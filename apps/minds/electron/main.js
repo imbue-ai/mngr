@@ -156,13 +156,19 @@ ipcMain.on('open-log-file', () => {
 
 // -- App lifecycle --
 
+let isShuttingDown = false;
+
 app.on('window-all-closed', async () => {
-  await shutdown();
-  app.quit();
+  if (!isShuttingDown) {
+    isShuttingDown = true;
+    await shutdown();
+    app.quit();
+  }
 });
 
 app.on('before-quit', async (event) => {
-  if (getBackendProcess()) {
+  if (getBackendProcess() && !isShuttingDown) {
+    isShuttingDown = true;
     event.preventDefault();
     await shutdown();
     app.quit();

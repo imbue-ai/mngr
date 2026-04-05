@@ -95,7 +95,6 @@ function startBackend(onProgress) {
       const env = {
         ...process.env,
         PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
-        MINDS_ELECTRON: '1',
         UV_CACHE_DIR: uvCacheDir,
         UV_PYTHON_INSTALL_DIR: uvPythonDir,
       };

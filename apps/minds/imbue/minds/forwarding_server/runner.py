@@ -1,4 +1,3 @@
-import os
 import secrets
 import time
 import webbrowser
@@ -21,14 +20,14 @@ from imbue.minds.primitives import OneTimeCode
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
 
 
-def _is_electron_mode() -> bool:
-    return os.environ.get("MINDS_ELECTRON") == "1"
-
-
 def start_forwarding_server(
     data_directory: Path,
     host: str,
     port: int,
+    # When True, skip opening the system browser and suppress duplicate
+    # human-readable login URL output. The structured login_url event is
+    # still emitted for the Electron shell to parse from JSONL stderr.
+    is_headless: bool = False,
 ) -> None:
     """Start the forwarding server using uvicorn.
 
@@ -48,11 +47,11 @@ def start_forwarding_server(
     auth_store.add_one_time_code(code=code)
     login_url = "http://{}:{}/login?one_time_code={}".format(host, port, code)
 
-    # Emit login URL -- in JSONL mode the structured `login_url` extra field
-    # allows Electron's backend.js to detect and parse this event.
+    # Emit login URL as a structured field -- in JSONL mode Electron's
+    # backend.js detects and parses this event via the `extra.login_url` key.
     logger.info("Login URL ready", login_url=login_url)
 
-    if not _is_electron_mode():
+    if not is_headless:
         logger.info("")
         logger.info("Login URL (one-time use):")
         logger.info("  {}", login_url)
@@ -68,9 +67,9 @@ def start_forwarding_server(
         agent_creator=agent_creator,
     )
 
-    # In Electron mode, the BrowserWindow navigates directly to the login URL,
-    # so we skip opening the system browser.
-    if not _is_electron_mode():
+    # In headless mode the Electron BrowserWindow navigates directly to the
+    # login URL, so we skip opening the system browser.
+    if not is_headless:
         thread = Thread(target=_sleep_then_open, args=(login_url,))
         thread.daemon = True
         thread.start()

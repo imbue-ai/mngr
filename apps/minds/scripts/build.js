@@ -120,16 +120,25 @@ function copyPyproject() {
   const destDir = path.join(RESOURCES_DIR, 'pyproject');
   fs.mkdirSync(destDir, { recursive: true });
 
-  // Copy pyproject.toml and uv.lock
-  for (const file of ['pyproject.toml', 'uv.lock']) {
-    const src = path.join(srcDir, file);
-    const dest = path.join(destDir, file);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, dest);
-      console.log(`Copied ${file} to ${destDir}`);
-    } else {
-      console.warn(`Warning: ${src} not found`);
-    }
+  // Copy pyproject.toml, stripping any [tool.uv.sources] section that
+  // contains local editable paths (only valid in the monorepo layout)
+  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
+  if (fs.existsSync(pyprojectSrc)) {
+    let content = fs.readFileSync(pyprojectSrc, 'utf-8');
+    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, '').trimEnd() + '\n';
+    fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
+    console.log(`Copied pyproject.toml to ${destDir} (stripped local sources)`);
+  } else {
+    console.warn(`Warning: ${pyprojectSrc} not found`);
+  }
+
+  // Copy lockfile as-is
+  const lockSrc = path.join(srcDir, 'uv.lock');
+  if (fs.existsSync(lockSrc)) {
+    fs.copyFileSync(lockSrc, path.join(destDir, 'uv.lock'));
+    console.log(`Copied uv.lock to ${destDir}`);
+  } else {
+    console.warn(`Warning: ${lockSrc} not found`);
   }
 }
 
