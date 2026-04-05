@@ -680,22 +680,28 @@ def make_test_agent_details(
 
 
 def init_git_repo(path: Path, initial_commit: bool = True) -> None:
-    """Initialize a git repo at the given path.
+    """Initialize a git repo at the given path with system config isolation.
 
     If initial_commit is True, creates a README.md and commits it.
     Expects git user config to be available (provided by the
     setup_git_config fixture, or temp_git_repo which depends on it,
     via GIT_CONFIG_GLOBAL).
+
+    Uses _git_isolation_env() to set GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT, preventing reads of /etc/gitconfig and interactive
+    prompts that can cause flakes under parallel execution.
     """
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    env = _git_isolation_env()
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, env=env)
     if initial_commit:
         (path / "README.md").write_text("Test repository")
-        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True, env=env)
         subprocess.run(
             ["git", "commit", "-m", "Initial commit"],
             cwd=path,
             check=True,
             capture_output=True,
+            env=env,
         )
 
 
