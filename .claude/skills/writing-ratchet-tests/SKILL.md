@@ -74,11 +74,42 @@ uv run pytest --inline-snapshot=update -k test_ratchets
 
 This updates each project's snapshot with the actual violation count.
 
+## Adding a Project-Specific Ratchet
+
+Not all ratchets belong in every project. If a ratchet only applies to one project (e.g., a project-specific API convention), add it to a separate file -- NOT to `test_ratchets.py` (which is enforced to be identical across all projects by `test_meta_ratchets.py`).
+
+Create a project-specific ratchet test file (e.g., `test_project_ratchets.py`) using the core API directly:
+
+```python
+from pathlib import Path
+
+from inline_snapshot import snapshot
+
+from imbue.imbue_common.ratchet_testing.core import FileExtension
+from imbue.imbue_common.ratchet_testing.core import RegexPattern
+from imbue.imbue_common.ratchet_testing.core import check_regex_ratchet
+from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
+
+_DIR = Path(__file__).parent.parent.parent
+
+
+def test_prevent_my_project_pattern() -> None:
+    pattern = RegexPattern(r"my_regex_pattern", multiline=False)
+    chunks = check_regex_ratchet(_DIR, FileExtension(".py"), pattern)
+    assert len(chunks) <= snapshot(), format_ratchet_failure_message(
+        rule_name="my project pattern",
+        rule_description="Why this is problematic and what to do instead",
+        chunks=chunks,
+    )
+```
+
+Run with `--inline-snapshot=create` to set the initial count, then verify it passes normally.
+
 ## Important Rules
 
-- **Never add per-project code quality ratchets to `test_meta_ratchets.py`**. Meta ratchets are for repo-wide structural checks only. Use the sync script instead.
+- **Never add per-project code quality ratchets to `test_meta_ratchets.py`**. Meta ratchets are for repo-wide structural checks only.
+- If a ratchet applies to all projects, use the common ratchet workflow (sync script). If it only applies to one project, use a separate test file with the core API.
 - Keep test function names descriptive: `test_prevent_<anti_pattern>`
-- Place tests in the correct section (Code safety, Exception handling, Import style, etc.)
 - Provide clear `rule_description` that explains WHY the pattern is bad and WHAT to do instead
 - Never blindly update snapshots -- investigate why a count increased
 
