@@ -422,6 +422,7 @@ def _get_all_commits_ahead(
                 logger.debug("Unparseable git rev-list output in {}: {}", work_dir, exc)
                 result[work_dir] = None
         else:
+            logger.debug("git rev-list exited with code {} in {}", proc.returncode, work_dir)
             result[work_dir] = None
     return result
 
