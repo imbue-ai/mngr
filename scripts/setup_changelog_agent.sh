@@ -7,9 +7,10 @@ set -euo pipefail
 # Safe to run multiple times: skips creation if the schedule already exists,
 # so there is never a risk of duplicate agents.
 #
-# The scheduled agent runs at midnight PST, executes the deterministic
-# consolidation script (scripts/consolidate_changelog.py), commits the
-# result, and opens a PR.
+# The scheduled agent runs at midnight PST, consolidates per-PR changelog
+# entries into UNABRIDGED_CHANGELOG.md via the deterministic script
+# (scripts/consolidate_changelog.py), then writes a concise AI-generated
+# summary to CHANGELOG.md, commits, and opens a PR.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
