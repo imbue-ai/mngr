@@ -1,13 +1,14 @@
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -26,6 +27,7 @@ from imbue.mngr_kanpan.data_types import GitHubData
 from imbue.mngr_kanpan.data_types import PrInfo
 from imbue.mngr_kanpan.data_types import PrState
 from imbue.mngr_kanpan.data_types import RefreshHook
+from imbue.mngr_kanpan.github import FetchPrsResult
 from imbue.mngr_kanpan.github import fetch_all_prs
 
 PLUGIN_NAME = "kanpan"
@@ -56,12 +58,19 @@ def fetch_agent_snapshot(
 
     muted_agents = _load_muted_agents(mngr_ctx)
 
-    entries: list[AgentBoardEntry] = []
-    for agent in result.agents:
-        branch = agent.initial_branch
+    # Collect local work dirs for parallel commits-ahead check
+    agent_work_dirs: dict[int, Path] = {}
+    for i, agent in enumerate(result.agents):
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
-        local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
-        commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
+        if is_local and agent.work_dir.exists():
+            agent_work_dirs[i] = agent.work_dir
+    commits_ahead_map = _get_all_commits_ahead(list(agent_work_dirs.values()), cg)
+
+    entries: list[AgentBoardEntry] = []
+    for i, agent in enumerate(result.agents):
+        branch = agent.initial_branch
+        local_work_dir = agent_work_dirs.get(i)
+        commits_ahead = commits_ahead_map.get(local_work_dir) if local_work_dir is not None else None
         entries.append(
             AgentBoardEntry(
                 name=agent.name,
@@ -104,20 +113,23 @@ def fetch_github_data(mngr_ctx: MngrContext, agents: list[AgentDetails]) -> GitH
         if repo_path is not None:
             all_repos.add(repo_path)
 
-    # Fetch PRs once per unique repo via gh --repo.
+    # Fetch PRs for all unique repos in parallel via gh --repo.
     pr_by_repo_branch: dict[str, dict[str, PrInfo]] = {}
     repo_pr_loaded: dict[str, bool] = {}
 
-    for repo_path in all_repos:
-        pr_result = fetch_all_prs(cg, repo=repo_path)
-        if pr_result.error is None:
-            repo_index = _build_pr_branch_index(pr_result.prs)
-            if repo_index:
-                pr_by_repo_branch[repo_path] = repo_index
-            repo_pr_loaded[repo_path] = True
-        else:
-            repo_pr_loaded[repo_path] = False
-            errors.append(pr_result.error)
+    def _fetch_repo(repo_path: str) -> tuple[str, FetchPrsResult]:
+        return repo_path, fetch_all_prs(cg, repo=repo_path)
+
+    with ThreadPoolExecutor(max_workers=max(len(all_repos), 1)) as executor:
+        for repo_path, pr_result in executor.map(_fetch_repo, all_repos):
+            if pr_result.error is None:
+                repo_index = _build_pr_branch_index(pr_result.prs)
+                if repo_index:
+                    pr_by_repo_branch[repo_path] = repo_index
+                repo_pr_loaded[repo_path] = True
+            else:
+                repo_pr_loaded[repo_path] = False
+                errors.append(pr_result.error)
 
     return GitHubData(
         pr_by_repo_branch=pr_by_repo_branch,
@@ -194,13 +206,20 @@ def fetch_board_snapshot(
     # Fetch remote data (GitHub PRs)
     remote = fetch_github_data(mngr_ctx, result.agents)
 
+    # Collect local work dirs for parallel commits-ahead check
+    agent_work_dirs: dict[int, Path] = {}
+    for i, agent in enumerate(result.agents):
+        is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
+        if is_local and agent.work_dir.exists():
+            agent_work_dirs[i] = agent.work_dir
+    commits_ahead_map = _get_all_commits_ahead(list(agent_work_dirs.values()), cg)
+
     # Build board entries with both local and remote info
     entries: list[AgentBoardEntry] = []
-    for agent in result.agents:
+    for i, agent in enumerate(result.agents):
         branch = agent.initial_branch
-        is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
-        local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
-        commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
+        local_work_dir = agent_work_dirs.get(i)
+        commits_ahead = commits_ahead_map.get(local_work_dir) if local_work_dir is not None else None
         agent_repo = _get_agent_repo_path(agent)
         pr = _lookup_pr(remote, agent_repo, branch)
         agent_prs_loaded = agent_repo is not None and remote.repo_pr_loaded.get(agent_repo) is True
@@ -246,25 +265,41 @@ def fetch_board_snapshot(
     return snapshot
 
 
+_HOOK_TIMEOUT_SECONDS = 30.0
+
+
 def run_refresh_hooks(
     cg: ConcurrencyGroup,
     hooks: list[RefreshHook],
     entries: tuple[AgentBoardEntry, ...],
 ) -> list[str]:
-    """Run refresh hook commands for each agent in parallel. Returns list of error messages."""
+    """Run refresh hook commands for each agent in parallel. Returns list of error messages.
+
+    Hook failures (including timeouts) are collected as error strings and never propagate
+    as exceptions -- callers always get their snapshot back.
+    """
     errors: list[str] = []
     for hook in hooks:
         processes: list[tuple[AgentBoardEntry, RunningProcess]] = []
-        with cg.make_concurrency_group(name=f"hook-{hook.name}") as child_cg:
-            for entry in entries:
-                env = _build_hook_env(entry)
-                proc = child_cg.run_process_in_background(
-                    ["sh", "-c", hook.command],
-                    timeout=30.0,
-                    is_checked_by_group=False,
-                    env=env,
-                )
-                processes.append((entry, proc))
+        try:
+            with cg.make_concurrency_group(
+                name=f"hook-{hook.name}",
+                exit_timeout_seconds=_HOOK_TIMEOUT_SECONDS,
+            ) as child_cg:
+                for entry in entries:
+                    env = _build_hook_env(entry)
+                    proc = child_cg.run_process_in_background(
+                        ["sh", "-c", hook.command],
+                        timeout=_HOOK_TIMEOUT_SECONDS,
+                        is_checked_by_group=False,
+                        env=env,
+                    )
+                    processes.append((entry, proc))
+        except ConcurrencyExceptionGroup as exc:
+            n_failed = len(exc.exceptions)
+            errors.append(f"Hook '{hook.name}': {n_failed} process(es) timed out or failed")
+            logger.debug("Hook '{}' concurrency group error: {}", hook.name, exc)
+            continue
         for entry, proc in processes:
             rc = proc.returncode
             if rc is not None and rc != 0:
@@ -338,22 +373,39 @@ def _is_agent_muted(certified_data: Any) -> bool:
     return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
 
 
-def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:
-    """Get the number of commits the local branch is ahead of its remote tracking branch.
+def _get_all_commits_ahead(
+    work_dirs: list[Path],
+    cg: ConcurrencyGroup,
+) -> dict[Path, int | None]:
+    """Get commits-ahead counts for multiple work dirs in parallel.
 
-    Returns None if no upstream is configured or the check fails.
-    Returns 0 if the branch is up to date with the remote.
+    Launches all git rev-list processes concurrently, then collects results.
+    Returns a dict mapping work_dir to commits-ahead count (None on failure).
     """
-    if work_dir is None:
-        return None
-    try:
-        result = cg.run_process_to_completion(
+    if not work_dirs:
+        return {}
+
+    processes: list[tuple[Path, RunningProcess]] = []
+    for work_dir in work_dirs:
+        proc = cg.run_process_in_background(
             ["git", "rev-list", "--count", "@{upstream}..HEAD"],
             cwd=work_dir,
+            timeout=10.0,
+            is_checked_by_group=False,
         )
-        return int(result.stdout.strip())
-    except (ProcessError, ValueError):
-        return None
+        processes.append((work_dir, proc))
+
+    result: dict[Path, int | None] = {}
+    for work_dir, proc in processes:
+        proc.wait()
+        if proc.returncode == 0:
+            try:
+                result[work_dir] = int(proc.read_stdout().strip())
+            except ValueError:
+                result[work_dir] = None
+        else:
+            result[work_dir] = None
+    return result
 
 
 @pure
