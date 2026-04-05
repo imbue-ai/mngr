@@ -473,6 +473,11 @@ def assert_posix_compatible(command: str) -> None:
     which may be zsh or another POSIX shell rather than bash. This function checks
     for non-portable constructs (shellcheck SC3xxx codes: arrays, [[ ]], declare, etc.)
     that would break in non-bash shells.
+
+    Note: zsh is not strictly POSIX-compliant (it differs in word splitting, globbing,
+    etc.), but it supports all standard POSIX constructs. Checking against ``-s sh``
+    (pure POSIX sh) is stricter than necessary for zsh, which means commands that pass
+    this check will work in zsh and any other POSIX-superset shell.
     """
     result = subprocess.run(
         ["shellcheck", "-s", "sh", "--format=json1", "-"],
