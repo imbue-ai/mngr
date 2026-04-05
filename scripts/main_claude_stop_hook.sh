@@ -218,7 +218,6 @@ else
     while IFS= read -r line; do
         log_error "$line"
     done <<< "$GATE_OUTPUT"
-    log_error "The base branch for this work is: $BASE_BRANCH -- pass this to any verification commands that compare against a base branch."
     _log_to_file "INFO" "main_stop_hook exiting with code 2 (gate check failed)"
     exit 2
 fi

@@ -536,10 +536,18 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
+                            "command": 'echo "The base branch for this work is: ${GIT_BASE_BRANCH:-main} -- pass this to any verification commands that compare against a base branch." >&2',
+                        },
+                    ],
+                },
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
                             "command": _SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
-                }
+                },
             ],
         }
     }
