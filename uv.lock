@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -31,6 +31,8 @@ members = [
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
+    "imbue-mngr-vps-docker",
+    "imbue-mngr-vultr",
     "imbue-mngr-wait",
     "minds",
     "modal-proxy",
@@ -1766,6 +1768,34 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-vps-docker"
+version = "0.2.1"
+source = { editable = "libs/mngr_vps_docker" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+
+[[package]]
+name = "imbue-mngr-vultr"
+version = "0.2.1"
+source = { editable = "libs/mngr_vultr" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-vps-docker" },
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
+    { name = "requests", specifier = ">=2.31.0" },
 ]
 
 [[package]]
