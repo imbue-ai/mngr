@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Final
 
 from loguru import logger
@@ -20,7 +19,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
-from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
 from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord

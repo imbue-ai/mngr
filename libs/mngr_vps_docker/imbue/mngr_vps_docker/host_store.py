@@ -5,10 +5,8 @@ from typing import Final
 
 from loguru import logger
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.primitives import AgentId

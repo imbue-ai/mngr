@@ -3,7 +3,6 @@ import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 from typing import Mapping
 from typing import Sequence
@@ -16,10 +15,8 @@ from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -31,15 +28,12 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
-from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -60,7 +54,6 @@ from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
 from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import DockerNotReadyError
 from imbue.mngr_vps_docker.errors import VpsConnectionError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.host_store import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
@@ -841,7 +834,7 @@ class VpsDockerProvider(BaseProviderInstance):
         )
 
         # Update certified data with new snapshot
-        existing_snapshots = host_record.certified_host_data.snapshots if hasattr(host_record.certified_host_data, 'snapshots') else []
+        existing_snapshots = host_record.certified_host_data.snapshots
         updated_snapshots = list(existing_snapshots) + [snapshot_record]
         updated_data = host_record.certified_host_data.model_copy(
             update={"snapshots": updated_snapshots, "updated_at": datetime.now(timezone.utc)}
