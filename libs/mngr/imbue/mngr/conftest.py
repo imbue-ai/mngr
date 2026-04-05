@@ -161,17 +161,11 @@ def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit.
 
-    Git user config is provided by the setup_git_config fixture via
-    GIT_CONFIG_GLOBAL. Creates a git repo with one tracked file and an
-    initial commit.
-
-    Use this fixture for any test that needs a git repository.
+    Uses a subdirectory of tmp_path so that .gitconfig (written by
+    setup_git_config) does not appear as untracked in git status.
     """
     repo_dir = tmp_path / "git_repo"
-    repo_dir.mkdir()
-
     init_git_repo(repo_dir)
-
     return repo_dir
 
 

@@ -135,7 +135,6 @@ def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit."""
     repo_dir = tmp_path / "git_repo"
-    repo_dir.mkdir()
     init_git_repo(repo_dir)
     return repo_dir
 

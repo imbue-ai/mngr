@@ -675,32 +675,6 @@ def make_test_agent_details(
     )
 
 
-def init_git_repo(path: Path, initial_commit: bool = True) -> None:
-    """Initialize a git repo at the given path with system config isolation.
-
-    If initial_commit is True, creates a README.md and commits it.
-    Expects git user config to be available (provided by the
-    setup_git_config fixture, or temp_git_repo which depends on it,
-    via GIT_CONFIG_GLOBAL).
-
-    Uses _git_isolation_env() to set GIT_CONFIG_NOSYSTEM and
-    GIT_TERMINAL_PROMPT, preventing reads of /etc/gitconfig and interactive
-    prompts that can cause flakes under parallel execution.
-    """
-    env = _git_isolation_env()
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, env=env)
-    if initial_commit:
-        (path / "README.md").write_text("Test repository")
-        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True, env=env)
-        subprocess.run(
-            ["git", "commit", "-m", "Initial commit"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,
-        )
-
-
 def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
@@ -726,24 +700,27 @@ def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
-def init_git_repo_with_config(path: Path) -> None:
-    """Initialize a git repository with an initial commit and local git config.
+def init_git_repo(path: Path, initial_commit: bool = True) -> None:
+    """Initialize a git repository with local git config.
 
-    Creates the directory if it doesn't exist, initializes git, sets local
-    user.email and user.name config, and creates an initial commit with a
-    README.md file.
+    Creates the directory if it doesn't exist, initializes git with branch
+    "main", and sets local user.email and user.name config.
 
-    Use this variant when you need repo-local git config (e.g., in
-    subprocess tests where the child process may not inherit the test
-    environment's GIT_CONFIG_GLOBAL).
+    If initial_commit is True (the default), also creates a README.md and
+    commits it.
+
+    Self-contained: does not require any global gitconfig or the
+    setup_git_config fixture. Subprocess calls use _git_isolation_env()
+    to set GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT.
     """
     path.mkdir(parents=True, exist_ok=True)
     run_git_command(path, "init", "-b", "main")
     run_git_command(path, "config", "user.email", "test@example.com")
     run_git_command(path, "config", "user.name", "Test User")
-    (path / "README.md").write_text("Initial content")
-    run_git_command(path, "add", "README.md")
-    run_git_command(path, "commit", "-m", "Initial commit")
+    if initial_commit:
+        (path / "README.md").write_text("Initial content")
+        run_git_command(path, "add", "README.md")
+        run_git_command(path, "commit", "-m", "Initial commit")
 
 
 def get_stash_count(path: Path) -> int:
