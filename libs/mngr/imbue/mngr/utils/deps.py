@@ -6,6 +6,8 @@ from enum import auto
 
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import BinaryNotInstalledError
@@ -150,17 +152,11 @@ def check_bash_version(minimum: int = 4) -> bool:
     Only practically relevant on macOS where /bin/bash is version 3.2.
     """
     try:
-        result = subprocess.run(
-            ["bash", "-c", "echo ${BASH_VERSINFO[0]}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return False
+        with ConcurrencyGroup(name="check-bash") as cg:
+            result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
         version = int(result.stdout.strip())
         return version >= minimum
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    except (OSError, ProcessError, ValueError):
         return False
 
 
@@ -186,12 +182,41 @@ def install_dep(dep: SystemDependency, os_name: OsName) -> bool:
     return False
 
 
+def describe_install_commands(deps: Sequence[SystemDependency], os_name: OsName) -> list[str]:
+    """Return the shell commands that would be run to install the given deps.
+
+    This is used to show users exactly what will happen before they confirm.
+    """
+    commands: list[str] = []
+    brew_packages: list[str] = []
+    apt_packages: list[str] = []
+
+    for dep in deps:
+        if dep.install_method is None:
+            continue
+        if dep.install_method.custom_install_script is not None:
+            commands.append(f"curl -fsSL {dep.install_method.custom_install_script} | bash")
+        elif os_name == OsName.MACOS and dep.install_method.brew_package is not None:
+            brew_packages.append(dep.install_method.brew_package)
+        elif os_name == OsName.LINUX and dep.install_method.apt_package is not None:
+            apt_packages.append(dep.install_method.apt_package)
+        else:
+            commands.append(f"# {dep.binary}: install manually ({dep.install_hint})")
+
+    if brew_packages:
+        commands.insert(0, f"brew install {' '.join(brew_packages)}")
+    if apt_packages:
+        commands.insert(0, f"sudo apt-get install -y {' '.join(apt_packages)}")
+
+    return commands
+
+
 def install_deps_batch(deps: Sequence[SystemDependency], os_name: OsName) -> list[SystemDependency]:
     """Install multiple dependencies, batching brew/apt calls. Returns list of deps that failed."""
-    # Separate deps by install mechanism
     brew_packages: list[str] = []
     apt_packages: list[str] = []
     custom_deps: list[SystemDependency] = []
+    no_auto_install: list[SystemDependency] = []
     brew_dep_map: dict[str, SystemDependency] = {}
     apt_dep_map: dict[str, SystemDependency] = {}
 
@@ -207,9 +232,9 @@ def install_deps_batch(deps: Sequence[SystemDependency], os_name: OsName) -> lis
             apt_packages.append(dep.install_method.apt_package)
             apt_dep_map[dep.install_method.apt_package] = dep
         else:
-            pass
+            no_auto_install.append(dep)
 
-    failed: list[SystemDependency] = []
+    failed: list[SystemDependency] = list(no_auto_install)
 
     # Batch install brew/apt packages
     if brew_packages:
@@ -233,12 +258,10 @@ def _install_via_brew(packages: list[str]) -> bool:
     if shutil.which("brew") is None:
         return False
     try:
-        result = subprocess.run(
-            ["brew", "install", *packages],
-            timeout=300,
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        with ConcurrencyGroup(name="brew-install") as cg:
+            cg.run_process_to_completion(["brew", "install", *packages])
+        return True
+    except (OSError, ProcessError):
         return False
 
 
@@ -247,26 +270,35 @@ def _install_via_apt(packages: list[str]) -> bool:
     if shutil.which("apt-get") is None:
         return False
     try:
-        subprocess.run(
-            ["sudo", "apt-get", "update", "-qq"],
-            timeout=60,
-        )
-        result = subprocess.run(
-            ["sudo", "apt-get", "install", "-y", "-qq", *packages],
-            timeout=300,
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        with ConcurrencyGroup(name="apt-install") as cg:
+            cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
+            cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
+        return True
+    except (OSError, ProcessError):
         return False
 
 
 def _install_via_script(url: str) -> bool:
-    """Install via curl-pipe-bash. Returns True on success."""
+    """Install via curl-pipe-bash. Returns True on success.
+
+    Downloads the script with curl first, then pipes it to bash via stdin.
+    This avoids passing ``url`` through a shell interpreter (which would be
+    a shell injection risk). Uses subprocess directly because
+    ConcurrencyGroup does not support piping stdin between processes.
+    """
     if shutil.which("curl") is None:
         return False
     try:
+        download = subprocess.run(
+            ["curl", "-fsSL", url],
+            capture_output=True,
+            timeout=60,
+        )
+        if download.returncode != 0:
+            return False
         result = subprocess.run(
-            ["bash", "-c", f"curl -fsSL {url} | bash"],
+            ["bash"],
+            input=download.stdout,
             timeout=120,
         )
         return result.returncode == 0
