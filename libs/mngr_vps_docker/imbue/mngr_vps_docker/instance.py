@@ -134,7 +134,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _key_dir(self) -> Path:
         """Directory for SSH keys for this provider instance."""
-        key_dir = self.mngr_ctx.profile_dir / "providers" / "vultr" / str(self.name) / "keys"
+        key_dir = self.mngr_ctx.profile_dir / "providers" / str(self.config.backend) / str(self.name) / "keys"
         key_dir.mkdir(parents=True, exist_ok=True)
         return key_dir
 
@@ -530,8 +530,13 @@ class VpsDockerProvider(BaseProviderInstance):
             return host
 
         except Exception:
-            # Best-effort cleanup on failure: try to destroy VPS
+            # Best-effort cleanup on failure: destroy VPS and SSH key
             logger.error("Host creation failed, attempting cleanup...")
+            try:
+                if "vps_instance_id" in dir():
+                    self.vps_client.destroy_instance(vps_instance_id)
+            except Exception as cleanup_err:
+                logger.warning("Failed to clean up VPS instance: {}", cleanup_err)
             try:
                 self.vps_client.delete_ssh_key(vps_ssh_key_id)
             except Exception as cleanup_err:
@@ -696,8 +701,9 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
 
     def delete_host(self, host: HostInterface) -> None:
-        """Delete all records for a destroyed host."""
-        self.destroy_host(host)
+        """Delete all local records for a destroyed host (does not destroy VPS)."""
+        host_id = host.id
+        self._host_by_id_cache.pop(host_id, None)
 
     def on_connection_error(self, host_id: HostId) -> None:
         self._host_by_id_cache.pop(host_id, None)
@@ -852,7 +858,7 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None:
             return []
 
-        snapshots = host_record.certified_host_data.snapshots if hasattr(host_record.certified_host_data, 'snapshots') else []
+        snapshots = host_record.certified_host_data.snapshots
         return [
             SnapshotInfo(
                 id=SnapshotId(s.id),

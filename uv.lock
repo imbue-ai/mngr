@@ -1776,14 +1776,10 @@ version = "0.2.1"
 source = { editable = "libs/mngr_vps_docker" }
 dependencies = [
     { name = "imbue-mngr" },
-    { name = "requests" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "requests", specifier = ">=2.31.0" },
-]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-vultr"
