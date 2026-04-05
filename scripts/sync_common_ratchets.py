@@ -22,7 +22,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SECTION_HEADER_RE = re.compile(r"^# --- (.+) ---$")
-SNAPSHOT_VALUE_RE = re.compile(r"snapshot\(\d+\)")
 
 # Projects excluded from ratchet requirements (scheduled for deletion).
 # Keep in sync with _EXCLUDED_PROJECTS in test_meta_ratchets.py
@@ -118,11 +117,6 @@ def _extract_tests(text: str) -> list[RatchetTemplate]:
         tests.append(RatchetTemplate(name=node.name, source=source, section=section))
 
     return tests
-
-
-def _normalize_snapshot(source: str) -> str:
-    """Replace snapshot(N) with snapshot(0)."""
-    return SNAPSHOT_VALUE_RE.sub("snapshot(0)", source)
 
 
 def _section_sort_key(section_name: str) -> int:

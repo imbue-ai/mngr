@@ -6,7 +6,6 @@ from scripts.sync_common_ratchets import _discover_check_functions
 from scripts.sync_common_ratchets import _extract_tests
 from scripts.sync_common_ratchets import _find_test_ratchet_files
 from scripts.sync_common_ratchets import _insert_test
-from scripts.sync_common_ratchets import _normalize_snapshot
 from test_meta_ratchets import _EXCLUDED_PROJECTS
 
 
@@ -17,16 +16,6 @@ def test_find_test_ratchet_files_finds_all_projects() -> None:
     for f in files:
         assert f.name == "test_ratchets.py"
         assert f.exists()
-
-
-def test_normalize_snapshot_replaces_nonzero_counts() -> None:
-    source = "rc.check_todos(_DIR, snapshot(15))"
-    assert _normalize_snapshot(source) == "rc.check_todos(_DIR, snapshot(0))"
-
-
-def test_normalize_snapshot_preserves_zero() -> None:
-    source = "rc.check_todos(_DIR, snapshot(0))"
-    assert _normalize_snapshot(source) == "rc.check_todos(_DIR, snapshot(0))"
 
 
 def test_extract_tests_finds_all_functions() -> None:
