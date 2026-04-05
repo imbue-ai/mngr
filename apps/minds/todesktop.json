@@ -3,11 +3,11 @@
   "id": "26032588hqdzk",
   "icon": "./electron/assets/icon.png",
   "appPath": ".",
+  "uploadSizeLimit": 300,
   "extraResources": [
     {
       "from": "resources/",
-      "to": ".",
-      "filter": ["**/*"]
+      "to": "."
     }
   ]
 }
