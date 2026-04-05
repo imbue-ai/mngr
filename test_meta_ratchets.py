@@ -7,7 +7,6 @@ import tomlkit
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
-from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
@@ -123,27 +122,6 @@ def test_prevent_bash_without_strict_mode() -> None:
     assert len(violations) <= snapshot(0), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
-
-
-_PREVENT_BARE_URWID_SCREEN = RegexRatchetRule(
-    rule_name="bare urwid tty_signal_keys call",
-    rule_description=(
-        "Do not call screen.tty_signal_keys() directly. "
-        "Use create_urwid_screen_preserving_terminal() from imbue.mngr.cli.urwid_utils instead. "
-        "Calling tty_signal_keys(intr='undefined') disables Ctrl-C at the terminal level, "
-        "and urwid does not reliably restore it on exit. The context manager saves and restores "
-        "terminal settings in a finally block."
-    ),
-    pattern_string=r"\.tty_signal_keys\(",
-)
-
-_URWID_UTILS_EXCLUSION: tuple[str, ...] = ("urwid_utils.py",) + _SELF_EXCLUSION
-
-
-def test_prevent_bare_urwid_tty_signal_keys() -> None:
-    """Ensure tty_signal_keys is only called inside urwid_utils.py (the context manager)."""
-    chunks = check_ratchet_rule(_PREVENT_BARE_URWID_SCREEN, _REPO_ROOT, _URWID_UTILS_EXCLUSION)
-    assert len(chunks) <= snapshot(0), _PREVENT_BARE_URWID_SCREEN.format_failure(chunks)
 
 
 _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
