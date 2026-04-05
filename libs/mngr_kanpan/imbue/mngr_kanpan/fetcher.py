@@ -1,7 +1,6 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -119,7 +118,7 @@ def fetch_github_data(mngr_ctx: MngrContext, agents: list[AgentDetails]) -> GitH
     repo_pr_loaded: dict[str, bool] = {}
 
     with ThreadPoolExecutor(max_workers=min(len(all_repos), 8) or 1) as executor:
-        for repo_path, pr_result in executor.map(partial(_fetch_repo_prs, cg), all_repos):
+        for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp), all_repos):
             if pr_result.error is None:
                 repo_index = _build_pr_branch_index(pr_result.prs)
                 if repo_index:
