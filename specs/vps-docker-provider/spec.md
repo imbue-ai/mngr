@@ -10,7 +10,7 @@ mngr currently supports three provider backends for running agents:
 
 There is a large gap between "run Docker locally" and "use Modal". Many users have access to VPS providers (Vultr, DigitalOcean, Hetzner, Linode, AWS Lightsail, etc.) and want to run agents on cheap cloud VMs without being locked into Modal. They want the isolation benefits of Docker containers but on infrastructure they control.
 
-The goal of this project is to create a generic VPS Docker provider layer that provisions a VPS from any cloud provider, installs Docker on it, and runs agents inside a Docker container on that VPS. The VPS is accessed purely via SSH, and the Docker container inside is accessed via ProxyJump through the VPS. This gives users Modal-like convenience (one command to create remote agents) on any VPS provider.
+The goal of this project is to create a generic VPS Docker provider layer that provisions a VPS from any cloud provider, installs Docker on it, and runs agents inside a Docker container on that VPS. The VPS is accessed purely via SSH, and the Docker container inside is accessed via SSH to the VPS's public IP on a dedicated port. This gives users Modal-like convenience (one command to create remote agents) on any VPS provider.
 
 We start with **Vultr** as the first concrete implementation because it has a simple API and cheap instances, but the abstraction layer is designed so that adding DigitalOcean, Hetzner, etc. is just implementing a small set of abstract methods.
 
@@ -26,13 +26,13 @@ This model uses Docker purely as a consistent provisioning mechanism -- it ensur
 User Machine                              VPS (Vultr/DO/Hetzner/...)
 +------------------+                      +-------------------------------+
 |                  |   SSH (port 22)      |  VPS OS (Debian/Ubuntu)       |
-|  mngr CLI        | ------------------> |                               |
+|  mngr CLI        | ------------------> |  (Docker commands over SSH)   |
 |                  |                      |  Docker Engine                |
-|  ~/.mngr/        |                      |  +-------------------------+ |
-|    profile/      |   SSH ProxyJump      |  | Container (sshd)        | |
-|      providers/  | - - - - - - - - - -> |  |                         | |
-|        vultr/    |   via VPS:22 to      |  |  /mngr/ (host_dir)     | |
-|          keys/   |   container:2222     |  |    agents/              | |
+|  ~/.mngr/        |   SSH (port 2222)   |  +-------------------------+ |
+|    profile/      | ------------------> |  | Container (sshd)        | |
+|      providers/  |   direct to         |  |                         | |
+|        vultr/    |   VPS:2222          |  |  /mngr/ (host_dir)     | |
+|          keys/   |                      |  |    agents/              | |
 |                  |                      |  |    activity/            | |
 +------------------+                      |  |    commands/            | |
                                           |  +-------------------------+ |
@@ -50,7 +50,7 @@ Key architectural decisions:
 - **1:1 mapping**: Each VPS runs exactly one Docker container. No multi-container support. Docker is used purely for consistent provisioning, not for multiplexing.
 - **SSH host keys injected at creation**: SSH host keys are generated locally and injected into the VPS via cloud-init `user_data`. The public key is added to local `known_hosts` immediately. No TOFU (trust-on-first-use) needed.
 - **Docker commands over SSH**: All Docker commands on the VPS are executed via SSH (`ssh user@vps docker ...`), not via Docker SDK remote host. This keeps the attack surface minimal and reuses the same SSH connection we already have.
-- **ProxyJump for container access**: Once the container is running sshd, mngr connects to it via `ssh -J user@vps root@localhost -p 2222`. The container's sshd port (2222) is only exposed on the VPS's loopback, not to the internet.
+- **Direct SSH to container**: Once the container is running sshd, mngr connects directly to the VPS's public IP on port 2222 (`ssh -i <container_key> -p 2222 root@<vps-ip>`). The container's sshd port is mapped to `0.0.0.0:2222` on the VPS. This is simpler than ProxyJump (fewer SSH hops, no proxy command configuration) and the container has its own SSH key authentication for security.
 - **State on the VPS**: All host records and agent data are stored on a Docker state volume on the VPS itself, following the same pattern as the existing Docker provider (state container + named volume). This keeps all infrastructure state self-contained with the VPS.
 - **Host volume**: A separate Docker named volume stores the host_dir data, making it persistent across container stop/start cycles.
 
@@ -249,7 +249,7 @@ When a VPS is created:
 When a VPS is destroyed:
 1. Remove entry from `vps_known_hosts`
 
-The container gets its own known_hosts file (`container_known_hosts`) with an entry for `[localhost]:2222 <container-host-public-key>`. Since we always ProxyJump through the VPS, the "hostname" in known_hosts is always `localhost`.
+The container gets its own known_hosts file (`container_known_hosts`) with an entry for `[<vps-ip>]:2222 <container-host-public-key>`. Since mngr connects directly to the VPS IP on port 2222, the known_hosts entry uses the VPS IP as the hostname.
 
 ## Docker Over SSH
 
@@ -313,7 +313,7 @@ After the VPS is ready and Docker is installed, the provider:
 2. **Creates a Docker named volume** for host data: `mngr-host-vol-<host_id_hex>`
 3. **Pulls or builds the base image** (default: `debian:bookworm-slim`, or user-specified)
 4. **Runs the container** with:
-   - Port 2222 mapped to the VPS's localhost only (`-p 127.0.0.1:2222:22`)
+   - Port 2222 mapped on the VPS's public interface (`-p 0.0.0.0:2222:22`)
    - The host volume mounted at `/mngr-vol`
    - Labels for discovery (`com.imbue.mngr.host-id`, etc.)
    - The container entrypoint: `trap 'exit 0' TERM; tail -f /dev/null & wait`
@@ -323,17 +323,17 @@ After the VPS is ready and Docker is installed, the provider:
    - Configures SSH keys (container client key, container host key)
    - Symlinks `/mngr` to `/mngr-vol` (the volume mount point)
    - Starts sshd: `/usr/sbin/sshd -D -o MaxSessions=100 -p 22`
-6. **Waits for container sshd** to be ready (via `wait_for_sshd` through the ProxyJump)
-7. **Creates a pyinfra Host** with ProxyJump configuration
+6. **Waits for container sshd** to be ready (via `wait_for_sshd` on `<vps_ip>:2222`)
+7. **Creates a pyinfra Host** with direct SSH to `<vps_ip>:2222`
 8. **Starts the activity watcher** and creates the shutdown script
 9. **Writes HostRecord** to the state volume on the VPS
 
-### ProxyJump SSH Configuration
+### Direct SSH to Container
 
-To reach the container, mngr uses SSH ProxyJump:
+To reach the container, mngr connects directly to the VPS's public IP on port 2222:
 
 ```
-ssh -J root@<vps-ip> -i <container_key> -p 2222 -o UserKnownHostsFile=<container_known_hosts> root@localhost
+ssh -i <container_key> -p 2222 -o UserKnownHostsFile=<container_known_hosts> -o StrictHostKeyChecking=yes root@<vps-ip>
 ```
 
 The pyinfra Host is created with these SSH settings:
@@ -344,9 +344,10 @@ host_data = {
     "ssh_key": str(container_key_path),
     "ssh_known_hosts_file": str(container_known_hosts_path),
     "ssh_strict_host_key_checking": "yes",
-    "ssh_proxy_command": f"ssh -i {vps_key_path} -o UserKnownHostsFile={vps_known_hosts_path} -o StrictHostKeyChecking=yes -W localhost:2222 root@{vps_ip}",
 }
 ```
+
+The container has its own SSH keypair (separate from the VPS keypair), so even though the port is publicly exposed, only holders of the container private key can authenticate.
 
 ## Lifecycle
 
@@ -611,10 +612,10 @@ class VpsApiError(VpsDockerError):
 ## Security Considerations
 
 1. **SSH key isolation**: Each provider instance gets its own SSH keypair. The VPS key and container key are separate -- compromising the container key doesn't grant VPS-level access.
-2. **Container port binding**: The container's sshd port (2222) is bound to `127.0.0.1` on the VPS, not `0.0.0.0`. It's only reachable via ProxyJump through the VPS.
+2. **Container port binding**: The container's sshd port (2222) is bound to `0.0.0.0` on the VPS and accessible directly. Authentication requires the container SSH private key (separate from the VPS key). This is simpler than a ProxyJump setup and avoids double-hop latency.
 3. **Cloud-init host keys**: SSH host keys are generated locally and injected via cloud-init. This prevents MITM attacks during initial connection.
 4. **No API credentials in containers**: VPS provider API keys never enter the container. The container is treated as untrusted, same as Modal sandboxes.
-5. **Firewall**: The VPS should have a firewall that only allows SSH (port 22) inbound. Docker's default bridge network provides container isolation.
+5. **Firewall**: The VPS should have a firewall that allows SSH (port 22) and the container SSH port (default 2222) inbound. Docker's default bridge network provides container isolation.
 
 ## Process Lifecycle
 
@@ -633,8 +634,8 @@ class VpsApiError(VpsDockerError):
 11. Run container with host volume mount, port mapping, labels
 12. Set up SSH in container (install packages, configure keys, start sshd) via `docker exec`
 13. Add container host key to `container_known_hosts`
-14. Wait for container sshd (via ProxyJump, timeout 60s)
-15. Create pyinfra Host with ProxyJump config
+14. Wait for container sshd (direct SSH to `<vps_ip>:2222`, timeout 60s)
+15. Create pyinfra Host with direct SSH to `<vps_ip>:2222`
 16. Set up activity watcher and shutdown script
 17. Write HostRecord to state volume on VPS
 18. Return Host object
