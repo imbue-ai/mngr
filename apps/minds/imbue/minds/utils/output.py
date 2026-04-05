@@ -25,7 +25,7 @@ def emit_event(
             if "message" in data:
                 write_stdout_line(str(data["message"]))
         case OutputFormat.JSONL:
-            event = {"event": event_type, **data}
+            event = {**data, "event": event_type}
             sys.stdout.write(json.dumps(event) + "\n")
             sys.stdout.flush()
         case OutputFormat.JSON:
