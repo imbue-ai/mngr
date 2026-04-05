@@ -16,15 +16,16 @@ from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_schedule.cli.group import schedule
 from imbue.mngr_schedule.cli.options import ScheduleRunCliOptions
 from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
+from imbue.mngr_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_schedule_creation_record
 from imbue.mngr_schedule.implementations.modal.deploy import invoke_modal_trigger_function
 
-# Callable that executes a shell script and returns the exit code.
-# The default implementation runs the script with inherited stdio.
-# Tests inject a fake.
+# Callable type aliases for dependency injection in tests.
 ScriptRunner = Callable[[str], int]
+RecordLookup = Callable[[ModalProviderInstance, str], ModalScheduleCreationRecord | None]
+TriggerInvoker = Callable[[ModalScheduleCreationRecord], None]
 
 
 def _default_script_runner(script_path: str) -> int:
@@ -111,13 +112,21 @@ def run_local_trigger(
     return script_runner(str(run_script))
 
 
-def run_modal_trigger(provider: ModalProviderInstance, trigger_name: str) -> int:
+def run_modal_trigger(
+    provider: ModalProviderInstance,
+    trigger_name: str,
+    record_lookup: RecordLookup = get_modal_schedule_creation_record,
+    trigger_invoker: TriggerInvoker = invoke_modal_trigger_function,
+) -> int:
     """Run a modal trigger by invoking the deployed function on Modal.
 
     This is the exact same code path as Modal cron: invoke the
     run_scheduled_trigger() function that was deployed by schedule add.
+
+    The record_lookup and trigger_invoker parameters allow tests to inject
+    fakes without monkey-patching modal.
     """
-    record = get_modal_schedule_creation_record(provider, trigger_name)
+    record = record_lookup(provider, trigger_name)
     if record is None:
         raise click.ClickException(
             f"No modal schedule record found for trigger '{trigger_name}'. "
@@ -135,7 +144,7 @@ def run_modal_trigger(provider: ModalProviderInstance, trigger_name: str) -> int
     )
 
     try:
-        invoke_modal_trigger_function(record)
+        trigger_invoker(record)
     except MngrError as exc:
         raise click.ClickException(f"Modal invocation failed for trigger '{trigger_name}': {exc}") from None
 
