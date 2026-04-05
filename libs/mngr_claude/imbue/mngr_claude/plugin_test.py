@@ -423,6 +423,52 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     )
 
 
+def test_claude_agent_assemble_command_is_posix_compatible(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Assembled commands are sent via tmux send-keys to the user's shell, which may not be bash.
+
+    All assembled commands must be POSIX-compatible so they work in any POSIX shell (bash, zsh, etc.).
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    command = agent.assemble_command(host=host, agent_args=("--model", "opus"), command_override=None)
+
+    result = subprocess.run(
+        ["shellcheck", "-s", "sh", "--format=json1", "-"],
+        input=str(command),
+        capture_output=True,
+        text=True,
+    )
+    issues = json.loads(result.stdout)
+    portability_issues = [c for c in issues.get("comments", []) if c["code"] >= 3000]
+    assert portability_issues == [], "Assembled command contains non-POSIX constructs:\n" + "\n".join(
+        f"  SC{c['code']}: {c['message']}" for c in portability_issues
+    )
+
+
+def test_claude_agent_assemble_command_remote_is_posix_compatible(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Remote assembled commands (with IS_SANDBOX) must also be POSIX-compatible."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    non_local_host = cast(OnlineHostInterface, SimpleNamespace(is_local=False))
+    command = agent.assemble_command(host=non_local_host, agent_args=(), command_override=None)
+
+    result = subprocess.run(
+        ["shellcheck", "-s", "sh", "--format=json1", "-"],
+        input=str(command),
+        capture_output=True,
+        text=True,
+    )
+    issues = json.loads(result.stdout)
+    portability_issues = [c for c in issues.get("comments", []) if c["code"] >= 3000]
+    assert portability_issues == [], "Assembled command contains non-POSIX constructs:\n" + "\n".join(
+        f"  SC{c['code']}: {c['message']}" for c in portability_issues
+    )
+
+
 # =============================================================================
 # Activity Updater Tests
 # =============================================================================

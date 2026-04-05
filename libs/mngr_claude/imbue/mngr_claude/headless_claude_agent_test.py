@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -174,6 +175,27 @@ def test_assemble_command_raises_without_command(
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_config=config)
     with pytest.raises(NoCommandDefinedError):
         agent.assemble_command(host, agent_args=(), command_override=None)
+
+
+def test_assemble_command_is_posix_compatible(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Assembled commands are sent via tmux send-keys to the user's shell, which may not be bash."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    command = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    result = subprocess.run(
+        ["shellcheck", "-s", "sh", "--format=json1", "-"],
+        input=str(command),
+        capture_output=True,
+        text=True,
+    )
+    issues = json.loads(result.stdout)
+    portability_issues = [c for c in issues.get("comments", []) if c["code"] >= 3000]
+    assert portability_issues == [], "Assembled command contains non-POSIX constructs:\n" + "\n".join(
+        f"  SC{c['code']}: {c['message']}" for c in portability_issues
+    )
 
 
 # =============================================================================
