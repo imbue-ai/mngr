@@ -944,28 +944,29 @@ def test_stop_agent_does_not_kill_prefix_matched_session(
     session_short = f"{mngr_test_prefix}{agent_short.name}"
     session_long = f"{mngr_test_prefix}{agent_long.name}"
 
-    # Verify both sessions exist
-    success, output = host._run_shell_command(StringCommand("tmux list-sessions -F '#{session_name}' 2>/dev/null"))
-    assert success
-    assert session_short in output.stdout
-    assert session_long in output.stdout
+    try:
+        # Verify both sessions exist
+        success, output = host._run_shell_command(StringCommand("tmux list-sessions -F '#{session_name}' 2>/dev/null"))
+        assert success
+        assert session_short in output.stdout
+        assert session_long in output.stdout
 
-    # Kill the short-named session directly (simulating it being cleaned up
-    # before stop_agents runs, which is the exact race condition in the bug)
-    host._run_shell_command(StringCommand(f"tmux kill-session -t '={session_short}' 2>/dev/null"))
+        # Kill the short-named session directly (simulating it being cleaned up
+        # before stop_agents runs, which is the exact race condition in the bug)
+        host._run_shell_command(StringCommand(f"tmux kill-session -t '={session_short}' 2>/dev/null"))
 
-    # Now stop the short agent -- it should NOT kill the long agent's session
-    host.stop_agents([agent_short.id], timeout_seconds=3.0)
+        # Now stop the short agent -- it should NOT kill the long agent's session
+        host.stop_agents([agent_short.id], timeout_seconds=3.0)
 
-    # The long-named session must still be alive
-    success, _ = host._run_shell_command(StringCommand(f"tmux has-session -t '={session_long}' 2>/dev/null"))
-    assert success, (
-        f"Session '{session_long}' was killed by stop_agents targeting '{session_short}' -- "
-        f"tmux prefix matching is not being prevented"
-    )
-
-    # Clean up
-    host.stop_agents([agent_long.id], timeout_seconds=3.0)
+        # The long-named session must still be alive
+        success, _ = host._run_shell_command(StringCommand(f"tmux has-session -t '={session_long}' 2>/dev/null"))
+        assert success, (
+            f"Session '{session_long}' was killed by stop_agents targeting '{session_short}' -- "
+            f"tmux prefix matching is not being prevented"
+        )
+    finally:
+        host.stop_agents([agent_short.id], timeout_seconds=3.0)
+        host.stop_agents([agent_long.id], timeout_seconds=3.0)
 
 
 @pytest.mark.tmux
