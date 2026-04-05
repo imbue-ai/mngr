@@ -19,11 +19,7 @@ function getResourcesDir() {
 }
 
 function getUvPath() {
-  const resourcesDir = getResourcesDir();
-  if (process.platform === 'darwin') {
-    return path.join(resourcesDir, 'uv', 'uv');
-  }
-  return path.join(resourcesDir, 'uv', 'uv');
+  return path.join(getResourcesDir(), 'uv', 'uv');
 }
 
 function getUvBinDir() {
@@ -31,11 +27,7 @@ function getUvBinDir() {
 }
 
 function getGitPath() {
-  const resourcesDir = getResourcesDir();
-  if (process.platform === 'darwin') {
-    return path.join(resourcesDir, 'git', 'bin', 'git');
-  }
-  return path.join(resourcesDir, 'git', 'bin', 'git');
+  return path.join(getResourcesDir(), 'git', 'bin', 'git');
 }
 
 function getGitBinDir() {
