@@ -387,19 +387,29 @@ def _get_all_commits_ahead(
         return {}
 
     unique_dirs = set(work_dirs)
+    result: dict[Path, int | None] = {}
     processes: list[tuple[Path, RunningProcess]] = []
     for work_dir in unique_dirs:
-        proc = cg.run_process_in_background(
-            ["git", "rev-list", "--count", "@{upstream}..HEAD"],
-            cwd=work_dir,
-            timeout=10.0,
-            is_checked_by_group=False,
-        )
+        try:
+            proc = cg.run_process_in_background(
+                ["git", "rev-list", "--count", "@{upstream}..HEAD"],
+                cwd=work_dir,
+                timeout=10.0,
+                is_checked_by_group=False,
+            )
+        except Exception as exc:
+            logger.debug("Failed to launch git rev-list in {}: {}", work_dir, exc)
+            result[work_dir] = None
+            continue
         processes.append((work_dir, proc))
 
-    result: dict[Path, int | None] = {}
     for work_dir, proc in processes:
-        proc.wait()
+        try:
+            proc.wait()
+        except Exception as exc:
+            logger.debug("git rev-list failed in {}: {}", work_dir, exc)
+            result[work_dir] = None
+            continue
         if proc.returncode == 0:
             try:
                 result[work_dir] = int(proc.read_stdout().strip())
