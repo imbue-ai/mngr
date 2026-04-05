@@ -83,13 +83,35 @@ def _create_pyinfra_host_with_proxy(
     private_key_path: Path,
     known_hosts_path: Path,
     proxy_command: str,
+    ssh_config_path: Path,
 ) -> "PyinfraHost":
-    """Create a pyinfra host with SSH connector and ProxyCommand support."""
+    """Create a pyinfra host with SSH connector and ProxyCommand support.
+
+    Writes an SSH config file that pyinfra's SSHClient.parse_config() will
+    read, providing the ProxyCommand transparently.
+    """
     from pyinfra.api.inventory import Inventory
     from pyinfra.api.state import State as PyinfraState
     from pyinfra.connectors.sshuserclient.client import get_host_keys
 
     get_host_keys.cache.clear()
+
+    # pyinfra reads ProxyCommand from an SSH config file.
+    # We write a config file with the ProxyCommand entry for this host.
+    ssh_config_path.parent.mkdir(parents=True, exist_ok=True)
+    # Use a unique hostname alias to avoid conflicts
+    alias = f"mngr-container-{port}"
+    ssh_config_content = (
+        f"Host {alias}\n"
+        f"  HostName {hostname}\n"
+        f"  Port {port}\n"
+        f"  User root\n"
+        f"  IdentityFile {private_key_path}\n"
+        f"  UserKnownHostsFile {known_hosts_path}\n"
+        f"  StrictHostKeyChecking yes\n"
+        f"  ProxyCommand {proxy_command}\n"
+    )
+    ssh_config_path.write_text(ssh_config_content)
 
     host_data = {
         "ssh_user": "root",
@@ -97,14 +119,14 @@ def _create_pyinfra_host_with_proxy(
         "ssh_key": str(private_key_path),
         "ssh_known_hosts_file": str(known_hosts_path),
         "ssh_strict_host_key_checking": "yes",
-        "ssh_proxy_command": proxy_command,
+        "ssh_config_file": str(ssh_config_path),
     }
 
-    names_data = ([(hostname, host_data)], {})
+    names_data = ([(alias, host_data)], {})
     inventory = Inventory(names_data)
     state = PyinfraState(inventory=inventory)
 
-    pyinfra_host = inventory.get_host(hostname)
+    pyinfra_host = inventory.get_host(alias)
     pyinfra_host.init(state)
 
     return pyinfra_host
@@ -244,12 +266,14 @@ class VpsDockerProvider(BaseProviderInstance):
             f"root@{vps_ip}"
         )
 
+        ssh_config_path = self._key_dir() / "ssh_config"
         pyinfra_host = _create_pyinfra_host_with_proxy(
             hostname="localhost",
             port=self.config.container_ssh_port,
             private_key_path=container_key_path,
             known_hosts_path=self._container_known_hosts_path(),
             proxy_command=proxy_command,
+            ssh_config_path=ssh_config_path,
         )
 
         connector = PyinfraConnector(pyinfra_host)
