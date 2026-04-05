@@ -148,7 +148,7 @@ def _find_section_end(lines: list[str], sections: list[tuple[int, str]], section
         boundary = len(lines)
 
     insert_at = boundary
-    while insert_at > sec_line and (insert_at - 1 >= len(lines) or lines[insert_at - 1].strip() == ""):
+    while insert_at > sec_line and lines[insert_at - 1].strip() == "":
         insert_at -= 1
     return insert_at
 
