@@ -1215,3 +1215,31 @@ def test_create_with_invalid_provider_name(
     assert result.exit_code != 0
     assert "unknown provider" in result.output.lower()
     assert "nonexistent" in result.output
+
+
+def test_create_with_idle_timeout_rejected_on_local_provider(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """mngr create with --idle-timeout on local provider should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-idle-local",
+            "--command",
+            "sleep 99999",
+            "--idle-timeout",
+            "60",
+            "--source",
+            str(temp_work_dir),
+            "--transfer=none",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "not supported" in result.output.lower() or "remote provider" in result.output.lower()

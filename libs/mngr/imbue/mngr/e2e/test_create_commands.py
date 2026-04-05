@@ -33,22 +33,23 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-def test_create_with_idle_mode_and_timeout_rejected_on_local(e2e: E2eSession) -> None:
+@pytest.mark.rsync
+@pytest.mark.timeout(120)
+def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
     mngr create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
-    # Idle timeout is only supported on remote providers (Modal, Docker).
-    # The local provider rejects it with a clear error.
+    # Idle timeout requires a remote provider (local provider rejects it).
+    # Use Modal to exercise the real idle timeout path.
     result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean --idle-mode run --idle-timeout 60",
-        comment="Idle timeout is rejected on local provider",
+        "mngr create my-task --provider modal --command 'sleep 99999' --no-ensure-clean"
+        " --idle-mode run --idle-timeout 60 --no-connect",
+        comment="idle timeout requires a remote provider",
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    assert "not supported" in combined.lower() or "remote provider" in combined.lower()
+    expect(result).to_succeed()
 
 
 @pytest.mark.release
