@@ -70,8 +70,8 @@ def ensure_state_container(
     try:
         docker_ssh.start_container(container_name)
         return container_name
-    except ContainerSetupError:
-        pass
+    except ContainerSetupError as e:
+        logger.debug("State container {} does not exist yet, creating: {}", container_name, e)
 
     # Create the volume and container
     logger.debug("Creating VPS state container: {}", container_name)
@@ -138,7 +138,8 @@ class VpsDockerHostStore:
             host_record = VpsDockerHostRecord.model_validate_json(data)
             self._cache[host_id] = host_record
             return host_record
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("Host record {} not found on state volume: {}", host_id, e)
             return None
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning("Failed to parse host record {}: {}", path, e)
@@ -166,7 +167,8 @@ class VpsDockerHostStore:
         state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
         try:
             output = self._exec(f"ls '{state_dir}'/*.json 2>/dev/null || true")
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("No host records found on state volume: {}", e)
             return []
 
         for line in output.strip().splitlines():
@@ -199,7 +201,8 @@ class VpsDockerHostStore:
         agent_dir = self._agent_data_dir(host_id)
         try:
             output = self._exec(f"ls '{agent_dir}'/*.json 2>/dev/null || true")
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("No agent data found for host {}: {}", host_id, e)
             return []
 
         agent_records: list[dict[str, Any]] = []

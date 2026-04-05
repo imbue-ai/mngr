@@ -1,7 +1,3 @@
-from imbue.imbue_common.pure import pure
-
-
-@pure
 def generate_cloud_init_user_data(
     host_private_key: str,
     host_public_key: str,
@@ -30,7 +26,6 @@ runcmd:
 """
 
 
-@pure
 def _indent(text: str, spaces: int) -> str:
     """Indent each line of text by the given number of spaces."""
     prefix = " " * spaces

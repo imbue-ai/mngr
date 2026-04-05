@@ -134,7 +134,8 @@ class DockerOverSsh(MutableModel):
                 ["inspect", "--format", "{{.State.Running}}", container_id_or_name]
             )
             return output.strip().lower() == "true"
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("Container {} not running or not found: {}", container_id_or_name, e)
             return False
 
     def pull_image(self, image: str, timeout_seconds: float = 300.0) -> None:
@@ -154,7 +155,8 @@ class DockerOverSsh(MutableModel):
         try:
             self.run_docker(["volume", "inspect", name])
             return True
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("Volume {} not found: {}", name, e)
             return False
 
     def check_docker_ready(self) -> bool:
@@ -162,7 +164,8 @@ class DockerOverSsh(MutableModel):
         try:
             self.run_ssh("docker info > /dev/null 2>&1", timeout_seconds=15.0)
             return True
-        except (VpsConnectionError, ContainerSetupError):
+        except (VpsConnectionError, ContainerSetupError) as e:
+            logger.debug("Docker not ready on VPS {}: {}", self.vps_ip, e)
             return False
 
     def check_file_exists(self, path: str) -> bool:
@@ -170,5 +173,6 @@ class DockerOverSsh(MutableModel):
         try:
             self.run_ssh(f"test -f {shlex.quote(path)}", timeout_seconds=10.0)
             return True
-        except ContainerSetupError:
+        except ContainerSetupError as e:
+            logger.debug("File {} not found on VPS {}: {}", path, self.vps_ip, e)
             return False
