@@ -230,7 +230,8 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         """Build a simplified command for headless operation.
 
         Always includes --print, no session resumption, no background activity
-        tracking. Redirects stdout to $MNGR_AGENT_STATE_DIR/stdout.jsonl.
+        tracking. Redirects stdout to $MNGR_AGENT_STATE_DIR/stdout.jsonl and
+        stderr to $MNGR_AGENT_STATE_DIR/stderr.log.
         """
         if command_override is not None:
             base = str(command_override)
