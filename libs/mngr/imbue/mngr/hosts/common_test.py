@@ -286,7 +286,7 @@ def _get_safe_directories() -> list[str]:
     return result.stdout.strip().splitlines()
 
 
-def test_add_safe_directory_on_remote_adds_entry_for_non_local_host() -> None:
+def test_add_safe_directory_on_remote_adds_entry_for_non_local_host(setup_git_config: None) -> None:
     """Test that add_safe_directory_on_remote writes to gitconfig for non-local hosts."""
     host = cast(OnlineHostInterface, FakeHost(is_local=False))
     target_path = Path("/some/agent/workdir")
@@ -297,7 +297,7 @@ def test_add_safe_directory_on_remote_adds_entry_for_non_local_host() -> None:
     assert str(target_path) in safe_dirs
 
 
-def test_add_safe_directory_on_remote_is_noop_for_local_host() -> None:
+def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: None) -> None:
     """Test that add_safe_directory_on_remote does nothing for local hosts."""
     host = cast(OnlineHostInterface, FakeHost(is_local=True))
     target_path = Path("/some/agent/workdir")
