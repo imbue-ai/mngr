@@ -214,7 +214,7 @@ class VpsDockerProvider(BaseProviderInstance):
         state_container_name = ensure_state_container(
             docker_ssh=docker_ssh,
             prefix=self.mngr_ctx.config.prefix,
-            user_id=str(self.mngr_ctx.user_id),
+            user_id=str(self.mngr_ctx.get_profile_user_id()),
             provider_name=str(self.name),
         )
         return VpsDockerHostStore(
