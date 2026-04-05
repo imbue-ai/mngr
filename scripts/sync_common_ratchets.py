@@ -26,7 +26,9 @@ SECTION_HEADER_RE = re.compile(r"^# --- (.+) ---$")
 SNAPSHOT_VALUE_RE = re.compile(r"snapshot\(\d+\)")
 
 # Projects excluded from ratchet requirements (scheduled for deletion).
-EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
+# Keep in sync with _EXCLUDED_PROJECTS in test_meta_ratchets.py
+# (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
+EXCLUDED_RATCHET_PROJECTS: frozenset[str] = frozenset({"flexmux"})
 
 # Canonical section order, used for inserting new sections at the right position.
 SECTION_ORDER = [
@@ -63,7 +65,7 @@ def _find_test_ratchet_files() -> list[Path]:
         if not parent.is_dir():
             continue
         for child in sorted(parent.iterdir()):
-            if not child.is_dir() or child.name in EXCLUDED_PROJECTS:
+            if not child.is_dir() or child.name in EXCLUDED_RATCHET_PROJECTS:
                 continue
             if not (child / "pyproject.toml").exists():
                 continue
@@ -209,7 +211,11 @@ def main() -> int:
             if t.name not in templates:
                 templates[t.name] = normalized
             elif len(normalized.source) < len(templates[t.name].source):
-                # Prefer the shorter (simpler) form without project-specific args.
+                # Prefer the shorter source: some projects add extra kwargs
+                # (e.g. excluded_patterns, allowed_root_init_lines) that are
+                # project-specific.  The generic form without those kwargs is
+                # always shorter, so picking the shortest gives us the right
+                # default template for new projects.
                 templates[t.name] = normalized
 
     canonical_names = set(templates.keys())

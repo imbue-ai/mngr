@@ -14,7 +14,9 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_withou
 
 _REPO_ROOT = Path(__file__).parent
 
-# Projects that are excluded from ratchet requirements (scheduled for deletion)
+# Projects that are excluded from ratchet requirements (scheduled for deletion).
+# Keep in sync with EXCLUDED_RATCHET_PROJECTS in scripts/sync_common_ratchets.py
+# (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
