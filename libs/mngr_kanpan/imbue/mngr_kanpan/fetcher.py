@@ -2,6 +2,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,6 +10,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -397,7 +399,7 @@ def _get_all_commits_ahead(
                 timeout=10.0,
                 is_checked_by_group=False,
             )
-        except Exception as exc:
+        except (ConcurrencyGroupError, OSError) as exc:
             logger.debug("Failed to launch git rev-list in {}: {}", work_dir, exc)
             result[work_dir] = None
             continue
@@ -406,7 +408,7 @@ def _get_all_commits_ahead(
     for work_dir, proc in processes:
         try:
             proc.wait()
-        except Exception as exc:
+        except (ConcurrencyGroupError, TimeoutExpired) as exc:
             logger.debug("git rev-list failed in {}: {}", work_dir, exc)
             result[work_dir] = None
             continue
