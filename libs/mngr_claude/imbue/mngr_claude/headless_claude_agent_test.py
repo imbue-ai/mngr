@@ -300,6 +300,26 @@ def test_stream_output_raises_with_stream_json_error_result(
         list(agent.stream_output())
 
 
+def test_stream_output_raises_with_stderr_content(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should surface stderr.log content in the error when stdout is empty."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = agent_dir / "stdout.jsonl"
+    stdout_path.write_text("")
+    stderr_path = agent_dir / "stderr.log"
+    stderr_path.write_text("Error: authentication required\n")
+
+    with pytest.raises(MngrError, match="authentication required"):
+        list(agent.stream_output())
+
+
 def test_stream_output_raises_when_agent_stopped_and_no_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
