@@ -12,9 +12,9 @@ import {
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
 import { getAgents } from "../models/Conversation";
-import { MarkdownContent } from "../markdown";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
+import { renderAssistantMessageChildren } from "./message-renderers";
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
@@ -68,68 +68,6 @@ function renderUserMessage(event: TranscriptEvent): m.Vnode {
   return m("div", { class: "message message-user", key: event.event_id }, [m(StableUserMessage, { event })]);
 }
 
-function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
-  const metadata = toolCall.subagent_metadata;
-  if (!metadata) {
-    return renderToolCallBlock(toolCall, null);
-  }
-
-  const description = metadata.description || "Sub-agent";
-  const agentType = metadata.agent_type || "";
-  const subagentUrl = `#!/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(metadata.session_id)}`;
-
-  return m("div", { class: "subagent-card" }, [
-    m("div", { class: "subagent-card-header" }, [
-      m("span", { class: "subagent-card-description" }, description),
-      agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
-    ]),
-    m(
-      "a",
-      {
-        class: "subagent-card-link",
-        href: subagentUrl,
-        target: "_blank",
-        rel: "noopener",
-        onclick(e: Event) {
-          e.stopPropagation();
-        },
-      },
-      "View conversation \u2197",
-    ),
-  ]);
-}
-
-function renderToolCallBlock(toolCall: ToolCall, toolResult: TranscriptEvent | null): m.Vnode {
-  const headerText = `Tool: ${toolCall.tool_name}`;
-  const inputText = toolCall.input_preview || "";
-  const outputText = toolResult?.output || "";
-  const isError = toolResult?.is_error === true;
-
-  return m("div", { class: "tool-call-block" }, [
-    m(
-      "div",
-      {
-        class: "tool-call-header",
-        onclick(e: Event) {
-          const block = (e.currentTarget as HTMLElement).parentElement;
-          if (block) {
-            block.classList.toggle("tool-call-block--expanded");
-          }
-        },
-      },
-      [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", headerText)],
-    ),
-    m("div", { class: "tool-call-details" }, [
-      inputText ? m("div", { class: "tool-call-input" }, [m("pre", m("code", inputText))]) : null,
-      outputText
-        ? m("div", { class: isError ? "tool-call-output tool-call-output--error" : "tool-call-output" }, [
-            m("pre", m("code", outputText)),
-          ])
-        : null,
-    ]),
-  ]);
-}
-
 function countResolvedToolResults(
   toolCalls: ToolCall[] | undefined,
   toolResults: Map<string, TranscriptEvent>,
@@ -162,25 +100,7 @@ function StableAssistantMessage(): m.Component<{
       renderedEventId = event.event_id;
       renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
 
-      const textContent = event.text || "";
-      const toolCalls = event.tool_calls || [];
-
-      const children: m.Children[] = [];
-
-      if (textContent) {
-        children.push(m(MarkdownContent, { content: textContent }));
-      }
-
-      for (const toolCall of toolCalls) {
-        if (toolCall.tool_name === "Agent" && toolCall.subagent_metadata) {
-          children.push(renderSubagentCard(toolCall, agentId));
-        } else {
-          const result = toolResults.get(toolCall.tool_call_id) ?? null;
-          children.push(renderToolCallBlock(toolCall, result));
-        }
-      }
-
-      return m("div", children);
+      return m("div", renderAssistantMessageChildren(event, toolResults, agentId));
     },
   };
 }
