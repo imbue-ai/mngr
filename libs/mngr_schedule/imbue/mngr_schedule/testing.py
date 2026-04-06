@@ -118,7 +118,7 @@ def deploy_test_trigger(
             "--command",
             "create",
             "--args",
-            "test-agent echo --no-connect --await-ready --no-ensure-clean --branch :run-{DATE} -- hello-from-schedule-run",
+            "test-agent echo --no-connect --no-ensure-clean --branch :run-{DATE} -- hello-from-schedule-run",
             "--schedule",
             "0 3 * * *",
             "--provider",
