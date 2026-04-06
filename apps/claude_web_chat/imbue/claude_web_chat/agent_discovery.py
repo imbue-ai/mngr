@@ -31,8 +31,12 @@ class AgentInfo(FrozenModel):
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
     cg = ConcurrencyGroup(name="claude-web-chat")
     cg.__enter__()
-    pm = get_or_create_plugin_manager()
-    mngr_ctx = load_config(pm, cg, is_interactive=False)
+    try:
+        pm = get_or_create_plugin_manager()
+        mngr_ctx = load_config(pm, cg, is_interactive=False)
+    except BaseException:
+        cg.__exit__(None, None, None)
+        raise
     return mngr_ctx, cg
 
 
