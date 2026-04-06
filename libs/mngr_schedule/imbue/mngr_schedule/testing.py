@@ -158,7 +158,6 @@ def deploy_test_trigger(
             "--no-auto-merge",
             "--full-copy",
             "--exclude-project-settings",
-            "--exclude-user-settings",
             "--verify",
             "none",
             *disable_args,
