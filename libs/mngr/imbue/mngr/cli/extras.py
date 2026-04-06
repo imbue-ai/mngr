@@ -20,7 +20,7 @@ from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import read_tty_choice
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard_impl
-from imbue.mngr.plugin_catalog import RECOMMENDED_PLUGINS
+from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
@@ -163,10 +163,12 @@ def _plugins_status() -> str:
         receipt_path = require_uv_tool_receipt()
         receipt = read_receipt(receipt_path)
         installed_names = frozenset(r.name for r in receipt.extras)
-        available = [p for p in RECOMMENDED_PLUGINS if p.package_name not in installed_names]
+        available = [p for p in PLUGIN_CATALOG if p.package_name not in installed_names]
         if not available:
-            return "all recommended plugins installed"
-        return f"{len(available)} recommended plugin(s) available"
+            return "all plugins installed"
+        # Count unique packages
+        available_packages = {p.package_name for p in available}
+        return f"{len(available_packages)} plugin package(s) available"
     except (OSError, ValueError, KeyError, AbortError):
         return "status unknown"
 
