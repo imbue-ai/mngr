@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
+import { getBasePath } from "../base-path";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
 
 export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
@@ -15,7 +16,8 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
 
   const description = metadata.description || "Sub-agent";
   const agentType = metadata.agent_type || "";
-  const subagentUrl = `#!/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(metadata.session_id)}`;
+  const basePath = getBasePath();
+  const subagentUrl = `${basePath}/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(metadata.session_id)}`;
 
   return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
