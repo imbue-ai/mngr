@@ -23,7 +23,7 @@ class Config(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         if isinstance(value, list):
-            return value
+            return [str(item) for item in value]
         return None
 
     @cached_property

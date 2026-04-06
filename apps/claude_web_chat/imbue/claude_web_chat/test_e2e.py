@@ -88,8 +88,8 @@ def _make_agent_fixture(
         id=agent_id,
         name=agent_name,
         state="RUNNING",
-        agent_state_dir=str(agent_state_dir),
-        claude_config_dir=str(claude_config_dir),
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
     )
     return agent_info, session_file
 
@@ -313,8 +313,7 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
     # Wait for initial content
     expect(page.locator(".message-user").first).to_be_visible(timeout=5000)
 
-    # Count initial messages
-    initial_count = page.locator(".message-user").count()
+
 
     # Append a new event to the session file
     new_event = {

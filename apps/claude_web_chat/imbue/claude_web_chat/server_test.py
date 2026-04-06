@@ -1,8 +1,6 @@
 """Tests for the FastAPI server."""
 
 import json
-import os
-import time
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -60,20 +58,18 @@ def test_index_returns_not_built_when_no_static(client: TestClient, tmp_path: Pa
 
 def test_list_agents_endpoint(client: TestClient) -> None:
     """The agents endpoint returns agent data."""
-    mock_agents = [
-        {
-            "id": "agent-123",
-            "name": "test-agent",
-            "state": "RUNNING",
-            "agent_state_dir": "/tmp/test",
-            "claude_config_dir": "/tmp/.claude",
-        }
-    ]
-
     with patch("imbue.claude_web_chat.server.discover_agents") as mock_discover:
         from imbue.claude_web_chat.agent_discovery import AgentInfo
 
-        mock_discover.return_value = [AgentInfo(**a) for a in mock_agents]
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=Path("/tmp/test"),
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
         response = client.get("/api/agents")
 
     assert response.status_code == 200
@@ -136,18 +132,18 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     # Write session history
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
 
-    mock_agent = {
-        "id": "agent-123",
-        "name": "test-agent",
-        "state": "RUNNING",
-        "agent_state_dir": str(agent_state_dir),
-        "claude_config_dir": str(claude_config_dir),
-    }
-
     with patch("imbue.claude_web_chat.server.discover_agents") as mock_discover:
         from imbue.claude_web_chat.agent_discovery import AgentInfo
 
-        mock_discover.return_value = [AgentInfo(**mock_agent)]
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=agent_state_dir,
+                claude_config_dir=claude_config_dir,
+            )
+        ]
         response = client.get("/api/agents/agent-123/events")
 
     assert response.status_code == 200
@@ -161,21 +157,21 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
 
 def test_send_message_success(client: TestClient) -> None:
     """Sending a message to a known agent succeeds."""
-    mock_agent = {
-        "id": "agent-123",
-        "name": "test-agent",
-        "state": "RUNNING",
-        "agent_state_dir": "/tmp/test",
-        "claude_config_dir": "/tmp/.claude",
-    }
-
     with (
         patch("imbue.claude_web_chat.server.discover_agents") as mock_discover,
         patch("imbue.claude_web_chat.server.send_message", return_value=True) as mock_send,
     ):
         from imbue.claude_web_chat.agent_discovery import AgentInfo
 
-        mock_discover.return_value = [AgentInfo(**mock_agent)]
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=Path("/tmp/test"),
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
         response = client.post("/api/agents/agent-123/message", json={"message": "hello"})
 
     assert response.status_code == 200

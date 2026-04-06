@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -52,18 +51,17 @@ def discover_agents() -> list[AgentInfo]:
     finally:
         cg.__exit__(None, None, None)
 
+    # Use default host dir from mngr config for local agents
+    default_host_dir = mngr_ctx.config.default_host_dir
+
     agents: list[AgentInfo] = []
     for agent_details in result.agents:
         agent_id = str(agent_details.id)
         agent_name = str(agent_details.name)
         state = str(agent_details.state.value) if agent_details.state else "unknown"
 
-        # Compute agent state dir from the host dir
-        host_dir = agent_details.host.host_dir if agent_details.host else None
-        if host_dir is not None:
-            agent_state_dir = Path(host_dir) / "agents" / agent_id
-        else:
-            agent_state_dir = Path()
+        # Compute agent state dir from the default host dir
+        agent_state_dir = default_host_dir / "agents" / agent_id
 
         # Get CLAUDE_CONFIG_DIR -- check agent's env vars if available,
         # default to ~/.claude

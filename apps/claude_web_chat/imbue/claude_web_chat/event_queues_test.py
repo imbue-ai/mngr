@@ -61,6 +61,7 @@ def test_buffer_behavior_stripped_from_delivered_events() -> None:
     q = queues.register("agent-1")
     queues.broadcast("agent-1", {"type": "test", "buffer_behavior": BufferBehavior.STORE})
     event = q.get_nowait()
+    assert event is not None
     assert "buffer_behavior" not in event
 
 

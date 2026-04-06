@@ -7,7 +7,6 @@ in mngr_recursive.
 
 from __future__ import annotations
 
-import json
 from loguru import logger as _loguru_logger
 import os
 import threading
@@ -75,7 +74,7 @@ class AgentSessionWatcher:
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
-        self._observer: Observer | None = None
+        self._observer: Any = None
         self._thread: threading.Thread | None = None
         self._mtime_cache: dict[str, tuple[float, int]] = {}
 

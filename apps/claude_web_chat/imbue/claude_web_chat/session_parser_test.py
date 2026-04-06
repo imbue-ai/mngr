@@ -1,6 +1,7 @@
 """Tests for the session JSONL parser."""
 
 import json
+from typing import Any
 
 from imbue.claude_web_chat.session_parser import parse_session_lines
 
@@ -18,10 +19,10 @@ def _make_assistant_line(
     uuid: str,
     timestamp: str,
     text: str,
-    tool_calls: list[dict[str, str]] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
     model: str = "claude-opus-4-6",
 ) -> str:
-    content = [{"type": "text", "text": text}]
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if tool_calls:
         for tc in tool_calls:
             content.append({

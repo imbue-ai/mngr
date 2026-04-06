@@ -62,8 +62,9 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         def _graceful_shutdown_handler(signum: int, frame: object) -> None:
             event_queues.shutdown()
             _stop_all_watchers(application)
-            if callable(original_sigint_handler):
-                original_sigint_handler(signum, frame)
+            handler = original_sigint_handler
+            if callable(handler):
+                handler(signum, frame)  # type: ignore[arg-type]
 
         signal.signal(signal.SIGINT, _graceful_shutdown_handler)
 
