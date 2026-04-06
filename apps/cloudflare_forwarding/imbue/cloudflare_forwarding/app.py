@@ -9,11 +9,14 @@ import base64
 import binascii
 import functools
 import json
+import logging
 import os
 import secrets as secrets_module
 from typing import Any
 from typing import NoReturn
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 import httpx
 import modal
@@ -449,6 +452,7 @@ def get_ctx() -> ForwardingCtx:
 def raise_as_http(exc: Exception) -> NoReturn:
     """Convert domain exceptions to HTTPException."""
     if isinstance(exc, CloudflareApiError):
+        logger.warning("Cloudflare API error: %s", exc)
         raise HTTPException(status_code=exc.status_code, detail={"errors": exc.cf_errors}) from exc
     if isinstance(exc, TunnelNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -458,6 +462,7 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, InvalidTunnelComponentError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.exception("Unexpected error in endpoint handler")
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
