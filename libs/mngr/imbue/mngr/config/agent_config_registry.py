@@ -11,6 +11,10 @@ from imbue.mngr.config.data_types import merge_cli_args
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 
+# Fields on AgentTypeConfig that are routing metadata (not runtime config values).
+# These are skipped when applying custom overrides to a parent config.
+_METADATA_FIELDS: frozenset[str] = frozenset({"parent_type", "plugin"})
+
 # =============================================================================
 # Agent Config Registry
 # =============================================================================
@@ -75,14 +79,14 @@ def _apply_custom_overrides_to_parent_config(
     fields like trust_working_directory).
     """
     explicitly_set_fields = custom_config.model_fields_set
-    if not explicitly_set_fields - {"parent_type"}:
+    if not explicitly_set_fields - _METADATA_FIELDS:
         return parent_config
 
     custom_values = custom_config.model_dump()
     updates: list[tuple[str, Any]] = []
 
     for field_name in explicitly_set_fields:
-        if field_name == "parent_type":
+        if field_name in _METADATA_FIELDS:
             continue
         elif field_name == "cli_args":
             # cli_args uses merge semantics (concatenation)
@@ -105,22 +109,34 @@ def _check_agent_type_not_disabled(
 ) -> None:
     """Raise MngrError if the agent type or any ancestor in its parent chain is disabled.
 
+    At each level, uses the explicit ``plugin`` field if set, otherwise
+    falls back to ``parent_type`` (if set) or the type name -- mirroring
+    how ``_parse_providers`` resolves the plugin for a provider block.
+
     Walks the chain: agent_type -> parent_type -> parent's parent_type -> ...
     until we hit a type with no parent_type or one that is not defined in
     config.agent_types.
     """
-    custom_config = config.agent_types.get(agent_type)
+    current_cfg = config.agent_types.get(agent_type)
     checked: str | None = str(agent_type)
-    current_cfg = custom_config
     seen: set[str] = set()
     while checked is not None and checked not in seen:
+        seen.add(checked)
+        # If this level has an explicit plugin field, use it and stop walking.
+        if current_cfg is not None and current_cfg.plugin is not None:
+            if current_cfg.plugin in config.disabled_plugins:
+                raise MngrError(
+                    f"Agent type '{agent_type}' cannot be used because plugin "
+                    f"'{current_cfg.plugin}' is disabled. Enable the plugin with: "
+                    f"mngr plugin enable {current_cfg.plugin}"
+                )
+            return
         if checked in config.disabled_plugins:
             raise MngrError(
                 f"Agent type '{agent_type}' cannot be used because plugin "
                 f"'{checked}' is disabled. Enable the plugin with: "
                 f"mngr plugin enable {checked}"
             )
-        seen.add(checked)
         if current_cfg is not None and current_cfg.parent_type is not None:
             checked = str(current_cfg.parent_type)
             current_cfg = config.agent_types.get(current_cfg.parent_type)

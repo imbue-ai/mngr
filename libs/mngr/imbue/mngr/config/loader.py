@@ -363,14 +363,25 @@ def _has_disabled_ancestor(
     raw_types: dict[str, dict[str, Any]],
     disabled_plugins: frozenset[str],
 ) -> bool:
-    """Check if an agent type or any ancestor in its parent chain is disabled."""
+    """Check if an agent type or any ancestor in its parent chain is disabled.
+
+    At each level, uses the explicit ``plugin`` field if set, otherwise
+    falls back to ``parent_type`` (if set) or the type name -- mirroring
+    how ``_parse_providers`` resolves the plugin for a provider block.
+    """
     current: str | None = name
     seen: set[str] = set()
     while current is not None and current not in seen:
-        if current in disabled_plugins:
-            return True
         seen.add(current)
         raw = raw_types.get(current)
+        # Determine the plugin identity for this level.
+        plugin: str | None = raw.get("plugin") if raw is not None else None
+        if plugin is not None:
+            # Explicit plugin field -- check it and stop walking (the field
+            # already tells us which plugin this whole sub-chain depends on).
+            return plugin in disabled_plugins
+        if current in disabled_plugins:
+            return True
         current = raw.get("parent_type") if raw is not None else None
     return False
 

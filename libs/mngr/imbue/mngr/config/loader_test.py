@@ -386,6 +386,20 @@ def test_parse_agent_types_skips_type_with_disabled_grandparent() -> None:
     assert AgentTypeName("unrelated") in result
 
 
+def test_parse_agent_types_uses_explicit_plugin_field() -> None:
+    """_parse_agent_types should use an explicit plugin field to determine the owning plugin."""
+    raw = {"my-type": {"plugin": "real-plugin", "cli_args": "--verbose"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"real-plugin"}))
+    assert AgentTypeName("my-type") not in result
+
+
+def test_parse_agent_types_explicit_plugin_overrides_name() -> None:
+    """An explicit plugin field pointing to an enabled plugin should keep the type even if name matches a disabled plugin."""
+    raw = {"disabled-name": {"plugin": "enabled-plugin", "cli_args": "--verbose"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"disabled-name"}))
+    assert AgentTypeName("disabled-name") in result
+
+
 # =============================================================================
 # Tests for _parse_plugins
 # =============================================================================

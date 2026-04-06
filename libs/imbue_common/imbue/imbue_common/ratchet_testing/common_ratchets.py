@@ -353,7 +353,11 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 
 PREVENT_IF_ELIF_WITHOUT_ELSE = RatchetRuleInfo(
     rule_name="if/elif without else",
-    rule_description="All if/elif chains must have an else clause to ensure all cases are handled explicitly",
+    rule_description=(
+        "All if/elif chains must have an else clause. You must consider what the "
+        "logically correct behavior is when none of the conditions match. Do not "
+        "add 'else: pass' without thinking about whether the else case is a bug."
+    ),
 )
 
 PREVENT_INIT_IN_NON_EXCEPTION_CLASSES = RatchetRuleInfo(
