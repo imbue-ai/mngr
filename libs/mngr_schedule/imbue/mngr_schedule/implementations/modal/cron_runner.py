@@ -146,12 +146,15 @@ def _run_and_stream(
         shell=is_shell,
     )
     assert process.stdout is not None
+    captured_lines: list[str] = []
     for line in process.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
+        captured_lines.append(line)
     process.wait()
     if is_checked and process.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}")
+        tail = "".join(captured_lines[-20:])
+        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}\nLast output:\n{tail}")
     return process.returncode
 
 
