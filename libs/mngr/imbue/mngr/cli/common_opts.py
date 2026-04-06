@@ -63,6 +63,7 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --context: Project context directory
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
+    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated paths)
     """
     # Apply decorators in reverse order (bottom to top)
     # These are wrapped in the "Common" option group
