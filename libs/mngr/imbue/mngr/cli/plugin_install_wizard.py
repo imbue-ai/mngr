@@ -42,7 +42,9 @@ from imbue.mngr.plugin_catalog import SignalCheck
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import PluginTier
-from imbue.mngr.utils.toml_config import set_plugin_enabled
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
+from imbue.mngr.utils.toml_config import set_nested_value
 from imbue.mngr.uv_tool import build_uv_tool_install_add_many
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
@@ -255,8 +257,8 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
 def _enable_selected_plugins(selected_package_names: frozenset[str]) -> None:
     """Enable all entry points from the selected packages in user config.
 
-    Uses the same code path as ``mngr plugin enable`` (set_plugin_enabled),
-    writing to the user-scope settings file.
+    Loads the user-scope settings file once, sets all plugin entries, and
+    saves once -- avoiding repeated file I/O.
     """
     profile_dir = find_profile_dir_lightweight(read_default_host_dir())
     if profile_dir is None:
@@ -267,11 +269,15 @@ def _enable_selected_plugins(selected_package_names: frozenset[str]) -> None:
 
     entry_points_to_enable = [e.entry_point_name for e in PLUGIN_CATALOG if e.package_name in selected_package_names]
 
-    for name in entry_points_to_enable:
-        set_plugin_enabled(name, is_enabled=True, config_path=config_path)
+    if not entry_points_to_enable:
+        return
 
-    if entry_points_to_enable:
-        write_human_line("Enabled {} plugin(s) in {}", len(entry_points_to_enable), config_path)
+    doc = load_config_file_tomlkit(config_path)
+    for name in entry_points_to_enable:
+        set_nested_value(doc, f"plugins.{name}.enabled", True)
+    save_config_file(config_path, doc)
+
+    write_human_line("Enabled {} plugin(s) in {}", len(entry_points_to_enable), config_path)
 
 
 _RELAUNCH_HINT: Final[str] = (
