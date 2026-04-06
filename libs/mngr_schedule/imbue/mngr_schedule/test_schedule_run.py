@@ -63,5 +63,24 @@ def test_schedule_run_invokes_modal_trigger() -> None:
         assert run_result.returncode == 0, (
             f"schedule run failed\nstdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
+
+        # Verify the deployed function actually executed by checking for
+        # output from cron_runner.py's run_scheduled_trigger(), which prints
+        # "Running: mngr create ..." before invoking the command.
+        combined_output = run_result.stdout + run_result.stderr
+        assert "Running:" in combined_output and "mngr create" in combined_output, (
+            f"schedule run exited 0 but the trigger function does not appear to have "
+            f"executed (expected 'Running: mngr create ...' in output)\n"
+            f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
+        )
     finally:
         cleanup_modal_app(app_name, env)
+        # Best-effort cleanup of any agent created by the trigger.
+        # The auto-fix args add --host-label SCHEDULE=<name>, but we don't
+        # know the exact agent name, so just try to destroy by the trigger name.
+        subprocess.run(
+            ["uv", "run", "mngr", "destroy", "--force", trigger_name],
+            capture_output=True,
+            timeout=30,
+            env=env,
+        )
