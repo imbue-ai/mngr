@@ -2331,8 +2331,8 @@ class Host(BaseHost, OnlineHostInterface):
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
             result = self.execute_idempotent_command(
-                f"tmux has-session -t {shlex.quote(old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote(old_session_name)} {shlex.quote(new_session_name)} || true"
+                f"tmux has-session -t {shlex.quote('=' + old_session_name)} 2>/dev/null && "
+                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} {shlex.quote(new_session_name)} || true"
             )
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
@@ -2557,7 +2557,19 @@ class Host(BaseHost, OnlineHostInterface):
 
         Uses -s flag to list panes across ALL windows in the session, not just the
         current window. This is important for sessions with additional command windows.
+
+        Guards with has-session first because list-panes -s does not support the =
+        prefix for exact session matching. Despite the man page saying "if -s is given,
+        target is a session", list-panes resolves its -t via CMD_FIND_WINDOW, so a bare
+        '=name' is parsed as an exact window match, not an exact session match. Without
+        this guard, list-panes -s would fall back to session prefix matching and could
+        return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
         """
+        # has-session supports = for exact matching -- bail out if session doesn't exist
+        has_result = self.execute_idempotent_command(f"tmux has-session -t '={session_name}' 2>/dev/null")
+        if not has_result.success:
+            return []
+
         all_pids: list[str] = []
         result = self.execute_idempotent_command(
             f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
@@ -2609,7 +2621,7 @@ class Host(BaseHost, OnlineHostInterface):
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self.execute_idempotent_command(f"tmux kill-session -t '{session_name}' 2>/dev/null || true")
+                self.execute_idempotent_command(f"tmux kill-session -t '={session_name}' 2>/dev/null || true")
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
@@ -2772,9 +2784,11 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists (using ; so that a failed
-    # has-session check doesn't break the && chain that follows)
-    guard = f"tmux has-session -t {shlex.quote(session_name)} 2>/dev/null && exit 0"
+    # Bail out early if the session already exists. Use = prefix for exact
+    # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
+    # matching "mngr_foo-bar"). stderr is redirected to suppress the
+    # "can't find session" message when the session doesn't exist yet.
+    guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
 
     steps: list[str] = []
 
@@ -2799,6 +2813,15 @@ def _build_start_agent_shell_command(
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
+
+    # NOTE: Commands below target a session that was just created above in the
+    # same && chain. The exact session definitely exists, so we do NOT use the
+    # = prefix here -- it's unnecessary. The = prefix only provides exact
+    # *session* matching for commands whose -t resolves as target-session (e.g.
+    # has-session, kill-session). For target-pane (e.g. set-option) or
+    # target-window (e.g. list-panes) commands, a bare '=name' is parsed as
+    # an exact window/pane match rather than an exact session match, so it
+    # does not prevent session prefix matching.
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
@@ -2884,7 +2907,7 @@ def _build_start_agent_shell_command(
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote(session_name) + ':0'} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
+        f"tmux list-panes -t {shlex.quote(session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     )
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (
