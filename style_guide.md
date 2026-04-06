@@ -1882,7 +1882,7 @@ There are three levels of ratchet tests:
 
 Every project in the monorepo must have a `test_ratchets.py` file that checks for the standard set of anti-patterns. All `test_ratchets.py` files must define precisely the same set of test functions -- this is enforced by `test_meta_ratchets.py` (see below). The implementations may differ (e.g., different snapshot values, different `allowed_root_init_lines` for `test_prevent_code_in_init_files`), but the function names must match exactly.
 
-When adding a new common ratchet, add the rule to `common_ratchets.py` and a wrapper to `standard_ratchet_checks.py`, then run `uv run python scripts/sync_common_ratchets.py` to auto-generate the test in all projects. Finally, run `uv run pytest --inline-snapshot=update -k test_ratchets` to set the actual violation counts per project. See the `/writing-ratchet-tests` skill for the full workflow.
+When adding a new ratchet, add it to `standard_ratchet_checks.py` and run the sync script to propagate it to all projects.
 
 Ratchet values use `inline_snapshot` so they can be automatically updated with `--inline-snapshot=update`.
 
