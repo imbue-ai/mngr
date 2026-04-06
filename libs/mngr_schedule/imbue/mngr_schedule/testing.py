@@ -124,6 +124,7 @@ def deploy_test_trigger(
             "--provider",
             provider,
             "--no-auto-merge",
+            "--full-copy",
             "--verify",
             "none",
             *disable_args,
