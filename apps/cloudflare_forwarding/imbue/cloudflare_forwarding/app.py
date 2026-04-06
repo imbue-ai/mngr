@@ -7,11 +7,13 @@ This keeps deployment simple: `modal deploy app.py` ships just this file.
 
 import base64
 import binascii
+import contextlib
 import functools
 import json
 import logging
 import os
 import secrets as secrets_module
+from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
 from typing import Protocol
@@ -466,6 +468,17 @@ def raise_as_http(exc: Exception) -> NoReturn:
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@contextlib.contextmanager
+def handle_endpoint_errors() -> Iterator[None]:
+    """Wrap endpoint logic: re-raise HTTPException, convert domain errors via raise_as_http."""
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise_as_http(exc)
+
+
 # ---------------------------------------------------------------------------
 # Modal deployment
 # ---------------------------------------------------------------------------
@@ -479,64 +492,44 @@ _secrets = [modal.Secret.from_name("cloudflare-forwarding-secrets")]
 @modal.fastapi_endpoint(method="POST", docs=True)
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token."""
-    try:
+    with handle_endpoint_errors():
         username = authenticate(request)
         return get_ctx().create_tunnel(username, body.agent_id).model_dump()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise_as_http(exc)
 
 
 @app.function(secrets=_secrets)
 @modal.fastapi_endpoint(method="GET", docs=True)
 def list_tunnels(request: Request) -> list[dict[str, object]]:
     """List all tunnels belonging to the authenticated user."""
-    try:
+    with handle_endpoint_errors():
         username = authenticate(request)
         return [t.model_dump() for t in get_ctx().list_tunnels(username)]
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise_as_http(exc)
 
 
 @app.function(secrets=_secrets)
 @modal.fastapi_endpoint(method="DELETE", docs=True)
 def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
     """Delete a tunnel and all its associated DNS records and ingress rules."""
-    try:
+    with handle_endpoint_errors():
         username = authenticate(request)
         get_ctx().delete_tunnel(tunnel_name, username)
         return {"status": "deleted"}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise_as_http(exc)
 
 
 @app.function(secrets=_secrets)
 @modal.fastapi_endpoint(method="POST", docs=True)
 def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
     """Add a service to a tunnel."""
-    try:
+    with handle_endpoint_errors():
         username = authenticate(request)
         return get_ctx().add_service(tunnel_name, username, body.service_name, body.service_url).model_dump()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise_as_http(exc)
 
 
 @app.function(secrets=_secrets)
 @modal.fastapi_endpoint(method="DELETE", docs=True)
 def remove_service(request: Request, tunnel_name: str, service_name: str) -> dict[str, str]:
     """Remove a service from a tunnel."""
-    try:
+    with handle_endpoint_errors():
         username = authenticate(request)
         get_ctx().remove_service(tunnel_name, username, service_name)
         return {"status": "deleted"}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise_as_http(exc)
