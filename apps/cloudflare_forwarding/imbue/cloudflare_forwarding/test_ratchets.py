@@ -92,6 +92,10 @@ def test_prevent_setattr() -> None:
 # --- Banned libraries and patterns ---
 
 
+def test_prevent_asyncio_import() -> None:
+    rc.check_asyncio_import(_DIR, snapshot(0))
+
+
 def test_prevent_pandas_import() -> None:
     rc.check_pandas_import(_DIR, snapshot(0))
 
