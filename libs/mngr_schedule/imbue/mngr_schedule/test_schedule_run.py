@@ -83,10 +83,9 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
         )
 
         # Step 3b: Verify the trigger actually created an agent.
-        # The auto_fix_create_args in schedule add adds --host-label
-        # SCHEDULE=<trigger_name> to the create args, so we can find
-        # the agent by that label. This proves the full chain worked:
-        # schedule run -> fn.remote() -> cron_runner -> mngr create.
+        # The trigger creates the agent on the modal provider (--provider
+        # modal in the args), so it persists beyond the container lifetime.
+        # The auto_fix_create_args adds --host-label SCHEDULE=<name>.
         list_agents_result = subprocess.run(
             ["uv", "run", "mngr", "list", "--host-label", f"SCHEDULE={trigger_name}", "--format=json", *disable_args],
             capture_output=True,
@@ -101,7 +100,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
         agents = agents_data.get("agents", [])
         assert len(agents) >= 1, (
             f"No agents found with host-label SCHEDULE={trigger_name}. "
-            f"The trigger may not have actually created an agent.\n"
+            f"The trigger ran (exit 0) but did not produce a visible agent.\n"
             f"mngr list output: {list_agents_result.stdout}"
         )
 
