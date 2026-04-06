@@ -308,6 +308,47 @@ def test_stream_output_raises_error_result_even_after_yielding_text(
         list(agent.stream_output())
 
 
+def test_stream_output_combines_result_error_and_stderr_after_partial_output(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should combine result error and stderr even after yielding text."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text(
+        _make_stream_json_line("partial") + "\n"
+        '{"type":"result","subtype":"success","is_error":true,"result":"rate limit"}\n'
+    )
+    (agent_dir / "stderr.log").write_text("stack trace here\n")
+
+    with pytest.raises(MngrError, match="rate limit") as exc_info:
+        list(agent.stream_output())
+    assert "stack trace here" in str(exc_info.value)
+
+
+def test_stream_output_combines_stderr_and_stdout_errors(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should include both stderr and stdout errors when both are present."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text(
+        '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+    )
+    (agent_dir / "stderr.log").write_text("Error: ECONNREFUSED\n")
+
+    with pytest.raises(MngrError, match="Not logged in") as exc_info:
+        list(agent.stream_output())
+    assert "ECONNREFUSED" in str(exc_info.value)
+
+
 def test_stream_output_raises_with_stderr_content(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
