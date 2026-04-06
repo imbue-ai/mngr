@@ -15,9 +15,15 @@ import subprocess
 import pytest
 
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
+from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
 from imbue.mngr_schedule.testing import deploy_test_trigger
+
+# Only the schedule and modal plugins are needed for this test.
+# All other plugins are disabled to avoid needing their credentials
+# (e.g. ANTHROPIC_API_KEY for the claude plugin).
+_ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 
 
 @pytest.mark.release
@@ -38,7 +44,7 @@ def test_schedule_run_invokes_modal_trigger() -> None:
         # call below IS the test -- it exercises invoke_modal_trigger_function,
         # a completely different code path from --verify quick which uses
         # `modal run` CLI instead of the SDK's Function.from_name().remote())
-        add_result = deploy_test_trigger(trigger_name, env)
+        add_result = deploy_test_trigger(trigger_name, env, _ENABLED_PLUGINS)
         assert add_result.returncode == 0, (
             f"schedule add failed\nstdout: {add_result.stdout}\nstderr: {add_result.stderr}"
         )
@@ -54,6 +60,7 @@ def test_schedule_run_invokes_modal_trigger() -> None:
                 trigger_name,
                 "--provider",
                 "modal",
+                *build_disable_plugin_args(_ENABLED_PLUGINS),
             ],
             capture_output=True,
             text=True,

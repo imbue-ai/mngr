@@ -4,6 +4,7 @@ These helpers are used by test_schedule_add.py and test_schedule_run.py
 for end-to-end tests that require real Modal credentials and network access.
 """
 
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -21,6 +22,27 @@ REAL_HOME: Path = Path.home()
 # mngr schedule commands need to be in a git repo for auto-merge and code
 # packaging to work.
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _get_all_plugin_names() -> frozenset[str]:
+    """Discover all installed mngr plugin entry point names."""
+    return frozenset(ep.name for ep in importlib.metadata.entry_points(group="mngr"))
+
+
+def build_disable_plugin_args(enabled_plugins: frozenset[str]) -> list[str]:
+    """Build --disable-plugin CLI args for all plugins NOT in enabled_plugins.
+
+    Scans installed mngr entry points and produces --disable-plugin flags
+    for everything except the specified set. This gives subprocess tests
+    explicit control over which plugins are active, matching the
+    enabled_plugins fixture pattern used for in-process tests.
+    """
+    all_plugins = _get_all_plugin_names()
+    to_disable = sorted(all_plugins - enabled_plugins)
+    args: list[str] = []
+    for name in to_disable:
+        args.extend(["--disable-plugin", name])
+    return args
 
 
 def build_subprocess_env() -> dict[str, str]:
@@ -71,15 +93,20 @@ def cleanup_modal_app(app_name: str, env: dict[str, str]) -> None:
 def deploy_test_trigger(
     trigger_name: str,
     env: dict[str, str],
+    enabled_plugins: frozenset[str],
     *,
     provider: str = "modal",
     timeout: int = 600,
 ) -> subprocess.CompletedProcess[str]:
     """Deploy a test trigger via schedule add. Returns the subprocess result.
 
+    enabled_plugins controls which mngr plugins are active in the subprocess.
+    All other installed plugins are disabled via --disable-plugin flags.
+
     Runs from REPO_ROOT so that git context is available (the autouse test
     fixture chdir's into tmp_path which is outside any git repo).
     """
+    disable_args = build_disable_plugin_args(enabled_plugins)
     return subprocess.run(
         [
             "uv",
@@ -99,6 +126,7 @@ def deploy_test_trigger(
             "--no-auto-merge",
             "--verify",
             "none",
+            *disable_args,
         ],
         capture_output=True,
         text=True,

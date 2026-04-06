@@ -11,8 +11,13 @@ import pytest
 
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
 from imbue.mngr_schedule.testing import REPO_ROOT
+from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
+
+# These tests exercise the full deploy flow including claude plugin hooks,
+# so claude must be enabled (and ANTHROPIC_API_KEY must be set).
+_ENABLED_PLUGINS = frozenset({"schedule", "modal", "claude"})
 
 
 @pytest.mark.release
@@ -47,8 +52,10 @@ def test_schedule_add_deploys_to_modal() -> None:
                 "0 3 * * *",
                 "--provider",
                 "modal",
+                "--no-auto-merge",
                 "--verify",
                 "none",
+                *build_disable_plugin_args(_ENABLED_PLUGINS),
             ],
             capture_output=True,
             text=True,
@@ -100,8 +107,10 @@ def test_schedule_add_with_verification() -> None:
                 "0 3 * * *",
                 "--provider",
                 "modal",
+                "--no-auto-merge",
                 "--verify",
                 "quick",
+                *build_disable_plugin_args(_ENABLED_PLUGINS),
             ],
             capture_output=True,
             text=True,
@@ -152,8 +161,10 @@ def test_schedule_list_shows_deployed_schedule() -> None:
                 "0 4 * * *",
                 "--provider",
                 "modal",
+                "--no-auto-merge",
                 "--verify",
                 "none",
+                *build_disable_plugin_args(_ENABLED_PLUGINS),
             ],
             capture_output=True,
             text=True,
@@ -167,7 +178,17 @@ def test_schedule_list_shows_deployed_schedule() -> None:
 
         # List schedules and verify the deployed schedule appears
         list_result = subprocess.run(
-            ["uv", "run", "mngr", "schedule", "list", "--provider", "modal", "--format=json"],
+            [
+                "uv",
+                "run",
+                "mngr",
+                "schedule",
+                "list",
+                "--provider",
+                "modal",
+                "--format=json",
+                *build_disable_plugin_args(_ENABLED_PLUGINS),
+            ],
             capture_output=True,
             text=True,
             timeout=60,
