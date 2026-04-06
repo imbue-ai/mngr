@@ -224,6 +224,13 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "events/claude/common_transcript/events.jsonl. The common format includes user messages, "
         "assistant messages, and tool call/result summaries.",
     )
+    archive_sessions_on_destroy: bool = Field(
+        default=True,
+        description="Archive Claude session files before the agent's state directory is deleted on destroy. "
+        "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
+        "are copied to <host_dir>/plugin/mngr_claude/session_archives/<agent-name>--<agent-id>/. "
+        "Set to False to discard session data on destroy.",
+    )
 
 
 def _collect_claude_home_dir_files(claude_dir: Path) -> dict[Path, Path]:
@@ -1648,13 +1655,21 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
-        """Clean up per-agent credentials and trust entries.
+        """Archive session files and clean up per-agent credentials and trust entries.
+
+        When archive_sessions_on_destroy is enabled (default), copies session JSONL
+        files, the aggregated transcript, and session history to a persistent archive
+        directory before the agent state directory is deleted.
 
         For agents with per-agent config dirs: cleans up macOS keychain entries
         (the config dir itself is deleted with the agent state).
         For legacy agents without per-agent config dirs: cleans up the global
         ~/.claude.json trust entry.
         """
+        # Archive session files before the state dir is deleted
+        if self.agent_config.archive_sessions_on_destroy:
+            _archive_session_files(self, host)
+
         config_dir = self.get_claude_config_dir()
         per_agent_config_exists = host.execute_idempotent_command(
             f"test -d {shlex.quote(str(config_dir))}", timeout_seconds=5.0
@@ -1676,6 +1691,82 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         else:
             # Per-agent config dir on non-macOS: config dir is deleted with agent state, nothing extra to clean up
             pass
+
+
+def _get_session_archive_dir(host: OnlineHostInterface, agent: ClaudeAgent) -> Path:
+    """Return the archive directory path for an agent's session files."""
+    return host.host_dir / "plugin" / "mngr_claude" / "session_archives" / f"{agent.name}--{agent.id}"
+
+
+def _archive_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
+    """Copy session files to a persistent archive before the agent state dir is deleted.
+
+    Archives four categories of data:
+    - Session JSONL files from the per-agent Claude config dir (projects/)
+    - The raw transcript (logs/claude_transcript/events.jsonl)
+    - The common (agent-agnostic) transcript (events/claude/common_transcript/events.jsonl)
+    - The session ID history file (claude_session_id_history)
+
+    Uses a single batched shell command to minimize SSH roundtrips for remote hosts.
+    Failures are logged as warnings but do not prevent agent destruction.
+    """
+    agent_dir = agent._get_agent_dir()
+    archive_dir = _get_session_archive_dir(host, agent)
+
+    # Source paths for session data
+    config_dir = agent.get_claude_config_dir()
+    projects_dir = config_dir / "projects"
+    raw_transcript_path = agent_dir / "logs" / "claude_transcript" / "events.jsonl"
+    common_transcript_path = agent_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
+    history_path = agent_dir / "claude_session_id_history"
+
+    # Build a single shell script that checks existence and copies in one roundtrip
+    archive_script = _build_archive_script(
+        archive_dir=archive_dir,
+        projects_dir=projects_dir,
+        raw_transcript_path=raw_transcript_path,
+        common_transcript_path=common_transcript_path,
+        history_path=history_path,
+    )
+
+    with log_span("Archiving session files for agent {}", agent.name):
+        result = host.execute_idempotent_command(archive_script, timeout_seconds=30.0)
+        if not result.success:
+            logger.warning("Session archival failed for agent {}: {}", agent.name, result.stderr)
+        elif result.stdout.strip():
+            logger.debug("Archived session data for agent {}: {}", agent.name, result.stdout.strip())
+        else:
+            logger.debug("No session data to archive for agent {}", agent.name)
+
+
+def _build_archive_script(
+    archive_dir: Path,
+    projects_dir: Path,
+    raw_transcript_path: Path,
+    common_transcript_path: Path,
+    history_path: Path,
+) -> str:
+    """Build a shell script that checks for session data and copies it in a single invocation."""
+    q_archive = shlex.quote(str(archive_dir))
+    q_projects = shlex.quote(str(projects_dir))
+    q_raw_transcript = shlex.quote(str(raw_transcript_path))
+    q_common_transcript = shlex.quote(str(common_transcript_path))
+    q_history = shlex.quote(str(history_path))
+
+    return (
+        f"_has_data=false;"
+        f" [ -d {q_projects} ] && _has_data=true;"
+        f" [ -f {q_raw_transcript} ] && _has_data=true;"
+        f" [ -f {q_common_transcript} ] && _has_data=true;"
+        f" [ -f {q_history} ] && _has_data=true;"
+        f' if [ "$_has_data" = false ]; then exit 0; fi;'
+        f" mkdir -p {q_archive};"
+        f" [ -d {q_projects} ] && cp -r {q_projects} {q_archive}/projects && echo projects;"
+        f" [ -f {q_raw_transcript} ] && cp {q_raw_transcript} {q_archive}/claude_transcript.jsonl && echo raw_transcript;"
+        f" [ -f {q_common_transcript} ] && cp {q_common_transcript} {q_archive}/common_transcript.jsonl && echo common_transcript;"
+        f" [ -f {q_history} ] && cp {q_history} {q_archive}/claude_session_id_history && echo history;"
+        f" true"
+    )
 
 
 def _generate_claude_home_settings() -> dict[str, Any]:
