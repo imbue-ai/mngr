@@ -58,15 +58,21 @@ def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
 
 
-def _setup_agent_output_dir(host: Host, agent: HeadlessClaude) -> Path:
-    """Create the agent state directory and return it.
+def _write_fake_agent_output(
+    host: Host,
+    agent: HeadlessClaude,
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    """Write synthetic stdout.jsonl and stderr.log to simulate claude output.
 
-    The returned directory is where stdout.jsonl and stderr.log live.
-    Callers can write test fixtures to agent_dir / "stdout.jsonl" etc.
+    Creates the agent state directory (normally set up by the agent lifecycle)
+    and writes the provided content to the output files.
     """
     agent_dir = host.host_dir / "agents" / str(agent.id)
     agent_dir.mkdir(parents=True, exist_ok=True)
-    return agent_dir
+    (agent_dir / "stdout.jsonl").write_text(stdout)
+    (agent_dir / "stderr.log").write_text(stderr)
 
 
 # =============================================================================
@@ -218,13 +224,12 @@ def test_stream_output_yields_text_deltas(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
     lines = [
         _make_stream_json_line("Hello "),
         _make_stream_json_line("world!"),
         json.dumps({"type": "result", "is_error": False}),
     ]
-    (agent_dir / "stdout.jsonl").write_text("\n".join(lines) + "\n")
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
 
     chunks = list(agent.stream_output())
 
@@ -244,9 +249,7 @@ def test_stream_output_raises_when_empty_file(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
-    (agent_dir / "stderr.log").write_text("")
+    _write_fake_agent_output(host, agent)
 
     with pytest.raises(MngrError, match="no details available"):
         list(agent.stream_output())
@@ -261,9 +264,7 @@ def test_stream_output_handles_file_without_trailing_newline(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    content = _make_stream_json_line("no trailing newline")
-    (agent_dir / "stdout.jsonl").write_text(content)
+    _write_fake_agent_output(host, agent, stdout=_make_stream_json_line("no trailing newline"))
 
     chunks = list(agent.stream_output())
 
@@ -279,10 +280,13 @@ def test_stream_output_raises_with_stream_json_error_result(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text(
-        '{"type":"system","subtype":"init","session_id":"abc"}\n'
-        '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            '{"type":"system","subtype":"init","session_id":"abc"}\n'
+            '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+        ),
     )
 
     with pytest.raises(MngrError, match="Not logged in"):
@@ -298,10 +302,13 @@ def test_stream_output_raises_error_result_even_after_yielding_text(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text(
-        _make_stream_json_line("partial output") + "\n"
-        '{"type":"result","subtype":"success","is_error":true,"result":"API rate limit exceeded"}\n'
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            _make_stream_json_line("partial output") + "\n"
+            '{"type":"result","subtype":"success","is_error":true,"result":"API rate limit exceeded"}\n'
+        ),
     )
 
     with pytest.raises(MngrError, match="API rate limit exceeded"):
@@ -317,12 +324,15 @@ def test_stream_output_combines_result_error_and_stderr_after_partial_output(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text(
-        _make_stream_json_line("partial") + "\n"
-        '{"type":"result","subtype":"success","is_error":true,"result":"rate limit"}\n'
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            _make_stream_json_line("partial") + "\n"
+            '{"type":"result","subtype":"success","is_error":true,"result":"rate limit"}\n'
+        ),
+        stderr="stack trace here\n",
     )
-    (agent_dir / "stderr.log").write_text("stack trace here\n")
 
     with pytest.raises(MngrError, match="rate limit") as exc_info:
         list(agent.stream_output())
@@ -338,11 +348,12 @@ def test_stream_output_combines_stderr_and_stdout_errors(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text(
-        '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout='{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n',
+        stderr="Error: ECONNREFUSED\n",
     )
-    (agent_dir / "stderr.log").write_text("Error: ECONNREFUSED\n")
 
     with pytest.raises(MngrError, match="Not logged in") as exc_info:
         list(agent.stream_output())
@@ -358,9 +369,7 @@ def test_stream_output_raises_with_stderr_content(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
-    (agent_dir / "stderr.log").write_text("Error: authentication required\n")
+    _write_fake_agent_output(host, agent, stderr="Error: authentication required\n")
 
     with pytest.raises(MngrError, match="authentication required"):
         list(agent.stream_output())
