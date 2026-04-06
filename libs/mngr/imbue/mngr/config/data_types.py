@@ -755,6 +755,7 @@ class CommonCliOptions(FrozenModel):
     project_context_path: str | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
+    setting: tuple[str, ...] = ()
 
 
 class CreateCliOptions(CommonCliOptions):
