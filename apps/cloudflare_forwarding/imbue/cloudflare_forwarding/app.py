@@ -8,6 +8,7 @@ import modal
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import SecretStr
 
 from imbue.cloudflare_forwarding.auth import verify_credentials
 from imbue.cloudflare_forwarding.cloudflare_client import create_cloudflare_client
@@ -35,7 +36,7 @@ web_app = FastAPI()
 def _get_forwarding_service() -> ForwardingService:
     """Return a cached ForwardingService, creating it on first call."""
     client = create_cloudflare_client(
-        api_token=os.environ["CLOUDFLARE_API_TOKEN"],
+        api_token=SecretStr(os.environ["CLOUDFLARE_API_TOKEN"]),
         account_id=CloudflareAccountId(os.environ["CLOUDFLARE_ACCOUNT_ID"]),
         zone_id=CloudflareZoneId(os.environ["CLOUDFLARE_ZONE_ID"]),
     )

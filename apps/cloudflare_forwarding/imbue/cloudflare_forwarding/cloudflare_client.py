@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.cloudflare_forwarding.errors import CloudflareApiError
 from imbue.cloudflare_forwarding.primitives import CloudflareAccountId
@@ -17,14 +18,14 @@ _BASE_URL = "https://api.cloudflare.com/client/v4"
 
 
 def create_cloudflare_client(
-    api_token: str,
+    api_token: SecretStr,
     account_id: CloudflareAccountId,
     zone_id: CloudflareZoneId,
 ) -> "CloudflareClient":
     """Create a CloudflareClient configured with the given credentials."""
     http_client = httpx.Client(
         base_url=_BASE_URL,
-        headers={"Authorization": f"Bearer {api_token}"},
+        headers={"Authorization": f"Bearer {api_token.get_secret_value()}"},
         timeout=30.0,
     )
     return CloudflareClient(http_client=http_client, account_id=account_id, zone_id=zone_id)
