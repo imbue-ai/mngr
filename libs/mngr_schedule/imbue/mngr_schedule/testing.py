@@ -161,6 +161,7 @@ def deploy_test_trigger(
             provider,
             "--no-auto-merge",
             "--full-copy",
+            "--exclude-user-settings",
             "--verify",
             "none",
             *disable_args,
