@@ -209,6 +209,31 @@ class AgentSessionWatcher:
                 except OSError:
                     logger.debug("Failed to schedule watchdog for %s", parent_dir)
 
+            # Also discover subagent session files
+            self._discover_subagent_sessions(session_id, file_path)
+
+    def _discover_subagent_sessions(self, parent_session_id: str, parent_file_path: Path) -> None:
+        """Discover subagent session files under <session_id>/subagents/."""
+        subagents_dir = parent_file_path.parent / parent_session_id / "subagents"
+        if not subagents_dir.exists():
+            return
+
+        for jsonl_file in subagents_dir.glob("*.jsonl"):
+            sub_id = jsonl_file.stem
+            if sub_id in self._session_states:
+                continue
+
+            self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
+            self._known_session_ids.append(sub_id)
+
+            if self._observer is not None:
+                try:
+                    self._observer.schedule(
+                        _ChangeHandler(self._wake_event), str(subagents_dir), recursive=False
+                    )
+                except OSError:
+                    pass
+
     def _find_session_file(self, session_id: str) -> Path | None:
         """Search for a session JSONL file under the Claude projects directory."""
         projects_dir = self._claude_config_dir / "projects"

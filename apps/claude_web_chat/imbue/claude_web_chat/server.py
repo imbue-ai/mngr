@@ -179,7 +179,8 @@ def _get_events(agent_id: str, request: Request) -> Response:
     if before_event_id:
         events = watcher.get_backfill_events(before_event_id, limit=limit)
     else:
-        events = watcher.get_all_events(tail=limit)
+        # Return all events on initial load
+        events = watcher.get_all_events()
 
     return JSONResponse(content={"events": events})
 

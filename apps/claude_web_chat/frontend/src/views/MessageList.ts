@@ -161,14 +161,19 @@ export function MessageList(): m.Component<{ agentId: string | null }> {
     loadAgent(agentId);
   }
 
+  async function runBackfillLoop(agentId: string): Promise<void> {
+    while (!isBackfillComplete(agentId) && agentId === currentAgentId) {
+      await fetchBackfillEvents(agentId);
+      m.redraw();
+    }
+  }
+
   function startBackfill(agentId: string): void {
     if (backfillStarted || isBackfillComplete(agentId)) {
       return;
     }
     backfillStarted = true;
-    fetchBackfillEvents(agentId).then(() => {
-      m.redraw();
-    });
+    runBackfillLoop(agentId);
   }
 
   function applyScrollPosition(element: HTMLElement): void {
