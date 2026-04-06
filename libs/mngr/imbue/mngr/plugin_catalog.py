@@ -4,11 +4,12 @@ This module defines the full plugin catalog, signal checks for binary
 detection, and helpers used by the install wizard and test fixtures.
 """
 
-import subprocess
 from typing import Final
 
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import PluginTier
 
@@ -249,13 +250,10 @@ def check_signal(signal: SignalCheck) -> bool:
     Returns True if the command exits with code 0, False otherwise.
     """
     try:
-        result = subprocess.run(
-            signal.command,
-            capture_output=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        with ConcurrencyGroup(name="signal-check") as cg:
+            cg.run_process_to_completion(signal.command, timeout_seconds=10.0)
+        return True
+    except (ProcessError, FileNotFoundError, OSError):
         return False
 
 
