@@ -134,8 +134,13 @@ def _run_and_stream(
     is_checked: bool = True,
     cwd: str | None = None,
     is_shell: bool = False,
-) -> int:
-    """Run a command, streaming output to stdout in real time."""
+) -> tuple[int, str]:
+    """Run a command, streaming output to stdout in real time.
+
+    Returns (exit_code, captured_output). The captured output contains
+    the last lines of stdout+stderr, useful for including in error messages
+    when the command fails remotely and only the exception propagates.
+    """
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -146,13 +151,16 @@ def _run_and_stream(
         shell=is_shell,
     )
     assert process.stdout is not None
+    captured_lines: list[str] = []
     for line in process.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
+        captured_lines.append(line)
     process.wait()
+    tail = "".join(captured_lines[-50:])
     if is_checked and process.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}")
-    return process.returncode
+        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}\nLast output:\n{tail}")
+    return process.returncode, tail
 
 
 @app.function(
@@ -223,6 +231,6 @@ def run_scheduled_trigger() -> None:
     print(f"Currently in {os.getcwd()}")
 
     print(f"Running: {' '.join(cmd)}")
-    exit_code = _run_and_stream(cmd, is_checked=False)
+    exit_code, output_tail = _run_and_stream(cmd, is_checked=False)
     if exit_code != 0:
-        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}")
+        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nLast output:\n{output_tail}")

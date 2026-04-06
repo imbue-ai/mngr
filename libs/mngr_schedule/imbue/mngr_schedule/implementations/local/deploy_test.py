@@ -14,6 +14,8 @@ from imbue.mngr_schedule.implementations.local.deploy import _save_creation_reco
 from imbue.mngr_schedule.implementations.local.deploy import _stage_env_file
 from imbue.mngr_schedule.implementations.local.deploy import build_wrapper_script
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
+from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
+from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule_creation_records
 
 
@@ -459,3 +461,79 @@ def test_list_local_schedule_creation_records_skips_unreadable_files(
     assert records[0].trigger.name == "readable-trigger"
 
     unreadable.chmod(0o644)
+
+
+# =============================================================================
+# get_local_schedule_creation_record tests
+# =============================================================================
+
+
+def test_get_local_schedule_creation_record_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up a deployed trigger by name should return its record."""
+    trigger = _make_test_trigger("my-trigger")
+    deploy_local_schedule(
+        trigger,
+        temp_mngr_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "fakehash",
+    )
+
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "my-trigger")
+    assert record is not None
+    assert record.trigger.name == "my-trigger"
+    assert record.trigger.command == ScheduledMngrCommand.CREATE
+
+
+def test_get_local_schedule_creation_record_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up a nonexistent trigger should return None."""
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "nonexistent")
+    assert record is None
+
+
+def test_get_local_schedule_creation_record_invalid_json(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up a trigger with invalid JSON should return None."""
+    records_dir = tmp_path / ".mngr" / "schedule" / "records"
+    records_dir.mkdir(parents=True)
+    (records_dir / "bad-trigger.json").write_text("not valid json")
+
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "bad-trigger")
+    assert record is None
+
+
+# =============================================================================
+# get_local_trigger_run_script tests
+# =============================================================================
+
+
+def test_get_local_trigger_run_script_returns_correct_path(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Should return the path to run.sh inside the trigger directory."""
+    path = get_local_trigger_run_script(temp_mngr_ctx, "my-trigger")
+    assert path.name == "run.sh"
+    assert "my-trigger" in str(path)
+
+
+def test_get_local_trigger_run_script_exists_after_deploy(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """After deploying a trigger, its run.sh should exist."""
+    trigger = _make_test_trigger("deployed-trigger")
+    deploy_local_schedule(
+        trigger,
+        temp_mngr_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "fakehash",
+    )
+
+    path = get_local_trigger_run_script(temp_mngr_ctx, "deployed-trigger")
+    assert path.is_file()

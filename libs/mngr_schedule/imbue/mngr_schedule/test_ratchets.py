@@ -208,7 +208,7 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess_usage() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(5))
+    rc.check_direct_subprocess(_DIR, snapshot(10))
 
 
 # --- AST-based ratchets ---

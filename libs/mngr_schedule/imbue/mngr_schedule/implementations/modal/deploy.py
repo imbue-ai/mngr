@@ -15,6 +15,7 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
+import modal
 import modal.exception
 from dotenv import dotenv_values
 from loguru import logger
@@ -400,6 +401,10 @@ def stage_deploy_files(
     - project/: Files destined for the project working directory
     - secrets/.env: Consolidated environment variables from all sources
     """
+    # Wipe and recreate the staging dir so stale files from previous builds
+    # (including read-only git objects) don't block the new copy.
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     # Collect files from all plugins via the hook
@@ -410,11 +415,16 @@ def stage_deploy_files(
         include_project_settings=include_project_settings,
     )
 
-    # Create both staging subdirectories unconditionally
+    # Create both staging subdirectories unconditionally. Each gets a
+    # placeholder file because modal's add_local_dir(copy=True) does not
+    # include empty directories in the image, and the Dockerfile commands
+    # expect both /staging/home/ and /staging/project/ to exist.
     home_dir = staging_dir / "home"
     home_dir.mkdir(exist_ok=True)
+    (home_dir / ".keep").touch()
     project_dir = staging_dir / "project"
     project_dir.mkdir(exist_ok=True)
+    (project_dir / ".keep").touch()
 
     def resolve_staged_path(dest_str: str) -> Path:
         """Resolve a destination string to a staged path under home/ or project/."""
@@ -549,6 +559,110 @@ def _save_schedule_creation_record(
     logger.debug("Saved schedule creation record to {}", path)
 
 
+def get_modal_schedule_creation_record(
+    provider: ModalProviderInstance,
+    trigger_name: str,
+) -> ModalScheduleCreationRecord | None:
+    """Read a single schedule creation record by trigger name from the state volume.
+
+    Returns None if the record does not exist, is unreadable, or is invalid.
+    """
+    volume = provider.get_state_volume()
+    file_path = f"{_SCHEDULE_RECORDS_PREFIX}/{trigger_name}.json"
+    try:
+        data = volume.read_file(file_path)
+    except (modal.exception.NotFoundError, FileNotFoundError, OSError) as exc:
+        logger.debug("Schedule record not found at {}: {}", file_path, exc)
+        return None
+    try:
+        return ModalScheduleCreationRecord.model_validate_json(data)
+    except (ValidationError, ValueError) as exc:
+        logger.warning("Invalid schedule record at {}: {}", file_path, exc)
+        return None
+
+
+def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> None:
+    """Invoke the deployed modal function for a trigger.
+
+    Calls modal.Function.from_name() to look up the deployed function and
+    invokes it remotely. Raises MngrError if the function is not found or
+    the invocation fails.
+    """
+    try:
+        fn = modal.Function.from_name(
+            record.app_name,
+            "run_scheduled_trigger",
+            environment_name=record.environment,
+        )
+        fn.remote()
+    except modal.exception.NotFoundError:
+        raise MngrError(
+            f"Modal function not found (app: {record.app_name}, env: {record.environment}). "
+            "The trigger may need to be re-deployed with 'mngr schedule add'."
+        ) from None
+    except modal.exception.Error as exc:
+        raise MngrError(f"Modal invocation failed: {exc}") from None
+
+
+def remove_modal_schedule(
+    provider: ModalProviderInstance,
+    trigger_name: str,
+) -> None:
+    """Remove a modal scheduled trigger.
+
+    Idempotent: missing artifacts are logged as warnings, not errors.
+    Cleans up in order:
+    1. Stop the Modal app (via modal CLI -- no Python SDK method exists)
+    2. Delete the creation record from the state volume
+    """
+    app_name = get_modal_app_name(trigger_name)
+    environment_name = provider.environment_name
+
+    # 1. Stop the Modal app
+    # First find the app ID by listing apps and matching the description
+    with ConcurrencyGroup(name=f"modal-app-list-{trigger_name}") as cg:
+        list_result = cg.run_process_to_completion(
+            ["uv", "run", "modal", "app", "list", "--json", "--env", environment_name],
+            is_checked_after=False,
+            timeout=30.0,
+        )
+
+    if list_result.returncode == 0:
+        apps = json.loads(list_result.stdout)
+        app_id: str | None = None
+        for app in apps:
+            if app.get("Description", "") == app_name:
+                app_id = app.get("App ID", "")
+                break
+
+        if app_id:
+            with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
+                stop_result = cg.run_process_to_completion(
+                    ["uv", "run", "modal", "app", "stop", app_id],
+                    is_checked_after=False,
+                    timeout=30.0,
+                )
+            if stop_result.returncode == 0:
+                logger.info("Stopped Modal app '{}' (id: {})", app_name, app_id)
+            else:
+                logger.warning("Failed to stop Modal app '{}': {}", app_name, stop_result.stderr)
+        else:
+            logger.warning("Modal app '{}' not found in environment '{}'", app_name, environment_name)
+    else:
+        logger.warning("Failed to list Modal apps: {}", list_result.stderr)
+
+    # 2. Delete the creation record from the state volume
+    volume = provider.get_state_volume()
+    record_path = f"{_SCHEDULE_RECORDS_PREFIX}/{trigger_name}.json"
+    try:
+        volume.remove_file(record_path)
+        logger.info("Removed creation record from state volume: {}", record_path)
+    except (modal.exception.NotFoundError, FileNotFoundError):
+        logger.warning("Creation record not found on state volume: {}", record_path)
+    except OSError as exc:
+        logger.warning("Failed to remove creation record {}: {}", record_path, exc)
+
+
 def list_schedule_creation_records(
     provider: ModalProviderInstance,
 ) -> list[ModalScheduleCreationRecord]:
@@ -567,7 +681,9 @@ def list_schedule_creation_records(
     for entry in entries:
         if not entry.path.endswith(".json"):
             continue
-        file_path = f"{_SCHEDULE_RECORDS_PREFIX}/{entry.path}"
+        # entry.path is the full relative path (e.g. "plugin/schedule/name.json"),
+        # not just the filename. Prepend "/" to make it absolute for read_file.
+        file_path = f"/{entry.path}"
         try:
             data = volume.read_file(file_path)
         except (modal.exception.NotFoundError, FileNotFoundError, OSError) as exc:
