@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -16,17 +17,15 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
 
-logger = logging.getLogger(__name__)
 
-
-class AgentInfo(BaseModel, frozen=True):
+class AgentInfo(FrozenModel):
     """Lightweight agent info for the web UI."""
 
-    id: str
-    name: str
-    state: str
-    agent_state_dir: str
-    claude_config_dir: str
+    id: str = Field(description="The agent's unique identifier")
+    name: str = Field(description="The agent's human-readable name")
+    state: str = Field(description="The agent's lifecycle state (e.g. RUNNING, STOPPED)")
+    agent_state_dir: Path = Field(description="Path to the agent's state directory on the local host")
+    claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
@@ -58,19 +57,19 @@ def discover_agents() -> list[AgentInfo]:
         # Compute agent state dir from the host dir
         host_dir = agent_details.host.host_dir if agent_details.host else None
         if host_dir is not None:
-            agent_state_dir = str(Path(host_dir) / "agents" / agent_id)
+            agent_state_dir = Path(host_dir) / "agents" / agent_id
         else:
-            agent_state_dir = ""
+            agent_state_dir = Path()
 
         # Get CLAUDE_CONFIG_DIR -- check agent's env vars if available,
         # default to ~/.claude
-        claude_config_dir = str(Path.home() / ".claude")
+        claude_config_dir = Path.home() / ".claude"
         # If the agent has plugin data with config dir info, use it
         plugin_data: dict[str, Any] = agent_details.plugin or {}
         if "claude" in plugin_data:
             claude_data = plugin_data["claude"]
             if isinstance(claude_data, dict) and "config_dir" in claude_data:
-                claude_config_dir = str(claude_data["config_dir"])
+                claude_config_dir = Path(claude_data["config_dir"])
 
         agents.append(
             AgentInfo(
@@ -92,7 +91,7 @@ def send_message(agent_name: str, message: str) -> bool:
         result = send_message_to_agents(
             mngr_ctx=mngr_ctx,
             message_content=message,
-            include_filters=(agent_name,),
+            include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
             error_behavior=ErrorBehavior.CONTINUE,
         )
     finally:

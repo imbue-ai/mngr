@@ -1,5 +1,5 @@
 import json
-import logging
+from loguru import logger as _loguru_logger
 import queue
 import signal
 import threading
@@ -31,7 +31,7 @@ from imbue.claude_web_chat.models import SendMessageResponse
 from imbue.claude_web_chat.plugins import get_plugin_manager
 from imbue.claude_web_chat.session_watcher import AgentSessionWatcher
 
-logger = logging.getLogger(__name__)
+logger = _loguru_logger
 
 STATIC_DIRECTORY = Path(__file__).parent / "static"
 
@@ -96,8 +96,8 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
-        agent_state_dir=Path(agent_info.agent_state_dir),
-        claude_config_dir=Path(agent_info.claude_config_dir),
+        agent_state_dir=agent_info.agent_state_dir,
+        claude_config_dir=agent_info.claude_config_dir,
         on_events=on_events,
     )
     watchers[agent_info.id] = watcher

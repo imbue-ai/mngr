@@ -8,7 +8,7 @@ in mngr_recursive.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger as _loguru_logger
 import os
 import threading
 import time
@@ -22,7 +22,7 @@ from watchdog.observers import Observer
 
 from imbue.claude_web_chat.session_parser import parse_session_lines
 
-logger = logging.getLogger(__name__)
+logger = _loguru_logger
 
 _NON_CHANGE_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
 

@@ -8,10 +8,7 @@ and tool result events.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
