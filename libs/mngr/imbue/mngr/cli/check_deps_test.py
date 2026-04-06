@@ -9,10 +9,13 @@ from imbue.mngr.cli.check_deps import _prompt_install_choice
 from imbue.mngr.cli.check_deps import _report_post_install_status
 from imbue.mngr.cli.check_deps import _run_installation
 from imbue.mngr.cli.check_deps import check_deps
+from imbue.mngr.utils.deps import ALL_DEPS
 from imbue.mngr.utils.deps import DependencyCategory
 from imbue.mngr.utils.deps import InstallMethod
 from imbue.mngr.utils.deps import OsName
 from imbue.mngr.utils.deps import SystemDependency
+from imbue.mngr.utils.deps import describe_install_commands
+from imbue.mngr.utils.deps import detect_os
 
 _EXISTING_DEP = SystemDependency(
     binary="python3",
@@ -77,12 +80,6 @@ def test_check_deps_no_flags(cli_runner: CliRunner) -> None:
     """Running 'mngr dependencies' with no flags outputs a status table."""
     result = cli_runner.invoke(check_deps, [])
     assert result.exit_code in (0, 1)
-    assert "System dependencies" in result.output
-
-
-def test_check_deps_all_flag(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies --all' runs the full check/install flow."""
-    result = cli_runner.invoke(check_deps, ["--all"])
     assert "System dependencies" in result.output
 
 
@@ -203,6 +200,46 @@ def test_prompt_install_choice_interactive_choices(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(check_deps_mod, "read_tty_choice", lambda _prompt: "n")
     result = _prompt_install_choice(missing, missing_core, need_bash=False, os_name=OsName.LINUX)
     assert result is None
+
+
+def _install_identifier(dep: SystemDependency, os_name: OsName) -> str | None:
+    """Return the string that would appear in install commands for this dep, or None."""
+    if dep.install_method is None:
+        return None
+    if dep.install_method.custom_install_script is not None:
+        return dep.install_method.custom_install_script
+    if os_name == OsName.MACOS:
+        return dep.install_method.brew_package
+    if os_name == OsName.LINUX:
+        return dep.install_method.apt_package
+    return None
+
+
+def test_check_deps_all_flag_plans_correct_install_commands() -> None:
+    """The --all flow should plan installs for all missing deps and skip present ones.
+
+    Exercises the same logic as _check_deps_impl with install_all=True: compute
+    which deps are missing, generate the install commands, and verify that every
+    missing dep is covered while every present dep is excluded.
+    """
+    os_name = detect_os()
+    missing = [dep for dep in ALL_DEPS if not dep.is_available()]
+    present = [dep for dep in ALL_DEPS if dep.is_available()]
+
+    commands = describe_install_commands(missing, os_name)
+    joined = " ".join(commands)
+
+    # Every missing dep with a matching install method should appear in the commands
+    for dep in missing:
+        identifier = _install_identifier(dep, os_name)
+        if identifier is not None:
+            assert identifier in joined, f"Missing dep {dep.binary} should appear in install commands"
+
+    # Already-present deps should NOT appear in any install command
+    for dep in present:
+        identifier = _install_identifier(dep, os_name)
+        if identifier is not None:
+            assert identifier not in joined, f"Present dep {dep.binary} should NOT be in the install commands"
 
 
 def test_run_installation_with_deps_invokes_batch_install() -> None:
