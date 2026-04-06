@@ -309,41 +309,46 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         return "".join(self.stream_output())
 
     def _raise_no_output_error(self) -> Never:
-        """Raise MngrError with the best available error detail.
+        """Raise MngrError collecting all available error detail.
 
-        Three fallback layers, checked in order:
+        Collects errors from all file-based sources (stderr.log and stdout.jsonl)
+        since they can contain complementary information (e.g. stderr has a stack
+        trace while stdout has the user-facing error message). Falls back to tmux
+        pane capture only when neither redirect file exists (the shell never ran).
 
-        1. stderr.log -- claude CLI crashes (unhandled promise rejections) write
-           stack traces here. Also catches errors from other tools in the
-           pipeline. Note: claude's stderr behavior is unreliable (some errors
-           leak to stdout instead), so this rarely fires in practice.
+        Error sources:
 
-        2. stdout.jsonl stream-json error result -- the primary error channel.
-           With --output-format stream-json --verbose, auth failures and API
-           errors appear as result events with is_error=true. This is how
-           "Not logged in" is captured.
+        - stderr.log: claude CLI crashes (unhandled promise rejections) write
+          stack traces here. Claude's stderr behavior is unreliable (some errors
+          leak to stdout instead), so this rarely fires in practice.
 
-        3. tmux pane capture -- last resort. Only attempted when neither
-           redirect file exists, meaning the shell itself failed before
-           running the command (e.g. tmux send-keys never reached a shell
-           prompt). Extremely unlikely in practice since the shell redirect
-           creates both files before executing the command.
+        - stdout.jsonl stream-json error result: the primary error channel.
+          With --output-format stream-json --verbose, auth failures and API
+          errors appear as result events with is_error=true.
+
+        - tmux pane capture: last resort when neither redirect file exists,
+          meaning the shell itself failed before running the command. Extremely
+          unlikely since the shell redirect creates both files before executing.
         """
-        # 1. stderr: crashes, stack traces, tool errors
+        parts: list[str] = []
+        # stderr: crashes, stack traces, tool errors
         stderr_error = self._get_stderr_error_message()
         if stderr_error:
-            raise MngrError(f"claude exited without producing output:\n{stderr_error}")
-        # 2. stdout: stream-json result events with is_error=true
+            parts.append(stderr_error)
+        # stdout: stream-json result events with is_error=true
         stdout_error = self._get_stdout_stream_json_error()
         if stdout_error:
-            raise MngrError(f"claude exited without producing output:\n{stdout_error}")
-        # 3. pane capture: only if the shell never created the redirect files
-        stderr_exists = self._file_exists_on_host(self._get_stderr_path())
-        stdout_exists = self._file_exists_on_host(self._get_stdout_path())
-        if not stderr_exists and not stdout_exists:
-            pane_error = self._get_pane_error_message()
-            if pane_error:
-                raise MngrError(f"claude exited without producing output:\n{pane_error}")
+            parts.append(stdout_error)
+        # pane capture: only if the shell never created the redirect files
+        if not parts:
+            stderr_exists = self._file_exists_on_host(self._get_stderr_path())
+            stdout_exists = self._file_exists_on_host(self._get_stdout_path())
+            if not stderr_exists and not stdout_exists:
+                pane_error = self._get_pane_error_message()
+                if pane_error:
+                    parts.append(pane_error)
+        if parts:
+            raise MngrError(f"claude exited without producing output:\n{chr(10).join(parts)}")
         raise MngrError("claude exited without producing output (no details available)")
 
     def _get_stderr_error_message(self) -> str | None:
@@ -432,14 +437,19 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
             yielded_any = True
             yield chunk
 
-        # Check for errors after streaming completes. The result_error is
-        # captured from stream-json result events with is_error=true during
-        # tailing -- this surfaces errors even after partial output was yielded
-        # (e.g. rate limit mid-response, API error after some text).
+        # After streaming completes, check for errors. result_error is
+        # captured from the stream-json result event during tailing (covers
+        # both "error with no output" and "error after partial output").
+        # Also check stderr since it may have complementary info (e.g. a
+        # stack trace alongside the user-facing error in the result event).
         if state.result_error:
-            raise MngrError(f"claude returned an error:\n{state.result_error}")
-        # If nothing was yielded at all, check the fallback error chain
-        # (stderr, stdout error results, pane capture).
+            parts = [state.result_error]
+            stderr_error = self._get_stderr_error_message()
+            if stderr_error:
+                parts.append(stderr_error)
+            raise MngrError(f"claude returned an error:\n{chr(10).join(parts)}")
+        # If nothing was yielded and no result error was captured, fall back
+        # to the full error chain (re-reads stdout for errors, checks pane).
         if not yielded_any:
             self._raise_no_output_error()
 
