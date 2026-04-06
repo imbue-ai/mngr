@@ -92,6 +92,18 @@ def test_check_signal_fails_for_missing_binary() -> None:
     assert check_signal(signal) is False
 
 
+def test_check_signal_fails_for_shell_grep_mismatch() -> None:
+    """Exercises the sh -c pipe pattern used by real signals like pi and llm."""
+    signal = SignalCheck(command=("sh", "-c", "echo hello | grep -q nonexistent_pattern_xyz"))
+    assert check_signal(signal) is False
+
+
+def test_check_signal_succeeds_for_shell_grep_match() -> None:
+    """Exercises the sh -c pipe pattern when the grep matches."""
+    signal = SignalCheck(command=("sh", "-c", "echo datasette.io | grep -q datasette.io"))
+    assert check_signal(signal) is True
+
+
 # =============================================================================
 # get_installable_packages
 # =============================================================================
