@@ -48,17 +48,21 @@ def build_disable_plugin_args(enabled_plugins: frozenset[str]) -> list[str]:
 def build_subprocess_env() -> dict[str, str]:
     """Build environment for subprocess calls that need real Modal credentials.
 
-    The autouse test fixture overrides HOME to a temp directory for test isolation.
-    Subprocesses need the real HOME to find ~/.modal.toml, git config, mngr profiles,
-    etc. We restore the real HOME and remove test isolation vars so the subprocess
-    uses the real mngr configuration (which has the correct Modal environment).
+    Restores the real HOME so subprocesses can find ~/.modal.toml for Modal
+    authentication. Sets MNGR_ROOT_NAME to an isolated value so mngr does
+    NOT load the user's personal profile (which may contain plugin config
+    fields incompatible with the deployed mngr version). The modal backend
+    is still discoverable without user config via default backend resolution.
     """
     env = os.environ.copy()
     env["HOME"] = str(REAL_HOME)
-    # Remove test isolation vars that would interfere with the real mngr config
+    # Use an isolated mngr config namespace so we don't load the user's
+    # personal settings (e.g. kanpan plugin config that the container
+    # mngr version may not understand).
+    env["MNGR_ROOT_NAME"] = "mngr-schedule-test"
+    # Remove other test isolation vars
     env.pop("MNGR_HOST_DIR", None)
     env.pop("MNGR_PREFIX", None)
-    env.pop("MNGR_ROOT_NAME", None)
     # Remove pytest marker so mngr doesn't reject the call
     env.pop("PYTEST_CURRENT_TEST", None)
     return env
@@ -157,7 +161,6 @@ def deploy_test_trigger(
             provider,
             "--no-auto-merge",
             "--full-copy",
-            "--exclude-project-settings",
             "--verify",
             "none",
             *disable_args,
