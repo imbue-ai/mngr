@@ -42,6 +42,16 @@ if ! bash -c "$ENABLED_WHEN" 2>/dev/null; then
     exit 0
 fi
 
+# Skip gates when there are no code changes vs the base branch.
+# Uses the same GIT_BASE_BRANCH env var that the verification skills use.
+BASE_BRANCH="${GIT_BASE_BRANCH:-main}"
+if git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1; then
+    CODE_DIFF=$(git diff "$BASE_BRANCH"...HEAD 2>/dev/null || true)
+    if [[ -z "$CODE_DIFF" ]]; then
+        exit 0
+    fi
+fi
+
 HASH="${1:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 
 # ---------------------------------------------------------------------------

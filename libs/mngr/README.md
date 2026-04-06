@@ -2,7 +2,7 @@
 <!-- This is a copy of the top-level README.md, but with local paths replaced by GitHub links. -->
 <!-- To modify, edit README.md in the repo root and run: uv run python scripts/make_cli_docs.py -->
 
-# mngr: a Unix-style tool for managing agents
+# mngr: run any coding agent in parallel, anywhere
 
 [![GitHub Stars](https://img.shields.io/github/stars/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr)
 [![PyPI](https://img.shields.io/pypi/v/imbue-mngr?style=flat-square)](https://pypi.org/project/imbue-mngr/)
@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://github.com/imbue-ai/mngr/blob/main/./LICENSE)
 [![Open Issues](https://img.shields.io/github/issues/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr/issues)
 
-Programmatically manage any agent, anywhere.
+`mngr` is a Unix-style tool for managing coding agents.
 
 Seamlessly scale from a single local Claude to 100s of agents across remote hosts, containers, and sandboxes.
 List all your agents, see which are blocked, and instantly connect to any of them to chat or debug.
@@ -224,12 +224,13 @@ From the repo where you would like a Dockerfile created.
 
 ## Installation
 
-**Quick install** (installs system dependencies + mngr automatically):
+**Quick install:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
+This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies and optional extras. You can [review the script](https://github.com/imbue-ai/mngr/blob/main/scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and system deps: `git`, `tmux`, `jq`, `rsync`, `unison`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 

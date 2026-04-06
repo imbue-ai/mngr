@@ -359,7 +359,7 @@ def _get_positional_candidates(
     return _resolve_sources(sources, cache, first_positional_word=first_positional_word)
 
 
-def _generate_zsh_script() -> str:
+def generate_zsh_script() -> str:
     """Generate the zsh completion script with the current python path baked in."""
     python_path = sys.executable
     return f"""_mngr_complete() {{
@@ -371,7 +371,7 @@ def _generate_zsh_script() -> str:
 compdef _mngr_complete mngr"""
 
 
-def _generate_bash_script() -> str:
+def generate_bash_script() -> str:
     """Generate the bash completion script with the current python path baked in."""
     python_path = sys.executable
     return f"""_mngr_complete() {{
@@ -397,9 +397,9 @@ def main() -> None:
     if len(args) >= 2 and args[0] == "--script":
         shell = args[1]
         if shell == "zsh":
-            sys.stdout.write(_generate_zsh_script() + "\n")
+            sys.stdout.write(generate_zsh_script() + "\n")
         else:
-            sys.stdout.write(_generate_bash_script() + "\n")
+            sys.stdout.write(generate_bash_script() + "\n")
         return
 
     completions = _get_completions()
