@@ -2559,8 +2559,10 @@ class Host(BaseHost, OnlineHostInterface):
         current window. This is important for sessions with additional command windows.
 
         Guards with has-session first because list-panes -s does not support the =
-        prefix for exact session matching (it uses target-pane resolution internally).
-        Without this guard, list-panes -s would fall back to prefix matching and could
+        prefix for exact session matching. Despite the man page saying "if -s is given,
+        target is a session", list-panes resolves its -t via CMD_FIND_WINDOW, so a bare
+        '=name' is parsed as an exact window match, not an exact session match. Without
+        this guard, list-panes -s would fall back to session prefix matching and could
         return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
         """
         # has-session supports = for exact matching -- bail out if session doesn't exist
@@ -2784,8 +2786,8 @@ def _build_start_agent_shell_command(
     """
     # Bail out early if the session already exists. Use = prefix for exact
     # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
-    # matching "mngr_foo-bar"). stderr is redirected so if = is not supported
-    # by this tmux version, the guard harmlessly falls through.
+    # matching "mngr_foo-bar"). stderr is redirected to suppress the
+    # "can't find session" message when the session doesn't exist yet.
     guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
 
     steps: list[str] = []
@@ -2814,8 +2816,12 @@ def _build_start_agent_shell_command(
 
     # NOTE: Commands below target a session that was just created above in the
     # same && chain. The exact session definitely exists, so we do NOT use the
-    # = prefix here -- it's unnecessary and some tmux versions don't support it
-    # for target-pane/-window resolution (e.g. set-option's -t target-pane).
+    # = prefix here -- it's unnecessary. The = prefix only provides exact
+    # *session* matching for commands whose -t resolves as target-session (e.g.
+    # has-session, kill-session). For target-pane (e.g. set-option) or
+    # target-window (e.g. list-panes) commands, a bare '=name' is parsed as
+    # an exact window/pane match rather than an exact session match, so it
+    # does not prevent session prefix matching.
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
