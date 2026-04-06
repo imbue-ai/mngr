@@ -14,11 +14,10 @@ import subprocess
 
 import pytest
 
-from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
 from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
-from imbue.mngr_schedule.testing import cleanup_modal_app
 from imbue.mngr_schedule.testing import deploy_test_trigger
+from imbue.mngr_schedule.testing import remove_test_trigger
 
 # Only the schedule and modal plugins are needed for this test.
 # All other plugins are disabled to avoid needing their credentials
@@ -36,7 +35,6 @@ def test_schedule_run_invokes_modal_trigger() -> None:
     within the timeout.
     """
     trigger_name = "test-schedule-run"
-    app_name = get_modal_app_name(trigger_name)
     env = build_subprocess_env()
 
     try:
@@ -89,4 +87,4 @@ def test_schedule_run_invokes_modal_trigger() -> None:
             f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
     finally:
-        cleanup_modal_app(app_name, env)
+        remove_test_trigger(trigger_name, env, _ENABLED_PLUGINS)

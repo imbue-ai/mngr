@@ -90,6 +90,38 @@ def cleanup_modal_app(app_name: str, env: dict[str, str]) -> None:
         logger.warning("Failed to clean up Modal app '{}'", app_name)
 
 
+def remove_test_trigger(
+    trigger_name: str,
+    env: dict[str, str],
+    enabled_plugins: frozenset[str],
+    *,
+    provider: str = "modal",
+) -> None:
+    """Remove a test trigger via mngr schedule remove. Best-effort cleanup."""
+    disable_args = build_disable_plugin_args(enabled_plugins)
+    try:
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "mngr",
+                "schedule",
+                "remove",
+                trigger_name,
+                "--provider",
+                provider,
+                "--force",
+                *disable_args,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Timed out removing test trigger '{}'", trigger_name)
+
+
 def deploy_test_trigger(
     trigger_name: str,
     env: dict[str, str],
@@ -125,6 +157,7 @@ def deploy_test_trigger(
             provider,
             "--no-auto-merge",
             "--full-copy",
+            "--exclude-project-settings",
             "--verify",
             "none",
             *disable_args,

@@ -604,6 +604,65 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> None:
         raise MngrError(f"Modal invocation failed: {exc}") from None
 
 
+def remove_modal_schedule(
+    provider: ModalProviderInstance,
+    trigger_name: str,
+) -> None:
+    """Remove a modal scheduled trigger.
+
+    Idempotent: missing artifacts are logged as warnings, not errors.
+    Cleans up in order:
+    1. Stop the Modal app (via modal CLI -- no Python SDK method exists)
+    2. Delete the creation record from the state volume
+    """
+    app_name = get_modal_app_name(trigger_name)
+    environment_name = provider.environment_name
+
+    # 1. Stop the Modal app
+    # First find the app ID by listing apps and matching the description
+    with ConcurrencyGroup(name=f"modal-app-list-{trigger_name}") as cg:
+        list_result = cg.run_process_to_completion(
+            ["uv", "run", "modal", "app", "list", "--json", "--env", environment_name],
+            is_checked_after=False,
+            timeout=30.0,
+        )
+
+    if list_result.returncode == 0:
+        apps = json.loads(list_result.stdout)
+        app_id: str | None = None
+        for app in apps:
+            if app.get("Description", "") == app_name:
+                app_id = app.get("App ID", "")
+                break
+
+        if app_id:
+            with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
+                stop_result = cg.run_process_to_completion(
+                    ["uv", "run", "modal", "app", "stop", app_id],
+                    is_checked_after=False,
+                    timeout=30.0,
+                )
+            if stop_result.returncode == 0:
+                logger.info("Stopped Modal app '{}' (id: {})", app_name, app_id)
+            else:
+                logger.warning("Failed to stop Modal app '{}': {}", app_name, stop_result.stderr)
+        else:
+            logger.warning("Modal app '{}' not found in environment '{}'", app_name, environment_name)
+    else:
+        logger.warning("Failed to list Modal apps: {}", list_result.stderr)
+
+    # 2. Delete the creation record from the state volume
+    volume = provider.get_state_volume()
+    record_path = f"{_SCHEDULE_RECORDS_PREFIX}/{trigger_name}.json"
+    try:
+        volume.remove_file(record_path)
+        logger.info("Removed creation record from state volume: {}", record_path)
+    except (modal.exception.NotFoundError, FileNotFoundError):
+        logger.warning("Creation record not found on state volume: {}", record_path)
+    except OSError as exc:
+        logger.warning("Failed to remove creation record {}: {}", record_path, exc)
+
+
 def list_schedule_creation_records(
     provider: ModalProviderInstance,
 ) -> list[ModalScheduleCreationRecord]:
