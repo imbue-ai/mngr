@@ -415,11 +415,17 @@ def stage_deploy_files(
         include_project_settings=include_project_settings,
     )
 
-    # Create both staging subdirectories unconditionally
+    # Create both staging subdirectories unconditionally. Each gets a
+    # placeholder file because Docker COPY (used by modal's add_local_dir
+    # with copy=True) does not preserve empty directories, and the
+    # Dockerfile commands expect both /staging/home/ and /staging/project/
+    # to exist in the image.
     home_dir = staging_dir / "home"
     home_dir.mkdir(exist_ok=True)
+    (home_dir / ".keep").touch()
     project_dir = staging_dir / "project"
     project_dir.mkdir(exist_ok=True)
+    (project_dir / ".keep").touch()
 
     def resolve_staged_path(dest_str: str) -> Path:
         """Resolve a destination string to a staged path under home/ or project/."""
