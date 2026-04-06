@@ -73,15 +73,6 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             timeout=600,
             env=env,
         )
-        # fn.remote() raises RuntimeError if run_scheduled_trigger()
-        # fails inside the container, so returncode 0 proves the full
-        # invocation chain worked: schedule run -> fn.remote() ->
-        # run_scheduled_trigger() -> mngr create -> echo.
-        #
-        # Note: container stdout (e.g. "Running: mngr create ...")
-        # is NOT forwarded by fn.remote() to the caller's stdout
-        # when invoked synchronously, so we cannot assert on container
-        # output content. The returncode is the definitive signal.
         assert run_result.returncode == 0, (
             f"schedule run failed\nstdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
@@ -90,6 +81,40 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
         assert "Invoking modal trigger" in run_result.stderr, (
             f"schedule run did not reach modal invocation\nstderr: {run_result.stderr}"
         )
+
+        # Step 3b: Verify the trigger actually created an agent.
+        # The auto_fix_create_args in schedule add adds --host-label
+        # SCHEDULE=<trigger_name> to the create args, so we can find
+        # the agent by that label. This proves the full chain worked:
+        # schedule run -> fn.remote() -> cron_runner -> mngr create.
+        list_agents_result = subprocess.run(
+            ["uv", "run", "mngr", "list", "--host-label", f"SCHEDULE={trigger_name}", "--format=json", *disable_args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        assert list_agents_result.returncode == 0, (
+            f"mngr list failed\nstdout: {list_agents_result.stdout}\nstderr: {list_agents_result.stderr}"
+        )
+        agents_data = json.loads(list_agents_result.stdout)
+        agents = agents_data.get("agents", [])
+        assert len(agents) >= 1, (
+            f"No agents found with host-label SCHEDULE={trigger_name}. "
+            f"The trigger may not have actually created an agent.\n"
+            f"mngr list output: {list_agents_result.stdout}"
+        )
+
+        # Clean up the created agent
+        for agent in agents:
+            agent_name = agent.get("name", "")
+            if agent_name:
+                subprocess.run(
+                    ["uv", "run", "mngr", "destroy", "--force", agent_name, *disable_args],
+                    capture_output=True,
+                    timeout=60,
+                    env=env,
+                )
 
         # Step 4: Remove the trigger
         remove_result = subprocess.run(
