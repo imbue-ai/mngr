@@ -1,6 +1,6 @@
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
-import { fetchAgents, getAgents, getLoadingError, type Agent } from "../models/Conversation";
+import { fetchAgents, getAgents, getAgentsLoaded, getLoadingError, type Agent } from "../models/Conversation";
 import { getSelectedAgentId, selectAgent } from "../navigation";
 import { EmptySlot } from "./EmptySlot";
 
@@ -65,7 +65,7 @@ export const AgentSelector: m.Component = {
             ? m(
                 "p",
                 { class: "conversation-selector-empty mt-2 px-5 text-sm text-text-secondary" },
-                "No agents found.",
+                getAgentsLoaded() ? "No agents found." : "Loading agents...",
               )
             : m(
                 "div",

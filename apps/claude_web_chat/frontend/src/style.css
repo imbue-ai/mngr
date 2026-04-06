@@ -895,8 +895,8 @@ body {
 
 /* ── Structured tool call blocks (non-markdown) ── */
 .tool-call-block {
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-base);
   background: var(--color-bg-sidebar);
@@ -907,13 +907,26 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: 3px 10px;
   font-family: var(--font-family-mono);
   font-size: 13px;
   color: var(--color-text-secondary);
   cursor: pointer;
   user-select: none;
   transition: background 100ms;
+}
+
+/* System/hook messages shown as collapsed blocks instead of user bubbles */
+.message-system-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-bottom: 4px;
+}
+
+.message-system-collapsed .tool-call-block {
+  max-width: 80%;
+  margin: 0;
 }
 
 .tool-call-header:hover {

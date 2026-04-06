@@ -32,7 +32,7 @@ function getAgentName(agentId: string | null): string {
   }
   const agents = getAgents();
   const agent = agents.find((a) => a.id === agentId);
-  return agent?.name || "Unknown agent";
+  return agent?.name || "Loading...";
 }
 
 function getAgentState(agentId: string | null): string {
@@ -48,6 +48,17 @@ function getAgentState(agentId: string | null): string {
  * Stable message component that skips re-rendering when the event hasn't changed.
  * Session file events are immutable once written, so we only need to render once.
  */
+function isCollapsibleUserMessage(content: string): { label: string } | null {
+  if (content.startsWith("Stop hook feedback:\n")) {
+    return { label: "Stop hook feedback" };
+  }
+  if (content.startsWith("Base directory for this skill:")) {
+    const match = content.match(/skills\/([^\n/]+)/);
+    return { label: match ? `Skill: ${match[1]}` : "Skill expansion" };
+  }
+  return null;
+}
+
 function StableUserMessage(): m.Component<{ event: TranscriptEvent }> {
   let renderedEventId: string | null = null;
   return {
@@ -57,15 +68,42 @@ function StableUserMessage(): m.Component<{ event: TranscriptEvent }> {
     view(vnode) {
       const event = vnode.attrs.event;
       renderedEventId = event.event_id;
+      const content = event.content || "";
+      const collapsible = isCollapsibleUserMessage(content);
+
+      if (collapsible) {
+        return m("div", { class: "tool-call-block" }, [
+          m(
+            "div",
+            {
+              class: "tool-call-header",
+              onclick(e: Event) {
+                const block = (e.currentTarget as HTMLElement).parentElement;
+                if (block) {
+                  block.classList.toggle("tool-call-block--expanded");
+                }
+              },
+            },
+            [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", collapsible.label)],
+          ),
+          m("div", { class: "tool-call-details" }, [
+            m("div", { class: "tool-call-input" }, [m("pre", m("code", content))]),
+          ]),
+        ]);
+      }
+
       return m("div", { class: "message-user-bubble" }, [
-        m("div", { class: "message-content whitespace-pre-wrap" }, event.content || ""),
+        m("div", { class: "message-content whitespace-pre-wrap" }, content),
       ]);
     },
   };
 }
 
 function renderUserMessage(event: TranscriptEvent): m.Vnode {
-  return m("div", { class: "message message-user", key: event.event_id }, [m(StableUserMessage, { event })]);
+  const content = event.content || "";
+  const collapsible = isCollapsibleUserMessage(content);
+  const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
+  return m("div", { class: messageClass, key: event.event_id }, [m(StableUserMessage, { event })]);
 }
 
 function countResolvedToolResults(
