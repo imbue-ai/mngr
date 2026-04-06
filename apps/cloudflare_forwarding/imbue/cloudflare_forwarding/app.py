@@ -12,6 +12,7 @@ import os
 import secrets as secrets_module
 from typing import Any
 from typing import NoReturn
+from typing import Protocol
 
 import httpx
 import modal
@@ -231,14 +232,29 @@ def wrap_ingress(rules: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Forwarding service (business logic)
+# Cloudflare operations protocol
 # ---------------------------------------------------------------------------
 
 
-class ForwardingCtx:
-    """Holds the httpx client and Cloudflare config. Created once per container."""
+class CloudflareOps(Protocol):
+    """Abstraction over Cloudflare API calls used by ForwardingCtx."""
 
-    def __init__(self, api_token: str, account_id: str, zone_id: str, domain: str) -> None:
+    def create_tunnel(self, name: str) -> dict[str, Any]: ...
+    def list_tunnels(self, include_prefix: str = "") -> list[dict[str, Any]]: ...
+    def get_tunnel_by_name(self, name: str) -> dict[str, Any] | None: ...
+    def get_tunnel_token(self, tunnel_id: str) -> str: ...
+    def delete_tunnel(self, tunnel_id: str) -> None: ...
+    def get_tunnel_config(self, tunnel_id: str) -> dict[str, Any]: ...
+    def put_tunnel_config(self, tunnel_id: str, config: dict[str, Any]) -> None: ...
+    def create_cname(self, name: str, target: str) -> dict[str, Any]: ...
+    def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
+    def delete_dns_record(self, record_id: str) -> None: ...
+
+
+class HttpCloudflareOps:
+    """CloudflareOps implementation backed by real Cloudflare HTTP API calls."""
+
+    def __init__(self, api_token: str, account_id: str, zone_id: str) -> None:
         self.client = httpx.Client(
             base_url=_CF_BASE_URL,
             headers={"Authorization": f"Bearer {api_token}"},
@@ -246,6 +262,48 @@ class ForwardingCtx:
         )
         self.account_id = account_id
         self.zone_id = zone_id
+
+    def create_tunnel(self, name: str) -> dict[str, Any]:
+        return cf_create_tunnel(self.client, self.account_id, name)
+
+    def list_tunnels(self, include_prefix: str = "") -> list[dict[str, Any]]:
+        return cf_list_tunnels(self.client, self.account_id, include_prefix=include_prefix)
+
+    def get_tunnel_by_name(self, name: str) -> dict[str, Any] | None:
+        return cf_get_tunnel_by_name(self.client, self.account_id, name)
+
+    def get_tunnel_token(self, tunnel_id: str) -> str:
+        return cf_get_tunnel_token(self.client, self.account_id, tunnel_id)
+
+    def delete_tunnel(self, tunnel_id: str) -> None:
+        cf_delete_tunnel(self.client, self.account_id, tunnel_id)
+
+    def get_tunnel_config(self, tunnel_id: str) -> dict[str, Any]:
+        return cf_get_tunnel_config(self.client, self.account_id, tunnel_id)
+
+    def put_tunnel_config(self, tunnel_id: str, config: dict[str, Any]) -> None:
+        cf_put_tunnel_config(self.client, self.account_id, tunnel_id, config)
+
+    def create_cname(self, name: str, target: str) -> dict[str, Any]:
+        return cf_create_cname(self.client, self.zone_id, name, target)
+
+    def list_dns_records(self, name: str = "") -> list[dict[str, Any]]:
+        return cf_list_dns_records(self.client, self.zone_id, name=name)
+
+    def delete_dns_record(self, record_id: str) -> None:
+        cf_delete_dns_record(self.client, self.zone_id, record_id)
+
+
+# ---------------------------------------------------------------------------
+# Forwarding service (business logic)
+# ---------------------------------------------------------------------------
+
+
+class ForwardingCtx:
+    """Holds the Cloudflare ops abstraction and domain config. Created once per container."""
+
+    def __init__(self, ops: CloudflareOps, domain: str) -> None:
+        self.ops = ops
         self.domain = domain
 
     def verify_ownership(self, tunnel_name: str, username: str) -> None:
@@ -253,29 +311,29 @@ class ForwardingCtx:
             raise TunnelOwnershipError(tunnel_name, username)
 
     def get_tunnel_or_raise(self, tunnel_name: str) -> dict[str, Any]:
-        tunnel = cf_get_tunnel_by_name(self.client, self.account_id, tunnel_name)
+        tunnel = self.ops.get_tunnel_by_name(tunnel_name)
         if tunnel is None:
             raise TunnelNotFoundError(tunnel_name)
         return tunnel
 
     def create_tunnel(self, username: str, agent_id: str) -> TunnelInfo:
         name = make_tunnel_name(username, agent_id)
-        existing = cf_get_tunnel_by_name(self.client, self.account_id, name)
+        existing = self.ops.get_tunnel_by_name(name)
         if existing is not None:
             tid = existing["id"]
-            token = cf_get_tunnel_token(self.client, self.account_id, tid)
+            token = self.ops.get_tunnel_token(tid)
             services = self._list_services(tid, name, username)
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
-        result = cf_create_tunnel(self.client, self.account_id, name)
+        result = self.ops.create_tunnel(name)
         tid = result["id"]
-        token = cf_get_tunnel_token(self.client, self.account_id, tid)
-        cf_put_tunnel_config(self.client, self.account_id, tid, wrap_ingress([]))
+        token = self.ops.get_tunnel_token(tid)
+        self.ops.put_tunnel_config(tid, wrap_ingress([]))
         return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=[])
 
     def list_tunnels(self, username: str) -> list[TunnelInfo]:
         prefix = f"{username}{TUNNEL_NAME_SEP}"
-        tunnels = cf_list_tunnels(self.client, self.account_id, include_prefix=prefix)
+        tunnels = self.ops.list_tunnels(include_prefix=prefix)
         result: list[TunnelInfo] = []
         for t in tunnels:
             name = t["name"]
@@ -290,13 +348,13 @@ class ForwardingCtx:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        config = cf_get_tunnel_config(self.client, self.account_id, tid)
+        config = self.ops.get_tunnel_config(tid)
         for rule in non_catchall_rules(config.get("config", {}).get("ingress", [])):
             hostname = rule.get("hostname", "")
             if hostname:
                 self._delete_dns_by_name(hostname)
-        cf_put_tunnel_config(self.client, self.account_id, tid, wrap_ingress([]))
-        cf_delete_tunnel(self.client, self.account_id, tid)
+        self.ops.put_tunnel_config(tid, wrap_ingress([]))
+        self.ops.delete_tunnel(tid)
 
     def add_service(self, tunnel_name: str, username: str, service_name: str, service_url: str) -> ServiceInfo:
         self.verify_ownership(tunnel_name, username)
@@ -304,11 +362,11 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
-        cf_create_cname(self.client, self.zone_id, hostname, f"{tid}.cfargotunnel.com")
-        config = cf_get_tunnel_config(self.client, self.account_id, tid)
+        self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
+        config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         rules.append({"hostname": hostname, "service": service_url})
-        cf_put_tunnel_config(self.client, self.account_id, tid, wrap_ingress(rules))
+        self.ops.put_tunnel_config(tid, wrap_ingress(rules))
         return ServiceInfo(service_name=service_name, hostname=hostname, service_url=service_url)
 
     def remove_service(self, tunnel_name: str, username: str, service_name: str) -> None:
@@ -317,17 +375,17 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
-        config = cf_get_tunnel_config(self.client, self.account_id, tid)
+        config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         new_rules = [r for r in rules if r.get("hostname") != hostname]
         if len(new_rules) == len(rules):
             raise ServiceNotFoundError(service_name, tunnel_name)
-        cf_put_tunnel_config(self.client, self.account_id, tid, wrap_ingress(new_rules))
+        self.ops.put_tunnel_config(tid, wrap_ingress(new_rules))
         self._delete_dns_by_name(hostname)
 
     def _list_services(self, tunnel_id: str, tunnel_name: str, username: str) -> list[ServiceInfo]:
         agent_id = extract_agent_id(tunnel_name, username)
-        config = cf_get_tunnel_config(self.client, self.account_id, tunnel_id)
+        config = self.ops.get_tunnel_config(tunnel_id)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         services: list[ServiceInfo] = []
         for rule in rules:
@@ -339,9 +397,9 @@ class ForwardingCtx:
         return services
 
     def _delete_dns_by_name(self, hostname: str) -> None:
-        records = cf_list_dns_records(self.client, self.zone_id, name=hostname)
+        records = self.ops.list_dns_records(name=hostname)
         for record in records:
-            cf_delete_dns_record(self.client, self.zone_id, record["id"])
+            self.ops.delete_dns_record(record["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -376,12 +434,12 @@ def authenticate(request: Request) -> str:
 
 @functools.cache
 def get_ctx() -> ForwardingCtx:
-    return ForwardingCtx(
+    ops = HttpCloudflareOps(
         api_token=os.environ["CLOUDFLARE_API_TOKEN"],
         account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
         zone_id=os.environ["CLOUDFLARE_ZONE_ID"],
-        domain=os.environ["CLOUDFLARE_DOMAIN"],
     )
+    return ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"])
 
 
 def raise_as_http(exc: Exception) -> NoReturn:

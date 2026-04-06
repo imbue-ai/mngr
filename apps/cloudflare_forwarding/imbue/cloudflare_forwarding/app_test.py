@@ -16,7 +16,7 @@ from imbue.cloudflare_forwarding.app import cf_list_all_pages
 from imbue.cloudflare_forwarding.app import extract_service_name
 from imbue.cloudflare_forwarding.app import make_hostname
 from imbue.cloudflare_forwarding.app import make_tunnel_name
-from imbue.cloudflare_forwarding.testing import FakeForwardingCtx
+from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
 
 
 def test_make_tunnel_name_format() -> None:
@@ -94,7 +94,7 @@ def test_cf_list_all_pages_paginates() -> None:
 
 
 def test_create_tunnel_creates_new() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
     assert info.tunnel_name == "alice--agent1"
     assert info.tunnel_id == "tunnel-1"
@@ -104,7 +104,7 @@ def test_create_tunnel_creates_new() -> None:
 
 
 def test_create_tunnel_reuses_existing() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     info1 = ctx.create_tunnel("alice", "agent1")
     info2 = ctx.create_tunnel("alice", "agent1")
     assert info1.tunnel_id == info2.tunnel_id
@@ -112,7 +112,7 @@ def test_create_tunnel_reuses_existing() -> None:
 
 
 def test_create_tunnel_different_agents() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     info1 = ctx.create_tunnel("alice", "agent1")
     info2 = ctx.create_tunnel("alice", "agent2")
     assert info1.tunnel_id != info2.tunnel_id
@@ -120,7 +120,7 @@ def test_create_tunnel_different_agents() -> None:
 
 
 def test_list_tunnels_filters_by_user() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.create_tunnel("alice", "agent2")
     ctx.create_tunnel("bob", "agent3")
@@ -132,13 +132,13 @@ def test_list_tunnels_filters_by_user() -> None:
 
 
 def test_list_tunnels_empty_for_user_with_no_tunnels() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     assert ctx.list_tunnels("bob") == []
 
 
 def test_delete_tunnel_removes_tunnel_and_dns() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     assert len(ctx.fake.dns_records) == 1
@@ -149,20 +149,20 @@ def test_delete_tunnel_removes_tunnel_and_dns() -> None:
 
 
 def test_delete_tunnel_raises_for_nonexistent() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     with pytest.raises(TunnelNotFoundError):
         ctx.delete_tunnel("alice--nonexistent", "alice")
 
 
 def test_delete_tunnel_raises_for_wrong_owner() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     with pytest.raises(TunnelOwnershipError):
         ctx.delete_tunnel("alice--agent1", "bob")
 
 
 def test_add_service_creates_dns_and_ingress() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     info = ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
 
@@ -179,7 +179,7 @@ def test_add_service_creates_dns_and_ingress() -> None:
 
 
 def test_add_multiple_services() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
@@ -190,14 +190,14 @@ def test_add_multiple_services() -> None:
 
 
 def test_add_service_raises_for_wrong_owner() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     with pytest.raises(TunnelOwnershipError):
         ctx.add_service("alice--agent1", "bob", "web", "http://localhost:8080")
 
 
 def test_remove_service_removes_dns_and_ingress() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
@@ -213,14 +213,14 @@ def test_remove_service_removes_dns_and_ingress() -> None:
 
 
 def test_remove_service_raises_for_nonexistent() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     with pytest.raises(ServiceNotFoundError):
         ctx.remove_service("alice--agent1", "alice", "nonexistent")
 
 
 def test_remove_service_raises_for_wrong_owner() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     with pytest.raises(TunnelOwnershipError):
@@ -228,7 +228,7 @@ def test_remove_service_raises_for_wrong_owner() -> None:
 
 
 def test_list_services_after_adding() -> None:
-    ctx = FakeForwardingCtx()
+    ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
