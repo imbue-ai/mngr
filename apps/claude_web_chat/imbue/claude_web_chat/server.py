@@ -272,11 +272,11 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
             while not event_queues.is_shutdown:
                 try:
                     event = event_queue.get(timeout=1)
-                    keepalive_counter = 0
                     if event is None:
                         break
                     # Only forward events from this subagent's session
                     if event.get("session_id") == subagent_session_id:
+                        keepalive_counter = 0
                         yield f"data: {json.dumps(event)}\n\n"
                 except queue.Empty:
                     keepalive_counter += 1
