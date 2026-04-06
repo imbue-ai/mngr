@@ -285,11 +285,11 @@ def test_stream_output_raises_with_stream_json_error_result(
         agent,
         stdout=(
             '{"type":"system","subtype":"init","session_id":"abc"}\n'
-            '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-7f3a9b2e"}\n'
         ),
     )
 
-    with pytest.raises(MngrError, match="Not logged in"):
+    with pytest.raises(MngrError, match="err-7f3a9b2e"):
         list(agent.stream_output())
 
 
@@ -307,11 +307,11 @@ def test_stream_output_raises_error_result_even_after_yielding_text(
         agent,
         stdout=(
             _make_stream_json_line("partial output") + "\n"
-            '{"type":"result","subtype":"success","is_error":true,"result":"API rate limit exceeded"}\n'
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-c4d8e1f0"}\n'
         ),
     )
 
-    with pytest.raises(MngrError, match="API rate limit exceeded"):
+    with pytest.raises(MngrError, match="err-c4d8e1f0"):
         list(agent.stream_output())
 
 
@@ -329,14 +329,14 @@ def test_stream_output_combines_result_error_and_stderr_after_partial_output(
         agent,
         stdout=(
             _make_stream_json_line("partial") + "\n"
-            '{"type":"result","subtype":"success","is_error":true,"result":"rate limit"}\n'
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-a1b2c3d4"}\n'
         ),
-        stderr="stack trace here\n",
+        stderr="stderr-e5f6g7h8\n",
     )
 
-    with pytest.raises(MngrError, match="rate limit") as exc_info:
+    with pytest.raises(MngrError, match="err-a1b2c3d4") as exc_info:
         list(agent.stream_output())
-    assert "stack trace here" in str(exc_info.value)
+    assert "stderr-e5f6g7h8" in str(exc_info.value)
 
 
 def test_stream_output_combines_stderr_and_stdout_errors(
@@ -351,13 +351,13 @@ def test_stream_output_combines_stderr_and_stdout_errors(
     _write_fake_agent_output(
         host,
         agent,
-        stdout='{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n',
-        stderr="Error: ECONNREFUSED\n",
+        stdout='{"type":"result","subtype":"success","is_error":true,"result":"err-d9e0f1a2"}\n',
+        stderr="stderr-b3c4d5e6\n",
     )
 
-    with pytest.raises(MngrError, match="Not logged in") as exc_info:
+    with pytest.raises(MngrError, match="err-d9e0f1a2") as exc_info:
         list(agent.stream_output())
-    assert "ECONNREFUSED" in str(exc_info.value)
+    assert "stderr-b3c4d5e6" in str(exc_info.value)
 
 
 def test_stream_output_raises_with_stderr_content(
@@ -369,9 +369,9 @@ def test_stream_output_raises_with_stderr_content(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    _write_fake_agent_output(host, agent, stderr="Error: authentication required\n")
+    _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
 
-    with pytest.raises(MngrError, match="authentication required"):
+    with pytest.raises(MngrError, match="stderr-f7g8h9i0"):
         list(agent.stream_output())
 
 
