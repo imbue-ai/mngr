@@ -285,6 +285,7 @@ def e2e(
     # tests, but e2e subprocesses need the vars set explicitly.
     if "MODAL_TOKEN_ID" not in env:
         _load_modal_credentials(env)
+
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
