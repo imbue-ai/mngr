@@ -1,13 +1,16 @@
+import fcntl
 import json
 import re
 import shlex
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Callable
 from typing import Final
+from typing import Generator
 from typing import Mapping
 from typing import NoReturn
 from typing import Sequence
@@ -290,12 +293,40 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return f"{self.session_name}:0"
 
+    @contextmanager
+    def _message_lock(self) -> Generator[None, None, None]:
+        """Acquire an exclusive file lock to serialize concurrent message sends.
+
+        Multiple processes (e.g., telegram bot, bootstrap, cron scripts) may call
+        ``mngr message`` for the same agent concurrently. Without serialization,
+        their tmux send-keys calls can interleave, corrupting the message.
+
+        Uses ``flock`` on a lock file in the agent's state directory. Only locks
+        for local hosts (where the lock file is on the local filesystem). For
+        remote hosts, concurrent sends from the same machine are serialized by
+        the remote provider's SSH connection, and concurrent sends from different
+        machines are rare enough to not warrant cross-host locking.
+        """
+        if not self.host.is_local:
+            yield
+            return
+
+        lock_path = self._get_agent_dir() / "message.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
 
-        Runs preflight checks (e.g., dialog detection) first -- errors from
-        preflight indicate a condition that won't resolve by resending (e.g.,
-        a blocking dialog).
+        Acquires an exclusive file lock to prevent concurrent sends from
+        interleaving tmux input. Runs preflight checks (e.g., dialog detection)
+        first -- errors from preflight indicate a condition that won't resolve
+        by resending (e.g., a blocking dialog).
 
         For agents that echo input to the terminal (like Claude Code), uses a
         paste-detection approach to ensure the message is fully received before
@@ -304,7 +335,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         Subclasses can enable this by overriding uses_paste_detection_send().
         """
-        with log_span("Sending message to agent {} (length={})", self.name, len(message)):
+        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
             if self.uses_paste_detection_send():
                 self._send_message_with_paste_detection(self.tmux_target, message)
