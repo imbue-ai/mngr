@@ -154,7 +154,7 @@ def deploy_test_trigger(
             "--command",
             "create",
             "--args",
-            "test-agent 'sleep 60' --no-connect --no-ensure-clean --context /tmp --provider modal --branch :run-{DATE}",
+            "test-schedule-agent sleep --no-connect --no-ensure-clean --context /tmp --provider modal --branch :run-{DATE} -- 60",
             "--schedule",
             "0 3 * * *",
             "--provider",
