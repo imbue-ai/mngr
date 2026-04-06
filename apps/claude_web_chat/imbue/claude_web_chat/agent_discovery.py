@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from loguru import logger as _loguru_logger
 from pathlib import Path
 
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
@@ -15,6 +15,9 @@ from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
+from imbue.mngr.utils.env_utils import parse_env_file
+
+logger = _loguru_logger
 
 
 class AgentInfo(FrozenModel):
@@ -53,7 +56,7 @@ def _read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
             if "CLAUDE_CONFIG_DIR" in env_vars:
                 return Path(env_vars["CLAUDE_CONFIG_DIR"])
         except OSError:
-            pass
+            logger.debug("Failed to read env file: {}", env_file)
     # Fallback: the conventional location for mngr claude agents
     conventional = agent_state_dir / "plugin" / "claude" / "anthropic"
     if conventional.exists():
