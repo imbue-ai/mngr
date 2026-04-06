@@ -32,7 +32,7 @@ class ServiceInfo(FrozenModel):
 class TunnelInfo(FrozenModel):
     """Information about a tunnel and its configured services."""
 
-    tunnel_name: TunnelName = Field(description="Tunnel name ({username}-{agent_id})")
+    tunnel_name: TunnelName = Field(description="Tunnel name ({username}--{agent_id})")
     tunnel_id: CloudflareTunnelId = Field(description="Cloudflare tunnel UUID")
     token: str | None = Field(default=None, description="Tunnel token for cloudflared (only on create)")
     services: tuple[ServiceInfo, ...] = Field(default=(), description="Configured services on this tunnel")

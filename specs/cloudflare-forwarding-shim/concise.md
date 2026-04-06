@@ -16,7 +16,7 @@
 - Invalid or missing credentials return 401
 
 ### Tunnel Management
-- **Create tunnel** (`POST /tunnels`): takes `agent_id` as input; tunnel name is auto-generated as `{username}-{agent_id}`; idempotent -- reuses existing tunnel if one with that name already exists; returns the tunnel token for `cloudflared`
+- **Create tunnel** (`POST /tunnels`): takes `agent_id` as input; tunnel name is auto-generated as `{username}--{agent_id}`; idempotent -- reuses existing tunnel if one with that name already exists; returns the tunnel token for `cloudflared`
 - **List tunnels** (`GET /tunnels`): returns all tunnels belonging to the authenticated user (filtered by username in tunnel name), with their configured services
 - **Delete tunnel** (`DELETE /tunnels/{tunnel_name}`): cascading delete -- removes all CNAME DNS records for the tunnel's services, clears the ingress configuration, then deletes the tunnel itself; only the owning user can delete
 

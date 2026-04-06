@@ -26,7 +26,7 @@ class CloudflareDnsRecordId(NonEmptyStr):
 
 
 class TunnelName(NonEmptyStr):
-    """Name of a Cloudflare tunnel, formatted as '{username}-{agent_id}'."""
+    """Name of a Cloudflare tunnel, formatted as '{username}--{agent_id}'."""
 
     ...
 

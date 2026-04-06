@@ -24,7 +24,7 @@ from imbue.cloudflare_forwarding.primitives import Username
 from imbue.imbue_common.frozen_model import FrozenModel
 
 
-_TUNNEL_NAME_SEPARATOR = "-"
+_TUNNEL_NAME_SEPARATOR = "--"
 
 
 def make_tunnel_name(username: Username, agent_id: AgentId) -> TunnelName:
@@ -42,8 +42,8 @@ def make_hostname(service_name: ServiceName, agent_id: AgentId, username: Userna
 
 
 def _extract_agent_id_from_tunnel_name(tunnel_name: TunnelName, username: Username) -> AgentId:
-    """Extract the agent_id portion from a tunnel name of the form '{username}-{agent_id}'."""
-    prefix = f"{username}-"
+    """Extract the agent_id portion from a tunnel name of the form '{username}--{agent_id}'."""
+    prefix = f"{username}{_TUNNEL_NAME_SEPARATOR}"
     if not tunnel_name.startswith(prefix):
         raise TunnelOwnershipError(tunnel_name, username)
     return AgentId(tunnel_name[len(prefix) :])
@@ -75,7 +75,7 @@ class ForwardingService(FrozenModel):
 
     def _verify_ownership(self, tunnel_name: TunnelName, username: Username) -> None:
         """Verify that a tunnel belongs to the given user."""
-        expected_prefix = f"{username}-"
+        expected_prefix = f"{username}{_TUNNEL_NAME_SEPARATOR}"
         if not tunnel_name.startswith(expected_prefix):
             raise TunnelOwnershipError(tunnel_name, username)
 
@@ -117,7 +117,7 @@ class ForwardingService(FrozenModel):
 
     def list_tunnels(self, username: Username) -> list[TunnelInfo]:
         """List all tunnels belonging to a user."""
-        prefix = f"{username}-"
+        prefix = f"{username}{_TUNNEL_NAME_SEPARATOR}"
         tunnels = self.client.list_tunnels(name_prefix=prefix)
 
         result: list[TunnelInfo] = []

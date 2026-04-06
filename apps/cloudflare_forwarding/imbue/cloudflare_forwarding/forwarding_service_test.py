@@ -18,17 +18,22 @@ from imbue.cloudflare_forwarding.testing import make_forwarding_service
 
 
 def test_make_tunnel_name_format() -> None:
-    assert make_tunnel_name(Username("alice"), AgentId("agent1")) == "alice-agent1"
+    assert make_tunnel_name(Username("alice"), AgentId("agent1")) == "alice--agent1"
 
 
-def test_make_tunnel_name_rejects_hyphen_in_username() -> None:
+def test_make_tunnel_name_allows_single_hyphen_in_agent_id() -> None:
+    result = make_tunnel_name(Username("alice"), AgentId("agent-abc123"))
+    assert result == "alice--agent-abc123"
+
+
+def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
     with pytest.raises(InvalidTunnelComponentError, match="Username"):
-        make_tunnel_name(Username("alice-bob"), AgentId("agent1"))
+        make_tunnel_name(Username("alice--bob"), AgentId("agent1"))
 
 
-def test_make_tunnel_name_rejects_hyphen_in_agent_id() -> None:
+def test_make_tunnel_name_rejects_double_hyphen_in_agent_id() -> None:
     with pytest.raises(InvalidTunnelComponentError, match="Agent ID"):
-        make_tunnel_name(Username("alice"), AgentId("agent-1"))
+        make_tunnel_name(Username("alice"), AgentId("agent--1"))
 
 
 def test_make_hostname_format() -> None:
@@ -53,7 +58,7 @@ def test_extract_service_name_returns_none_for_non_matching() -> None:
 def test_create_tunnel_creates_new() -> None:
     svc, client = make_forwarding_service()
     info = svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    assert info.tunnel_name == "alice-agent1"
+    assert info.tunnel_name == "alice--agent1"
     assert info.tunnel_id == "tunnel-1"
     assert info.token == "token-for-tunnel-1"
     assert info.services == ()
@@ -85,7 +90,7 @@ def test_list_tunnels_filters_by_user() -> None:
     tunnels = svc.list_tunnels(Username("alice"))
     assert len(tunnels) == 2
     names = {t.tunnel_name for t in tunnels}
-    assert names == {"alice-agent1", "alice-agent2"}
+    assert names == {"alice--agent1", "alice--agent2"}
 
 
 def test_list_tunnels_empty_for_user_with_no_tunnels() -> None:
@@ -98,10 +103,10 @@ def test_list_tunnels_empty_for_user_with_no_tunnels() -> None:
 def test_delete_tunnel_removes_tunnel_and_dns() -> None:
     svc, client = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
 
     assert len(client.dns_records) == 1
-    svc.delete_tunnel(TunnelName("alice-agent1"), Username("alice"))
+    svc.delete_tunnel(TunnelName("alice--agent1"), Username("alice"))
     assert len(client.tunnels) == 0
     assert len(client.dns_records) == 0
 
@@ -109,21 +114,21 @@ def test_delete_tunnel_removes_tunnel_and_dns() -> None:
 def test_delete_tunnel_raises_for_nonexistent() -> None:
     svc, _ = make_forwarding_service()
     with pytest.raises(TunnelNotFoundError):
-        svc.delete_tunnel(TunnelName("alice-nonexistent"), Username("alice"))
+        svc.delete_tunnel(TunnelName("alice--nonexistent"), Username("alice"))
 
 
 def test_delete_tunnel_raises_for_wrong_owner() -> None:
     svc, _ = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
     with pytest.raises(TunnelOwnershipError):
-        svc.delete_tunnel(TunnelName("alice-agent1"), Username("bob"))
+        svc.delete_tunnel(TunnelName("alice--agent1"), Username("bob"))
 
 
 def test_add_service_creates_dns_and_ingress() -> None:
     svc, client = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
     info = svc.add_service(
-        TunnelName("alice-agent1"),
+        TunnelName("alice--agent1"),
         Username("alice"),
         ServiceName("web"),
         ServiceUrl("http://localhost:8080"),
@@ -145,8 +150,8 @@ def test_add_service_creates_dns_and_ingress() -> None:
 def test_add_multiple_services() -> None:
     svc, client = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
 
     assert len(client.dns_records) == 2
     config = client.get_tunnel_configuration(CloudflareTunnelId("tunnel-1"))
@@ -158,16 +163,16 @@ def test_add_service_raises_for_wrong_owner() -> None:
     svc, _ = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
     with pytest.raises(TunnelOwnershipError):
-        svc.add_service(TunnelName("alice-agent1"), Username("bob"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+        svc.add_service(TunnelName("alice--agent1"), Username("bob"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
 
 
 def test_remove_service_removes_dns_and_ingress() -> None:
     svc, client = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
 
-    svc.remove_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"))
+    svc.remove_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"))
 
     assert len(client.dns_records) == 1
     assert client.dns_records[0]["name"] == "api--agent1--alice.example.com"
@@ -181,22 +186,22 @@ def test_remove_service_raises_for_nonexistent() -> None:
     svc, _ = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
     with pytest.raises(ServiceNotFoundError):
-        svc.remove_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("nonexistent"))
+        svc.remove_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("nonexistent"))
 
 
 def test_remove_service_raises_for_wrong_owner() -> None:
     svc, _ = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
     with pytest.raises(TunnelOwnershipError):
-        svc.remove_service(TunnelName("alice-agent1"), Username("bob"), ServiceName("web"))
+        svc.remove_service(TunnelName("alice--agent1"), Username("bob"), ServiceName("web"))
 
 
 def test_list_services_after_adding() -> None:
     svc, _ = make_forwarding_service()
     svc.create_tunnel(Username("alice"), AgentId("agent1"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
-    svc.add_service(TunnelName("alice-agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("web"), ServiceUrl("http://localhost:8080"))
+    svc.add_service(TunnelName("alice--agent1"), Username("alice"), ServiceName("api"), ServiceUrl("http://localhost:3000"))
 
     tunnels = svc.list_tunnels(Username("alice"))
     assert len(tunnels) == 1
