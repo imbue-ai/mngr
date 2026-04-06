@@ -42,6 +42,7 @@ from imbue.mngr.plugin_catalog import SignalCheck
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import PluginTier
+from imbue.mngr.utils.toml_config import set_plugin_enabled
 from imbue.mngr.uv_tool import build_uv_tool_install_add_many
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
@@ -257,8 +258,6 @@ def _enable_selected_plugins(selected_package_names: frozenset[str]) -> None:
     Uses the same code path as ``mngr plugin enable`` (set_plugin_enabled),
     writing to the user-scope settings file.
     """
-    from imbue.mngr.cli.plugin import set_plugin_enabled
-
     profile_dir = find_profile_dir_lightweight(read_default_host_dir())
     if profile_dir is None:
         logger.warning("Could not find profile directory; skipping plugin enable")

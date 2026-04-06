@@ -22,12 +22,12 @@ from imbue.mngr.cli.config import _get_nested_value
 from imbue.mngr.cli.config import _parse_value
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import config
-from imbue.mngr.cli.config import load_config_file_tomlkit
-from imbue.mngr.cli.config import save_config_file
-from imbue.mngr.cli.config import set_nested_value
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
+from imbue.mngr.utils.toml_config import set_nested_value
 
 
 def test_parse_value_parses_true_as_boolean() -> None:
