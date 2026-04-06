@@ -1,14 +1,8 @@
 """Tests with only one plugin enabled -- verifies granular control."""
 
 import pluggy
-import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-
-
-@pytest.fixture
-def enabled_plugins(claude_only_plugins: frozenset[str]) -> frozenset[str]:
-    return claude_only_plugins
 
 
 def test_only_claude_loaded(plugin_manager: pluggy.PluginManager) -> None:

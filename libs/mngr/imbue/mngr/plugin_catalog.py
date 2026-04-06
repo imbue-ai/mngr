@@ -249,12 +249,12 @@ def check_signal(signal: SignalCheck) -> bool:
 
     Returns True if the command exits with code 0, False otherwise.
     """
-    try:
-        with ConcurrencyGroup(name="signal-check") as cg:
-            cg.run_process_to_completion(signal.command, timeout_seconds=10.0)
-        return True
-    except (ProcessError, FileNotFoundError, OSError):
-        return False
+    with ConcurrencyGroup(name="signal-check") as cg:
+        try:
+            cg.run_process_to_completion(signal.command, timeout=10.0)
+            return True
+        except (ProcessError, FileNotFoundError, OSError):
+            return False
 
 
 def get_installable_packages() -> tuple[CatalogEntry, ...]:

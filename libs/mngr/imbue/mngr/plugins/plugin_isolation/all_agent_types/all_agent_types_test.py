@@ -1,14 +1,8 @@
 """Tests with all agent-type plugins enabled."""
 
 import pluggy
-import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-
-
-@pytest.fixture
-def enabled_plugins(all_agent_type_plugins: frozenset[str]) -> frozenset[str]:
-    return all_agent_type_plugins
 
 
 def test_all_specified_agent_types_registered(plugin_manager: pluggy.PluginManager) -> None:

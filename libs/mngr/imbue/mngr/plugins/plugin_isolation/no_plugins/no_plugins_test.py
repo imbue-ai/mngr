@@ -1,15 +1,9 @@
 """Tests with all plugins disabled -- simulates a minimal mngr install."""
 
 import pluggy
-import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
-
-
-@pytest.fixture
-def enabled_plugins(no_plugins: frozenset[str]) -> frozenset[str]:
-    return no_plugins
 
 
 def test_no_external_agent_types_registered(plugin_manager: pluggy.PluginManager) -> None:

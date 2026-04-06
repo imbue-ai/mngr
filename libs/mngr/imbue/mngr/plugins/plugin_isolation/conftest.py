@@ -16,7 +16,7 @@ def all_agent_type_plugins() -> frozenset[str]:
         e.entry_point_name
         for e in PLUGIN_CATALOG
         if e.entry_point_name
-        in ("claude", "opencode", "pi_coding", "llm", "code_guardian", "fixme_fairy", "headless_claude")
+        in ("claude", "opencode", "pi_coding", "llm", "code_guardian", "fixme_fairy", "headless_claude", "claude_mind")
     )
 
 
