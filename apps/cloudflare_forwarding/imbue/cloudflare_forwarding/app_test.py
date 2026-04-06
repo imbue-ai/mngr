@@ -3,6 +3,7 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request as StarletteRequest
 
 from imbue.cloudflare_forwarding.app import CloudflareApiError
@@ -254,5 +255,12 @@ def test_authenticate_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     encoded = base64.b64encode(b"alice:wrong").decode()
     scope = {"type": "http", "headers": [(b"authorization", f"Basic {encoded}".encode())]}
     req = StarletteRequest(scope)
-    with pytest.raises(Exception, match="Invalid credentials"):
+    with pytest.raises(HTTPException, match="Invalid credentials"):
+        authenticate(req)
+
+
+def test_authenticate_malformed_base64() -> None:
+    scope = {"type": "http", "headers": [(b"authorization", b"Basic !!!not-valid-base64!!!")]}
+    req = StarletteRequest(scope)
+    with pytest.raises(HTTPException, match="Malformed credentials"):
         authenticate(req)

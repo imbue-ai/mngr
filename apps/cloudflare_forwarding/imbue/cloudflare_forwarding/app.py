@@ -6,6 +6,7 @@ This keeps deployment simple: `modal deploy app.py` ships just this file.
 """
 
 import base64
+import binascii
 import functools
 import json
 import os
@@ -413,7 +414,10 @@ def authenticate(request: Request) -> str:
     if not auth_header.lower().startswith("basic "):
         raise HTTPException(status_code=401, detail="Missing credentials")
 
-    decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=401, detail="Malformed credentials") from exc
     username, _, password = decoded.partition(":")
 
     raw = os.environ.get("USER_CREDENTIALS", "")
