@@ -194,10 +194,16 @@ def verify_schedule_deployment(
     mngr_ctx: MngrContext,
     process_timeout_seconds: float = VERIFICATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Verify deployment by invoking the deployed function and waiting for it to exit.
+    """Verify deployment by running the cron function once and waiting for it to exit.
+
+    Note: this uses `modal run` which re-evaluates the local cron_runner.py
+    source file (not the already-deployed function). This means it tests the
+    deploy-time code and environment, not the exact deployed artifact. To
+    invoke the deployed function directly, use invoke_modal_trigger_function()
+    (which calls modal.Function.from_name().remote()).
 
     After modal deploy, this function:
-    1. Runs `modal run` to invoke the deployed cron function once
+    1. Runs `modal run` to execute the cron function from local source
     2. Streams output and monitors for errors
     3. Waits for the process to exit
     4. If is_finish_initial_run is False, destroys the agent after it starts
