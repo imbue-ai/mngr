@@ -24,7 +24,7 @@ repos:
         name: "Compile style guide Python examples"
         entry: bash -c 'uv run python scripts/compile_style_guide.py && git diff --quiet scripts/style_guide.py'
         language: system
-        files: 'style_guide\.md$|scripts/compile_style_guide\.py$|scripts/style_guide\.py$'
+        files: '^style_guide\.md$|scripts/compile_style_guide\.py$|scripts/style_guide\.py$'
         pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command
