@@ -698,11 +698,21 @@ def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool) -> None:
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
+    set_plugin_enabled(name, is_enabled=is_enabled, config_path=config_path)
+
+    _emit_plugin_toggle_result(name, is_enabled, scope, config_path, output_opts)
+
+
+def set_plugin_enabled(name: str, *, is_enabled: bool, config_path: Path) -> None:
+    """Set a plugin's enabled state in a config file.
+
+    This is the core logic shared by ``mngr plugin enable/disable``
+    and the install wizard.  It loads the TOML, sets
+    ``plugins.<name>.enabled``, and saves.
+    """
     doc = load_config_file_tomlkit(config_path)
     set_nested_value(doc, f"plugins.{name}.enabled", is_enabled)
     save_config_file(config_path, doc)
-
-    _emit_plugin_toggle_result(name, is_enabled, scope, config_path, output_opts)
 
 
 def _validate_plugin_name_is_known(name: str, mngr_ctx: MngrContext) -> None:

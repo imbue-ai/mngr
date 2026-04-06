@@ -33,7 +33,11 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
+from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import CatalogEntry
+from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import SignalCheck
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_installable_packages
@@ -245,6 +249,30 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
     return package_names
 
 
+def _enable_selected_plugins(selected_package_names: frozenset[str]) -> None:
+    """Enable all entry points from the selected packages in user config.
+
+    Uses the same code path as ``mngr plugin enable`` (set_plugin_enabled),
+    writing to the user-scope settings file.
+    """
+    from imbue.mngr.cli.plugin import set_plugin_enabled
+
+    profile_dir = find_profile_dir_lightweight(read_default_host_dir())
+    if profile_dir is None:
+        logger.warning("Could not find profile directory; skipping plugin enable")
+        return
+
+    config_path = get_user_config_path(profile_dir)
+
+    entry_points_to_enable = [e.entry_point_name for e in PLUGIN_CATALOG if e.package_name in selected_package_names]
+
+    for name in entry_points_to_enable:
+        set_plugin_enabled(name, is_enabled=True, config_path=config_path)
+
+    if entry_points_to_enable:
+        write_human_line("Enabled {} plugin(s) in {}", len(entry_points_to_enable), config_path)
+
+
 _RELAUNCH_HINT: Final[str] = (
     "You can re-launch the plugin installation wizard with `mngr plugin install-wizard`.\n"
     "See `mngr plugin --help` for more information on plugins."
@@ -298,6 +326,11 @@ def install_wizard_impl() -> None:
             ) from e
 
     write_human_line("Installed {} plugin(s): {}", len(selected), ", ".join(selected))
+
+    # Enable all entry points from the selected packages in user config.
+    # A single package may have multiple entry points (e.g. imbue-mngr-claude
+    # provides claude, code_guardian, fixme_fairy, headless_claude).
+    _enable_selected_plugins(frozenset(selected))
 
 
 @click.command(name="install-wizard")
