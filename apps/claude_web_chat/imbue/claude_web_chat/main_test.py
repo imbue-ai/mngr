@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from imbue.claude_web_chat.config import Config
+from imbue.claude_web_chat.main import main
 
 
 def test_main_starts_server() -> None:
@@ -16,8 +17,6 @@ def test_main_starts_server() -> None:
         mock_config = Config()
         mock_load_config.return_value = mock_config
         mock_create_app.return_value = "fake_app"
-
-        from imbue.claude_web_chat.main import main
 
         main()
 
@@ -45,8 +44,6 @@ def test_main_passes_filters() -> None:
     ):
         mock_load_config.return_value = Config()
         mock_create_app.return_value = "fake_app"
-
-        from imbue.claude_web_chat.main import main
 
         main()
 
