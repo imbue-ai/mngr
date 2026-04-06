@@ -25,6 +25,7 @@ from loguru import logger
 from paramiko import ChannelException
 from paramiko import SFTPClient
 from paramiko import SSHException
+from paramiko import Transport
 from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
@@ -134,6 +135,17 @@ _retry_on_transient_ssh_error = retry(
 )
 
 
+def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
+    """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
+    try:
+        client = pyinfra_host.connector.client
+    except AttributeError:
+        return None
+    if client is not None:
+        return client.get_transport()
+    return None
+
+
 @pure
 def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     """Compute the state directory path for an agent given the host directory and agent ID."""
@@ -171,7 +183,13 @@ class Host(BaseHost, OnlineHostInterface):
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host."""
-        return HostName(self.connector.name)
+        name = self.connector.name
+        # Strip the '@' prefix that pyinfra uses internally to signal local
+        # execution (via LocalConnector).  This is an implementation detail
+        # that should not leak into user-facing host names.
+        if name.startswith("@"):
+            name = name[1:]
+        return HostName(name)
 
     # =========================================================================
     # Core Primitives (pyinfra-compatible signatures)
@@ -293,8 +311,11 @@ class Host(BaseHost, OnlineHostInterface):
         closed, EOF) with the same backoff used by file operations.
         """
         self._ensure_connected()
+        # Save the transport used for this command so we can detect if it dies
+        # during execution (e.g. another thread disconnects the connection).
+        transport_before = _get_ssh_transport(self.connector.host)
         try:
-            return self.connector.host.run_shell_command(command, **pyinfra_kwargs)
+            result = self.connector.host.run_shell_command(command, **pyinfra_kwargs)
         except ChannelException as e:
             logger.debug("Channel open refused while running command: {}, retrying without disconnect", e)
             raise
@@ -316,6 +337,21 @@ class Host(BaseHost, OnlineHostInterface):
                 logger.debug("Socket closed while running command, disconnecting for retry")
                 self.connector.host.disconnect()
             raise
+
+        # Detect ghost failures: pyinfra silently returns (False, output) when
+        # a channel dies mid-command (paramiko's recv_exit_status() returns -1).
+        # This happens when another thread disconnects the shared SSH connection.
+        # Check whether the transport we used is still alive; if not, retry.
+        success, _output = result
+        if not success and transport_before is not None and not transport_before.is_active():
+            logger.debug("Command failed and SSH transport is dead, disconnecting for retry")
+            self.connector.host.disconnect()
+            raise SSHException(
+                "Command returned failure with dead SSH transport "
+                "(likely channel closed during execution by concurrent disconnect)"
+            )
+
+        return result
 
     def _get_file(
         self,
@@ -1877,7 +1913,8 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default.
+        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default,
+        or at <worktree_base_folder>/<name>-<uuid>/ if worktree_base_folder is set.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
@@ -1887,7 +1924,8 @@ class Host(BaseHost, OnlineHostInterface):
         else:
             agent_name = options.name or AgentName("agent")
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
-            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
+            worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
+            work_dir_path = worktree_base / work_dir_dir_name
 
         new_branch_name = options.git.new_branch_name if options.git else None
         base_branch = options.git.base_branch if options.git else None
@@ -2293,8 +2331,8 @@ class Host(BaseHost, OnlineHostInterface):
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
             result = self.execute_idempotent_command(
-                f"tmux has-session -t {shlex.quote(old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote(old_session_name)} {shlex.quote(new_session_name)} || true"
+                f"tmux has-session -t {shlex.quote('=' + old_session_name)} 2>/dev/null && "
+                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} {shlex.quote(new_session_name)} || true"
             )
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
@@ -2519,7 +2557,19 @@ class Host(BaseHost, OnlineHostInterface):
 
         Uses -s flag to list panes across ALL windows in the session, not just the
         current window. This is important for sessions with additional command windows.
+
+        Guards with has-session first because list-panes -s does not support the =
+        prefix for exact session matching. Despite the man page saying "if -s is given,
+        target is a session", list-panes resolves its -t via CMD_FIND_WINDOW, so a bare
+        '=name' is parsed as an exact window match, not an exact session match. Without
+        this guard, list-panes -s would fall back to session prefix matching and could
+        return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
         """
+        # has-session supports = for exact matching -- bail out if session doesn't exist
+        has_result = self.execute_idempotent_command(f"tmux has-session -t '={session_name}' 2>/dev/null")
+        if not has_result.success:
+            return []
+
         all_pids: list[str] = []
         result = self.execute_idempotent_command(
             f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
@@ -2571,7 +2621,7 @@ class Host(BaseHost, OnlineHostInterface):
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self.execute_idempotent_command(f"tmux kill-session -t '{session_name}' 2>/dev/null || true")
+                self.execute_idempotent_command(f"tmux kill-session -t '={session_name}' 2>/dev/null || true")
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
@@ -2734,9 +2784,11 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists (using ; so that a failed
-    # has-session check doesn't break the && chain that follows)
-    guard = f"tmux has-session -t {shlex.quote(session_name)} 2>/dev/null && exit 0"
+    # Bail out early if the session already exists. Use = prefix for exact
+    # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
+    # matching "mngr_foo-bar"). stderr is redirected to suppress the
+    # "can't find session" message when the session doesn't exist yet.
+    guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
 
     steps: list[str] = []
 
@@ -2761,6 +2813,15 @@ def _build_start_agent_shell_command(
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
+
+    # NOTE: Commands below target a session that was just created above in the
+    # same && chain. The exact session definitely exists, so we do NOT use the
+    # = prefix here -- it's unnecessary. The = prefix only provides exact
+    # *session* matching for commands whose -t resolves as target-session (e.g.
+    # has-session, kill-session). For target-pane (e.g. set-option) or
+    # target-window (e.g. list-panes) commands, a bare '=name' is parsed as
+    # an exact window/pane match rather than an exact session match, so it
+    # does not prevent session prefix matching.
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
@@ -2846,7 +2907,7 @@ def _build_start_agent_shell_command(
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote(session_name) + ':0'} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
+        f"tmux list-panes -t {shlex.quote(session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     )
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (

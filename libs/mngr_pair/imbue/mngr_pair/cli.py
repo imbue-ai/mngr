@@ -234,7 +234,7 @@ During rapid concurrent edits, changes will be debounced to avoid partial writes
         ("Pair to specific local directory", "mngr pair my-agent --target ./local-dir"),
         ("One-way sync (source to target)", "mngr pair my-agent --sync-direction=forward"),
         ("Prefer source on conflicts", "mngr pair my-agent --conflict=source"),
-        ("Filter to specific host", "mngr pair my-agent --source-host @local"),
+        ("Filter to specific host", "mngr pair my-agent --source-host localhost"),
         ("Use --source-agent flag", "mngr pair --source-agent my-agent --target ./local-copy"),
     ),
     see_also=(

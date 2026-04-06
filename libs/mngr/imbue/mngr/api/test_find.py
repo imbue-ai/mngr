@@ -19,6 +19,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -50,7 +51,7 @@ def test_ensure_host_started_returns_already_online_host(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that ensure_host_started returns an already-online host without starting."""
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     online_host, was_started = ensure_host_started(host, is_start_desired=True, provider=local_provider)
@@ -72,7 +73,7 @@ def test_resolve_source_location_resolves_host_and_path(
     host_id = local_provider.host_id
     host_ref = DiscoveredHost(
         host_id=host_id,
-        host_name=HostName("localhost"),
+        host_name=HostName(LOCAL_HOST_NAME),
         provider_name=ProviderInstanceName(LOCAL_PROVIDER_NAME),
     )
 

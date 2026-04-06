@@ -24,7 +24,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
@@ -129,6 +129,8 @@ def resolve_events_target(
 ) -> EventsTarget:
     """Resolve a target identifier (agent or host name/ID) to an EventsTarget.
 
+    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
+
     First tries to find an agent with the given identifier.
     If no agent is found, tries to find a host.
     Uses resolve_agent_reference and resolve_host_reference from api/find.py.
@@ -137,20 +139,16 @@ def resolve_events_target(
     online host and events path for direct command execution (e.g., tail -f).
     """
     with log_span("Loading agents and hosts"):
-        agents_by_host, _providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(identifier,),
-            include_destroyed=False,
-            reset_caches=False,
+        plain_id, filtered_agents_by_host, _providers = discover_by_address(
+            identifier, mngr_ctx, include_destroyed=False
         )
 
-    all_hosts = list(agents_by_host.keys())
+    all_hosts = list(filtered_agents_by_host.keys())
 
     # Try finding as an agent first
     # Only suppress "not found" errors; re-raise ambiguity ("Multiple") errors
     try:
-        agent_result = resolve_agent_reference(identifier, None, agents_by_host)
+        agent_result = resolve_agent_reference(plain_id, None, filtered_agents_by_host)
     except UserInputError as e:
         if "Multiple" in str(e):
             raise
@@ -194,11 +192,11 @@ def resolve_events_target(
     # Try finding as a host
     # Only suppress "not found" errors; re-raise ambiguity ("Multiple") errors
     try:
-        host_ref = resolve_host_reference(identifier, all_hosts)
+        host_ref = resolve_host_reference(plain_id, all_hosts)
     except UserInputError as e:
         if "Multiple" in str(e):
             raise
-        logger.trace("Host lookup did not find {}: {}", identifier, e)
+        logger.trace("Host lookup did not find {}: {}", plain_id, e)
         host_ref = None
 
     if host_ref is not None:

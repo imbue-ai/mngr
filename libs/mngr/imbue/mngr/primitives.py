@@ -209,6 +209,9 @@ class AgentLifecycleState(UpperCaseStrEnum):
     RUNNING = auto()
     WAITING = auto()
     REPLACED = auto()
+    # this happens when an agent is running but our configuration doesn't have an entry for that agent type (e.g. if it was launched remotely or by someone else)
+    # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
+    RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
 
 

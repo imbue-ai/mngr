@@ -431,61 +431,65 @@ class ProviderInstanceInterface(MutableModel, ABC):
             host = self.get_host(host_ref.host_id)
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
+
+            # Get all agents on this host
+            agents: list[AgentInterface] | None = None
+            if isinstance(host, OnlineHostInterface):
+                agents = host.get_agents()
+
+            # Build AgentDetails for each agent on this host
+            resolved_field_generators = field_generators or {}
+            agent_details_list: list[AgentDetails] = []
+            for agent_ref in agent_refs:
+                try:
+                    agent_details: AgentDetails | None = None
+                    if agents is not None and isinstance(host, OnlineHostInterface):
+                        # Find the agent in the list for running hosts
+                        agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
+                        if agent is not None:
+                            agent_details = _build_agent_details_from_online_agent(
+                                agent, host_details, host, ssh_activity, resolved_field_generators
+                            )
+                        else:
+                            # Agent was discovered but is no longer on the host
+                            exception = AgentNotFoundOnHostError(agent_ref.agent_id, host_ref.host_id)
+                            if on_error is not None:
+                                on_error(agent_ref, exception)
+                                continue
+                            else:
+                                logger.debug(
+                                    "Agent {} not found on host {}, using offline data",
+                                    agent_ref.agent_id,
+                                    host_ref.host_id,
+                                )
+
+                    # If this host is offline, or if we failed to find the agent on the online host
+                    if agent_details is None:
+                        agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
+
+                    agent_details_list.append(agent_details)
+                except MngrError as e:
+                    if on_error is not None:
+                        on_error(agent_ref, e)
+                        # callback didn't raise, skip this agent
+                    else:
+                        logger.debug(
+                            "Failed to build details for agent {} on host {}, using offline data: {}",
+                            agent_ref.agent_id,
+                            host_ref.host_id,
+                            e,
+                        )
+                        agent_details_list.append(_build_agent_details_from_offline_ref(agent_ref, host_details))
+
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
             logger.debug("Host {} unreachable, falling back to offline data: {}", host_ref.host_id, e)
             host = self.to_offline_host(host_ref.host_id)
             is_authentication_failure = isinstance(e, HostAuthenticationError)
-            host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
-
-        # Get all agents on this host
-        agents: list[AgentInterface] | None = None
-        if isinstance(host, OnlineHostInterface):
-            agents = host.get_agents()
-
-        # Build AgentDetails for each agent on this host
-        resolved_field_generators = field_generators or {}
-        agent_details_list: list[AgentDetails] = []
-        for agent_ref in agent_refs:
-            try:
-                agent_details: AgentDetails | None = None
-                if agents is not None and isinstance(host, OnlineHostInterface):
-                    # Find the agent in the list for running hosts
-                    agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
-                    if agent is not None:
-                        agent_details = _build_agent_details_from_online_agent(
-                            agent, host_details, host, ssh_activity, resolved_field_generators
-                        )
-                    else:
-                        # Agent was discovered but is no longer on the host
-                        exception = AgentNotFoundOnHostError(agent_ref.agent_id, host_ref.host_id)
-                        if on_error is not None:
-                            on_error(agent_ref, exception)
-                            continue
-                        else:
-                            logger.debug(
-                                "Agent {} not found on host {}, using offline data",
-                                agent_ref.agent_id,
-                                host_ref.host_id,
-                            )
-
-                # If this host is offline, or if we failed to find the agent on the online host
-                if agent_details is None:
-                    agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
-
-                agent_details_list.append(agent_details)
-            except MngrError as e:
-                if on_error is not None:
-                    on_error(agent_ref, e)
-                    # callback didn't raise, skip this agent
-                else:
-                    logger.debug(
-                        "Failed to build details for agent {} on host {}, using offline data: {}",
-                        agent_ref.agent_id,
-                        host_ref.host_id,
-                        e,
-                    )
-                    agent_details_list.append(_build_agent_details_from_offline_ref(agent_ref, host_details))
+            host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
+            agent_details_list = [
+                _build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+            ]
 
         return host_details, agent_details_list
 

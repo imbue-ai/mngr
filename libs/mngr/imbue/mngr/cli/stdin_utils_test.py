@@ -43,6 +43,11 @@ def test_expand_stdin_placeholder_dash_skips_empty_lines() -> None:
     assert result == ["agent-a", "agent-b"]
 
 
+def test_expand_stdin_placeholder_dash_with_empty_stdin_returns_empty_list() -> None:
+    result = expand_stdin_placeholder(("-",), stdin=StringIO(""))
+    assert result == []
+
+
 def test_expand_stdin_placeholder_preserves_non_dash_args_around_dash() -> None:
     result = expand_stdin_placeholder(("before", "-", "after"), stdin=StringIO("stdin-agent\n"))
     assert result == ["before", "stdin-agent", "after"]

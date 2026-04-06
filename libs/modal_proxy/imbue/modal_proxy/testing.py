@@ -104,6 +104,10 @@ class TestingImage(ImageInterface):
         # No-op -- return a new image with a fresh ID to simulate layer caching
         return TestingImage(image_id=f"img-{uuid.uuid4().hex}")
 
+    def build(self, app: AppInterface) -> None:
+        # No-op -- images are not real in the test environment
+        pass
+
 
 class TestingVolume(VolumeInterface):
     """Volume backed by a real directory on disk."""
@@ -237,7 +241,7 @@ class TestingSandbox(SandboxInterface):
             exec_proc._completed_text = finished.stdout
             return exec_proc
 
-    def tunnels(self) -> dict[int, TunnelInfo]:
+    def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
         if self._is_terminated:
             raise ModalProxyError("Sandbox has been terminated")
         # Return a fixed tunnel for SSH port 22 -> localhost:22222

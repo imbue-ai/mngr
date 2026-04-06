@@ -40,6 +40,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
+from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -997,7 +998,7 @@ class ModalProviderInstance(BaseProviderInstance):
             )
             self._write_host_record(updated_host_record)
 
-    def _build_modal_image(
+    def _get_modal_image_definition(
         self,
         base_image: str | None = None,
         dockerfile: Path | None = None,
@@ -1154,10 +1155,15 @@ class ModalProviderInstance(BaseProviderInstance):
                 stderr=StreamType.DEVNULL,
             )
 
-    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface) -> tuple[str, int]:
-        """Extract SSH connection info from a running sandbox."""
+    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int = 50) -> tuple[str, int]:
+        """Extract SSH connection info from a running sandbox.
+
+        ``tunnel_timeout`` is forwarded to the Modal SDK's ``tunnels()`` call
+        and controls how many seconds the backend will wait for the sandbox to
+        be ready before raising ``SandboxTimeoutError``.
+        """
         try:
-            tunnels = sandbox.tunnels()
+            tunnels = sandbox.tunnels(timeout=tunnel_timeout)
         except ModalProxyError as e:
             if _is_sandbox_timeout(e):
                 raise ModalSandboxTimeoutMngrError("Sandbox failed to come online fast enough") from e
@@ -1254,8 +1260,10 @@ class ModalProviderInstance(BaseProviderInstance):
                         ),
                     )
 
-            # Get SSH connection info
-            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
+            # Get SSH connection info.
+            # Use the sandbox timeout as the tunnel timeout so that the tunnel
+            # request waits long enough for image builds and container startup.
+            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox, tunnel_timeout=config.timeout)
             logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
 
             # Get SSH keypairs
@@ -1642,7 +1650,7 @@ log "=== Shutdown script completed ==="
     def reset_caches(self) -> None:
         """Reset all caches on this instance.
 
-        This is primarily used for "list --stream", where we need to actually see new data, and for
+        This is primarily used for discovery streaming, where we need to actually see new data, and for
         test isolation to ensure a clean state between tests
         """
         self._sandbox_cache_by_id.clear()
@@ -1873,20 +1881,24 @@ log "=== Shutdown script completed ==="
             )
 
         try:
+            # Get or create the Modal app (uses singleton pattern with context manager)
+            with log_span("Getting Modal app", app_name=self.app_name):
+                app = self._get_modal_app()
+
             if snapshot is not None:
                 # Use the snapshot image instead of building
                 with log_span("Loading Modal image from snapshot {}", str(snapshot)):
                     modal_image = self._modal_interface.image_from_id(str(snapshot))
             else:
-                # Build the Modal image
-                with log_span("Building Modal image..."):
-                    modal_image = self._build_modal_image(
+                # Prepare the Modal image definition (lazy -- does not trigger a remote build)
+                with log_span("Preparing Modal image definition"):
+                    modal_image = self._get_modal_image_definition(
                         base_image, dockerfile_path, context_dir_path, config.secrets, config.docker_build_args
                     )
 
-            # Get or create the Modal app (uses singleton pattern with context manager)
-            with log_span("Getting Modal app", app_name=self.app_name):
-                app = self._get_modal_app()
+                # Eagerly trigger the image build so we can measure build time separately from sandbox creation
+                with log_span("Building Modal image"):
+                    modal_image.build(app)
 
             # Create the sandbox
             # Add shutdown buffer to the timeout sent to Modal so the activity watcher can
@@ -2856,11 +2868,13 @@ log "=== Shutdown script completed ==="
 
         # Lifecycle state from tmux info
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
+        is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
         state = determine_lifecycle_state(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
             ps_output=ps_output,
+            is_agent_type_known=is_type_known,
         )
 
         return AgentDetails(

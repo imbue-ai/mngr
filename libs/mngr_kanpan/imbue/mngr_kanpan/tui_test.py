@@ -33,9 +33,11 @@ from imbue.mngr_kanpan.data_types import RefreshHook
 from imbue.mngr_kanpan.testing import make_pr_info
 from imbue.mngr_kanpan.tui import DEFAULT_REFRESH_INTERVAL_SECONDS
 from imbue.mngr_kanpan.tui import _BOARD_COLUMN_DEFS
+from imbue.mngr_kanpan.tui import _BatchWorkItem
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
 from imbue.mngr_kanpan.tui import _assemble_column_defs
+from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_column_palette
 from imbue.mngr_kanpan.tui import _build_command_map
@@ -58,10 +60,12 @@ from imbue.mngr_kanpan.tui import _load_user_columns
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _mute_focused_agent
 from imbue.mngr_kanpan.tui import _on_auto_refresh_alarm
+from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_custom_command_poll
 from imbue.mngr_kanpan.tui import _on_mute_persist_poll
 from imbue.mngr_kanpan.tui import _on_restore_footer
 from imbue.mngr_kanpan.tui import _on_spinner_tick
+from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _request_refresh
 from imbue.mngr_kanpan.tui import _restore_footer
@@ -1808,3 +1812,158 @@ def test_load_refresh_hooks_skips_invalid_values() -> None:
 def test_load_refresh_hooks_empty_input() -> None:
     result = _load_refresh_hooks({})
     assert result == []
+
+
+# =============================================================================
+# Tests for _batch_item_label
+# =============================================================================
+
+
+def test_batch_item_label_single_item() -> None:
+    cmd = CustomCommand(name="mark delete", markable="light red")
+    item = _BatchWorkItem(name=AgentName("agent-1"), key="d", cmd=cmd, entry=None)
+    assert _batch_item_label(item) == "mark delete agent-1"
+
+
+def test_batch_item_label_batched_items() -> None:
+    cmd = CustomCommand(name="mark delete", markable="light red")
+    item = _BatchWorkItem(
+        name=AgentName("agent-1"),
+        key="d",
+        cmd=cmd,
+        entry=None,
+        batch_names=(AgentName("agent-1"), AgentName("agent-2"), AgentName("agent-3")),
+    )
+    assert _batch_item_label(item) == "mark delete 3 agent(s)"
+
+
+# =============================================================================
+# Tests for _prune_orphaned_marks
+# =============================================================================
+
+
+def test_prune_orphaned_marks_removes_deleted_agents() -> None:
+    entry = _make_entry(name="alive-agent")
+    snapshot = _make_snapshot(entries=(entry,))
+    state = _make_state(snapshot=snapshot)
+    state.marks = {AgentName("alive-agent"): "d", AgentName("deleted-agent"): "d"}
+    _prune_orphaned_marks(state)
+    assert state.marks == {AgentName("alive-agent"): "d"}
+
+
+def test_prune_orphaned_marks_keeps_all_when_valid() -> None:
+    entry_a = _make_entry(name="agent-a")
+    entry_b = _make_entry(name="agent-b")
+    snapshot = _make_snapshot(entries=(entry_a, entry_b))
+    state = _make_state(snapshot=snapshot)
+    state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "p"}
+    _prune_orphaned_marks(state)
+    assert state.marks == {AgentName("agent-a"): "d", AgentName("agent-b"): "p"}
+
+
+def test_prune_orphaned_marks_noop_when_no_marks() -> None:
+    entry = _make_entry()
+    snapshot = _make_snapshot(entries=(entry,))
+    state = _make_state(snapshot=snapshot)
+    _prune_orphaned_marks(state)
+    assert state.marks == {}
+
+
+def test_prune_orphaned_marks_noop_when_no_snapshot() -> None:
+    state = _make_state()
+    state.marks = {AgentName("agent"): "d"}
+    _prune_orphaned_marks(state)
+    assert state.marks == {AgentName("agent"): "d"}
+
+
+# =============================================================================
+# Tests for batch delete in _on_batch_item_poll
+# =============================================================================
+
+
+def test_on_batch_item_poll_batch_delete_success_pops_all_marks() -> None:
+    entry_a = _make_entry(name="agent-a")
+    entry_b = _make_entry(name="agent-b")
+    snapshot = _make_snapshot(entries=(entry_a, entry_b))
+    state = _make_state(snapshot=snapshot)
+    state.column_defs = list(_BOARD_COLUMN_DEFS)
+    state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
+    state.executing = True
+
+    cmd = CustomCommand(name="mark delete", markable="light red")
+    item = _BatchWorkItem(
+        name=AgentName("agent-a"),
+        key="d",
+        cmd=cmd,
+        entry=entry_a,
+        batch_names=(AgentName("agent-a"), AgentName("agent-b")),
+    )
+
+    proc_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    future = _make_done_future(proc_result)
+
+    work = [item]
+    results: list[str] = []
+
+    _on_batch_item_poll(state.loop, (state, future, work, results, 0, item))
+
+    assert state.marks == {}
+    assert len(results) == 2
+    assert all(r.endswith(": ok") for r in results)
+
+
+def test_on_batch_item_poll_batch_delete_failure_keeps_marks() -> None:
+    entry_a = _make_entry(name="agent-a")
+    entry_b = _make_entry(name="agent-b")
+    snapshot = _make_snapshot(entries=(entry_a, entry_b))
+    state = _make_state(snapshot=snapshot)
+    state.column_defs = list(_BOARD_COLUMN_DEFS)
+    state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
+    state.executing = True
+
+    cmd = CustomCommand(name="mark delete", markable="light red")
+    item = _BatchWorkItem(
+        name=AgentName("agent-a"),
+        key="d",
+        cmd=cmd,
+        entry=entry_a,
+        batch_names=(AgentName("agent-a"), AgentName("agent-b")),
+    )
+
+    proc_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="some error")
+    future = _make_done_future(proc_result)
+
+    work = [item]
+    results: list[str] = []
+
+    _on_batch_item_poll(state.loop, (state, future, work, results, 0, item))
+
+    assert state.marks == {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
+    assert len(results) == 1
+    assert "failed" in results[0]
+    assert "2 agent(s)" in results[0]
+
+
+# =============================================================================
+# Tests for _finish_refresh mark pruning
+# =============================================================================
+
+
+def test_finish_refresh_prunes_orphaned_marks() -> None:
+    entry_a = _make_entry(name="agent-a")
+    entry_b = _make_entry(name="agent-b")
+    old_snapshot = _make_snapshot(entries=(entry_a, entry_b))
+    state = _make_state(snapshot=old_snapshot)
+    state.column_defs = list(_BOARD_COLUMN_DEFS)
+    state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
+
+    # New snapshot only has agent-a (agent-b was deleted)
+    new_snapshot = _make_snapshot(entries=(entry_a,))
+    future: Future[BoardSnapshot] = Future()
+    future.set_result(new_snapshot)
+    state.refresh_future = future
+
+    _finish_refresh(_make_mock_loop(), state)
+
+    assert AgentName("agent-a") in state.marks
+    assert AgentName("agent-b") not in state.marks

@@ -2,6 +2,7 @@ import os
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -11,8 +12,11 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+import tomlkit
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import init_git_repo_with_config
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -217,6 +221,28 @@ def _write_destroy_script(
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+# Resolve the real home directory at import time, before any test fixture
+# monkeypatches HOME to an isolated temp directory.
+_REAL_HOME = Path.home()
+
+
+def _load_modal_credentials(env: dict[str, str]) -> None:
+    """Load Modal credentials from ~/.modal.toml into the env dict.
+
+    Mirrors the logic in mngr_modal's conftest, which uses monkeypatch for
+    in-process tests. E2e subprocesses need the vars set explicitly since
+    monkeypatch doesn't propagate to child processes.
+    """
+    modal_toml_path = _REAL_HOME / ".modal.toml"
+    if not modal_toml_path.exists():
+        return
+    for value in tomlkit.loads(modal_toml_path.read_text()).values():
+        if isinstance(value, dict) and value.get("active", ""):
+            env["MODAL_TOKEN_ID"] = value.get("token_id", "")
+            env["MODAL_TOKEN_SECRET"] = value.get("token_secret", "")
+            break
+
+
 @pytest.fixture
 def e2e(
     temp_host_dir: Path,
@@ -253,6 +279,12 @@ def e2e(
     # are already set by the parent autouse fixture and inherited via
     # os.environ.copy().
     env = os.environ.copy()
+
+    # Load Modal credentials from ~/.modal.toml if present and not already in
+    # env vars. The Modal conftest does this via monkeypatch for in-process
+    # tests, but e2e subprocesses need the vars set explicitly.
+    if "MODAL_TOKEN_ID" not in env:
+        _load_modal_credentials(env)
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
@@ -268,8 +300,10 @@ def e2e(
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start
-    # Remote providers (Modal, Docker) are left enabled so that e2e tests exercise them
+    # Configure connect_command for create/start.
+    # Remote providers (Modal, Docker) are left enabled so that e2e tests
+    # exercise the full discovery path. Tests that trigger Modal (via
+    # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -342,3 +376,77 @@ def e2e(
         timeout=10.0,
     )
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
+
+
+class MinimalInstallEnv(FrozenModel):
+    """A fresh mngr install in an isolated venv, with subprocess env and git repo."""
+
+    venv_dir: Path
+    env: dict[str, str]
+    repo_dir: Path
+
+    def run_mngr(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run the venv's mngr binary with the given arguments."""
+        mngr_bin = str(self.venv_dir / "bin" / "mngr")
+        return subprocess.run(
+            [mngr_bin, *args],
+            capture_output=True,
+            text=True,
+            cwd=self.repo_dir,
+            env=self.env,
+            timeout=30,
+        )
+
+    def run_python(self, script: str) -> subprocess.CompletedProcess[str]:
+        """Run a Python script in the isolated venv."""
+        python_bin = str(self.venv_dir / "bin" / "python")
+        return subprocess.run(
+            [python_bin, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=self.repo_dir,
+            env=self.env,
+            timeout=30,
+        )
+
+
+@pytest.fixture
+def minimal_install_env(
+    isolated_mngr_venv: Path,
+    temp_host_dir: Path,
+    mngr_test_root_name: str,
+    tmp_path: Path,
+) -> MinimalInstallEnv:
+    """Provide a fresh mngr install in an isolated venv for install tests.
+
+    The venv is built from the workspace (not the dev venv), so it exercises
+    the real install path: entry points, dependency resolution, etc.
+
+    The subprocess environment is intentionally minimal (not inherited from
+    the parent process). PATH contains only the venv bin and the directories
+    of mngr's declared system dependencies (from scripts/install.sh: git,
+    tmux, jq, curl, ssh, rsync). This catches code that depends on tools from the
+    developer's environment (e.g. the modal CLI being on PATH).
+    """
+    # Build PATH from only the venv and the directories containing mngr's
+    # declared system dependencies (from scripts/install.sh). This mirrors
+    # what a user would have after running install.sh.
+    system_deps = ["git", "tmux", "jq", "curl", "ssh", "rsync"]
+    dep_dirs: set[str] = set()
+    for dep in system_deps:
+        dep_path = shutil.which(dep)
+        if dep_path is not None:
+            dep_dirs.add(str(Path(dep_path).parent))
+    system_path = ":".join(sorted(dep_dirs))
+
+    env = {
+        "PATH": f"{isolated_mngr_venv / 'bin'}:{system_path}",
+        "HOME": str(temp_host_dir.parent),
+        "MNGR_HOST_DIR": str(temp_host_dir),
+        "MNGR_ROOT_NAME": mngr_test_root_name,
+    }
+
+    repo_dir = tmp_path / "repo"
+    init_git_repo_with_config(repo_dir)
+
+    return MinimalInstallEnv(venv_dir=isolated_mngr_venv, env=env, repo_dir=repo_dir)

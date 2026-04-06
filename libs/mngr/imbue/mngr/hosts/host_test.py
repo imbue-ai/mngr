@@ -51,6 +51,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -75,7 +76,7 @@ def _create_testable_agent(
     on_destroy_should_raise: bool = False,
 ) -> tuple[_TestableAgent, Host]:
     """Create a _TestableAgent with proper filesystem setup."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()
@@ -117,7 +118,7 @@ def host_with_agents_dir(
     temp_host_dir: Path,
 ) -> tuple[Host, Path]:
     """Create a Host with an agents directory for testing."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     agents_dir = local_provider.host_dir / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
@@ -499,7 +500,7 @@ def _create_test_agent(
     temp_work_dir: Path,
 ) -> BaseAgent:
     """Create a minimal test agent for command building tests."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()
@@ -945,7 +946,11 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
 class _FakeTransport:
     """Fake paramiko transport for testing."""
 
-    pass
+    def __init__(self, *, is_active: bool = True) -> None:
+        self._is_active = is_active
+
+    def is_active(self) -> bool:
+        return self._is_active
 
 
 class _BaseFakeSFTP:
@@ -1540,6 +1545,55 @@ def test_run_shell_command_ssh_exception_disconnects_before_retry(
     assert fake.disconnect_call_count == 1
 
 
+def test_run_shell_command_retries_on_dead_transport_ghost_failure(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When run_shell_command returns (False, output) and the SSH transport is dead, retry.
+
+    This happens when another thread disconnects the shared SSH connection:
+    paramiko's recv_exit_status() returns -1 for the dead channel, and pyinfra
+    returns (False, empty_output) without raising an exception.
+    """
+    dead_transport = _FakeTransport(is_active=False)
+    ok_result = (True, CommandOutput([]))
+    # First call: command "fails" (exit -1 from dead channel) with dead transport.
+    # Second call: command succeeds after retry reconnects.
+    ghost_failure = (False, CommandOutput([]))
+    fake = _FakeHostWithSSH(
+        ssh_client=_FakeSSHClient(transport_return=dead_transport),
+        run_shell_command_results=[ghost_failure, ok_result],
+    )
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("mkdir -p /some/dir"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+    assert fake.disconnect_call_count >= 1
+
+
+def test_run_shell_command_does_not_retry_real_failure_with_live_transport(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When run_shell_command returns (False, output) but the transport is alive, do not retry.
+
+    This is a genuine command failure (e.g. permission denied), not a ghost failure.
+    """
+    live_transport = _FakeTransport(is_active=True)
+    real_failure = (False, CommandOutput([]))
+    fake = _FakeHostWithSSH(
+        ssh_client=_FakeSSHClient(transport_return=live_transport),
+        run_shell_command_results=[real_failure],
+    )
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("false"))
+
+    assert success is False
+    assert fake._run_shell_command_call_count == 1
+    assert fake.disconnect_call_count == 0
+
+
 def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
     local_provider: LocalProviderInstance,
 ) -> None:
@@ -1708,6 +1762,18 @@ def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
 
 
 # =========================================================================
+# Tests for Host.get_name()
+# =========================================================================
+
+
+def test_host_get_name_strips_at_prefix_for_local_host(
+    local_host: Host,
+) -> None:
+    """get_name() should strip pyinfra's internal '@' prefix from local host names."""
+    assert local_host.get_name() == HostName("local")
+
+
+# =========================================================================
 # Tests for Host certified data methods
 # =========================================================================
 
@@ -1719,7 +1785,8 @@ def test_host_get_certified_data_returns_defaults_when_no_file(
     host = local_host
     data = host.get_certified_data()
     assert data.host_id == str(host.id)
-    assert data.host_name == str(host.get_name())
+    # The validator normalizes 'local' (from get_name()) to 'localhost'.
+    assert data.host_name == LOCAL_HOST_NAME
 
 
 def test_host_set_and_get_certified_data(

@@ -1,5 +1,4 @@
 import os
-import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,6 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import load_local_config
 from imbue.mngr.config.pre_readers import load_project_config
@@ -245,24 +243,14 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     profiles_dir = base_dir / PROFILES_DIRNAME
     profiles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Try read-only lookup first
-    existing = find_profile_dir_lightweight(base_dir)
-    if existing is not None:
-        return existing
-
-    # Config specifies a profile ID but the directory doesn't exist yet -- create it
     config_path = base_dir / ROOT_CONFIG_FILENAME
-    if config_path.exists():
-        try:
-            with open(config_path, "rb") as f:
-                root_config = tomllib.load(f)
-            profile_id = root_config.get("profile")
-            if profile_id:
-                profile_dir = profiles_dir / profile_id
-                profile_dir.mkdir(parents=True, exist_ok=True)
-                return profile_dir
-        except tomllib.TOMLDecodeError:
-            pass
+    root_config = try_load_toml(config_path)
+    if root_config is not None:
+        profile_id = root_config.get("profile")
+        if profile_id:
+            profile_dir = profiles_dir / profile_id
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            return profile_dir
 
     # No valid config.toml or no profile specified -- create a new profile
     profile_id = uuid4().hex
@@ -370,14 +358,44 @@ def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, A
     return {**raw_config, "cli_args": normalized}
 
 
+def _has_disabled_ancestor(
+    name: str,
+    raw_types: dict[str, dict[str, Any]],
+    disabled_plugins: frozenset[str],
+) -> bool:
+    """Check if an agent type or any ancestor in its parent chain is disabled.
+
+    At each level, uses the explicit ``plugin`` field if set, otherwise
+    falls back to ``parent_type`` (if set) or the type name -- mirroring
+    how ``_parse_providers`` resolves the plugin for a provider block.
+    """
+    current: str | None = name
+    seen: set[str] = set()
+    while current is not None and current not in seen:
+        seen.add(current)
+        raw = raw_types.get(current)
+        # Determine the plugin identity for this level.
+        plugin: str | None = raw.get("plugin") if raw is not None else None
+        if plugin is not None:
+            # Explicit plugin field -- check it and stop walking (the field
+            # already tells us which plugin this whole sub-chain depends on).
+            return plugin in disabled_plugins
+        if current in disabled_plugins:
+            return True
+        current = raw.get("parent_type") if raw is not None else None
+    return False
+
+
 def _parse_agent_types(
     raw_types: dict[str, dict[str, Any]],
+    disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
 ) -> dict[AgentTypeName, AgentTypeConfig]:
     """Parse agent type configs using the registry.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Agent type blocks whose plugin is disabled are silently skipped.
     """
     agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
 
@@ -387,6 +405,10 @@ def _parse_agent_types(
         # has trust_working_directory). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
         parent_type = raw_config.get("parent_type")
+        # Walk the parent chain through raw_types to check if this type or
+        # any ancestor depends on a disabled plugin.
+        if _has_disabled_ancestor(name, raw_types, disabled_plugins):
+            continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
         normalized_config = _normalize_cli_args_for_construct(raw_config)
@@ -565,7 +587,9 @@ def parse_config(
     kwargs["connect_command"] = raw.pop("connect_command", None)
     kwargs["is_remote_agent_installation_allowed"] = raw.pop("is_remote_agent_installation_allowed", None)
     kwargs["agent_types"] = (
-        _parse_agent_types(raw.pop("agent_types", {}), strict=strict) if "agent_types" in raw else {}
+        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
+        if "agent_types" in raw
+        else {}
     )
     kwargs["providers"] = (
         _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)

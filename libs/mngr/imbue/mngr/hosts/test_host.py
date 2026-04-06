@@ -51,6 +51,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
@@ -64,7 +65,7 @@ from imbue.mngr.utils.testing import local_sshd
 @pytest.fixture
 def host_with_temp_dir(local_provider: LocalProviderInstance) -> tuple[Host, Path]:
     """Create a Host using the local provider and its per-host directory."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     return host, host.host_dir
 
@@ -732,7 +733,7 @@ def test_unset_vars_applied_during_agent_start(
         mngr_ctx=mngr_ctx_with_unset,
     )
 
-    host = provider_with_unset.create_host(HostName("localhost"))
+    host = provider_with_unset.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -751,7 +752,7 @@ def test_unset_vars_applied_during_agent_start(
 
     # Wait for the tmux session to exist
     def session_ready() -> bool:
-        result = host.execute_idempotent_command(f"tmux has-session -t '{session_name}'")
+        result = host.execute_idempotent_command(f"tmux has-session -t '={session_name}'")
         if not result.success:
             return False
         pane_content = capture_tmux_pane_content(host, session_name)
@@ -847,7 +848,7 @@ def test_stop_agent_kills_single_pane_processes(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -886,6 +887,88 @@ def test_stop_agent_kills_single_pane_processes(
 
 
 @pytest.mark.tmux
+def test_stop_agent_does_not_kill_prefix_matched_session(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    tmp_path: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Test that stopping agent 'foo' does not kill agent 'foo-bar'.
+
+    tmux's -t flag does prefix matching when no exact match is found.
+    Without the = prefix for exact matching, killing session 'mngr_foo'
+    after it has already exited would prefix-match to 'mngr_foo-bar' and
+    kill the wrong agent.
+    """
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
+    mngr_ctx = MngrContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
+    provider = LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=per_host_dir,
+        mngr_ctx=mngr_ctx,
+    )
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    work_dir_short = tmp_path / "work_short"
+    work_dir_short.mkdir()
+    work_dir_long = tmp_path / "work_long"
+    work_dir_long.mkdir()
+
+    # Create two agents where one name is a prefix of the other
+    agent_short = host.create_agent_state(
+        work_dir_path=work_dir_short,
+        options=CreateAgentOptions(
+            name=AgentName("pfx"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 1000"),
+        ),
+    )
+    agent_long = host.create_agent_state(
+        work_dir_path=work_dir_long,
+        options=CreateAgentOptions(
+            name=AgentName("pfx-bar"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 1000"),
+        ),
+    )
+
+    host.start_agents([agent_short.id])
+    host.start_agents([agent_long.id])
+
+    session_short = f"{mngr_test_prefix}{agent_short.name}"
+    session_long = f"{mngr_test_prefix}{agent_long.name}"
+
+    # Verify both sessions exist
+    success, output = host._run_shell_command(StringCommand("tmux list-sessions -F '#{session_name}' 2>/dev/null"))
+    assert success
+    assert session_short in output.stdout
+    assert session_long in output.stdout
+
+    # Kill the short-named session directly (simulating it being cleaned up
+    # before stop_agents runs, which is the exact race condition in the bug)
+    host._run_shell_command(StringCommand(f"tmux kill-session -t '={session_short}' 2>/dev/null"))
+
+    # Now stop the short agent -- it should NOT kill the long agent's session
+    host.stop_agents([agent_short.id], timeout_seconds=3.0)
+
+    # The long-named session must still be alive
+    success, _ = host._run_shell_command(StringCommand(f"tmux has-session -t '={session_long}' 2>/dev/null"))
+    assert success, (
+        f"Session '{session_long}' was killed by stop_agents targeting '{session_short}' -- "
+        f"tmux prefix matching is not being prevented"
+    )
+
+    # Clean up
+    host.stop_agents([agent_long.id], timeout_seconds=3.0)
+
+
+@pytest.mark.tmux
 def test_stop_agent_kills_multi_pane_processes(
     temp_host_dir: Path,
     per_host_dir: Path,
@@ -905,7 +988,7 @@ def test_stop_agent_kills_multi_pane_processes(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -924,7 +1007,7 @@ def test_stop_agent_kills_multi_pane_processes(
     host._run_shell_command(StringCommand(f"tmux split-window -t '{session_name}' 'sleep 3000'"))
 
     success, output = host._run_shell_command(
-        StringCommand(f"tmux list-panes -t '{session_name}' 2>/dev/null | wc -l")
+        StringCommand(f"tmux list-panes -t '={session_name}' 2>/dev/null | wc -l")
     )
     assert success
     pane_count = int(output.stdout.strip())
@@ -971,7 +1054,7 @@ def test_start_agent_creates_process_group(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -988,7 +1071,7 @@ def test_start_agent_creates_process_group(
 
     try:
         success, output = host._run_shell_command(
-            StringCommand(f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null")
+            StringCommand(f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' 2>/dev/null")
         )
         assert success
         pane_pid = output.stdout.strip()
@@ -1032,7 +1115,7 @@ def test_start_agent_starts_process_activity_monitor(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -1137,7 +1220,7 @@ def test_start_agent_creates_additional_tmux_windows(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -1164,7 +1247,7 @@ def test_start_agent_creates_additional_tmux_windows(
 
         # Verify we have 3 windows (main + 2 additional)
         success, output = host._run_shell_command(
-            StringCommand(f"tmux list-windows -t '{session_name}' -F '#{{window_name}}' 2>/dev/null")
+            StringCommand(f"tmux list-windows -t '={session_name}' -F '#{{window_name}}' 2>/dev/null")
         )
         assert success
         windows = output.stdout.strip().split("\n")
@@ -1198,7 +1281,7 @@ def test_start_agent_additional_windows_run_commands(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -2199,7 +2282,7 @@ def test_start_agent_has_access_to_env_vars(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     # Create a marker file path where the agent will write the env var value
@@ -2276,7 +2359,7 @@ def test_new_tmux_window_inherits_env_vars(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     marker_file = temp_work_dir / "new_window_marker.txt"
@@ -2749,7 +2832,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         host_dir=source_host_dir,
         mngr_ctx=source_mngr_ctx,
     )
-    source_host = source_provider.create_host(HostName("localhost"))
+    source_host = source_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     # Verify the two hosts have different IDs (cross-host scenario)
     assert source_host.id != target_host.id

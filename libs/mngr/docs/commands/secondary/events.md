@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr events TARGET [SOURCES...] [--source SOURCE] [--filter CEL] [--follow] [--tail N] [--head N]
+mngr events TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
 ```
 
 View events from an agent or host.
@@ -16,8 +16,10 @@ The command first tries to match TARGET as an agent, then as a host.
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.
-Use --filter to further restrict events via a CEL expression. Use --follow
-to continuously stream new events.
+Use --include and --exclude to further restrict events via CEL expressions.
+All --include filters must match for an event to be included, and events
+matching any --exclude filter are dropped. Use --follow to continuously
+stream new events.
 
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
@@ -49,7 +51,8 @@ mngr events [OPTIONS] TARGET [SOURCES]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--source` | text | Event source to include, relative to events/ (e.g. 'messages', 'logs/mngr'). Can be repeated. | None |
-| `--filter` | text | CEL expression to filter which events to include (e.g. 'source == "messages"') | None |
+| `--include` | text | CEL expression that events must match to be included (repeatable, all must match). | None |
+| `--exclude` | text | CEL expression; events matching any exclude filter are dropped (repeatable). | None |
 
 ## Common
 
@@ -100,10 +103,16 @@ $ mngr events my-agent messages logs/mngr
 $ mngr events my-agent --source messages --source logs/mngr
 ```
 
-**Filter within a source**
+**Include only user messages**
 
 ```bash
-$ mngr events my-agent messages --filter 'data.role == "user"'
+$ mngr events my-agent --include 'source == "messages"' --include 'data.role == "user"'
+```
+
+**Exclude log events**
+
+```bash
+$ mngr events my-agent --exclude 'source.startsWith("logs/")'
 ```
 
 **View last 100 events**

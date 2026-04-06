@@ -13,6 +13,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
@@ -21,7 +22,6 @@ from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.gc import gc as api_gc
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -30,6 +30,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -198,7 +199,9 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             agent_identifiers.append(agent_name)
 
     if not agent_identifiers:
-        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     # Find agents to destroy
     try:

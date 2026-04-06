@@ -28,6 +28,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
@@ -355,13 +356,13 @@ def local_host(local_provider: LocalProviderInstance) -> Host:
     """Create a local Host via the local provider.
 
     This fixture eliminates the repeated pattern of:
-        host = local_provider.create_host(HostName("localhost"))
+        host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     Use this when tests need a Host instance for creating agents,
     executing commands, etc. The local provider always returns a Host
     (the concrete OnlineHostInterface implementation).
     """
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     return host
 
 
@@ -369,6 +370,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _WORKSPACE_PACKAGES = (
     _REPO_ROOT / "libs" / "imbue_common",
     _REPO_ROOT / "libs" / "concurrency_group",
+    _REPO_ROOT / "libs" / "resource_guards",
     _REPO_ROOT / "libs" / "mngr",
 )
 
@@ -403,7 +405,7 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
     with cg:
         # Export mngr's pinned transitive deps from the lockfile (no editable/comment lines)
         export_result = cg.run_process_to_completion(
-            ("uv", "export", "--package", "mngr", "--no-hashes", "--frozen"),
+            ("uv", "export", "--package", "imbue-mngr", "--no-hashes", "--frozen"),
             cwd=_REPO_ROOT,
         )
         reqs_file = tmp_path / "pinned-deps.txt"

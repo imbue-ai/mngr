@@ -34,6 +34,7 @@ from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.forwarding_server.mngr_settings import configure_mngr_settings
 from imbue.minds.forwarding_server.parent_tracking import setup_mind_branch_and_parent
 from imbue.minds.forwarding_server.vendor_mngr import apply_vendor_overrides
 from imbue.minds.forwarding_server.vendor_mngr import default_vendor_configs
@@ -58,7 +59,7 @@ LOG_SENTINEL: Final[str] = "__DONE__"
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
     """Create an output callback that puts lines into a queue."""
-    return lambda line, is_stdout: log_queue.put(line.rstrip("\n"))
+    return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_queue.put(line.rstrip("\n"))
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
@@ -218,6 +219,13 @@ def run_mngr_create(
         case LaunchMode.DEV:
             mngr_command.append("--transfer=none")
         case LaunchMode.LOCAL:
+            # stick the source into some canonical location
+            mngr_command.extend(
+                [
+                    "--target-path",
+                    "/code/",
+                ]
+            )
             remote_data_dir = os.path.expanduser(f"~/.minds/data/{agent_id}")
             Path(remote_data_dir).mkdir(parents=True, exist_ok=True)
             mngr_command.extend(
@@ -226,6 +234,8 @@ def run_mngr_create(
                     "docker",
                     "--host-env",
                     "IS_SANDBOX=1",
+                    "--disable-plugin",
+                    "recursive",
                     "-vv",
                     "--source-path",
                     str(mind_dir),
@@ -365,6 +375,9 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Setting up branch and parent tracking...")
                 setup_mind_branch_and_parent(mind_dir, AgentName(agent_name), GitUrl(git_url), on_output=emit_log)
+
+                log_queue.put("[minds] Configuring mngr settings...")
+                configure_mngr_settings(mind_dir, AgentName(agent_name), agent_id, on_output=emit_log)
 
                 settings = load_creation_settings(mind_dir)
 

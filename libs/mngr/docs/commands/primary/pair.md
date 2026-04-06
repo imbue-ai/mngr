@@ -122,7 +122,7 @@ $ mngr pair my-agent --conflict=source
 **Filter to specific host**
 
 ```bash
-$ mngr pair my-agent --source-host @local
+$ mngr pair my-agent --source-host localhost
 ```
 
 **Use --source-agent flag**

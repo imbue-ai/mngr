@@ -18,12 +18,10 @@ from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.data_types import ConnectionOptions
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mngr.api.list import list_agents
-from imbue.mngr.cli.agent_addr import find_agent_by_address
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -385,13 +383,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--no-reconnect is not implemented yet")
 
     logger.info("Finding agent...")
-    agents_by_host, providers = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=None,
-        agent_identifiers=(opts.agent,) if opts.agent is not None else None,
-        include_destroyed=False,
-        reset_caches=False,
-    )
 
     agent: AgentInterface
     host: OnlineHostInterface
@@ -399,7 +390,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     if opts.agent is not None:
         agent, host = find_agent_by_address(
             opts.agent,
-            agents_by_host,
             mngr_ctx,
             "connect",
             is_start_desired=opts.start,
@@ -414,9 +404,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         sorted_agents = sorted(list_result.agents, key=lambda a: a.create_time, reverse=True)
         most_recent = sorted_agents[0]
         logger.info("No agent specified, connecting to most recently created: {}", most_recent.name)
-        agent, host = find_and_maybe_start_agent_by_name_or_id(
+        agent, host = find_agent_by_address(
             str(most_recent.id),
-            agents_by_host,
             mngr_ctx,
             "connect",
             is_start_desired=opts.start,
@@ -431,9 +420,8 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
             logger.info("No agent selected")
             return
 
-        agent, host = find_and_maybe_start_agent_by_name_or_id(
+        agent, host = find_agent_by_address(
             str(selected.id),
-            agents_by_host,
             mngr_ctx,
             "connect",
             is_start_desired=opts.start,

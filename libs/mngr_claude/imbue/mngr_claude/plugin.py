@@ -209,6 +209,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "in ~/.claude.json before startup. This prevents the trust dialog from appearing. "
         "Also dismisses the effort callout dialog.",
     )
+    model: str | None = Field(
+        default=None,
+        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
+    is_fast: bool = Field(
+        default=False,
+        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
     emit_common_transcript: bool = Field(
         default=True,
         description="Emit a common, agent-agnostic transcript alongside the raw Claude transcript. "
@@ -240,7 +248,11 @@ def _collect_claude_home_dir_files(claude_dir: Path) -> dict[Path, Path]:
     return files
 
 
-def _build_settings_json_content(sync_local: bool) -> str:
+def _build_settings_json_content(
+    sync_local: bool,
+    model: str | None = None,
+    is_fast: bool = False,
+) -> str:
     """Build settings.json content for remote/deploy per-agent config dirs.
 
     Used for remote hosts and deploy only. Local hosts symlink settings.json
@@ -248,16 +260,18 @@ def _build_settings_json_content(sync_local: bool) -> str:
 
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Forces skipDangerousModePermissionPrompt=True
-    and disables fastMode (not supported via the API on remote hosts).
     """
     local_path = Path.home() / ".claude" / "settings.json"
     if sync_local and local_path.exists():
         data: dict[str, Any] = json.loads(local_path.read_text())
-        if data.get("fastMode") is True:
-            logger.warning("Disabling fast mode for remote deployment because it is not yet supported via the API")
-            data["fastMode"] = False
     else:
         data = _generate_claude_home_settings()
+    if model is not None:
+        data["model"] = model
+    if is_fast:
+        data["fastMode"] = True
+    else:
+        data["fastMode"] = False
     data["skipDangerousModePermissionPrompt"] = True
     return json.dumps(data, indent=2) + "\n"
 
@@ -633,6 +647,44 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
             )
 
 
+def _apply_settings_json_overrides(
+    host: OnlineHostInterface,
+    config_dir: Path,
+    config: ClaudeAgentConfig,
+) -> None:
+    """Apply per-agent settings overrides (model, is_fast) to settings.json.
+
+    Only called for local hosts. When overrides are needed, reads existing
+    settings (following symlinks if present), then writes a regular file
+    with the overrides applied. Replaces any existing symlink to avoid
+    modifying the user's global settings.
+    """
+    if config.model is None and not config.is_fast:
+        return
+
+    settings_path = config_dir / "settings.json"
+
+    data: dict[str, Any] = {}
+    try:
+        content = host.read_text_file(settings_path)
+    except FileNotFoundError:
+        content = None
+    else:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning("Corrupt settings.json, replacing with overrides only")
+
+    if config.model is not None:
+        data["model"] = config.model
+    if config.is_fast:
+        data["fastMode"] = True
+
+    # Remove existing file/symlink before writing a regular file
+    host.execute_idempotent_command(f"rm -f {shlex.quote(str(settings_path))}", timeout_seconds=5.0)
+    host.write_text_file(settings_path, json.dumps(data, indent=2) + "\n")
+
+
 def _load_claude_resource_script(filename: str) -> str:
     """Load a shell script from the mngr_claude resources package."""
     resource_files = importlib.resources.files(_claude_resources)
@@ -645,9 +697,9 @@ def _provision_background_scripts(
 ) -> None:
     """Write the background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
 
-    Provisions stream_transcript.sh, claude_background_tasks.sh, and
-    common_transcript.sh so they can be launched by the agent's
-    assemble_command at runtime.
+    Provisions stream_transcript.sh, claude_background_tasks.sh,
+    common_transcript.sh, and wait_for_stop_hook.sh so they can be
+    launched by the agent's assemble_command or hooks at runtime.
 
     Note: mngr_log.sh (shared logging library) is provisioned by
     Host.provision_agent() to both host-level and agent-level commands
@@ -658,7 +710,12 @@ def _provision_background_scripts(
 
     # Claude-specific scripts from this plugin's resources
     threads: list[ObservableThread] = []
-    for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
+    for script_name in (
+        "stream_transcript.sh",
+        "claude_background_tasks.sh",
+        "common_transcript.sh",
+        "wait_for_stop_hook.sh",
+    ):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
@@ -729,6 +786,35 @@ def _has_api_credentials_available(
             return True
 
     return False
+
+
+def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+    """Verify .claude/settings.local.json is gitignored in the given repo path.
+
+    Raises PluginMngrError if the file is not gitignored. Silently returns
+    if the path is not a git repository.
+    """
+    settings_relative = Path(".claude") / "settings.local.json"
+
+    is_git_repo = host.execute_idempotent_command(
+        "git rev-parse --is-inside-work-tree",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not is_git_repo.success:
+        return
+
+    result = host.execute_idempotent_command(
+        f"git check-ignore -q {shlex.quote(str(settings_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not result.success:
+        raise PluginMngrError(
+            f".claude/settings.local.json is not gitignored in {repo_path}.\n"
+            "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
+            f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
+        )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -828,6 +914,23 @@ class CostThresholdDialogIndicator(DialogIndicator):
 
 class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    @classmethod
+    def preflight_check(
+        cls,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        agent_options: CreateAgentOptions,
+        agent_config: AgentTypeConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Validate that .claude/settings.local.json is gitignored in the source repo.
+
+        mngr writes readiness hooks to this file during provisioning. If it's not
+        gitignored, it would appear as an unstaged change. Checking early avoids
+        wasting time on host creation and work_dir setup before surfacing this error.
+        """
+        _check_settings_local_gitignored(source_host, source_path)
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.
@@ -1125,25 +1228,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         settings_relative = Path(".claude") / "settings.local.json"
         settings_path = self.work_dir / settings_relative
 
-        # Only check gitignore if git is available and this is a git repository
-        is_git_repo = host.execute_idempotent_command(
-            "git rev-parse --is-inside-work-tree",
-            cwd=self.work_dir,
-            timeout_seconds=5.0,
-        )
-        if is_git_repo.success:
-            # Verify .claude/settings.local.json is gitignored to avoid unstaged changes
-            result = host.execute_idempotent_command(
-                f"git check-ignore -q {shlex.quote(str(settings_relative))}",
-                cwd=self.work_dir,
-                timeout_seconds=5.0,
-            )
-            if not result.success:
-                raise PluginMngrError(
-                    f".claude/settings.local.json is not gitignored in {self.work_dir}.\n"
-                    "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
-                    f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
-                )
+        # Check gitignore. During create(), preflight_check already verified
+        # this on the source, but this covers other code paths (e.g. mngr provision).
+        _check_settings_local_gitignored(host, self.work_dir)
 
         hooks_config = build_readiness_hooks_config()
 
@@ -1269,6 +1356,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         if config.sync_home_settings:
             _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
 
+        _apply_settings_json_overrides(host, config_dir, config)
+
     def _setup_remote_config_dir(
         self,
         host: OnlineHostInterface,
@@ -1285,7 +1374,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         file_transfers: list[tuple[Path, bytes]] = []
         # 1. Always ship settings.json
         file_transfers.append(
-            (config_dir / "settings.json", _build_settings_json_content(config.sync_home_settings).encode("utf-8"))
+            (
+                config_dir / "settings.json",
+                _build_settings_json_content(
+                    config.sync_home_settings,
+                    model=config.model,
+                    is_fast=config.is_fast,
+                ).encode("utf-8"),
+            )
         )
 
         # 2. Transfer other home dir files (skills, agents, commands) if syncing is enabled
@@ -1623,13 +1719,22 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
+_MKDIR_BATCH_SIZE: Final[int] = 50
+
+
 def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    remote_folders: list[str] = []
-    for dest_path, _dest_contents in transfers:
-        remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
+    # Deduplicate parent directories -- many files share the same parent, and
+    # sending all 1000+ paths in a single mkdir command can exceed the OS
+    # argument length limit ("/bin/bash: File name too long").
+    unique_dirs = sorted({str(dest_path.parent) for dest_path, _ in transfers})
+
+    # Batch mkdir calls so no single command exceeds OS argument limits.
+    for i in range(0, len(unique_dirs), _MKDIR_BATCH_SIZE):
+        batch = unique_dirs[i : i + _MKDIR_BATCH_SIZE]
+        args = " ".join(shlex.quote(d) for d in batch)
+        mkdir_result = host.execute_idempotent_command(f"mkdir -p {args}")
+        if not mkdir_result.success:
+            raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 
     # then upload them all in parallel
     count = 0

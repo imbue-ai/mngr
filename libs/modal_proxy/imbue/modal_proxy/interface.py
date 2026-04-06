@@ -89,6 +89,11 @@ class ImageInterface(MutableModel, ABC):
         """Apply Dockerfile commands to this image."""
         ...
 
+    @abstractmethod
+    def build(self, app: "AppInterface") -> None:
+        """Eagerly build this image (triggers the remote build if not already cached)."""
+        ...
+
 
 class VolumeInterface(MutableModel, ABC):
     """A persistent volume for storing files (mirrors modal.Volume)."""
@@ -148,8 +153,13 @@ class SandboxInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def tunnels(self) -> dict[int, TunnelInfo]:
-        """Get tunnel connection info for exposed ports."""
+    def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
+        """Get tunnel connection info for exposed ports.
+
+        Blocks until tunnel metadata is available or the timeout is reached.
+        If the sandbox is not ready within ``timeout`` seconds, a
+        ``SandboxTimeoutError`` is raised by the Modal backend.
+        """
         ...
 
     @abstractmethod

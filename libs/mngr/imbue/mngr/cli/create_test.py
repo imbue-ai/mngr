@@ -11,12 +11,13 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.agent_addr import AgentAddress
+from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.api.find import ResolvedSource
-from imbue.mngr.cli.agent_addr import AgentAddress
-from imbue.mngr.cli.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
+from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -24,6 +25,7 @@ from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
+from imbue.mngr.cli.create import _parse_source_string
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -47,8 +49,10 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.logging import LoggingSuppressor
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -363,7 +367,7 @@ def test_try_reuse_existing_agent_found_and_started(
     temp_work_dir: Path,
 ) -> None:
     """Returns (agent, host) when agent is found and started."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
 
     # Create a real agent on the local host with a harmless command
     agent_options = CreateAgentOptions(
@@ -412,7 +416,7 @@ def test_try_reuse_existing_agent_not_found_on_host(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Returns None when agent reference exists but agent not found on online host."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
 
     # Build references pointing to this host, but with a nonexistent agent ID
     host_ref = DiscoveredHost(
@@ -486,7 +490,7 @@ def test_resolve_target_host_with_host_reference(
     host_ref = DiscoveredHost(
         provider_name=ProviderInstanceName("local"),
         host_id=local_provider.host_id,
-        host_name=HostName("localhost"),
+        host_name=HostName(LOCAL_HOST_NAME),
     )
 
     result = _resolve_target_host(
@@ -509,7 +513,7 @@ def test_parse_project_name_returns_explicit_project(
     temp_work_dir: Path,
 ) -> None:
     """When --project is specified, return it directly."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     resolved = ResolvedSource(location=HostLocation(host=local_host, path=temp_work_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
@@ -528,7 +532,7 @@ def test_parse_project_name_inherits_from_source_agent(
     """When source agent has a project label, inherit it."""
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     resolved = ResolvedSource(
         location=HostLocation(host=local_host, path=some_dir),
         agent=DiscoveredAgent(
@@ -553,7 +557,7 @@ def test_parse_project_name_derives_from_remote_url(
     """When remote URL is available, derive project name from it."""
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url="https://github.com/owner/my-repo.git")
@@ -569,7 +573,7 @@ def test_parse_project_name_falls_back_to_folder_name(
     """When no remote URL, fall back to the source directory name."""
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
@@ -597,7 +601,7 @@ def test_get_source_remote_url_returns_url_when_remote_exists(
         capture_output=True,
     )
 
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
     result = _get_source_remote_url(source_location)
@@ -614,7 +618,7 @@ def test_get_source_remote_url_returns_none_when_no_remote(
     repo_dir.mkdir()
     subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
 
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
     result = _get_source_remote_url(source_location)
@@ -630,7 +634,7 @@ def test_get_source_remote_url_returns_none_when_no_git(
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
 
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=plain_dir)
 
     result = _get_source_remote_url(source_location)
@@ -703,7 +707,7 @@ def test_parse_agent_opts_includes_labels(
     temp_work_dir: Path,
 ) -> None:
     """--label KEY=VALUE options should be parsed into label_options.labels."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().label, ("project=mngr", "env=prod")),
@@ -727,7 +731,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
     temp_work_dir: Path,
 ) -> None:
     """--label without = should raise UserInputError."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().label, ("invalid-no-equals",)),
@@ -750,7 +754,7 @@ def test_parse_agent_opts_empty_labels_by_default(
     temp_work_dir: Path,
 ) -> None:
     """Without --label, label_options.labels should be empty."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
 
     result, _ = _parse_agent_opts(
@@ -771,7 +775,7 @@ def test_parse_agent_opts_with_agent_id(
     temp_work_dir: Path,
 ) -> None:
     """--id should be parsed into id field."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     explicit_id = AgentId()
     opts = default_create_cli_opts.model_copy_update(
@@ -796,7 +800,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
     temp_work_dir: Path,
 ) -> None:
     """Without --id, id should be None (auto-generated later)."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
 
     result, _ = _parse_agent_opts(
@@ -817,7 +821,7 @@ def test_parse_agent_opts_conflicting_type_and_positional_raises(
     temp_work_dir: Path,
 ) -> None:
     """Specifying both --type and positional agent type with different values should raise."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().type, "claude"),
@@ -841,7 +845,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
     temp_work_dir: Path,
 ) -> None:
     """Specifying both --type and positional with the same value should not raise."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().type, "claude"),
@@ -950,6 +954,47 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
     assert base is None
     assert new == "my-exact-branch"
     assert has_explicit_base is False
+
+
+# =============================================================================
+# Tests for _parse_source_string
+# =============================================================================
+
+
+def test_parse_source_string_plain_path() -> None:
+    """A plain path without @ or : is treated as a filesystem path."""
+    result = _parse_source_string("./some/dir")
+
+    assert result.path == Path("./some/dir")
+    assert result.agent_name is None
+    assert result.host_name is None
+
+
+def test_parse_source_string_agent_at_host_without_colon() -> None:
+    """AGENT@HOST without a colon parses as an address with no path."""
+    result = _parse_source_string("my-agent@my-host")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host"
+    assert result.path is None
+
+
+def test_parse_source_string_agent_at_host_with_provider_without_colon() -> None:
+    """AGENT@HOST.PROVIDER without a colon parses as an address with no path."""
+    result = _parse_source_string("my-agent@my-host.modal")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host.modal"
+    assert result.path is None
+
+
+def test_parse_source_string_agent_at_host_with_colon_path() -> None:
+    """AGENT@HOST:PATH parses all three components."""
+    result = _parse_source_string("my-agent@my-host:/path/to/dir")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host"
+    assert result.path == Path("/path/to/dir")
 
 
 # =============================================================================
@@ -1103,6 +1148,27 @@ def test_create_rejects_positional_and_name_together(
 
     assert result.exit_code != 0
     assert "Cannot specify both" in result.output
+
+
+def test_create_edit_message_error_not_swallowed(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Early errors with --edit-message must still be visible.
+
+    LoggingSuppressor is enabled early when --edit-message is set. If an error
+    occurs before the editor opens, the suppressor must be cleaned up so the
+    error message is not swallowed and stdout/stderr are restored.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+    assert not LoggingSuppressor.is_suppressed()
 
 
 @pytest.mark.tmux
@@ -1304,3 +1370,77 @@ def test_editor_cleanup_scope_does_not_rescue_on_success(
 
     # Temp file should still be cleaned up
     assert not session.temp_file_path.exists()
+
+
+# =============================================================================
+# Tests for _check_source_does_not_contain_state_dir
+# =============================================================================
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_parent(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory is a parent of the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    parent_of_state_dir = state_dir.parent
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(parent_of_state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory IS the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_sibling(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Does not raise when the source directory is a sibling of the state dir."""
+    sibling_dir = tmp_path / "some-project"
+    sibling_dir.mkdir()
+
+    # Should not raise
+    _check_source_does_not_contain_state_dir(sibling_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_child_of_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Does not raise when the source directory is inside the state dir (child)."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    child_dir = state_dir / "agents" / "some-agent"
+    child_dir.mkdir(parents=True, exist_ok=True)
+
+    # Should not raise -- we only block the parent-contains-state-dir direction
+    _check_source_does_not_contain_state_dir(child_dir, temp_mngr_ctx)
+
+
+# =============================================================================
+# Tests for _resolve_source_location without git repo
+# =============================================================================
+
+
+def test_resolve_source_location_raises_outside_git_repo(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_source_location raises UserInputError when not in a git repo and no source specified."""
+    # tmp_path is not a git repo, change cwd to it
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(UserInputError, match="Not inside a git repository"):
+        _resolve_source_location(
+            default_create_cli_opts,
+            agent_and_host_loader=lambda: {},
+            mngr_ctx=temp_mngr_ctx,
+            is_start_desired=True,
+        )

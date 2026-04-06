@@ -7,6 +7,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 
 # =============================================================================
@@ -15,14 +16,19 @@ from imbue.mngr.utils.git_utils import find_git_worktree_root
 
 
 def try_load_toml(path: Path | None) -> dict[str, Any] | None:
-    """Load and parse a TOML file, returning None if path is None, missing, or malformed."""
+    """Load and parse a TOML file, returning None if path is None or missing.
+
+    Raises ConfigParseError if the file exists but contains invalid TOML.
+    """
     if path is None:
         return None
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
         return None
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigParseError(f"Failed to parse config file {path}: {e}") from e
 
 
 def find_profile_dir_lightweight(base_dir: Path) -> Path | None:
@@ -84,7 +90,7 @@ def resolve_project_config_dir(
 
 
 def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found or malformed."""
+    """Find and load the project config file, returning None if not found."""
     project_dir = resolve_project_config_dir(context_dir, root_name, cg)
     if project_dir is None:
         return None
@@ -92,7 +98,7 @@ def load_project_config(context_dir: Path | None, root_name: str, cg: Concurrenc
 
 
 def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the local config file, returning None if not found or malformed."""
+    """Find and load the local config file, returning None if not found."""
     project_dir = resolve_project_config_dir(context_dir, root_name, cg)
     if project_dir is None:
         return None
@@ -134,16 +140,21 @@ def _resolve_config_files(
         if raw is not None:
             configs.append(raw)
 
-    # Project + local config need the project root
+    # Project + local config need the project root.
+    # Resolve the directory inside the ConcurrencyGroup (it needs git lookups),
+    # but load the TOML files outside it so ConfigParseError propagates directly
+    # instead of being wrapped in ConcurrencyExceptionGroup.
     cg = ConcurrencyGroup(name="config-pre-reader")
     with cg:
-        raw_project = load_project_config(context_dir, root_name, cg)
-        raw_local = load_local_config(context_dir, root_name, cg)
+        project_dir = resolve_project_config_dir(context_dir, root_name, cg)
 
-    if raw_project is not None:
-        configs.append(raw_project)
-    if raw_local is not None:
-        configs.append(raw_local)
+    if project_dir is not None:
+        raw_project = try_load_toml(project_dir / "settings.toml")
+        if raw_project is not None:
+            configs.append(raw_project)
+        raw_local = try_load_toml(project_dir / "settings.local.toml")
+        if raw_local is not None:
+            configs.append(raw_local)
 
     return configs
 

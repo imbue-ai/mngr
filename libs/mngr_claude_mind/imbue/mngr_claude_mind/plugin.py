@@ -65,7 +65,7 @@ WEB_SERVER_COMMAND: Final[str] = "mngr llmweb"
 # Observer: runs 'mngr observe' writing events to the agent's state directory
 # so each mind has its own local copy of agent state events.
 OBSERVER_WINDOW_NAME: Final[str] = "observer"
-OBSERVER_COMMAND: Final[str] = 'mngr observe --events-dir "$MNGR_AGENT_STATE_DIR"'
+OBSERVER_COMMAND: Final[str] = 'mngr observe -v --events-dir "$MNGR_AGENT_STATE_DIR"'
 
 
 class ClaudeMindConfig(ClaudeAgentConfig):
@@ -98,6 +98,14 @@ class ClaudeMindConfig(ClaudeAgentConfig):
         description="Whether to symlink (True) or copy (False) user resources from ~/.claude/ "
         "into local per-agent config dirs. Symlinks avoid duplication and keep the "
         "per-agent dir lightweight; copies provide full isolation.",
+    )
+    model: str | None = Field(
+        default="opus[1m]",
+        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
+    is_fast: bool = Field(
+        default=True,
+        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
     )
     install_llm: bool = Field(
         default=True,

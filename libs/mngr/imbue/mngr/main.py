@@ -1,4 +1,5 @@
 import bdb
+import sys
 from typing import Any
 
 import click
@@ -11,6 +12,7 @@ from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.ask import ask
 from imbue.mngr.cli.capture import capture
+from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.cli.cleanup import cleanup
 from imbue.mngr.cli.clone import clone
 from imbue.mngr.cli.common_opts import TCommand
@@ -24,7 +26,9 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
+from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -46,6 +50,7 @@ from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.providers.registry import load_all_registries
@@ -155,7 +160,7 @@ def cli(ctx: click.Context) -> None:
     """
     Initial entry point for mngr CLI commands.
     """
-    setproctitle.setproctitle("mngr")
+    setproctitle.setproctitle(" ".join(["mngr"] + sys.argv[1:]))
 
     # expose the plugin manager in the command context so that all commands have access to it
     # This uses the singleton that was already created during command registration
@@ -302,10 +307,12 @@ def reset_plugin_manager() -> None:
 BUILTIN_COMMANDS: list[click.Command] = [
     ask,
     capture,
+    check_deps,
     create,
     cleanup,
     destroy,
     exec_command,
+    extras,
     list_command,
     events,
     connect,
@@ -320,6 +327,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     snapshot,
     config,
     gc,
+    help_command,
     label,
     plugin_command,
     observe,
@@ -353,7 +361,13 @@ cli.add_command(migrate)
 
 # Register plugin commands after built-in commands but before applying CLI options.
 # This ordering allows plugins to add CLI options to other plugin commands.
-PLUGIN_COMMANDS = _register_plugin_commands()
+# Wrapped in try/except because this runs at module import time, before Click's
+# exception handling is active, so ConfigParseError would produce a stack trace.
+try:
+    PLUGIN_COMMANDS = _register_plugin_commands()
+except ConfigParseError as e:
+    e.show()
+    sys.exit(1)
 
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)

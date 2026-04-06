@@ -9,7 +9,6 @@ from loguru import logger
 from imbue.mngr.api.exec import ExecResult
 from imbue.mngr.api.exec import MultiExecResult
 from imbue.mngr.api.exec import exec_command_on_agents
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -19,6 +18,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -108,25 +108,17 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers:
-        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
-
-    # Resolve agent addresses (NAME@HOST.PROVIDER) to agent IDs for the API layer.
-    # This ensures host/provider filtering works correctly for disambiguation.
-    matches = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
-        filter_all=False,
-        target_state=None,
-        mngr_ctx=mngr_ctx,
-    )
-    resolved_identifiers = [str(m.agent_id) for m in matches]
 
     # For JSONL format, use streaming callbacks
     if output_opts.output_format == OutputFormat.JSONL:
         result = exec_command_on_agents(
             mngr_ctx=mngr_ctx,
-            agent_identifiers=resolved_identifiers,
+            agent_identifiers=agent_identifiers,
             command=opts.command_arg,
             is_all=False,
             user=opts.user,
@@ -144,7 +136,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     # For other formats, collect all results first
     result = exec_command_on_agents(
         mngr_ctx=mngr_ctx,
-        agent_identifiers=resolved_identifiers,
+        agent_identifiers=agent_identifiers,
         command=opts.command_arg,
         is_all=False,
         user=opts.user,

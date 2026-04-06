@@ -5,11 +5,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.default_command_group import DefaultCommandGroup
@@ -23,6 +23,7 @@ from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -474,7 +475,9 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     host_identifiers = mixed_host_ids + list(opts.hosts)
 
     if not agent_identifiers and not host_identifiers:
-        raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.identifiers:
+            raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
+        return
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -588,7 +591,9 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
     host_identifiers = mixed_host_ids + list(opts.hosts)
 
     if not agent_identifiers and not host_identifiers:
-        raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.identifiers:
+            raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
+        return
 
     # Resolve to hosts
     targets = _resolve_snapshot_hosts(
@@ -667,7 +672,9 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers:
-        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     if not opts.snapshots and not opts.all_snapshots:
         raise click.UsageError("Must specify --snapshot or --all-snapshots")
