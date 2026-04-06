@@ -8,20 +8,15 @@ Run with:
 """
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.testing import is_claude_installed
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
-
-def _is_claude_installed() -> bool:
-    return shutil.which("claude") is not None
-
-
-pytestmark = pytest.mark.skipif(not _is_claude_installed(), reason="Claude Code CLI is not installed")
+pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code CLI is not installed")
 
 
 @pytest.mark.acceptance
