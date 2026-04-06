@@ -153,6 +153,11 @@ class AgentTypeConfig(FrozenModel):
         default=None,
         description="Base type to inherit from (must be a plugin-provided or command type, not another custom type)",
     )
+    plugin: str | None = Field(
+        default=None,
+        description="Plugin that provides this agent type. Defaults to parent_type (if set) or the type name. "
+        "Used to skip parsing when the plugin is disabled.",
+    )
     command: CommandString | None = Field(
         default=None,
         description="Command to run for this agent type",
