@@ -101,19 +101,35 @@ function renderToolCallBlock(toolCall: ToolCall, toolResult: TranscriptEvent | n
   ]);
 }
 
+function countResolvedToolResults(
+  toolCalls: ToolCall[] | undefined,
+  toolResults: Map<string, TranscriptEvent>,
+): number {
+  if (!toolCalls) return 0;
+  let count = 0;
+  for (const tc of toolCalls) {
+    if (toolResults.has(tc.tool_call_id)) count++;
+  }
+  return count;
+}
+
 function StableAssistantMessage(): m.Component<{
   event: TranscriptEvent;
   toolResults: Map<string, TranscriptEvent>;
 }> {
   let renderedEventId: string | null = null;
+  let renderedToolResultCount = 0;
   return {
     onbeforeupdate(vnode) {
-      return vnode.attrs.event.event_id !== renderedEventId;
+      const { event, toolResults } = vnode.attrs;
+      const currentToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
+      return event.event_id !== renderedEventId || currentToolResultCount !== renderedToolResultCount;
     },
     view(vnode) {
       const event = vnode.attrs.event;
       const toolResults = vnode.attrs.toolResults;
       renderedEventId = event.event_id;
+      renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
 
       const textContent = event.text || "";
       const toolCalls = event.tool_calls || [];
