@@ -1,6 +1,7 @@
 """Tests for BaseAgent lifecycle state detection and data methods."""
 
 import json
+import shutil
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -118,7 +119,7 @@ def _create_running_agent(
 
     # Create a tmux session and run the expected command
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep {sleep_duration}'",
+        f"tmux new-session -d -s '{session_name}' -n agent 'sleep {sleep_duration}'",
         timeout_seconds=5.0,
     )
 
@@ -176,7 +177,7 @@ def test_lifecycle_state_running_unknown_agent_type_when_different_process_exist
 
     # Create a tmux session with a different command (cat waits for input indefinitely)
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'cat'",
+        f"tmux new-session -d -s '{session_name}' -n agent 'cat'",
         timeout_seconds=5.0,
     )
 
@@ -205,7 +206,7 @@ def test_lifecycle_state_done_when_no_process_in_pane(
     # Create a tmux session, then manually stop the process inside it
     # First create it with a long-running command
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}'",
+        f"tmux new-session -d -s '{session_name}' -n agent",
         timeout_seconds=5.0,
     )
 
@@ -231,7 +232,7 @@ def test_lifecycle_state_waiting_when_no_active_file(
 
     # Create a tmux session and run the expected command
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n agent 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -258,7 +259,7 @@ def test_lifecycle_state_running_when_active_file_created(
 
     # Create a tmux session and run the expected command
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n agent 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -369,11 +370,11 @@ def test_uses_paste_detection_send_returns_false_by_default(
     assert test_agent.uses_paste_detection_send() is False
 
 
-def test_tmux_target_appends_window_zero(
+def test_tmux_target_appends_agent_window_name(
     test_agent: BaseAgent,
 ) -> None:
-    """tmux_target should return session_name:0 to always target window 0."""
-    assert test_agent.tmux_target == f"{test_agent.session_name}:0"
+    """tmux_target should return session_name:agent to target the named agent window."""
+    assert test_agent.tmux_target == f"{test_agent.session_name}:agent"
 
 
 def test_get_tui_ready_indicator_returns_none_by_default(
@@ -414,29 +415,25 @@ def test_check_paste_content_handles_empty_message() -> None:
 
 
 @pytest.mark.tmux
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU timeout (coreutils)")
 def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
     test_agent: BaseAgent,
 ) -> None:
     """Test that _send_enter_and_wait_for_signal returns True when tmux wait-for signal is received."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = f"{session_name}:agent"
     wait_channel = f"mngr-submit-{session_name}"
 
-    # Create a tmux session
+    # Run a shell that signals the channel on receiving Enter (simulates the
+    # UserPromptSubmit hook). Using `read` blocks until Enter is received,
+    # then `tmux wait-for -S` fires the signal — deterministic, no timing race.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
+        f"tmux new-session -d -s '{session_name}' -n agent "
+        f"\"bash -c 'read line && tmux wait-for -S {wait_channel}'\"",
         timeout_seconds=5.0,
     )
 
     try:
-        # Signal the channel from a background process after a short delay
-        # This simulates what the UserPromptSubmit hook does
-        test_agent.host.execute_idempotent_command(
-            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
-            timeout_seconds=1.0,
-        )
-
-        # Call the method - it should receive the signal and return True
         result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
         assert result is True
     finally:
@@ -454,13 +451,13 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
     # Use a shorter timeout so the test doesn't wait the full 2 seconds
     test_agent.enter_submission_timeout_seconds = 0.2
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = f"{session_name}:agent"
     # Use a unique channel that won't be signaled
     wait_channel = f"mngr-submit-never-signaled-{session_name}"
 
-    # Create a tmux session
+    # Create a tmux session with named agent window (matching tmux_target)
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
+        f"tmux new-session -d -s '{session_name}' -n agent 'bash'",
         timeout_seconds=5.0,
     )
 

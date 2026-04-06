@@ -2795,6 +2795,7 @@ def _build_start_agent_shell_command(
     steps.append(
         f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
         f" -s {shlex.quote(session_name)}"
+        f" -n agent"
         f" -x 200 -y 50"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
@@ -2857,12 +2858,12 @@ def _build_start_agent_shell_command(
     # If we created additional windows, select the first window (the main agent)
     # before sending the agent command
     if additional_commands:
-        steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
+        steps.append(f"tmux select-window -t {shlex.quote(session_name + ':agent')}")
 
     # Send the agent command as literal keys, then Enter to execute.
-    # Target window :0 explicitly so this works even after additional windows
-    # have been created (which changes the active window).
-    agent_window = shlex.quote(session_name + ":0")
+    # Target window :agent explicitly so this works even after additional
+    # windows have been created (which changes the active window).
+    agent_window = shlex.quote(session_name + ":agent")
     steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {agent_window} Enter")
 
@@ -2880,11 +2881,11 @@ def _build_start_agent_shell_command(
     )
     steps.append(activity_printf_cmd)
 
-    # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
+    # Build the process activity monitor script (runs in the background, inspects the agent window)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote(session_name) + ':0'} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
+        f"tmux list-panes -t {shlex.quote(session_name) + ':agent'} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     )
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (

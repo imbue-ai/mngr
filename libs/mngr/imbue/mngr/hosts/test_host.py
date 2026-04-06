@@ -795,6 +795,61 @@ def test_unset_vars_applied_during_agent_start(
     host.stop_agents([agent.id])
 
 
+@pytest.mark.tmux
+def test_start_agents_agent_window_addressable_with_user_base_index_1(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+    tmp_home_dir: Path,
+) -> None:
+    """Regression: agent window must work when ~/.tmux.conf sets base-index 1."""
+    # Simulate user config that would break index-based window targets
+    (tmp_home_dir / ".tmux.conf").write_text("set -g base-index 1\nset -g pane-base-index 1\n")
+
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
+    mngr_ctx = MngrContext(
+        config=config,
+        pm=plugin_manager,
+        profile_dir=temp_profile_dir,
+        concurrency_group=active_concurrency_group,
+    )
+    provider = LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=per_host_dir,
+        mngr_ctx=mngr_ctx,
+    )
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    agent = host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("base-index-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 7654 &"),
+        ),
+    )
+
+    session_name = f"{mngr_test_prefix}{agent.name}"
+
+    # Before the fix, this raised AgentStartError: can't find window: 0
+    host.start_agents([agent.id])
+
+    try:
+        wait_for(
+            lambda: host.execute_idempotent_command(f"tmux has-session -t '{session_name}:agent'").success,
+            timeout=30.0,
+            poll_interval=0.5,
+            error_message=f"tmux window {session_name}:agent not addressable after start_agents",
+        )
+    finally:
+        host.stop_agents([agent.id])
+
+
 # =============================================================================
 # Agent Start/Stop Process Tests
 # =============================================================================

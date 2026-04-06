@@ -2399,6 +2399,18 @@ def test_host_create_host_tmux_config_creates_file(
     assert "C-t" in content
 
 
+def test_host_create_host_tmux_config_does_not_override_base_index(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """Config must not override base-index — name-based targeting makes it unnecessary."""
+    content = local_host._create_host_tmux_config().read_text()
+
+    assert "source-file" in content
+    assert "set -g base-index" not in content
+    assert "set -g pane-base-index" not in content
+
+
 # =========================================================================
 # Tests for Host._build_env_shell_command
 # =========================================================================
