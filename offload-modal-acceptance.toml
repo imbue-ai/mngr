@@ -5,7 +5,7 @@ test_timeout_secs = 60
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages && mkdir -p /etc/docker && echo '{\"registry-mirrors\": [\"https://imbue--keystone-docker-hub-mirror-q7x3p-registry.modal.run\"]}' > /etc/docker/daemon.json && /start_dockerd.sh & /wait_for_docker.sh"
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages && mkdir -p /etc/docker && echo '{\"registry-mirrors\": [\"https://imbue--keystone-docker-hub-mirror-q7x3p-registry.modal.run\"]}' > /etc/docker/daemon.json && (/start_dockerd.sh &) && /wait_for_docker.sh"
 
 [provider]
 type = "modal"
