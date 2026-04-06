@@ -147,14 +147,22 @@ def timestamp_to_datetime(timestamp: int | None) -> datetime | None:
 
 @pure
 def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """Parse ps output into children-by-ppid and comm-by-pid mappings."""
+    """Parse ps output into children-by-ppid and comm-by-pid mappings.
+
+    The comm values are normalized to basenames because ``ps -o comm=``
+    returns full executable paths on some platforms (e.g. macOS returns
+    ``/Users/.../bin/claude`` instead of ``claude``).
+    """
     children_by_ppid: dict[str, list[str]] = {}
     comm_by_pid: dict[str, str] = {}
 
     for line in ps_output.strip().split("\n"):
         line_parts = line.split()
         if len(line_parts) >= 3:
-            pid, ppid, comm = line_parts[0], line_parts[1], line_parts[2]
+            pid, ppid = line_parts[0], line_parts[1]
+            # Join remaining parts to handle paths with spaces, then extract basename
+            comm_full = " ".join(line_parts[2:])
+            comm = comm_full.rsplit("/", 1)[-1]
             comm_by_pid[pid] = comm
             if ppid not in children_by_ppid:
                 children_by_ppid[ppid] = []

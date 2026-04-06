@@ -199,6 +199,32 @@ def test_descendant_names_finds_nested_children() -> None:
     assert result == ["bash", "claude", "node"]
 
 
+def test_descendant_names_extracts_basename_from_full_paths() -> None:
+    """On macOS, ps -o comm= returns full executable paths. Verify basenames are extracted."""
+    ps_output = "200 100 /usr/bin/bash\n300 200 /Users/user/.local/bin/claude\n400 300 node\n"
+    result = get_descendant_process_names("100", ps_output)
+    assert result == ["bash", "claude", "node"]
+
+
+def test_descendant_names_handles_paths_with_spaces() -> None:
+    """Executable paths with spaces (e.g. macOS Application Support) are handled correctly."""
+    ps_output = "200 100 /Users/user/Library/Application Support/com.app/bin/claude\n"
+    result = get_descendant_process_names("100", ps_output)
+    assert result == ["claude"]
+
+
+def test_lifecycle_running_when_descendant_has_full_path() -> None:
+    """Agent is RUNNING when ps reports full path but basename matches expected process."""
+    ps_output = "200 123 /usr/bin/bash\n300 200 /Users/user/.local/bin/claude\n"
+    assert determine_lifecycle_state("0|2.1.73|123", True, "claude", ps_output) == AgentLifecycleState.RUNNING
+
+
+def test_lifecycle_waiting_when_descendant_has_full_path() -> None:
+    """Agent is WAITING when ps reports full path and active file is absent."""
+    ps_output = "200 123 /usr/bin/bash\n300 200 /Users/user/.local/bin/claude\n"
+    assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.WAITING
+
+
 # =========================================================================
 # resolve_expected_process_name tests
 # =========================================================================
