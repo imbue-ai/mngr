@@ -1,3 +1,4 @@
+import importlib.metadata
 import os
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -438,19 +440,33 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
     return venv_dir
 
 
+@pytest.fixture
+def enabled_plugins() -> frozenset[str]:
+    """Return the set of plugin entry point names to enable for this test.
+
+    Defaults to the BASIC-tier plugins (claude, opencode, pi_coding,
+    llm, modal, tutor).  Override in test files or local conftest.py
+    for different configurations::
+
+        @pytest.fixture
+        def enabled_plugins():
+            return frozenset()
+    """
+    return get_independent_entry_point_names()
+
+
 @pytest.fixture(autouse=True)
-def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with mngr hookspecs and local backend only.
+def plugin_manager(
+    enabled_plugins: frozenset[str],
+) -> Generator[pluggy.PluginManager, None, None]:
+    """Create a plugin manager with all external plugins disabled by default.
 
-    This fixture only loads the local provider backend, not modal. This ensures
-    tests don't depend on Modal credentials being available.
+    Discovers all entry-point plugins and blocks everything except those
+    listed in ``enabled_plugins``. Tests that need specific plugins
+    override the ``enabled_plugins`` fixture.
 
-    Also loads external plugins via setuptools entry points to match the behavior
-    of load_config(). This ensures that external plugins like mngr_opencode are
-    discovered and registered.
-
-    This fixture also resets the module-level plugin manager singleton to ensure
-    test isolation.
+    Backend loading uses ``load_local_backend_only`` to avoid docker/modal
+    SDK imports that would trigger resource guards.
     """
     # Reset the module-level plugin manager singleton before each test
     imbue.mngr.main.reset_plugin_manager()
@@ -459,13 +475,19 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     reset_backend_registry()
     reset_agent_registry()
 
+    # Discover all entry-point plugins and block everything except enabled_plugins
+    all_eps = {ep.name for ep in importlib.metadata.entry_points(group="mngr")}
+    to_block = all_eps - enabled_plugins
+
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
+    for name in to_block:
+        pm.set_blocked(name)
     pm.load_setuptools_entrypoints("mngr")
 
-    # Only register the local backend, not modal
-    # This prevents tests from depending on Modal credentials
-    # This also loads the provider configs since backends and configs are registered together
+    # Only register the local backend, not modal or docker.
+    # This prevents tests from depending on Modal credentials or Docker daemon.
+    # This also loads the provider configs since backends and configs are registered together.
     load_local_backend_only(pm)
 
     # Load other registries (agents)
