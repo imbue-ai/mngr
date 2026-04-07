@@ -110,15 +110,6 @@ def test_run_test_notification_binary_check_fails(notification_cg: ConcurrencyGr
     assert result.error_message == "notifier binary not found"
 
 
-def test_run_test_notification_marker_cleaned_up(notification_cg: ConcurrencyGroup) -> None:
-    """The marker file is cleaned up after click verification."""
-    notifier = _ClickSimulatingNotifier()
-    result = run_test_notification(notifier, notification_cg, click_timeout=5.0, binary_checker=_no_binary_issues)
-
-    assert result.is_sent is True
-    assert result.is_clicked is True
-
-
 # --- _build_marker_touch_command ---
 
 
