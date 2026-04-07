@@ -8,17 +8,23 @@ from contextlib import contextmanager
 from urwid.display.raw import Screen
 
 
-def has_interactive_terminal() -> bool:
+def has_interactive_terminal(
+    *,
+    stdin_is_tty: bool | None = None,
+    tty_path: str = "/dev/tty",
+) -> bool:
     """Return True if a real terminal is available for interactive TUI input.
 
-    Checks sys.stdin first, then falls back to probing /dev/tty.  This
+    Checks sys.stdin first, then falls back to probing *tty_path*.  This
     handles the common case where stdin is piped (e.g. via ``uv run``)
     but a controlling terminal still exists.
+
+    Parameters are exposed for testing; callers should use the defaults.
     """
-    if sys.stdin.isatty():
+    if stdin_is_tty if stdin_is_tty is not None else sys.stdin.isatty():
         return True
     try:
-        fd = os.open("/dev/tty", os.O_RDONLY)
+        fd = os.open(tty_path, os.O_RDONLY)
         os.close(fd)
         return True
     except OSError:
