@@ -7,6 +7,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.events import parse_event_line
 from imbue.mngr.api.observe import get_agent_states_events_path
 from imbue.mngr.api.observe import get_default_events_base_dir
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.notifier import Notifier
@@ -89,6 +90,7 @@ def _process_events(
         agent_name = record.data.get("agent_name", "unknown")
         agent_id = record.data.get("agent_id", "unknown")
         logger.info("{} ({}): RUNNING -> WAITING", agent_name, agent_id)
+        write_human_line("{} is now WAITING -- sending notification", agent_name)
 
         title = "Agent waiting"
         message = f"{agent_name} is waiting for input"
