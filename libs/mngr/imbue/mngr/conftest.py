@@ -637,7 +637,7 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
         return
 
     try:
-        client = docker.from_env()
+        client = create_docker_client()
     except docker.errors.DockerException:
         return
 
