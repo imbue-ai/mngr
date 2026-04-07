@@ -86,7 +86,8 @@ def _make_agent(
         host=host,
     )
     if isinstance(agent, _StoppedWithPaneContent) and pane_content is not _UNSET:
-        agent._pane_content = pane_content  # type: ignore[assignment]
+        assert isinstance(pane_content, str) or pane_content is None
+        agent._pane_content = pane_content
     return agent
 
 

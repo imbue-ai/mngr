@@ -132,6 +132,25 @@ def test_stream_output_raises_when_empty_file(
         list(agent.stream_output())
 
 
+def test_stream_output_raises_when_stdout_file_missing(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """stream_output raises when the stdout file is never created (agent exits immediately).
+
+    Creates only stderr.log (empty) to avoid triggering the tmux pane capture
+    fallback, while still exercising the _wait_for_stdout_file -> _raise_no_output_error path.
+    """
+    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "stderr.log").write_text("")
+
+    with pytest.raises(MngrError, match="no details available"):
+        list(agent.stream_output())
+
+
 def test_stream_output_surfaces_stderr_on_error(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
