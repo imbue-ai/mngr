@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
+from imbue.mngr_claude.headless_claude_agent import _STARTUP_GRACE_SECONDS
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 
 
@@ -54,9 +56,17 @@ def _make_headless_agent(
     return agent, host
 
 
+def _patch_agent_lifecycle_state(
+    monkeypatch: pytest.MonkeyPatch,
+    state: AgentLifecycleState = AgentLifecycleState.STOPPED,
+) -> None:
+    """Patch HeadlessClaude.get_lifecycle_state to return the given state."""
+    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: state)
+
+
 def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch HeadlessClaude.get_lifecycle_state to return STOPPED so stream_output terminates."""
-    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
+    _patch_agent_lifecycle_state(monkeypatch, AgentLifecycleState.STOPPED)
 
 
 def _write_fake_agent_output(
@@ -414,6 +424,80 @@ def test_stream_output_falls_back_to_pane_capture(
             list(agent.stream_output())
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], check=False)
+
+
+# =============================================================================
+# Tests for _stdout_ready_or_confirmed_exit (send-keys race handling)
+# =============================================================================
+
+
+def test_stdout_ready_returns_true_when_stdout_exists(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should return True immediately when stdout.jsonl exists."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    _write_fake_agent_output(host, agent, stdout="some output\n")
+
+    assert agent._stdout_ready_or_confirmed_exit(time.monotonic()) is True
+
+
+def test_stdout_ready_returns_false_when_agent_still_running(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should return False when agent is still running and stdout doesn't exist."""
+    _patch_agent_lifecycle_state(monkeypatch, AgentLifecycleState.RUNNING)
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+
+    assert agent._stdout_ready_or_confirmed_exit(time.monotonic()) is False
+
+
+def test_stdout_ready_returns_true_when_stderr_exists_without_stdout(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should return True when agent is done and stderr exists (command ran, real failure)."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    # Write only stderr, not stdout -- simulates command running but claude failing
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "stderr.log").write_text("some error\n")
+
+    assert agent._stdout_ready_or_confirmed_exit(time.monotonic()) is True
+
+
+def test_stdout_ready_returns_false_during_grace_period_with_no_files(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should return False when agent appears done but no redirect files exist (race condition)."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+
+    # Start time is now, so we are within the grace period
+    assert agent._stdout_ready_or_confirmed_exit(time.monotonic()) is False
+
+
+def test_stdout_ready_returns_true_after_grace_period_with_no_files(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should return True when agent appears done, no files, and grace period has expired."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+
+    # Pretend we started well before the grace period
+    start = time.monotonic() - _STARTUP_GRACE_SECONDS - 1.0
+    assert agent._stdout_ready_or_confirmed_exit(start) is True
 
 
 # =============================================================================
