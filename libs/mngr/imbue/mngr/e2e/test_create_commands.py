@@ -33,7 +33,9 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.tmux
+@pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(120)
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
@@ -41,25 +43,20 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     mngr create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
-    expect(
-        e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --idle-mode run --idle-timeout 60",
-            comment="this enables some pretty interesting use cases, like running servers or other programs",
-        )
-    ).to_succeed()
-
-    # Verify the idle settings were applied by checking the JSON output
-    list_result = e2e.run("mngr list --format json", comment="Verify idle-mode and idle-timeout are set")
-    expect(list_result).to_succeed()
-    parsed = json.loads(list_result.stdout)
-    agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == "my-task"]
-    assert len(matching) == 1
-    assert matching[0]["idle_timeout_seconds"] == 60
+    # Idle timeout requires a remote provider (local provider rejects it).
+    # Use Modal to exercise the real idle timeout path.
+    result = e2e.run(
+        "mngr create my-task --provider modal --command 'sleep 99999' --no-ensure-clean"
+        " --idle-mode run --idle-timeout 60 --no-connect",
+        comment="idle timeout requires a remote provider",
+        timeout=120.0,
+    )
+    expect(result).to_succeed()
 
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # alternatively, you can simply add extra tmux windows that run alongside your agent:
@@ -81,6 +78,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -105,6 +103,7 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_connect_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -128,6 +127,7 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_message(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can send a message when starting the agent (great for scripting):

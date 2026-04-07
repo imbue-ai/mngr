@@ -184,6 +184,18 @@ class ConflictMode(UpperCaseStrEnum):
     ASK = auto()
 
 
+class PluginTier(UpperCaseStrEnum):
+    """Whether a plugin works standalone or depends on another plugin.
+
+    INDEPENDENT: works out of the box (may have a signal for binary detection).
+    DEPENDENT: requires another plugin's signal to be relevant (e.g.,
+               fixme_fairy depends on claude).
+    """
+
+    INDEPENDENT = auto()
+    DEPENDENT = auto()
+
+
 # === ID Types ===
 
 

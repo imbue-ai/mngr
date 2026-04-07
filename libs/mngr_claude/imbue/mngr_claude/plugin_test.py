@@ -552,15 +552,20 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 2
+    assert len(hooks) == 3
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
     assert "touch" in hooks[0]["command"]
     assert "session_started" in hooks[0]["command"]
 
-    # Second hook: tracks current session ID for session replacement detection
-    session_id_hook = hooks[1]["command"]
+    # Second hook: outputs the base branch so the agent knows it
+    assert hooks[1]["type"] == "command"
+    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+    assert "base branch" in hooks[1]["command"].lower()
+
+    # Third hook: tracks current session ID for session replacement detection
+    session_id_hook = hooks[2]["command"]
     assert hooks[1]["type"] == "command"
     assert "claude_session_id" in session_id_hook
     assert "session_id" in session_id_hook
@@ -2497,13 +2502,14 @@ def test_on_after_provisioning_raises_when_session_not_found(
 def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Session lookup should find sessions in ~/.claude/ even when CLAUDE_CONFIG_DIR points elsewhere."""
+    """Session lookup should find sessions via ORIGINAL_CLAUDE_CONFIG_DIR even when CLAUDE_CONFIG_DIR points elsewhere."""
     config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
-    # Session lives under ~/.claude/ (HOME is already a temp dir via autouse fixture)
-    project_dir = Path.home() / ".claude" / "projects" / "test-project"
+    # Session lives under the user-scope config dir (HOME is already a temp dir via autouse fixture)
+    user_claude_dir = Path.home() / ".claude"
+    project_dir = user_claude_dir / "projects" / "test-project"
     project_dir.mkdir(parents=True)
     target_session_id = "session-in-home-dir"
     (project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
@@ -2520,7 +2526,15 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
         plugin_data={"adopt_session": (target_session_id,)},
     )
 
-    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir)}):
+    # ORIGINAL_CLAUDE_CONFIG_DIR points to the user's original config dir, so
+    # the session search falls back there even though CLAUDE_CONFIG_DIR is the agent's.
+    with patch.dict(
+        "os.environ",
+        {
+            "CLAUDE_CONFIG_DIR": str(agent_config_dir),
+            "ORIGINAL_CLAUDE_CONFIG_DIR": str(user_claude_dir),
+        },
+    ):
         agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
         agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 

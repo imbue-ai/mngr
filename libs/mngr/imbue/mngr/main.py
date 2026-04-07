@@ -12,6 +12,7 @@ from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.ask import ask
 from imbue.mngr.cli.capture import capture
+from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.cli.cleanup import cleanup
 from imbue.mngr.cli.clone import clone
 from imbue.mngr.cli.common_opts import TCommand
@@ -25,6 +26,7 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
+from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
@@ -305,10 +307,12 @@ def reset_plugin_manager() -> None:
 BUILTIN_COMMANDS: list[click.Command] = [
     ask,
     capture,
+    check_deps,
     create,
     cleanup,
     destroy,
     exec_command,
+    extras,
     list_command,
     events,
     connect,
