@@ -94,6 +94,26 @@ class _AlwaysFinishedHeadlessClaude(HeadlessClaude):
         return True
 
 
+class _CreatesFileOnSecondPollAgent(_AlwaysFinishedHeadlessClaude):
+    """Simulates a file appearing mid-poll during the grace period.
+
+    On the first _file_exists_on_host call for the stdout path, returns
+    False (file doesn't exist yet). On the second call, creates the file
+    then returns the real result. This proves the poller checked at least
+    once without finding the file, then found it on a subsequent check.
+    """
+
+    _stdout_poll_count: int = 0
+
+    def _file_exists_on_host(self, path: Path) -> bool:
+        if path == self._get_stdout_path():
+            self._stdout_poll_count += 1
+            if self._stdout_poll_count >= 2:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+        return super()._file_exists_on_host(path)
+
+
 # =============================================================================
 # Tests for HeadlessClaude overrides
 # =============================================================================
@@ -454,21 +474,9 @@ def test_grace_period_ignores_lifecycle_state(
     to create the file on the second poll -- proving the poller checked at
     least once without finding it, then found it on a subsequent check.
     """
-    agent, _host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
+    agent, _host = _make_headless_agent(local_provider, tmp_path, agent_cls=_CreatesFileOnSecondPollAgent)
     stdout_path = agent._get_stdout_path()
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
-    poll_count = 0
-    original_file_exists = agent._file_exists_on_host
-
-    def _create_file_on_second_poll(path: Path) -> bool:
-        nonlocal poll_count
-        poll_count += 1
-        if poll_count >= 2 and path == stdout_path:
-            stdout_path.write_text("")
-        return original_file_exists(path)
-
-    agent._file_exists_on_host = _create_file_on_second_poll  # type: ignore[assignment]
     result = agent._wait_for_stdout_file(stdout_path)
 
     assert result is True
