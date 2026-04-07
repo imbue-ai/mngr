@@ -31,6 +31,7 @@ import os
 import re
 import struct
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -100,11 +101,10 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
         raise ValueError("Credential pattern not found in any bundle chunk")
 
-    except Exception as exc:
-        click.echo(
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        sys.stderr.write(
             f"Warning: could not extract api credentials from Telegram Web "
-            f"bundle ({exc}), using known defaults",
-            err=True,
+            f"bundle ({exc}), using known defaults\n"
         )
         return 2496, "8da85b0d5bfe62527e5b244c209159c3"
 
@@ -149,7 +149,7 @@ def _get_string_session() -> str:
 
     # Option 3: latchkey dump file
     if LATCHKEY_DUMP_PATH.exists():
-        click.echo(f"Reading credentials from {LATCHKEY_DUMP_PATH}", err=True)
+        sys.stderr.write(f"Reading credentials from {LATCHKEY_DUMP_PATH}\n")
         dump = json.loads(LATCHKEY_DUMP_PATH.read_text())
         ls = dump.get("localStorage", {})
         dc_str = ls.get("dc")
@@ -185,7 +185,7 @@ async def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str
     """
     session_str = _get_string_session()
     api_id, api_hash = _fetch_telegram_web_api_credentials()
-    click.echo(f"Using api_id={api_id}", err=True)
+    sys.stderr.write(f"Using api_id={api_id}\n")
 
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.connect()
@@ -198,7 +198,7 @@ async def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str
             )
 
         me = await client.get_me()
-        click.echo(f"Connected as: {me.first_name} (id={me.id})", err=True)
+        sys.stderr.write(f"Connected as: {me.first_name} (id={me.id})\n")
 
         botfather = await client.get_entity("@BotFather")
 
@@ -272,9 +272,9 @@ def main(bot_display_name: str, bot_username: str) -> None:
     except (TelegramCredentialError, BotCreationError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Print both values to stdout (all other output goes to stderr via click)
-    click.echo(f"bot_token={bot_token}")
-    click.echo(f"bot_username={actual_username}")
+    # Print both values to stdout (all other output goes to stderr)
+    sys.stdout.write(f"bot_token={bot_token}\n")
+    sys.stdout.write(f"bot_username={actual_username}\n")
 
 
 if __name__ == "__main__":

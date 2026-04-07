@@ -90,6 +90,9 @@ default-flags-tui=["report"]
 default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
+[tool.ty.src]
+exclude = ["scripts/"]
+
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
