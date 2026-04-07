@@ -795,11 +795,21 @@ def _has_api_credentials_available(
     return False
 
 
-def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+def _check_settings_local_gitignored(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    require_repo_rule: bool = False,
+) -> None:
     """Verify .claude/settings.local.json is gitignored in the given repo path.
 
     Raises PluginMngrError if the file is not gitignored. Silently returns
     if the path is not a git repository.
+
+    When require_repo_rule is True, also verifies that the ignore rule comes
+    from the repository itself (not the user's global gitignore). This is
+    important for preflight checks: a global gitignore entry won't exist on
+    remote hosts, so the provisioning check would fail after expensive host
+    creation.
     """
     settings_relative = Path(".claude") / "settings.local.json"
 
@@ -822,6 +832,22 @@ def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path)
             "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
             f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
         )
+
+    if require_repo_rule:
+        # Re-check with global excludes disabled to see if the rule is from
+        # the repo itself. If only the global gitignore covers it, the remote
+        # host (which has no global gitignore) will fail during provisioning.
+        repo_only_result = host.execute_idempotent_command(
+            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(settings_relative))}",
+            cwd=repo_path,
+            timeout_seconds=5.0,
+        )
+        if not repo_only_result.success:
+            raise PluginMngrError(
+                f".claude/settings.local.json is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
+                "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
+                "Add '.claude/settings.local.json' to your repository's .gitignore and try again."
+            )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -936,8 +962,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         mngr writes readiness hooks to this file during provisioning. If it's not
         gitignored, it would appear as an unstaged change. Checking early avoids
         wasting time on host creation and work_dir setup before surfacing this error.
+
+        Uses require_repo_rule=True so that rules only in the user's global
+        gitignore are rejected -- remote hosts won't have the global config.
         """
-        _check_settings_local_gitignored(source_host, source_path)
+        _check_settings_local_gitignored(source_host, source_path, require_repo_rule=True)
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.

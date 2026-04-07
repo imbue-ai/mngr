@@ -805,6 +805,51 @@ def test_preflight_check_skips_when_not_git_repo(
     )
 
 
+def test_preflight_check_raises_when_only_global_gitignore(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should raise when .claude/settings.local.json is only in global gitignore.
+
+    Remote hosts don't have the user's global gitignore, so a rule that only
+    lives in the global config would cause provisioning to fail after expensive
+    host creation.
+    """
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    init_git_repo(source_dir, initial_commit=False)
+
+    # Set up a "global" gitignore that covers the file, but no repo .gitignore
+    global_gitignore = tmp_path / "global_gitignore"
+    global_gitignore.write_text(".claude/settings.local.json\n")
+    subprocess.run(
+        ["git", "config", "core.excludesFile", str(global_gitignore)],
+        cwd=source_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    # Verify the file IS ignored (via global)
+    check = subprocess.run(
+        ["git", "check-ignore", "-q", ".claude/settings.local.json"],
+        cwd=source_dir,
+        capture_output=True,
+    )
+    assert check.returncode == 0, "File should be ignored via global gitignore"
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    with pytest.raises(PluginMngrError, match="only gitignored via your global gitignore"):
+        ClaudeAgent.preflight_check(
+            source_host=host,
+            source_path=source_dir,
+            agent_options=options,
+            agent_config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
 def test_configure_readiness_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
