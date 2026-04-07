@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime
 from datetime import timezone
@@ -201,6 +202,20 @@ def test_get_docker_context_host_returns_none_when_config_malformed(
     config_dir.mkdir()
     (config_dir / "config.json").write_text("not json")
     monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_context_meta_corrupted(
+    fake_docker_config: Path,
+) -> None:
+    """Corrupted context meta.json returns None (the Docker SDK raises bare Exception)."""
+    # Write config pointing to a non-default context
+    (fake_docker_config / "config.json").write_text('{"currentContext": "bad-ctx"}')
+    # Create a corrupted meta.json for that context
+    ctx_id = hashlib.sha256(b"bad-ctx").hexdigest()
+    meta_dir = fake_docker_config / "contexts" / "meta" / ctx_id
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "meta.json").write_text("not json")
     assert _get_docker_context_host() is None
 
 

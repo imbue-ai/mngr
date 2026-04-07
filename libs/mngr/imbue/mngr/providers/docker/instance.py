@@ -179,8 +179,10 @@ def _get_docker_context_host() -> str | None:
     """
     try:
         ctx = docker.context.ContextAPI.get_current_context()
-    except (OSError, json.JSONDecodeError):
-        # Config file missing, unreadable, or malformed.
+    except Exception:
+        # The Docker SDK raises bare ``Exception`` when context metadata is
+        # corrupted, so we must catch broadly here.  This is a best-effort
+        # lookup; any failure falls back to ``docker.from_env()``.
         return None
 
     if ctx is None or ctx.Name == "default":
