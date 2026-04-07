@@ -120,6 +120,13 @@ def test_prevent_functools_partial() -> None:
     rc.check_functools_partial(_DIR, snapshot(0))
 
 
+# --- Hardcoded paths ---
+
+
+def test_prevent_hardcoded_claude_dir() -> None:
+    rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
+
+
 # --- Naming conventions ---
 
 
