@@ -16,6 +16,8 @@ End-to-end flow:
 
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +34,27 @@ _ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 _MARKER_PATH = "/tmp/schedule-test-marker"
 
 
+def _create_temp_git_repo() -> Path:
+    """Create a minimal git repo in a temp directory for subprocess cwd."""
+    repo_dir = Path(tempfile.mkdtemp(prefix="schedule-test-"))
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    (repo_dir / "README").write_text("test repo for schedule release tests\n")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env={
+            **subprocess.os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@test",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@test",
+        },
+    )
+    return repo_dir
+
+
 @pytest.mark.release
 @pytest.mark.timeout(900)
 def test_schedule_run_and_remove_modal_trigger() -> None:
@@ -40,6 +63,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
     agent_name = "test-schedule-host"
     env = build_subprocess_env()
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
+    repo_dir = _create_temp_git_repo()
 
     try:
         # Step 1: Create a long-running agent on Modal as a test host.
@@ -54,8 +78,6 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
                 "sleep",
                 "--no-connect",
                 "--no-ensure-clean",
-                "--context",
-                "/tmp",
                 "--provider",
                 "modal",
                 "--headless",
@@ -67,6 +89,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             text=True,
             timeout=300,
             env=env,
+            cwd=repo_dir,
         )
         assert create_result.returncode == 0, (
             f"mngr create failed\nstdout: {create_result.stdout}\nstderr: {create_result.stderr}"
