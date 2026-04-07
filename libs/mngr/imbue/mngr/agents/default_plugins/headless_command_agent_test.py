@@ -10,10 +10,8 @@ import pytest
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommand
 from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommandConfig
-from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -39,8 +37,7 @@ def _make_headless_command_agent(
     host: Host,
     mngr_ctx: MngrContext,
     tmp_path: Path,
-    agent_config: HeadlessCommandConfig | AgentTypeConfig | None = None,
-    # Use the always-stopped subclass by default for tests that call stream_output
+    agent_config: HeadlessCommandConfig | None = None,
     is_always_stopped: bool = False,
 ) -> HeadlessCommand:
     """Create a HeadlessCommand agent with a real local host for testing."""
@@ -74,49 +71,6 @@ def _write_fake_agent_output(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stdout.log").write_text(stdout)
     (agent_dir / "stderr.log").write_text(stderr)
-
-
-# =============================================================================
-# Tests for HeadlessCommand overrides
-# =============================================================================
-
-
-def test_preflight_send_message_raises(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent._preflight_send_message("some-target")
-
-
-def test_send_message_raises(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent.send_message("hello")
-
-
-def test_uses_paste_detection_send_returns_false(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.uses_paste_detection_send() is False
-
-
-def test_get_tui_ready_indicator_returns_none(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.get_tui_ready_indicator() is None
 
 
 # =============================================================================

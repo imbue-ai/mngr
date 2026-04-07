@@ -8,19 +8,15 @@ from typing import Never
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
+from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
+from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_until
-
-_TAIL_POLL_INTERVAL: float = 0.05
-_TAIL_POLL_TIMEOUT: float = 300.0
 
 
 class _RawStreamTailState(MutableModel):
@@ -56,8 +52,8 @@ class _RawStreamTailState(MutableModel):
         while not self.is_finished():
             poll_until(
                 self._has_new_data_or_finished,
-                timeout=_TAIL_POLL_TIMEOUT,
-                poll_interval=_TAIL_POLL_INTERVAL,
+                timeout=TAIL_POLL_TIMEOUT,
+                poll_interval=TAIL_POLL_INTERVAL,
             )
 
             new_content = self._read_new_content()
@@ -74,26 +70,13 @@ class HeadlessCommandConfig(AgentTypeConfig):
     """Config for the headless_command agent type."""
 
 
-class HeadlessCommand(BaseAgent[HeadlessCommandConfig], StreamingHeadlessAgentMixin):
+class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
     """Agent type that runs an arbitrary command headlessly and captures its output.
 
     Redirects stdout/stderr to files so callers can read output programmatically
     via stream_output(). Does not support interactive messages, paste detection,
     or TUI readiness checking.
     """
-
-    def _preflight_send_message(self, tmux_target: str) -> None:
-        """Headless command agents do not accept interactive messages."""
-        raise SendMessageError(
-            str(self.name),
-            "Headless command agents do not accept interactive messages.",
-        )
-
-    def uses_paste_detection_send(self) -> bool:
-        return False
-
-    def get_tui_ready_indicator(self) -> str | None:
-        return None
 
     def assemble_command(
         self,
@@ -112,29 +95,6 @@ class HeadlessCommand(BaseAgent[HeadlessCommandConfig], StreamingHeadlessAgentMi
 
     def _get_stderr_path(self) -> Path:
         return self._get_agent_dir() / "stderr.log"
-
-    def _is_agent_finished(self) -> bool:
-        state = self.get_lifecycle_state()
-        return state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE)
-
-    def _file_exists_on_host(self, path: Path) -> bool:
-        return self.host.get_file_mtime(path) is not None
-
-    def _wait_for_stdout_file(self, stdout_path: Path) -> bool:
-        """Wait for the stdout file to be created or the agent to exit.
-
-        Returns True if the file exists, False if the agent exited without creating it.
-        """
-        poll_until(
-            lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
-            timeout=_TAIL_POLL_TIMEOUT,
-            poll_interval=_TAIL_POLL_INTERVAL,
-        )
-        return self._file_exists_on_host(stdout_path)
-
-    def output(self) -> str:
-        """Wait for the agent to finish and return its complete output."""
-        return "".join(self.stream_output())
 
     def _raise_no_output_error(self) -> Never:
         """Raise MngrError collecting all available error detail.
@@ -162,24 +122,6 @@ class HeadlessCommand(BaseAgent[HeadlessCommandConfig], StreamingHeadlessAgentMi
             detail = "\n".join(parts)
             raise MngrError(f"Command exited without producing output:\n{detail}")
         raise MngrError("Command exited without producing output (no details available)")
-
-    def _get_stderr_error_message(self) -> str | None:
-        """Read stderr.log for error output from the command."""
-        stderr_path = self._get_stderr_path()
-        try:
-            content = self.host.read_text_file(stderr_path)
-        except FileNotFoundError:
-            return None
-        stripped = content.strip()
-        return stripped if stripped else None
-
-    def _get_pane_error_message(self) -> str | None:
-        """Capture the tmux pane content as a last-resort error source."""
-        content = self.capture_pane_content()
-        if content is None:
-            return None
-        stripped = content.strip()
-        return stripped if stripped else None
 
     def stream_output(self) -> Iterator[str]:
         """Stream raw text output as it becomes available.
