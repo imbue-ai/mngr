@@ -33,6 +33,7 @@ from imbue.mngr.config.pre_readers import load_project_config
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
+from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.primitives import AgentTypeName
@@ -302,29 +303,28 @@ def _parse_providers(
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     Provider blocks whose plugin is disabled are silently skipped.
-    Provider blocks with is_enabled=false are also skipped when the backend
-    plugin is not installed (unknown backend), since there is no need to resolve
-    the backend for a disabled provider.
+    Provider blocks with is_enabled=false whose backend plugin is not installed
+    are also skipped, since there is no config class to resolve for a disabled
+    provider.  When the backend IS installed, is_enabled=false is preserved in
+    the parsed config so that config layer merging works correctly.
     """
     providers: dict[ProviderInstanceName, ProviderInstanceConfig] = {}
+    known_backends = set(list_registered_provider_backend_names())
 
     for name, raw_config in raw_providers.items():
         backend = raw_config.get("backend") or name
         plugin = raw_config.get("plugin") or backend
         if plugin in disabled_plugins:
             continue
+        # Skip disabled providers whose backend plugin is not installed.
+        # We cannot skip unconditionally because is_enabled=false must be
+        # preserved in the parsed config when the backend IS installed,
+        # otherwise config layer merging would lose the override.
+        if raw_config.get("is_enabled") is False and backend not in known_backends:
+            continue
         try:
             config_class = get_provider_config_class(backend)
         except UnknownBackendError as e:
-            # If the provider is explicitly disabled via is_enabled=false, skip
-            # silently.  This allows config files to define provider blocks for
-            # backends whose plugin is not installed, as long as the provider is
-            # disabled.  We check here (inside the except) rather than before
-            # the try so that is_enabled=false is still preserved in the parsed
-            # config when the backend plugin IS installed -- enabling correct
-            # merge behaviour across config layers.
-            if raw_config.get("is_enabled") is False:
-                continue
             msg = f"Provider '{name}' references unknown backend '{backend}'."
             if backend in disabled_plugins:
                 msg += (
