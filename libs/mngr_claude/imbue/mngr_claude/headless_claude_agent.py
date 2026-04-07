@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,12 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
 _TAIL_POLL_INTERVAL: float = 0.05
 _TAIL_POLL_TIMEOUT: float = 300.0
+# Grace period before trusting the lifecycle state after starting an agent.
+# There is a race between tmux send-keys delivering the command and the shell
+# executing it. During this window the pane shows a running shell with no
+# claude descendant, which makes the lifecycle check return DONE even though
+# the command hasn't been processed yet.
+_STARTUP_GRACE_SECONDS: float = 10.0
 
 
 @pure
@@ -297,13 +304,44 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         """Check if a file exists on the agent's host (works for both local and remote)."""
         return self.host.get_file_mtime(path) is not None
 
+    def _stdout_ready_or_confirmed_exit(self, start: float) -> bool:
+        """Check if stdout exists or the agent has genuinely exited.
+
+        Distinguishes a real DONE (command ran, claude exited) from a
+        false-positive DONE caused by the shell not having processed
+        send-keys yet.
+
+        The shell redirect creates both stdout.jsonl and stderr.log before
+        invoking claude. If the lifecycle reports DONE but neither redirect
+        file exists, the command hasn't started -- this is a
+        send-keys/lifecycle race. A grace period caps how long we tolerate
+        this before reporting a failure.
+        """
+        if self._file_exists_on_host(self._get_stdout_path()):
+            return True
+        if not self._is_agent_finished():
+            return False
+        # Agent appears finished but stdout doesn't exist.
+        # If stderr.log exists the command ran (real failure).
+        if self._file_exists_on_host(self._get_stderr_path()):
+            return True
+        # Neither redirect file exists -- shell hasn't processed send-keys.
+        return time.monotonic() - start >= _STARTUP_GRACE_SECONDS
+
     def _wait_for_stdout_file(self, stdout_path: Path) -> bool:
         """Wait for the stdout file to be created or the agent to exit.
 
         Returns True if the file exists, False if the agent exited without creating it.
+
+        There is a race between tmux send-keys delivering the command and the
+        shell executing it. During this window the pane's shell has no claude
+        descendant, so the lifecycle check reports DONE even though the command
+        hasn't been processed yet. See _stdout_ready_or_confirmed_exit for
+        how this is handled.
         """
+        start = time.monotonic()
         poll_until(
-            lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
+            lambda: self._stdout_ready_or_confirmed_exit(start),
             timeout=_TAIL_POLL_TIMEOUT,
             poll_interval=_TAIL_POLL_INTERVAL,
         )
