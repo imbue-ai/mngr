@@ -12,6 +12,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr_notifications.notifier import LinuxNotifier
 from imbue.mngr_notifications.notifier import MacOSNotifier
 from imbue.mngr_notifications.notifier import Notifier
 
@@ -47,10 +48,12 @@ def check_notifier_binary(notifier: Notifier) -> str | None:
             return "terminal-notifier not found; install with: brew install terminal-notifier"
         return None
 
-    # LinuxNotifier uses notify-send
-    if shutil.which("notify-send") is None:
-        return "notify-send not found; install libnotify to enable notifications"
-    return None
+    if isinstance(notifier, LinuxNotifier):
+        if shutil.which("notify-send") is None:
+            return "notify-send not found; install libnotify to enable notifications"
+        return None
+
+    return f"Unsupported notifier type: {type(notifier).__name__}"
 
 
 def run_test_notification(
