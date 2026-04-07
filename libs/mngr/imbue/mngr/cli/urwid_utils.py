@@ -21,7 +21,8 @@ def has_interactive_terminal(
 
     Parameters are exposed for testing; callers should use the defaults.
     """
-    if stdin_is_tty if stdin_is_tty is not None else sys.stdin.isatty():
+    stdin_check = stdin_is_tty if stdin_is_tty is not None else sys.stdin.isatty()
+    if stdin_check:
         return True
     try:
         fd = os.open(tty_path, os.O_RDONLY)
