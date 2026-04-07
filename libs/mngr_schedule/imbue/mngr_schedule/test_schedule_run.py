@@ -85,12 +85,15 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"schedule run failed\nstdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 
-        # Step 4: Verify the echo output proves the command ran.
-        # The echo agent passes "hello-from-schedule-run" through /bin/echo,
-        # which appears in the captured output returned by fn.remote().
-        assert "hello-from-schedule-run" in run_result.stdout, (
-            f"Expected echo output 'hello-from-schedule-run' in stdout. "
-            f"The trigger may not have actually executed the command.\n"
+        # Step 4: Verify the mngr create output proves the trigger ran.
+        # The output is returned via fn.remote() from run_scheduled_trigger().
+        # mngr create --no-connect prints "Starting agent <name>" on success.
+        # The agent command (echo) runs asynchronously in tmux and its output
+        # is not captured by mngr create. See PR description for discussion
+        # of stronger validation approaches.
+        assert "Starting agent" in run_result.stdout, (
+            f"Expected 'Starting agent' in output (proves mngr create ran "
+            f"inside the container).\n"
             f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 
