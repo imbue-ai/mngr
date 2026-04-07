@@ -680,7 +680,7 @@ class ForwardingCtx:
             access_app = self.ops.get_access_app_by_domain(hostname)
             if access_app is not None:
                 self.ops.delete_access_app(access_app["id"])
-        except (CloudflareApiError, Exception) as exc:
+        except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
 
     def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
@@ -693,13 +693,13 @@ class ForwardingCtx:
             access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}")
             for cf_policy in policy_to_cf_rules(policy):
                 self.ops.create_access_policy(access_app["id"], cf_policy)
-        except (CloudflareApiError, Exception) as exc:
+        except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to apply Access policy for %s: %s", hostname, exc)
 
     def _kv_delete_safe(self, key: str) -> None:
         try:
             self.ops.kv_delete(key)
-        except (CloudflareApiError, Exception) as exc:
+        except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete KV entry for %s: %s", key, exc)
 
 
