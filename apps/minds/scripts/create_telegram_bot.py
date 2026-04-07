@@ -1,5 +1,8 @@
 """Create a Telegram bot via BotFather using credentials from latchkey.
 
+Requires the 'scripts' optional dependency group:
+    uv pip install -e 'apps/minds[scripts]'
+
 Usage:
     python scripts/create_telegram_bot.py <bot_display_name> <bot_username>
 
