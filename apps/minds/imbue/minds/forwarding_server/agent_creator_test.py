@@ -5,6 +5,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
@@ -12,6 +13,11 @@ from imbue.minds.forwarding_server.agent_creator import checkout_branch
 from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import _build_mngr_create_command
 from imbue.minds.forwarding_server.agent_creator import _is_local_path
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareSecret
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareUsername
+from imbue.minds.forwarding_server.cloudflare_client import OwnerEmail
 from imbue.minds.forwarding_server.agent_creator import extract_repo_name
 from imbue.minds.forwarding_server.agent_creator import make_log_callback
 from imbue.minds.forwarding_server.agent_creator import run_mngr_create
@@ -185,7 +191,7 @@ def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
     dest = tmp_path / "dest"
     clone_git_repo(GitUrl(str(source)), dest)
 
-    with pytest.raises(GitCloneError, match="git checkout failed"):
+    with pytest.raises(GitOperationError, match="git checkout failed"):
         checkout_branch(dest, GitBranch("nonexistent/branch-72391"))
 
 
@@ -254,8 +260,8 @@ def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
     assert info.status == AgentCreationStatus.CLONING
 
 
-def test_setup_cloudflare_tunnel_skips_when_not_configured(tmp_path: Path) -> None:
-    """Verify _setup_cloudflare_tunnel does nothing when env vars are not set."""
+def test_setup_cloudflare_tunnel_skips_when_no_client(tmp_path: Path) -> None:
+    """Verify _setup_cloudflare_tunnel does nothing when cloudflare_client is None."""
     creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
     )
@@ -267,27 +273,25 @@ def test_setup_cloudflare_tunnel_skips_when_not_configured(tmp_path: Path) -> No
     assert any("not configured" in m for m in messages)
 
 
-def test_setup_cloudflare_tunnel_handles_connection_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _setup_cloudflare_tunnel handles connection errors gracefully."""
-    monkeypatch.setenv("CLOUDFLARE_FORWARDING_URL", "http://127.0.0.1:1")
-    monkeypatch.setenv("CLOUDFLARE_FORWARDING_USERNAME", "testuser")
-    monkeypatch.setenv("CLOUDFLARE_FORWARDING_SECRET", "testsecret")
-    monkeypatch.setenv("OWNER_EMAIL", "test@example.com")
-
+def test_setup_cloudflare_tunnel_with_client_logs_creation(tmp_path: Path) -> None:
+    """Verify _setup_cloudflare_tunnel calls the client and logs progress."""
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        username=CloudflareUsername("testuser"),
+        secret=CloudflareSecret("testsecret"),
+        owner_email=OwnerEmail("test@example.com"),
+    )
     creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
+        cloudflare_client=client,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
     creator._setup_cloudflare_tunnel(AgentId(), log_queue)
     messages = []
     while not log_queue.empty():
         messages.append(log_queue.get_nowait())
-    # Should have attempted to create the tunnel and logged a failure
     assert any("Creating Cloudflare tunnel" in m for m in messages)
-    assert any("WARNING" in m or "Failed" in m for m in messages)
+    assert any("WARNING" in m or "failed" in m.lower() for m in messages)
 
 
 def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:

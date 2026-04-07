@@ -9,19 +9,18 @@ Callers can poll creation status via get_creation_info() or stream logs
 via get_log_queue().
 """
 
-import base64
 import os
 import queue
+import shlex
 import shutil
-import threading
 import tempfile
+import threading
 from collections.abc import Callable
 from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
 
-import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -34,7 +33,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -124,7 +125,7 @@ def checkout_branch(
 ) -> None:
     """Check out a specific branch in a cloned repository.
 
-    Raises GitCloneError if the checkout fails (e.g. branch does not exist).
+    Raises GitOperationError if the checkout fails (e.g. branch does not exist).
     """
     logger.debug("Checking out branch {} in {}", branch, repo_dir)
     cg = ConcurrencyGroup(name="git-checkout")
@@ -136,7 +137,7 @@ def checkout_branch(
             on_output=on_output,
         )
     if result.returncode != 0:
-        raise GitCloneError(
+        raise GitOperationError(
             "git checkout failed for branch '{}' (exit code {}):\n{}".format(
                 branch,
                 result.returncode,
@@ -219,54 +220,6 @@ def run_mngr_create(
         )
 
 
-def _create_cloudflare_tunnel(
-    agent_id: AgentId,
-    forwarding_url: str,
-    username: str,
-    secret: str,
-    owner_email: str,
-    log_queue: queue.Queue[str],
-) -> str | None:
-    """Create a Cloudflare tunnel for the agent and return the tunnel token.
-
-    Uses the cloudflare_forwarding API with admin (Basic) auth to create a tunnel
-    and set a default Google OAuth policy for the owner's email.
-
-    Returns the tunnel token string, or None if tunnel creation fails.
-    """
-    auth_header = "Basic " + base64.b64encode(f"{username}:{secret}".encode()).decode()
-
-    try:
-        # Create the tunnel
-        log_queue.put("[minds] Creating Cloudflare tunnel...")
-        response = httpx.post(
-            f"{forwarding_url}/tunnels",
-            headers={"Authorization": auth_header},
-            json={
-                "agent_id": str(agent_id),
-                "default_auth_policy": {
-                    "rules": [
-                        {"action": "allow", "include": [{"email": {"email": owner_email}}]},
-                    ],
-                },
-            },
-            timeout=30.0,
-        )
-        if response.status_code not in (200, 201):
-            log_queue.put(f"[minds] WARNING: Failed to create tunnel: {response.status_code} {response.text}")
-            return None
-
-        tunnel_info = response.json()
-        token = tunnel_info.get("token")
-        tunnel_name = tunnel_info.get("tunnel_name", "")
-        log_queue.put(f"[minds] Cloudflare tunnel created: {tunnel_name}")
-        return token
-
-    except httpx.HTTPError as e:
-        log_queue.put(f"[minds] WARNING: Failed to create tunnel: {e}")
-        return None
-
-
 def _inject_tunnel_token(
     agent_id: AgentId,
     token: str,
@@ -274,14 +227,14 @@ def _inject_tunnel_token(
 ) -> None:
     """Inject the tunnel token into the agent's runtime/secrets file via mngr exec."""
     log_queue.put("[minds] Injecting tunnel token into agent...")
+    safe_token = shlex.quote(token)
     cg = ConcurrencyGroup(name="mngr-exec-token")
     with cg:
-        # Append the token export to runtime/secrets
         command = [
             MNGR_BINARY,
             "exec",
             str(agent_id),
-            "mkdir -p runtime && echo 'export CLOUDFLARE_TUNNEL_TOKEN={}' >> runtime/secrets".format(token),
+            f"mkdir -p runtime && echo 'export CLOUDFLARE_TUNNEL_TOKEN='{safe_token} >> runtime/secrets",
         ]
         result = cg.run_process_to_completion(
             command=command,
@@ -307,6 +260,11 @@ class AgentCreator(MutableModel):
     """
 
     paths: MindPaths = Field(frozen=True, description="Filesystem paths for minds data")
+    cloudflare_client: CloudflareForwardingClient | None = Field(
+        default=None,
+        frozen=True,
+        description="Client for Cloudflare tunnel API, or None if not configured",
+    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -377,7 +335,6 @@ class AgentCreator(MutableModel):
         temp_clone_dir: Path | None = None
         try:
             with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
-                # Resolve repo source to a local directory
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -385,19 +342,16 @@ class AgentCreator(MutableModel):
                     mind_dir = resolved_path
                     log_queue.put(f"[minds] Using local directory: {mind_dir}")
                 else:
-                    # Clone to a temporary directory
                     temp_clone_dir = Path(tempfile.mkdtemp(prefix="minds-clone-"))
                     clone_target = temp_clone_dir / extract_repo_name(repo_source)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
                     clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log)
                     mind_dir = clone_target
 
-                # Check out the specified branch if provided
                 if branch:
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(mind_dir, GitBranch(branch), on_output=emit_log)
 
-                # Create the agent
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
 
@@ -413,7 +367,6 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                 )
 
-                # Post-creation: set up Cloudflare tunnel
                 self._setup_cloudflare_tunnel(agent_id, log_queue)
 
                 log_queue.put("[minds] Agent created successfully.")
@@ -422,14 +375,13 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (GitCloneError, MngrCommandError, NotImplementedError, ValueError, OSError) as e:
+        except (GitCloneError, GitOperationError, MngrCommandError, NotImplementedError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
                 self._statuses[aid] = AgentCreationStatus.FAILED
                 self._errors[aid] = str(e)
         finally:
-            # Clean up temp clone directory if we created one
             if temp_clone_dir is not None and temp_clone_dir.exists():
                 shutil.rmtree(temp_clone_dir, ignore_errors=True)
             log_queue.put(LOG_SENTINEL)
@@ -441,31 +393,16 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Create a Cloudflare tunnel and inject its token into the agent.
 
-        Reads configuration from environment variables. Does nothing if the
-        required env vars are not set.
+        Uses the cloudflare_client if configured. Does nothing otherwise.
         """
-        forwarding_url = os.environ.get("CLOUDFLARE_FORWARDING_URL")
-        username = os.environ.get("CLOUDFLARE_FORWARDING_USERNAME")
-        secret = os.environ.get("CLOUDFLARE_FORWARDING_SECRET")
-        owner_email = os.environ.get("OWNER_EMAIL")
-
-        if not all([forwarding_url, username, secret, owner_email]):
+        if self.cloudflare_client is None:
             log_queue.put("[minds] Cloudflare forwarding not configured, skipping tunnel creation.")
             return
 
-        assert forwarding_url is not None
-        assert username is not None
-        assert secret is not None
-        assert owner_email is not None
-
-        token = _create_cloudflare_tunnel(
-            agent_id=agent_id,
-            forwarding_url=forwarding_url,
-            username=username,
-            secret=secret,
-            owner_email=owner_email,
-            log_queue=log_queue,
-        )
+        log_queue.put("[minds] Creating Cloudflare tunnel...")
+        token = self.cloudflare_client.create_tunnel(agent_id)
 
         if token is not None:
             _inject_tunnel_token(agent_id, token, log_queue)
+        else:
+            log_queue.put("[minds] WARNING: Tunnel creation failed, skipping token injection.")

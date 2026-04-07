@@ -24,6 +24,12 @@ class GitCloneError(MindError):
     ...
 
 
+class GitOperationError(MindError):
+    """Raised when a git operation (other than clone) fails."""
+
+    ...
+
+
 class MngrCommandError(MindError):
     """Raised when an mngr CLI command fails."""
 

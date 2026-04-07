@@ -13,9 +13,6 @@ from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
 
-# Maps service name to its cloudflare hostname
-CloudflareServiceInfo = dict[str, str]
-
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
 
 _COMMON_STYLES: Final[str] = """
