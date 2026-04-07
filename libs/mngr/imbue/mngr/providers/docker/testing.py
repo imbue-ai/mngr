@@ -10,6 +10,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.local.volume import LocalVolume
@@ -55,7 +56,7 @@ def remove_all_containers_by_prefix(
     Creates and closes its own Docker client so callers don't need one.
     """
     try:
-        client = docker.from_env()
+        client = create_docker_client()
     except (docker.errors.DockerException, OSError):
         return
 

@@ -12,6 +12,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.docker.conftest import write_fake_docker_context
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
@@ -172,22 +173,35 @@ def test_get_ssh_host_remote_docker_tcp() -> None:
 # =========================================================================
 
 
-def test_get_docker_context_host_returns_none_for_default_context() -> None:
-    """Default context should return None so docker.from_env() is used."""
-    # _get_docker_context_host reads the real Docker config. If the active
-    # context is "default" (or unreadable) the function must return None.
-    # On CI or machines without Docker Desktop the context is typically
-    # "default", so this test validates the common path.  Machines running
-    # Docker Desktop with a non-default context exercise the positive path
-    # via test_get_docker_context_host_returns_host_for_non_default_context.
-    result = _get_docker_context_host()
-    if result is None:
-        # Default context or Docker not installed -- expected on CI.
-        assert result is None
-    else:
-        # Non-default context (e.g. Docker Desktop) -- must be a URL string.
-        assert isinstance(result, str)
-        assert result.startswith("unix://") or result.startswith("tcp://") or result.startswith("ssh://")
+def test_get_docker_context_host_returns_host_for_non_default_context(fake_docker_config: Path) -> None:
+    """Non-default context returns the context's Host URL."""
+    write_fake_docker_context(fake_docker_config, "desktop-linux", "unix:///Users/x/.docker/run/docker.sock")
+    assert _get_docker_context_host() == "unix:///Users/x/.docker/run/docker.sock"
+
+
+def test_get_docker_context_host_returns_none_for_default_context(fake_docker_config: Path) -> None:
+    """Default context returns None so docker.from_env() is used."""
+    write_fake_docker_context(fake_docker_config, "default", "")
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_config_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing Docker config returns None."""
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "nonexistent"))
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_config_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed Docker config returns None."""
+    config_dir = tmp_path / "docker-config-bad"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text("not json")
+    monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    assert _get_docker_context_host() is None
 
 
 # =========================================================================

@@ -190,6 +190,25 @@ def _get_docker_context_host() -> str | None:
     return host if host else None
 
 
+def create_docker_client() -> docker.DockerClient:
+    """Create a Docker client using the same resolution order as the Docker CLI.
+
+    1. ``DOCKER_HOST`` environment variable (via ``docker.from_env()``).
+    2. The active Docker context (read from ``~/.docker/config.json``).
+    3. Platform default (via ``docker.from_env()``).
+
+    Use this instead of ``docker.from_env()`` directly to avoid connection
+    failures on macOS Docker Desktop, where the default socket path
+    (``/var/run/docker.sock``) may not exist but the Docker context points
+    to the correct socket.
+    """
+    if not os.environ.get("DOCKER_HOST"):
+        context_host = _get_docker_context_host()
+        if context_host is not None:
+            return docker.DockerClient(base_url=context_host)
+    return docker.from_env()
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -229,24 +248,13 @@ class DockerProviderInstance(BaseProviderInstance):
         """Lazily create a Docker client.
 
         When ``self.config.host`` is set, connects to that explicit URL.
-        Otherwise resolves the endpoint in this order:
-
-        1. ``DOCKER_HOST`` environment variable (handled by ``docker.from_env()``).
-        2. The active Docker context (read from ``~/.docker/config.json``).
-           ``docker.from_env()`` does not consult Docker contexts, so we read
-           the context ourselves. This matches what the Docker CLI does and
-           avoids failures on macOS Docker Desktop where the default socket
-           path (``/var/run/docker.sock``) may not exist.
-        3. Fall back to ``docker.from_env()`` which tries the platform default.
+        Otherwise delegates to ``create_docker_client()`` which resolves
+        via DOCKER_HOST, then the active Docker context, then the platform
+        default.
         """
         if self.config.host:
             return docker.DockerClient(base_url=self.config.host)
-        if not os.environ.get("DOCKER_HOST"):
-            context_host = _get_docker_context_host()
-            if context_host is not None:
-                logger.trace("Using Docker context host: {}", context_host)
-                return docker.DockerClient(base_url=context_host)
-        return docker.from_env()
+        return create_docker_client()
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
