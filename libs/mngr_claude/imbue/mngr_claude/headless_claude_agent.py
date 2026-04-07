@@ -228,6 +228,23 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent):
     interactive messages, paste detection, or TUI readiness checking.
     """
 
+    def _preflight_send_message(self, tmux_target: str) -> None:
+        """Headless agents do not accept interactive messages.
+
+        Must be defined here because ClaudeAgent overrides BaseAgent's no-op
+        _preflight_send_message with dialog-checking logic. Without this
+        explicit override, the MRO resolves to ClaudeAgent's implementation
+        instead of BaseHeadlessAgent's, since ClaudeAgent appears earlier
+        in HeadlessClaude's MRO.
+        """
+        BaseHeadlessAgent._preflight_send_message(self, tmux_target)
+
+    def uses_paste_detection_send(self) -> bool:
+        return BaseHeadlessAgent.uses_paste_detection_send(self)
+
+    def get_tui_ready_indicator(self) -> str | None:
+        return BaseHeadlessAgent.get_tui_ready_indicator(self)
+
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
