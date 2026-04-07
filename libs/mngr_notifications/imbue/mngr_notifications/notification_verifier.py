@@ -87,13 +87,7 @@ def _run_click_verified_test(
     marker_path = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{uuid4().hex}"
     execute_command = _build_marker_touch_command(marker_path)
 
-    try:
-        notifier.notify(_TEST_TITLE, _TEST_MESSAGE_CLICK, execute_command, cg)
-    except FileNotFoundError:
-        return VerifyNotificationResult(
-            is_sent=False,
-            error_message="terminal-notifier not found; install with: brew install terminal-notifier",
-        )
+    notifier.notify(_TEST_TITLE, _TEST_MESSAGE_CLICK, execute_command, cg)
 
     try:
         is_clicked = poll_until(
@@ -111,12 +105,5 @@ def _run_basic_test(
     cg: ConcurrencyGroup,
 ) -> VerifyNotificationResult:
     """Send a test notification without click verification."""
-    try:
-        notifier.notify(_TEST_TITLE, _TEST_MESSAGE_BASIC, None, cg)
-    except FileNotFoundError:
-        return VerifyNotificationResult(
-            is_sent=False,
-            error_message="notify-send not found; install libnotify to enable notifications",
-        )
-
+    notifier.notify(_TEST_TITLE, _TEST_MESSAGE_BASIC, None, cg)
     return VerifyNotificationResult(is_sent=True, is_clicked=None)

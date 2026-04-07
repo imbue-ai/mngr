@@ -36,26 +36,12 @@ class _SilentMacOSNotifier(MacOSNotifier):
         pass
 
 
-class _MissingBinaryNotifier(MacOSNotifier):
-    """A MacOSNotifier subclass that raises FileNotFoundError (binary not found)."""
-
-    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        raise FileNotFoundError("terminal-notifier")
-
-
 class _NoOpLinuxNotifier(LinuxNotifier):
     """A LinuxNotifier subclass that silently does nothing (simulates successful send)."""
 
     def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
         if execute_command is not None:
             raise NotImplementedError("notify-send does not support click actions")
-
-
-class _MissingLinuxNotifier(LinuxNotifier):
-    """A LinuxNotifier subclass that raises FileNotFoundError."""
-
-    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        raise FileNotFoundError("notify-send")
 
 
 # --- run_test_notification ---
@@ -79,16 +65,6 @@ def test_run_test_notification_click_not_detected(notification_cg: ConcurrencyGr
     assert result.is_sent is True
     assert result.is_clicked is False
     assert result.error_message is None
-
-
-def test_run_test_notification_binary_not_found_via_notify(notification_cg: ConcurrencyGroup) -> None:
-    """FileNotFoundError from the notifier is caught and reported."""
-    notifier = _MissingBinaryNotifier()
-    result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
-
-    assert result.is_sent is False
-    assert result.error_message is not None
-    assert "terminal-notifier" in result.error_message
 
 
 def test_run_test_notification_linux_no_click_verification(notification_cg: ConcurrencyGroup) -> None:
@@ -140,16 +116,6 @@ def test_check_notifier_binary_linux_missing_on_macos() -> None:
     result = check_notifier_binary(LinuxNotifier())
     assert result is not None
     assert "notify-send" in result
-
-
-def test_run_test_notification_linux_file_not_found(notification_cg: ConcurrencyGroup) -> None:
-    """Linux notifier that raises FileNotFoundError reports error."""
-    notifier = _MissingLinuxNotifier()
-    result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
-
-    assert result.is_sent is False
-    assert result.error_message is not None
-    assert "notify-send" in result.error_message
 
 
 # --- _run_verification (CLI integration) ---
