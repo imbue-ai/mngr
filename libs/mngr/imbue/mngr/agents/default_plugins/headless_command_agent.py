@@ -98,10 +98,12 @@ class HeadlessCommand(BaseAgent[HeadlessCommandConfig], StreamingHeadlessAgentMi
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        raise NotImplementedError(
-            "HeadlessCommand agents do not support wait_for_ready_signal. "
-            "The command receives its input via CLI args, not via send_message."
-        )
+        """Start the agent without waiting for any readiness signal.
+
+        HeadlessCommand agents have no TUI, so there is nothing to wait for.
+        We still need to call start_action() so the tmux session starts.
+        """
+        start_action()
 
     def assemble_command(
         self,
