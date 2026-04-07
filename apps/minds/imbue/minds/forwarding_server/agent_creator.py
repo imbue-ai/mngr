@@ -148,7 +148,6 @@ def checkout_branch(
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
-    mind_dir: Path,
     agent_name: AgentName,
     agent_id: AgentId,
 ) -> list[str]:
@@ -198,7 +197,7 @@ def run_mngr_create(
 
     Raises MngrCommandError if the command fails.
     """
-    mngr_command = _build_mngr_create_command(launch_mode, mind_dir, agent_name, agent_id)
+    mngr_command = _build_mngr_create_command(launch_mode, agent_name, agent_id)
 
     logger.info("Running: {}", " ".join(mngr_command))
 

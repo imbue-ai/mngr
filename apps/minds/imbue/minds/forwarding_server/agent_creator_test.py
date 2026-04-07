@@ -87,7 +87,6 @@ def test_is_local_path_url() -> None:
 def test_build_mngr_create_command_dev_mode() -> None:
     cmd = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
-        mind_dir=Path("/tmp/repo"),
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
     )
@@ -101,7 +100,6 @@ def test_build_mngr_create_command_dev_mode() -> None:
 def test_build_mngr_create_command_local_mode() -> None:
     cmd = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        mind_dir=Path("/tmp/repo"),
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
     )
@@ -114,7 +112,6 @@ def test_build_mngr_create_command_cloud_mode_raises() -> None:
     with pytest.raises(NotImplementedError, match="Cloud launch mode"):
         _build_mngr_create_command(
             launch_mode=LaunchMode.CLOUD,
-            mind_dir=Path("/tmp/repo"),
             agent_name=AgentName("test-agent"),
             agent_id=AgentId(),
         )
@@ -182,7 +179,7 @@ def test_checkout_branch_switches_to_existing_branch(tmp_path: Path) -> None:
 
 
 def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
-    """Verify checkout_branch raises GitCloneError for a missing branch."""
+    """Verify checkout_branch raises GitOperationError for a missing branch."""
     source = tmp_path / "source"
     source.mkdir()
     (source / "hello.txt").write_text("hello")

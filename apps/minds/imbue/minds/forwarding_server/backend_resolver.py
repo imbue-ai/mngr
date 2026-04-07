@@ -211,8 +211,9 @@ def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord | ServerD
 def parse_server_log_records(text: str) -> list[ServerLogRecord | ServerDeregisteredRecord]:
     """Parse JSONL text into server log records (registered or deregistered).
 
-    Extracts only the 'server' and 'url' fields, ignoring any extra
-    envelope fields (timestamp, event_id, source, type) that may be present.
+    Uses the 'type' field to distinguish registered from deregistered events.
+    Registered events require 'server' and 'url'; deregistered events require
+    only 'server'. Other envelope fields (timestamp, event_id, source) are ignored.
     Raises on malformed lines rather than silently skipping them.
     """
     records: list[ServerLogRecord | ServerDeregisteredRecord] = []
