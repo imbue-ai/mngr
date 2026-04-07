@@ -3,7 +3,7 @@ name = "imbue-mngr-llm"
 version = "0.1.0"
 description = "LLM agent plugin for mngr - runs the llm CLI tool as an agent with conversation management"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.1.4",
     "imbue-mngr-recursive==0.1.0",
@@ -74,5 +74,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]
