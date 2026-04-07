@@ -219,7 +219,7 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     )
 
 
-class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent):
+class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can
