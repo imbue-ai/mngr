@@ -2502,14 +2502,10 @@ dependencies = [
     { name = "paramiko" },
     { name = "pydantic" },
     { name = "python-multipart" },
+    { name = "telethon" },
     { name = "tomlkit" },
     { name = "uvicorn" },
     { name = "websockets" },
-]
-
-[package.optional-dependencies]
-scripts = [
-    { name = "telethon" },
 ]
 
 [package.metadata]
@@ -2529,12 +2525,11 @@ requires-dist = [
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "telethon", marker = "extra == 'scripts'", specifier = ">=1.40.0" },
+    { name = "telethon", specifier = ">=1.40.0" },
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=13.0" },
 ]
-provides-extras = ["scripts"]
 
 [[package]]
 name = "modal"

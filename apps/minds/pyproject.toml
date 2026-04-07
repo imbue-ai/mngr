@@ -21,13 +21,9 @@ dependencies = [
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "tomlkit>=0.12.0",
+    "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
-]
-
-[project.optional-dependencies]
-scripts = [
-    "telethon>=1.40.0",
 ]
 
 [project.scripts]
