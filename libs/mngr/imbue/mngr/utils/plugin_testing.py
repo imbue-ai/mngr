@@ -26,11 +26,10 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.utils.testing import assert_home_is_temp_directory
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import isolate_home
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import setup_mngr_test_environment
 
 
 @pytest.fixture
@@ -87,26 +86,15 @@ def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, Non
 
 @pytest.fixture(autouse=True)
 def setup_test_mngr_env(
-    tmp_path: Path,
+    tmp_home_dir: Path,
     temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
     monkeypatch: pytest.MonkeyPatch,
     _isolate_tmux_server: None,
 ) -> Generator[None, None, None]:
     """Set up environment variables for all tests."""
-    mngr_test_id = uuid4().hex
-    mngr_test_prefix = f"mngr_{mngr_test_id}-"
-    mngr_test_root_name = f"mngr-test-{mngr_test_id}"
-
-    isolate_home(tmp_path, monkeypatch)
-    monkeypatch.setenv("MNGR_HOST_DIR", str(temp_host_dir))
-    monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
-    monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
-
-    unison_dir = tmp_path / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
-
-    assert_home_is_temp_directory()
+    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
 
     yield
 

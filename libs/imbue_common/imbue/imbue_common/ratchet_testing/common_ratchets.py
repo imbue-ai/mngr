@@ -353,7 +353,11 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 
 PREVENT_IF_ELIF_WITHOUT_ELSE = RatchetRuleInfo(
     rule_name="if/elif without else",
-    rule_description="All if/elif chains must have an else clause to ensure all cases are handled explicitly",
+    rule_description=(
+        "All if/elif chains must have an else clause. You must consider what the "
+        "logically correct behavior is when none of the conditions match. Do not "
+        "add 'else: pass' without thinking about whether the else case is a bug."
+    ),
 )
 
 PREVENT_INIT_IN_NON_EXCEPTION_CLASSES = RatchetRuleInfo(
@@ -436,4 +440,17 @@ PREVENT_IMPORTLIB_IMPORT_MODULE = RegexRatchetRule(
     rule_name="importlib.import_module usage",
     rule_description="Always use normal top-level imports instead of importlib.import_module",
     pattern_string=r"\bimport_module\b",
+)
+
+PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
+    rule_name="hardcoded Path.home() / '.claude' path references",
+    rule_description=(
+        "Use the accessor functions from claude_config.py instead of hardcoding "
+        "Path.home() / '.claude' or Path.home() / '.claude.json'. "
+        "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
+        "For the config file: get_claude_config_path() / get_user_claude_config_path(). "
+        "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
+        "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
+    ),
+    pattern_string=r"""Path\.home\(\)\s*/\s*["']\.claude(\.json(\.bak)?)?["']""",
 )

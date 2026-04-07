@@ -86,7 +86,7 @@ class ModalProviderConfig(ProviderInstanceConfig):
     )
     default_image: str | None = Field(
         default=None,
-        description="Default base image (e.g., 'python:3.11-slim'). None uses debian_slim.",
+        description="Default base image (e.g., 'python:3.12-slim'). None uses debian_slim.",
     )
     default_region: str | None = Field(
         default=None,
