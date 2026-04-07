@@ -42,7 +42,11 @@ def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
     """
 
     def _callable_method_names(cls: type) -> set[str]:
-        return {name for name in cls.__dict__ if callable(getattr(cls, name)) and not name.startswith("__")}
+        return {
+            name
+            for name, val in cls.__dict__.items()
+            if not name.startswith("__") and (callable(val) or isinstance(val, (classmethod, staticmethod)))
+        }
 
     base_headless_methods = _callable_method_names(BaseHeadlessAgent)
     claude_methods = _callable_method_names(ClaudeAgent)
