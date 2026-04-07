@@ -67,14 +67,22 @@ def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[None]:
         process.terminate()
 
 
+def _default_confirm(prompt: str) -> bool:
+    return click.confirm(prompt, default=False)
+
+
 def _run_verification(
     notifier: Notifier,
     cg: ConcurrencyGroup,
     binary_checker: Callable[[Notifier], str | None] = check_notifier_binary,
     click_timeout: float = DEFAULT_CLICK_TIMEOUT,
+    # Called when click detection is unavailable (e.g. Linux) to ask the user
+    # whether they saw the notification. Injected for testability.
+    confirm_fn: Callable[[str], bool] = _default_confirm,
 ) -> bool:
     """Send a test notification and verify delivery. Returns True if verified."""
-    write_human_line("Verifying notification delivery... (use --no-verify to skip)")
+    write_human_line("Sending a test notification -- you should see it now. Please click it to confirm.")
+    write_human_line("(use --no-verify to skip this check)")
     result = run_test_notification(notifier, cg, click_timeout=click_timeout, binary_checker=binary_checker)
 
     if not result.is_sent:
@@ -86,13 +94,16 @@ def _run_verification(
         return True
 
     if result.is_clicked is False:
-        write_human_line("Test notification was sent but not clicked within 15 seconds.")
+        write_human_line(
+            "Test notification was sent but not clicked within {} seconds.",
+            int(click_timeout),
+        )
         write_human_line("If you did not see the notification, check your notification")
         write_human_line("permissions in System Settings > Notifications.")
         return False
 
     # is_clicked is None: click detection not supported (e.g. Linux)
-    is_confirmed = click.confirm("Did you see the test notification?", default=False)
+    is_confirmed = confirm_fn("Did you see the test notification?")
     if is_confirmed:
         write_human_line("Notification delivery verified.")
         return True

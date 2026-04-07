@@ -1,4 +1,4 @@
-from collections.abc import Generator
+import shutil
 from pathlib import Path
 
 import pytest
@@ -23,12 +23,6 @@ def _binary_always_missing(notifier: Notifier) -> str | None:
     return "notifier binary not found"
 
 
-@pytest.fixture()
-def notification_cg() -> Generator[ConcurrencyGroup, None, None]:
-    with ConcurrencyGroup(name="test-notification") as group:
-        yield group
-
-
 class _ClickSimulatingNotifier(MacOSNotifier):
     """A MacOSNotifier subclass that simulates the user clicking the notification."""
 
@@ -45,26 +39,12 @@ class _SilentMacOSNotifier(MacOSNotifier):
         pass
 
 
-class _MissingBinaryNotifier(MacOSNotifier):
-    """A MacOSNotifier subclass that raises FileNotFoundError (binary not found)."""
-
-    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        raise FileNotFoundError("terminal-notifier")
-
-
-class _RecordingLinuxNotifier(LinuxNotifier):
-    """A LinuxNotifier subclass that records calls instead of sending notifications."""
+class _NoOpLinuxNotifier(LinuxNotifier):
+    """A LinuxNotifier subclass that silently does nothing (simulates successful send)."""
 
     def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
         if execute_command is not None:
             raise NotImplementedError("notify-send does not support click actions")
-
-
-class _MissingLinuxNotifier(LinuxNotifier):
-    """A LinuxNotifier subclass that raises FileNotFoundError."""
-
-    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        raise FileNotFoundError("notify-send")
 
 
 # --- run_test_notification ---
@@ -90,19 +70,9 @@ def test_run_test_notification_click_not_detected(notification_cg: ConcurrencyGr
     assert result.error_message is None
 
 
-def test_run_test_notification_binary_not_found_via_notify(notification_cg: ConcurrencyGroup) -> None:
-    """FileNotFoundError from the notifier is caught and reported."""
-    notifier = _MissingBinaryNotifier()
-    result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
-
-    assert result.is_sent is False
-    assert result.error_message is not None
-    assert "terminal-notifier" in result.error_message
-
-
 def test_run_test_notification_linux_no_click_verification(notification_cg: ConcurrencyGroup) -> None:
     """Linux notifier returns is_clicked=None (no click detection)."""
-    notifier = _RecordingLinuxNotifier()
+    notifier = _NoOpLinuxNotifier()
     result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
 
     assert result.is_sent is True
@@ -119,15 +89,6 @@ def test_run_test_notification_binary_check_fails(notification_cg: ConcurrencyGr
     assert result.error_message == "notifier binary not found"
 
 
-def test_run_test_notification_marker_cleaned_up(notification_cg: ConcurrencyGroup) -> None:
-    """The marker file is cleaned up after click verification."""
-    notifier = _ClickSimulatingNotifier()
-    result = run_test_notification(notifier, notification_cg, click_timeout=5.0, binary_checker=_no_binary_issues)
-
-    assert result.is_sent is True
-    assert result.is_clicked is True
-
-
 # --- _build_marker_touch_command ---
 
 
@@ -137,31 +98,57 @@ def test_build_marker_touch_command() -> None:
     assert cmd == "touch /tmp/mngr-notify-test-abc123"
 
 
+def test_build_marker_touch_command_quotes_spaces() -> None:
+    path = Path("/tmp/path with spaces/marker")
+    cmd = _build_marker_touch_command(path)
+    assert cmd == "touch '/tmp/path with spaces/marker'"
+
+
 # --- check_notifier_binary ---
 
 
-def testcheck_notifier_binary_macos() -> None:
-    """On macOS (where we're running tests), terminal-notifier should be found."""
+@pytest.mark.skipif(shutil.which("terminal-notifier") is None, reason="terminal-notifier not installed")
+def test_check_notifier_binary_macos() -> None:
+    """check_notifier_binary returns None when terminal-notifier is available."""
     result = check_notifier_binary(MacOSNotifier())
-    # terminal-notifier is installed in the test environment
     assert result is None
 
 
-def testcheck_notifier_binary_linux_missing_on_macos() -> None:
-    """On macOS, notify-send is not installed so Linux check returns error."""
+@pytest.mark.skipif(shutil.which("terminal-notifier") is not None, reason="terminal-notifier is installed")
+def test_check_notifier_binary_macos_missing() -> None:
+    """check_notifier_binary returns error when terminal-notifier is not found."""
+    result = check_notifier_binary(MacOSNotifier())
+    assert result is not None
+    assert "terminal-notifier" in result
+
+
+@pytest.mark.skipif(shutil.which("notify-send") is not None, reason="notify-send is installed")
+def test_check_notifier_binary_linux_missing() -> None:
+    """check_notifier_binary returns error when notify-send is not found."""
     result = check_notifier_binary(LinuxNotifier())
     assert result is not None
     assert "notify-send" in result
 
 
-def test_run_test_notification_linux_file_not_found(notification_cg: ConcurrencyGroup) -> None:
-    """Linux notifier that raises FileNotFoundError reports error."""
-    notifier = _MissingLinuxNotifier()
-    result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
+@pytest.mark.skipif(shutil.which("notify-send") is None, reason="notify-send not installed")
+def test_check_notifier_binary_linux_present() -> None:
+    """check_notifier_binary returns None when notify-send is available."""
+    result = check_notifier_binary(LinuxNotifier())
+    assert result is None
 
-    assert result.is_sent is False
-    assert result.error_message is not None
-    assert "notify-send" in result.error_message
+
+class _UnsupportedNotifier(Notifier):
+    """A notifier that is neither macOS nor Linux."""
+
+    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
+        pass
+
+
+def test_check_notifier_binary_unsupported_type() -> None:
+    """check_notifier_binary returns error for unknown notifier types."""
+    result = check_notifier_binary(_UnsupportedNotifier())
+    assert result is not None
+    assert "_UnsupportedNotifier" in result
 
 
 # --- _run_verification (CLI integration) ---
@@ -185,4 +172,28 @@ def test_run_verification_send_failed(notification_cg: ConcurrencyGroup) -> None
     """_run_verification returns False when notification sending fails."""
     notifier = MacOSNotifier()
     result = _run_verification(notifier, notification_cg, binary_checker=_binary_always_missing)
+    assert result is False
+
+
+def test_run_verification_linux_confirmed(notification_cg: ConcurrencyGroup) -> None:
+    """_run_verification returns True when user confirms they saw the notification on Linux."""
+    notifier = _NoOpLinuxNotifier()
+    result = _run_verification(
+        notifier,
+        notification_cg,
+        binary_checker=_no_binary_issues,
+        confirm_fn=lambda _prompt: True,
+    )
+    assert result is True
+
+
+def test_run_verification_linux_not_confirmed(notification_cg: ConcurrencyGroup) -> None:
+    """_run_verification returns False when user denies seeing the notification on Linux."""
+    notifier = _NoOpLinuxNotifier()
+    result = _run_verification(
+        notifier,
+        notification_cg,
+        binary_checker=_no_binary_issues,
+        confirm_fn=lambda _prompt: False,
+    )
     assert result is False

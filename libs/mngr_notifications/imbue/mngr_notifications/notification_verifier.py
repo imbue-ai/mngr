@@ -1,3 +1,4 @@
+import shlex
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr_notifications.notifier import LinuxNotifier
 from imbue.mngr_notifications.notifier import MacOSNotifier
 from imbue.mngr_notifications.notifier import Notifier
 
@@ -36,20 +38,22 @@ class VerifyNotificationResult(FrozenModel):
 @pure
 def _build_marker_touch_command(marker_path: Path) -> str:
     """Build a shell command that creates a marker file when executed."""
-    return f"touch {marker_path}"
+    return f"touch {shlex.quote(str(marker_path))}"
 
 
 def check_notifier_binary(notifier: Notifier) -> str | None:
     """Check if the notification binary is available. Returns an error message if not, None if OK."""
-    if isinstance(notifier, MacOSNotifier):
-        if shutil.which("terminal-notifier") is None:
-            return "terminal-notifier not found; install with: brew install terminal-notifier"
-        return None
-
-    # LinuxNotifier uses notify-send
-    if shutil.which("notify-send") is None:
-        return "notify-send not found; install libnotify to enable notifications"
-    return None
+    match notifier:
+        case MacOSNotifier():
+            if shutil.which("terminal-notifier") is None:
+                return "terminal-notifier not found; install with: brew install terminal-notifier"
+            return None
+        case LinuxNotifier():
+            if shutil.which("notify-send") is None:
+                return "notify-send not found; install libnotify to enable notifications"
+            return None
+        case _:
+            return f"Unsupported notifier type: {type(notifier).__name__}"
 
 
 def run_test_notification(
@@ -83,13 +87,7 @@ def _run_click_verified_test(
     marker_path = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{uuid4().hex}"
     execute_command = _build_marker_touch_command(marker_path)
 
-    try:
-        notifier.notify(_TEST_TITLE, _TEST_MESSAGE_CLICK, execute_command, cg)
-    except FileNotFoundError:
-        return VerifyNotificationResult(
-            is_sent=False,
-            error_message="terminal-notifier not found; install with: brew install terminal-notifier",
-        )
+    notifier.notify(_TEST_TITLE, _TEST_MESSAGE_CLICK, execute_command, cg)
 
     try:
         is_clicked = poll_until(
@@ -107,12 +105,5 @@ def _run_basic_test(
     cg: ConcurrencyGroup,
 ) -> VerifyNotificationResult:
     """Send a test notification without click verification."""
-    try:
-        notifier.notify(_TEST_TITLE, _TEST_MESSAGE_BASIC, None, cg)
-    except FileNotFoundError:
-        return VerifyNotificationResult(
-            is_sent=False,
-            error_message="notify-send not found; install libnotify to enable notifications",
-        )
-
+    notifier.notify(_TEST_TITLE, _TEST_MESSAGE_BASIC, None, cg)
     return VerifyNotificationResult(is_sent=True, is_clicked=None)
