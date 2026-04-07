@@ -5,16 +5,12 @@ which ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
 
-import contextlib
-import os
-import sys
 from typing import Any
 from typing import Final
 
 import click
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -35,6 +31,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -169,15 +167,7 @@ def _run_selection_screen(
 
     input_filter = _WizardInputFilter(state=state)
 
-    with contextlib.ExitStack() as stack:
-        if sys.stdin.isatty():
-            tty_input = sys.stdin
-        else:
-            tty_input = stack.enter_context(open("/dev/tty"))
-
-        screen = Screen(input=tty_input)
-        screen.tty_signal_keys(intr="undefined")
-
+    with create_urwid_screen_preserving_terminal() as screen:
         loop = MainLoop(
             frame,
             palette=palette,
@@ -309,16 +299,12 @@ def install_wizard_impl() -> None:
         return
 
     # Guard against non-interactive contexts (CI, cron, headless containers).
-    # urwid needs a real terminal for input.  When stdin is piped (e.g. via
-    # ``uv run``), /dev/tty still provides access to the controlling terminal.
-    if not sys.stdin.isatty():
-        try:
-            fd = os.open("/dev/tty", os.O_RDONLY)
-            os.close(fd)
-        except OSError:
-            write_human_line("No interactive terminal detected; skipping plugin install wizard.")
-            write_human_line(_RELAUNCH_HINT)
-            return
+    # has_interactive_terminal() checks stdin first, then /dev/tty as a
+    # fallback for cases where stdin is piped (e.g. via ``uv run``).
+    if not has_interactive_terminal():
+        write_human_line("No interactive terminal detected; skipping plugin install wizard.")
+        write_human_line(_RELAUNCH_HINT)
+        return
 
     selected = _run_two_phase_wizard(available)
 
