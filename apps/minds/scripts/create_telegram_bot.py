@@ -6,12 +6,13 @@ Usage:
     bot_display_name: The human-readable name for the bot (e.g. "My Cool Bot")
     bot_username: The username for the bot, must end in 'bot' (e.g. "my_cool_bot")
 
-Environment variables for credentials (checked in order):
-    TELEGRAM_STRING_SESSION: A pre-built Telethon StringSession string
-    TELEGRAM_DC_ID + TELEGRAM_AUTH_KEY_HEX: Raw MTProto auth data
+Credential sources (checked in order):
+    1. TELEGRAM_STRING_SESSION env var: a pre-built Telethon StringSession
+    2. TELEGRAM_DC_ID + TELEGRAM_AUTH_KEY_HEX env vars: raw MTProto auth data
+    3. latchkey auth get telegram: reads from latchkey's encrypted store
+    4. /tmp/latchkey-telegram-dump.json: fallback dump file
 
-If neither is set, falls back to reading /tmp/latchkey-telegram-dump.json
-(the file produced by `latchkey auth browser telegram`).
+To set up credentials, run: latchkey auth browser telegram
 
 The script connects to Telegram as the user, sends commands to @BotFather
 to create a new bot, and prints the resulting bot token and username to stdout.
@@ -25,7 +26,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -129,11 +132,46 @@ def _auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
     return "1" + base64.urlsafe_b64encode(packed).decode("ascii")
 
 
+def _try_latchkey_auth_get() -> str | None:
+    """Try to read Telegram user credentials from latchkey's credential store.
+
+    Returns a StringSession string if successful, None if latchkey is not
+    available or has no Telegram credentials.
+    """
+    latchkey_path = shutil.which("latchkey")
+    if latchkey_path is None:
+        return None
+
+    try:
+        result = subprocess.run(
+            [latchkey_path, "auth", "get", "telegram"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+
+        creds = json.loads(result.stdout)
+        if creds.get("objectType") != "telegramUser":
+            return None
+
+        dc_id = creds["dcId"]
+        auth_key_hex = creds["authKeyHex"]
+        sys.stderr.write(
+            f"Read credentials from latchkey (user={creds.get('firstName', '?')}, "
+            f"DC={dc_id})\n"
+        )
+        return _auth_key_to_string_session(dc_id, auth_key_hex)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
+        return None
+
+
 def _get_string_session() -> str:
     """Resolve a Telethon StringSession from available credential sources.
 
     Checks (in order): TELEGRAM_STRING_SESSION env var, TELEGRAM_DC_ID +
-    TELEGRAM_AUTH_KEY_HEX env vars, latchkey dump file.
+    TELEGRAM_AUTH_KEY_HEX env vars, latchkey auth get, latchkey dump file.
 
     Raises TelegramCredentialError if no credentials are found.
     """
@@ -154,7 +192,12 @@ def _get_string_session() -> str:
             ) from exc
         return _auth_key_to_string_session(dc_id, auth_key_hex)
 
-    # Option 3: latchkey dump file
+    # Option 3: latchkey auth get
+    session = _try_latchkey_auth_get()
+    if session:
+        return session
+
+    # Option 4: latchkey dump file (fallback for older latchkey versions)
     if LATCHKEY_DUMP_PATH.exists():
         sys.stderr.write(f"Reading credentials from {LATCHKEY_DUMP_PATH}\n")
         dump = json.loads(LATCHKEY_DUMP_PATH.read_text())
@@ -193,7 +236,7 @@ def _get_string_session() -> str:
         "Provide credentials via one of:\n"
         "  - TELEGRAM_STRING_SESSION environment variable\n"
         "  - TELEGRAM_DC_ID + TELEGRAM_AUTH_KEY_HEX environment variables\n"
-        f"  - Run 'latchkey auth browser telegram' to create {LATCHKEY_DUMP_PATH}"
+        "  - Run 'latchkey auth browser telegram' to store credentials"
     )
 
 
