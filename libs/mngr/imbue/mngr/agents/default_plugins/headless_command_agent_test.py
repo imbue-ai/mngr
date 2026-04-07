@@ -24,10 +24,24 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
+class _AlwaysStoppedHeadlessCommand(HeadlessCommand):
+    """Test subclass that always reports STOPPED lifecycle state.
+
+    Avoids monkeypatch.setattr by using inheritance to override
+    get_lifecycle_state, ensuring stream_output terminates immediately
+    when reading pre-written test files.
+    """
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.STOPPED
+
+
 def _make_headless_command_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: HeadlessCommandConfig | AgentTypeConfig | None = None,
+    # Use the always-stopped subclass by default for tests that call stream_output
+    is_always_stopped: bool = False,
 ) -> tuple[HeadlessCommand, Host]:
     """Create a HeadlessCommand agent with a real local host for testing."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
@@ -38,8 +52,9 @@ def _make_headless_command_agent(
     if agent_config is None:
         agent_config = HeadlessCommandConfig()
 
+    cls = _AlwaysStoppedHeadlessCommand if is_always_stopped else HeadlessCommand
     mngr_ctx = local_provider.mngr_ctx
-    agent = HeadlessCommand.model_construct(
+    agent = cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-headless-cmd"),
         agent_type=AgentTypeName("headless_command"),
@@ -51,11 +66,6 @@ def _make_headless_command_agent(
         host=host,
     )
     return agent, host
-
-
-def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch HeadlessCommand.get_lifecycle_state to return STOPPED so stream_output terminates."""
-    monkeypatch.setattr(HeadlessCommand, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
 
 
 def _write_fake_agent_output(
@@ -199,10 +209,8 @@ def test_assemble_command_no_print_flag(
 def test_stream_output_yields_raw_text(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_command_agent(local_provider, tmp_path)
+    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(host, agent, stdout="Hello world!\nLine 2\n")
 
     chunks = list(agent.stream_output())
@@ -213,10 +221,8 @@ def test_stream_output_yields_raw_text(
 def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_command_agent(local_provider, tmp_path)
+    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(host, agent)
 
     with pytest.raises(MngrError, match="no details available"):
@@ -226,11 +232,9 @@ def test_stream_output_raises_when_empty_file(
 def test_stream_output_surfaces_stderr_on_error(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When stdout is empty, stderr content appears in the error."""
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_command_agent(local_provider, tmp_path)
+    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(host, agent, stderr="command not found: foobar\n")
 
     with pytest.raises(MngrError, match="command not found: foobar"):
@@ -241,11 +245,9 @@ def test_stream_output_surfaces_stderr_on_error(
 def test_stream_output_falls_back_to_pane_capture(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When neither redirect file exists, pane capture is used as a fallback."""
-    _patch_agent_as_stopped(monkeypatch)
-    agent, _host = _make_headless_command_agent(local_provider, tmp_path)
+    agent, _host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
     session = agent.session_name
 
     subprocess.run(
@@ -273,10 +275,8 @@ def test_stream_output_falls_back_to_pane_capture(
 def test_output_returns_joined_text(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_command_agent(local_provider, tmp_path)
+    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(host, agent, stdout="chunk1chunk2")
 
     result = agent.output()
