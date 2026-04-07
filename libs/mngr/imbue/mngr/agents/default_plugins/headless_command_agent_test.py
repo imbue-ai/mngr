@@ -69,13 +69,12 @@ def _make_headless_command_agent(
 
 
 def _write_fake_agent_output(
-    host: Host,
     agent: HeadlessCommand,
     stdout: str = "",
     stderr: str = "",
 ) -> None:
     """Write synthetic stdout.log and stderr.log to simulate command output."""
-    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stdout.log").write_text(stdout)
     (agent_dir / "stderr.log").write_text(stderr)
@@ -210,8 +209,8 @@ def test_stream_output_yields_raw_text(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
-    _write_fake_agent_output(host, agent, stdout="Hello world!\nLine 2\n")
+    agent, _host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
+    _write_fake_agent_output(agent, stdout="Hello world!\nLine 2\n")
 
     chunks = list(agent.stream_output())
 
@@ -222,8 +221,8 @@ def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
-    _write_fake_agent_output(host, agent)
+    agent, _host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
+    _write_fake_agent_output(agent)
 
     with pytest.raises(MngrError, match="no details available"):
         list(agent.stream_output())
@@ -234,8 +233,8 @@ def test_stream_output_surfaces_stderr_on_error(
     tmp_path: Path,
 ) -> None:
     """When stdout is empty, stderr content appears in the error."""
-    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
-    _write_fake_agent_output(host, agent, stderr="command not found: foobar\n")
+    agent, _host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
+    _write_fake_agent_output(agent, stderr="command not found: foobar\n")
 
     with pytest.raises(MngrError, match="command not found: foobar"):
         list(agent.stream_output())
@@ -276,8 +275,8 @@ def test_output_returns_joined_text(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    agent, host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
-    _write_fake_agent_output(host, agent, stdout="chunk1chunk2")
+    agent, _host = _make_headless_command_agent(local_provider, tmp_path, is_always_stopped=True)
+    _write_fake_agent_output(agent, stdout="chunk1chunk2")
 
     result = agent.output()
 
