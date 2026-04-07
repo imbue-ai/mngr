@@ -43,17 +43,17 @@ def _build_marker_touch_command(marker_path: Path) -> str:
 
 def check_notifier_binary(notifier: Notifier) -> str | None:
     """Check if the notification binary is available. Returns an error message if not, None if OK."""
-    if isinstance(notifier, MacOSNotifier):
-        if shutil.which("terminal-notifier") is None:
-            return "terminal-notifier not found; install with: brew install terminal-notifier"
-        return None
-
-    if isinstance(notifier, LinuxNotifier):
-        if shutil.which("notify-send") is None:
-            return "notify-send not found; install libnotify to enable notifications"
-        return None
-
-    return f"Unsupported notifier type: {type(notifier).__name__}"
+    match notifier:
+        case MacOSNotifier():
+            if shutil.which("terminal-notifier") is None:
+                return "terminal-notifier not found; install with: brew install terminal-notifier"
+            return None
+        case LinuxNotifier():
+            if shutil.which("notify-send") is None:
+                return "notify-send not found; install libnotify to enable notifications"
+            return None
+        case _:
+            return f"Unsupported notifier type: {type(notifier).__name__}"
 
 
 def run_test_notification(
