@@ -1,0 +1,34 @@
+# offload configuration for running mngr release tests on Modal
+[offload]
+max_parallel = 7
+test_timeout_secs = 900
+stream_output = true
+sandbox_project_root = "/code/mngr"
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
+
+[provider]
+type = "modal"
+dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile.release"
+
+[provider.env]
+PYTEST_MAX_DURATION_SECONDS = "900"
+
+[provider.experimental_options]
+enable_docker = true
+
+[framework]
+type = "pytest"
+paths = ["."]
+command = "uv run pytest"
+run_args = "--no-cov -p no:xdist --timeout=900 -o addopts="
+
+[groups.all]
+retry_count = 1
+# All release+docker tests get 1 retry because Docker-in-Docker on gVisor
+# has intermittent networking issues (apt-get can't reach debian mirrors).
+filters = "-m 'release and docker'"
+
+[report]
+output_dir = "test-results"
+junit = true
+junit_file = "junit.xml"

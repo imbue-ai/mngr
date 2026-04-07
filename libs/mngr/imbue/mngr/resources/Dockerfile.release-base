@@ -1,0 +1,114 @@
+# Dockerfile.release-base — pre-built base image for release tests on Modal.
+#
+# Contains all system deps, Docker static binaries (for Docker-in-Docker on
+# Modal with enable_docker=True), and tooling. Uses static Docker binaries
+# instead of docker-ce apt packages to keep the image small enough for
+# Modal's image builder to save/materialize.
+#
+# Build & push (from repo root):
+#   docker build --platform linux/amd64 \
+#     -t danverbraganzaimbue/mngr-release-base:latest \
+#     -f libs/mngr/imbue/mngr/resources/Dockerfile.release-base .
+#   docker push danverbraganzaimbue/mngr-release-base:latest
+#
+# Keep the base section in sync with ./Dockerfile.
+
+FROM python:3.11-slim
+
+# ---- System packages (shared with Dockerfile) ----
+# git-lfs post-install script can fail under QEMU emulation (cross-build on
+# ARM Mac), so install it separately with dpkg --configure fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    build-essential \
+    ca-certificates \
+    curl \
+    fd-find \
+    git \
+    jq \
+    nano \
+    openssh-server \
+    procps \
+    ripgrep \
+    rsync \
+    tini \
+    tmux \
+    unison \
+    wget \
+    xxd \
+    && rm -rf /var/lib/apt/lists/*
+# git-lfs post-install runs `git lfs install` which fails under QEMU.
+# Use --unpack to skip post-install, then manually mark as configured.
+RUN apt-get update \
+    && apt-get download git-lfs \
+    && dpkg --unpack git-lfs*.deb \
+    && rm -f /var/lib/dpkg/info/git-lfs.postinst \
+    && dpkg --configure git-lfs \
+    && rm -f git-lfs*.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# ttyd binary from GitHub releases
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH}" \
+    -o /usr/local/bin/ttyd && \
+    chmod +x /usr/local/bin/ttyd
+
+# GitHub CLI
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+	&& cat $out | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+	&& chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+	&& mkdir -p -m 755 /etc/apt/sources.list.d \
+	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+	&& apt update \
+	&& apt install gh -y
+
+# uv (fast Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+ENV PATH="/root/.local/bin:$PATH"
+
+# Claude Code
+ARG CLAUDE_CODE_VERSION=""
+RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+
+ENV UV_LINK_MODE=copy
+
+# ---- Docker-in-Docker additions (release tests only) ----
+# Based on Modal's Docker-in-Sandboxes demo:
+# https://modal.com/docs/guide/docker-in-sandboxes
+#
+# Uses static Docker binaries instead of docker-ce apt packages to keep the
+# image small. The full docker-ce install adds ~1.5GB of apt dependencies
+# which causes Modal's image builder to OOM during save/materialize.
+
+# Minimal networking packages needed by start-dockerd.sh
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
+    iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# Static Docker binaries (dockerd, docker CLI, containerd, etc.)
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+    | tar xz -C /usr/local/bin --strip-components=1
+
+# Use a modern runc for reliable networking under gVisor
+# https://github.com/opencontainers/runc/commit/491326cdeb3762a8b5f926be9bb5ddd36115e31d
+RUN rm -f /usr/local/bin/runc \
+    && wget -q https://github.com/opencontainers/runc/releases/download/v1.3.0/runc.amd64 \
+    && chmod +x runc.amd64 \
+    && mv runc.amd64 /usr/local/bin/runc
+
+# gVisor doesn't support nftables (https://github.com/google/gvisor/issues/10510)
+RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
+    && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
+# Add the dockerd startup scripts
+COPY libs/mngr/imbue/mngr/resources/start-dockerd.sh /start-dockerd.sh
+COPY libs/mngr/imbue/mngr/resources/ensure-dockerd.sh /ensure-dockerd.sh
+RUN chmod +x /start-dockerd.sh /ensure-dockerd.sh
+
+# BASH_ENV is sourced before every `bash -c` command (used by offload's
+# sandbox.exec). This ensures dockerd is running before tests execute,
+# without requiring a custom command prefix.
+ENV BASH_ENV=/ensure-dockerd.sh
