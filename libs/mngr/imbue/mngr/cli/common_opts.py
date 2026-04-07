@@ -1,7 +1,9 @@
+import json
 import string
 import sys
 import uuid
 from collections.abc import Callable
+from collections.abc import Sequence
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
@@ -60,9 +63,16 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --context: Project context directory
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
+    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated paths)
     """
     # Apply decorators in reverse order (bottom to top)
     # These are wrapped in the "Common" option group
+    command = optgroup.option(
+        "-S",
+        "--setting",
+        multiple=True,
+        help="Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable]",
+    )(command)
     command = optgroup.option("--disable-plugin", multiple=True, help="Disable a plugin [repeatable]")(command)
     command = optgroup.option("--plugin", "--enable-plugin", multiple=True, help="Enable a plugin [repeatable]")(
         command
@@ -183,6 +193,17 @@ def setup_command_context(
         to_update(mngr_ctx.field_ref().is_interactive, is_interactive),
         to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
+
+    # Apply --setting overrides to config (right before CLI defaults are applied)
+    if initial_opts.setting:
+        updated_config = apply_settings_to_config(
+            mngr_ctx.config,
+            initial_opts.setting,
+            mngr_ctx.config.disabled_plugins,
+        )
+        mngr_ctx = mngr_ctx.model_copy_update(
+            to_update(mngr_ctx.field_ref().config, updated_config),
+        )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
     updated_params = apply_config_defaults(ctx, mngr_ctx.config, command_name)
@@ -355,6 +376,65 @@ def _process_template_escapes(template: str) -> str:
         result.append(char)
         idx += 1
     return "".join(result)
+
+
+@pure
+def _parse_setting_value(value_str: str) -> Any:
+    """Parse a setting value string into the appropriate Python type.
+
+    Tries JSON first (for booleans, numbers, arrays, objects), then falls back
+    to treating the value as a plain string.
+    """
+    try:
+        return json.loads(value_str)
+    except json.JSONDecodeError:
+        return value_str
+
+
+def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> None:
+    """Set a value in a nested dict using dot-separated key path, creating intermediate dicts as needed."""
+    keys = key_path.split(".")
+    current = data
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    current[keys[-1]] = value
+
+
+@pure
+def apply_settings_to_config(
+    config: MngrConfig,
+    settings: Sequence[str],
+    disabled_plugins: frozenset[str],
+) -> MngrConfig:
+    """Apply --setting KEY=VALUE overrides to a loaded config.
+
+    Parses each setting string, builds a raw config dict, parses it through the
+    config system, and merges it with the existing config. This gives --setting
+    the same semantics as config file values but at a higher precedence.
+    """
+    if not settings:
+        return config
+
+    # Build a raw config dict from the setting strings
+    raw: dict[str, Any] = {}
+    for setting_str in settings:
+        if "=" not in setting_str:
+            raise UserInputError(
+                f"Invalid --setting format: '{setting_str}'. "
+                "Expected KEY=VALUE (e.g., '--setting commands.create.connect=false')"
+            )
+        key_path, value_str = setting_str.split("=", 1)
+        key_path = key_path.strip()
+        if not key_path:
+            raise UserInputError("Invalid --setting: key cannot be empty")
+        parsed_value = _parse_setting_value(value_str)
+        _set_nested_dict_value(raw, key_path, parsed_value)
+
+    # Parse through the config system and merge with the existing config
+    settings_config = parse_config(raw, disabled_plugins=disabled_plugins, strict=True)
+    return config.merge_with(settings_config)
 
 
 def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: str) -> dict[str, Any]:
