@@ -306,25 +306,25 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
 
         Returns True if the file exists, False if the agent exited without creating it.
 
-        Uses a startup grace period before trusting lifecycle state. Claude can
-        take several seconds to start (nvm resolution, node startup, etc.),
-        during which the tmux pane shows bash as the current command. Without
-        the grace period, the lifecycle check sees bash -> DONE and gives up
-        before claude even begins.
+        Two phases:
+        1. Startup grace period -- wait for the file only, ignoring lifecycle
+           state. Claude can take several seconds to start (nvm resolution,
+           node startup), during which tmux shows bash as the current command
+           and lifecycle detection incorrectly reports DONE.
+        2. After the grace period, also check lifecycle state so we don't wait
+           forever if claude genuinely failed to start.
         """
-        start = datetime.now()
-
-        def _file_exists_or_agent_finished() -> bool:
-            if self._file_exists_on_host(stdout_path):
-                return True
-            elapsed = (datetime.now() - start).total_seconds()
-            if elapsed < _STARTUP_GRACE_SECONDS:
-                return False
-            return self._is_agent_finished()
-
+        # Phase 1: wait for stdout file, ignoring lifecycle state
+        if poll_until(
+            lambda: self._file_exists_on_host(stdout_path),
+            timeout=_STARTUP_GRACE_SECONDS,
+            poll_interval=_TAIL_POLL_INTERVAL,
+        ):
+            return True
+        # Phase 2: file didn't appear during grace period, now also check lifecycle
         poll_until(
-            _file_exists_or_agent_finished,
-            timeout=_TAIL_POLL_TIMEOUT,
+            lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
+            timeout=_TAIL_POLL_TIMEOUT - _STARTUP_GRACE_SECONDS,
             poll_interval=_TAIL_POLL_INTERVAL,
         )
         return self._file_exists_on_host(stdout_path)
