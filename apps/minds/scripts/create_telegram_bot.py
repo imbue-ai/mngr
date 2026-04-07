@@ -48,11 +48,54 @@ DC_IPS = {
     5: "91.108.56.130",
 }
 
-# Telegram Web A's official API credentials (public, not secret)
-TELEGRAM_WEB_API_ID = 2496
-TELEGRAM_WEB_API_HASH = "8da85b0d5bfe62527e5b244c209159c3"
+TELEGRAM_WEB_URL = "https://web.telegram.org/a/"
 
 LATCHKEY_DUMP_PATH = Path("/tmp/latchkey-telegram-dump.json")
+
+
+def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
+    """Extract api_id and api_hash from the live Telegram Web A bundle.
+
+    The credentials are embedded as literals in webpack chunk 81 (the GramJS
+    web worker). We fetch the main page, find the main bundle, look up chunk
+    81's content hash from the chunk map, fetch it, and regex out the values.
+    """
+    import urllib.request
+
+    try:
+        html = urllib.request.urlopen(TELEGRAM_WEB_URL).read().decode()
+        main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
+        if not main_match:
+            raise ValueError("Could not find main bundle in Telegram Web HTML")
+
+        main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
+        main_js = urllib.request.urlopen(main_js_url).read().decode()
+
+        # The webpack chunk map has entries like  81:"d56d2772fca9fc22b9c7"
+        chunk_match = re.search(r'81:"([a-f0-9]+)"', main_js)
+        if not chunk_match:
+            raise ValueError("Could not find chunk 81 hash in main bundle")
+
+        chunk_url = f"{TELEGRAM_WEB_URL}81.{chunk_match.group(1)}.js"
+        chunk_js = urllib.request.urlopen(chunk_url).read().decode()
+
+        # The TelegramClient constructor call: Number("2496"),"8da85b0d..."
+        cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', chunk_js)
+        if not cred_match:
+            raise ValueError("Could not find api credentials in chunk 81")
+
+        api_id = int(cred_match.group(1))
+        api_hash = cred_match.group(2)
+        print(f"Extracted api_id={api_id} from Telegram Web bundle", file=sys.stderr)
+        return api_id, api_hash
+
+    except Exception as exc:
+        print(
+            f"Warning: could not extract api credentials from Telegram Web "
+            f"bundle ({exc}), using known defaults",
+            file=sys.stderr,
+        )
+        return 2496, "8da85b0d5bfe62527e5b244c209159c3"
 
 
 def _auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
@@ -131,10 +174,9 @@ async def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str
     Returns (bot_token, bot_username) on success.
     """
     session_str = _get_string_session()
+    api_id, api_hash = _fetch_telegram_web_api_credentials()
 
-    client = TelegramClient(
-        StringSession(session_str), TELEGRAM_WEB_API_ID, TELEGRAM_WEB_API_HASH
-    )
+    client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.connect()
 
     if not await client.is_user_authorized():
