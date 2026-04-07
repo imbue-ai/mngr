@@ -54,16 +54,23 @@ LATCHKEY_DUMP_PATH = Path("/tmp/latchkey-telegram-dump.json")
 
 
 def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
-    """Extract api_id and api_hash from the live Telegram Web A bundle.
+    """Extract api_id and api_hash from the live Telegram Web A JS bundles.
 
-    The credentials are embedded as literals in webpack chunk 81 (the GramJS
-    web worker). We fetch the main page, find the main bundle, look up chunk
-    81's content hash from the chunk map, fetch it, and regex out the values.
+    Telegram Web embeds these as literals in its minified JavaScript (they're
+    public application identifiers, not secrets). The pattern in the minified
+    code is Number("DIGITS"),"32-hex-char-hash" from the TelegramClient
+    constructor call.
+
+    We fetch the main HTML, extract all JS bundle URLs, then search each
+    bundle for the credential pattern. This is chunk-number-agnostic -- the
+    credentials could move to any bundle across releases.
     """
     import urllib.request
 
     try:
         html = urllib.request.urlopen(TELEGRAM_WEB_URL).read().decode()
+
+        # Find the main bundle to get the webpack chunk map
         main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
         if not main_match:
             raise ValueError("Could not find main bundle in Telegram Web HTML")
@@ -71,23 +78,35 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
         main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
         main_js = urllib.request.urlopen(main_js_url).read().decode()
 
-        # The webpack chunk map has entries like  81:"d56d2772fca9fc22b9c7"
-        chunk_match = re.search(r'81:"([a-f0-9]+)"', main_js)
-        if not chunk_match:
-            raise ValueError("Could not find chunk 81 hash in main bundle")
+        # First check the main bundle itself
+        cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', main_js)
+        if cred_match:
+            api_id = int(cred_match.group(1))
+            api_hash = cred_match.group(2)
+            print(f"Extracted api_id={api_id} from Telegram Web bundle", file=sys.stderr)
+            return api_id, api_hash
 
-        chunk_url = f"{TELEGRAM_WEB_URL}81.{chunk_match.group(1)}.js"
-        chunk_js = urllib.request.urlopen(chunk_url).read().decode()
+        # Extract all chunk hashes from the webpack chunk map.
+        # The map contains entries like  42:"a1b2c3d4e5f6..."
+        chunk_entries = re.findall(r'(\d+):"([a-f0-9]{16,})"', main_js)
 
-        # The TelegramClient constructor call: Number("2496"),"8da85b0d..."
-        cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', chunk_js)
-        if not cred_match:
-            raise ValueError("Could not find api credentials in chunk 81")
+        for chunk_id, chunk_hash in chunk_entries:
+            chunk_url = f"{TELEGRAM_WEB_URL}{chunk_id}.{chunk_hash}.js"
+            try:
+                chunk_js = urllib.request.urlopen(chunk_url).read().decode()
+            except Exception:
+                continue
+            cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', chunk_js)
+            if cred_match:
+                api_id = int(cred_match.group(1))
+                api_hash = cred_match.group(2)
+                print(
+                    f"Extracted api_id={api_id} from Telegram Web bundle",
+                    file=sys.stderr,
+                )
+                return api_id, api_hash
 
-        api_id = int(cred_match.group(1))
-        api_hash = cred_match.group(2)
-        print(f"Extracted api_id={api_id} from Telegram Web bundle", file=sys.stderr)
-        return api_id, api_hash
+        raise ValueError("Credential pattern not found in any bundle chunk")
 
     except Exception as exc:
         print(
