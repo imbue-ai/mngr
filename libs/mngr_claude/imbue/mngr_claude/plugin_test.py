@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import EnvVar
@@ -421,6 +422,32 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     assert command == CommandString(
         f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
+
+
+def test_claude_agent_assemble_command_is_posix_compatible(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Assembled commands are sent via tmux send-keys to the user's shell, which may not be bash.
+
+    All assembled commands must be POSIX-compatible so they work in any POSIX shell (bash, zsh, etc.).
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    command = agent.assemble_command(host=host, agent_args=("--model", "opus"), command_override=None)
+
+    assert_posix_compatible(str(command))
+
+
+def test_claude_agent_assemble_command_remote_is_posix_compatible(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Remote assembled commands (with IS_SANDBOX) must also be POSIX-compatible."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    non_local_host = cast(OnlineHostInterface, SimpleNamespace(is_local=False))
+    command = agent.assemble_command(host=non_local_host, agent_args=(), command_override=None)
+
+    assert_posix_compatible(str(command))
 
 
 # =============================================================================

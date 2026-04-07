@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
@@ -195,6 +196,17 @@ def test_assemble_command_raises_without_command(
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_config=config)
     with pytest.raises(NoCommandDefinedError):
         agent.assemble_command(host, agent_args=(), command_override=None)
+
+
+def test_assemble_command_is_posix_compatible(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Assembled commands are sent via tmux send-keys to the user's shell, which may not be bash."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    command = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert_posix_compatible(str(command))
 
 
 # =============================================================================
