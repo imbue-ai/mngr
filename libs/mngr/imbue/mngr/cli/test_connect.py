@@ -83,7 +83,7 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
 
     # Verify the CLI resolved the agent and called tmux attach with the right session
     assert len(intercepted_execvp_calls) == 1
-    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", session_name])
+    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
 
 @pytest.mark.tmux
@@ -127,7 +127,7 @@ def test_connect_via_cli_group(
         )
 
         assert len(intercepted_execvp_calls) == 1
-        assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", session_name])
+        assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
     finally:
         cleanup_tmux_session(session_name)
@@ -185,7 +185,7 @@ def test_connect_start_restarts_stopped_agent(
         # Verify the tmux session was recreated before attaching
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to be restarted"
         assert len(intercepted_execvp_calls) == 1
-        assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", session_name])
+        assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
     finally:
         cleanup_tmux_session(session_name)
@@ -272,7 +272,7 @@ def test_connect_cli_non_interactive_selects_most_recent_agent(
 
     # Verify the CLI selected the most recently created agent
     assert len(intercepted_execvp_calls) == 1
-    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", session_new])
+    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_new}"])
 
 
 # =============================================================================

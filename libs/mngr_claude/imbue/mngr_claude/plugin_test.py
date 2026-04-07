@@ -550,15 +550,20 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 2
+    assert len(hooks) == 3
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
     assert "touch" in hooks[0]["command"]
     assert "session_started" in hooks[0]["command"]
 
-    # Second hook: tracks current session ID for session replacement detection
-    session_id_hook = hooks[1]["command"]
+    # Second hook: outputs the base branch so the agent knows it
+    assert hooks[1]["type"] == "command"
+    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+    assert "base branch" in hooks[1]["command"].lower()
+
+    # Third hook: tracks current session ID for session replacement detection
+    session_id_hook = hooks[2]["command"]
     assert hooks[1]["type"] == "command"
     assert "claude_session_id" in session_id_hook
     assert "session_id" in session_id_hook

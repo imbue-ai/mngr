@@ -12,7 +12,6 @@ Run with:
     pytest -m release libs/mngr/imbue/mngr/cli/test_message.py --timeout=300
 """
 
-import shutil
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
@@ -20,18 +19,13 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import is_claude_installed
 from imbue.mngr.utils.testing import mngr_agent_cleanup
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
-
-def _is_claude_installed() -> bool:
-    """Check if Claude Code CLI is installed and available."""
-    return shutil.which("claude") is not None
-
-
 # Skip all tests in this module if Claude is not installed
-pytestmark = pytest.mark.skipif(not _is_claude_installed(), reason="Claude Code CLI is not installed")
+pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code CLI is not installed")
 
 
 @pytest.fixture
