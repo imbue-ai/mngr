@@ -27,9 +27,9 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 class _AlwaysStoppedHeadlessCommand(HeadlessCommand):
     """Test subclass that always reports STOPPED lifecycle state.
 
-    Avoids monkeypatch.setattr by using inheritance to override
-    get_lifecycle_state, ensuring stream_output terminates immediately
-    when reading pre-written test files.
+    Uses inheritance to override get_lifecycle_state, ensuring
+    stream_output terminates immediately when reading pre-written
+    test files.
     """
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
