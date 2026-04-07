@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -22,6 +23,42 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
+from imbue.mngr_claude.plugin import ClaudeAgent
+
+# =============================================================================
+# MRO invariant test
+# =============================================================================
+
+
+def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
+    """Ensure HeadlessClaude explicitly resolves any method defined on both ClaudeAgent and BaseHeadlessAgent.
+
+    HeadlessClaude has diamond inheritance: it extends both
+    NoPermissionsClaudeAgent (-> ClaudeAgent -> BaseAgent) and
+    BaseHeadlessAgent (-> BaseAgent). When both ClaudeAgent and
+    BaseHeadlessAgent define the same method, the MRO silently picks
+    ClaudeAgent's version (which appears first). HeadlessClaude must
+    explicitly override any such method to select the correct behavior.
+    """
+
+    def _callable_method_names(cls: type) -> set[str]:
+        return {name for name in cls.__dict__ if callable(getattr(cls, name)) and not name.startswith("__")}
+
+    base_headless_methods = _callable_method_names(BaseHeadlessAgent)
+    claude_methods = _callable_method_names(ClaudeAgent)
+    headless_claude_methods = _callable_method_names(HeadlessClaude)
+
+    # Methods defined on both sides of the diamond
+    shared = base_headless_methods & claude_methods
+
+    # HeadlessClaude must explicitly override every shared method
+    unresolved = shared - headless_claude_methods
+    assert not unresolved, (
+        f"BaseHeadlessAgent and ClaudeAgent both define these methods, but HeadlessClaude "
+        f"does not explicitly override them: {unresolved}. Without an explicit override on "
+        f"HeadlessClaude, the MRO silently picks ClaudeAgent's version. Add overrides to "
+        f"HeadlessClaude that delegate to the correct base class."
+    )
 
 
 def _make_headless_agent(
