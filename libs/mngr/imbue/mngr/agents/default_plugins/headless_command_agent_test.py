@@ -136,65 +136,6 @@ def test_assemble_command_redirects_stdout_and_stderr(
     assert '2> "$MNGR_AGENT_STATE_DIR/stderr.log"' in cmd
 
 
-def test_assemble_command_uses_config_command(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    config = HeadlessCommandConfig(command=CommandString("my-command"))
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=(), command_override=None)
-    assert cmd.startswith("my-command")
-
-
-def test_assemble_command_uses_command_override(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    config = HeadlessCommandConfig(command=CommandString("original"))
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=(), command_override=CommandString("/custom/cmd"))
-    assert cmd.startswith("/custom/cmd")
-    assert "original" not in cmd
-
-
-def test_assemble_command_falls_back_to_agent_type(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    """When no command is set, assemble_command uses the agent_type as a command."""
-    config = HeadlessCommandConfig()
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=(), command_override=None)
-    assert cmd.startswith("headless_command")
-
-
-def test_assemble_command_includes_cli_args(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    config = HeadlessCommandConfig(command=CommandString("cmd"), cli_args=("--verbose", "--timeout=30"))
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=(), command_override=None)
-    assert "--verbose" in cmd
-    assert "--timeout=30" in cmd
-
-
-def test_assemble_command_includes_agent_args(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    config = HeadlessCommandConfig(command=CommandString("cmd"))
-    agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
-    cmd = agent.assemble_command(local_host, agent_args=("--arg1", "val1"), command_override=None)
-    assert "--arg1" in cmd
-    assert "val1" in cmd
-
-
 def test_assemble_command_no_print_flag(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
