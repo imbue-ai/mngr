@@ -60,28 +60,7 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
         timeout=600.0,
     )
     if result.exit_code != 0:
-        # Collect diagnostics from the remote host to understand why Claude didn't start
-        diag_parts = ["Create failed. Collecting diagnostics from remote host:"]
-        for diag_cmd, label in [
-            ("mngr exec my-task 'tmux list-sessions 2>&1'", "tmux sessions"),
-            (
-                'mngr exec my-task \'SESSION=$(tmux list-sessions -F "#{session_name}" 2>/dev/null | head -1);'
-                ' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
-                "claude pane",
-            ),
-            (
-                "mngr exec my-task 'ls -la /mngr/agents/*/session_started 2>/dev/null"
-                " || echo session_started-not-found'",
-                "session_started",
-            ),
-            (
-                "mngr exec my-task 'ps aux | grep -E \"claude|node\" | grep -v grep || echo no-claude-process'",
-                "processes",
-            ),
-        ]:
-            diag = e2e.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
-            diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
-        diagnostics = "\n".join(diag_parts)
+        diagnostics = e2e.collect_remote_diagnostics("my-task")
         raise AssertionError(
             f"Expected command to succeed but got exit code {result.exit_code}\n"
             f"  Command: {result.command}\n"
