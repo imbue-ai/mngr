@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
@@ -45,8 +46,8 @@ def _prompt_user_for_skill_install(skill_name: str, skill_path: Path) -> bool:
 
 
 def _install_skill_locally(skill_name: str, skill_content: str, mngr_ctx: MngrContext) -> None:
-    """Install a skill to the local user's ~/.claude/skills/."""
-    skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+    """Install a skill to the local user's Claude config skills/ directory."""
+    skill_path = get_user_claude_config_dir() / "skills" / skill_name / "SKILL.md"
 
     with log_span("Installing {} skill to {}", skill_name, skill_path):
         # Skip if the skill is already installed with the same content

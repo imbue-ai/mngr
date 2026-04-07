@@ -1,10 +1,12 @@
 """Tests for environment variables, config, and templates from the tutorial."""
 
 import json
+import uuid
 
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.utils.polling import wait_for
 from imbue.skitwright.expect import expect
 
 
@@ -16,23 +18,35 @@ def test_create_with_env(e2e: E2eSession) -> None:
     mngr create my-task --env DEBUG=true
     # (--env-file loads from a file, --pass-env forwards a variable from your current shell)
     """)
+    # Use a unique value so we can verify it appears in the tmux pane
+    env_value = uuid.uuid4().hex
     expect(
         e2e.run(
-            "mngr create my-task --env DEBUG=true --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --env MNGR_TEST_VAR={env_value}"
+            " --command 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 99999'"
+            " --no-ensure-clean",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
 
-    env_result = e2e.run(
-        "mngr exec my-task 'printenv DEBUG'",
-        comment="Verify DEBUG env var is set inside the agent",
-    )
-    expect(env_result).to_succeed()
-    expect(env_result.stdout).to_contain("true")
+    # Verify the env var is visible in the agent's tmux pane.
+    # The command prints MNGR_TEST_VAR=<value> before sleeping, so it
+    # should appear in the captured pane content. The session name is
+    # {MNGR_PREFIX}{agent_name}, and tmux commands use the e2e fixture's
+    # TMUX_TMPDIR to find the right server.
+    def _env_var_visible() -> bool:
+        capture = e2e.run(
+            "tmux capture-pane -t $(tmux list-sessions -F '#{session_name}' | grep my-task) -p",
+            comment="Capture tmux pane to verify env var",
+        )
+        return env_value in capture.stdout
+
+    wait_for(_env_var_visible, timeout=10.0, error_message=f"Expected {env_value} in tmux pane")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -90,7 +104,6 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.tmux
 def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can enable or disable specific plugins:
@@ -112,6 +125,7 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
@@ -149,6 +163,7 @@ def test_config_set_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.modal
 def test_env_var_mngr_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set it as an environment variable:
@@ -185,6 +200,7 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:

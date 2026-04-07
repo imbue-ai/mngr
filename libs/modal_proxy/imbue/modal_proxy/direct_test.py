@@ -17,10 +17,12 @@ from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
+from imbue.modal_proxy.direct import _translate_modal_cli_not_found
 from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
@@ -149,3 +151,22 @@ def test_unwrap_accepts_direct(unwrap_fn: Any, fake_cls: Any, direct_cls: Any, f
     sentinel = object()
     direct = direct_cls.model_construct(**{field_name: sentinel})
     assert unwrap_fn(direct) is sentinel
+
+
+# --- CLI not found tests ---
+
+
+def _make_file_not_found(filename: str) -> FileNotFoundError:
+    e = FileNotFoundError(2, "No such file or directory")
+    e.filename = filename
+    return e
+
+
+def test_translate_modal_cli_not_found_raises_for_modal() -> None:
+    with pytest.raises(ModalProxyError, match="modal.*CLI command was not found"):
+        _translate_modal_cli_not_found(_make_file_not_found("modal"))
+
+
+def test_translate_modal_cli_not_found_reraises_for_other() -> None:
+    with pytest.raises(FileNotFoundError):
+        _translate_modal_cli_not_found(_make_file_not_found("other_binary"))

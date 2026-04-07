@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_llm.data_types import ChatModel
@@ -118,6 +119,17 @@ def test_llm_agent_config_merge_with_preserves_cli_args() -> None:
     merged = base.merge_with(override)
     assert isinstance(merged, LlmAgentConfig)
     assert merged.cli_args == ("--verbose",)
+
+
+def test_assemble_command_is_posix_compatible() -> None:
+    """Assembled commands are sent via tmux send-keys to the user's shell, which may not be bash."""
+    agent = LlmAgent.model_construct(
+        agent_config=LlmAgentConfig(),
+    )
+    host = _make_host_stub()
+    command = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert_posix_compatible(str(command))
 
 
 # -- register_agent_type tests --

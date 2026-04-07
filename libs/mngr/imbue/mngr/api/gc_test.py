@@ -11,6 +11,7 @@ import pytest
 
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
+from imbue.mngr.api.gc import ProviderHosts
 from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
 from imbue.mngr.api.gc import _handle_error
 from imbue.mngr.api.gc import _is_rotated_log_file
@@ -26,6 +27,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
@@ -33,9 +35,16 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import VolumeId
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
+
+
+def _hosts_for(provider: BaseProviderInstance) -> ProviderHosts:
+    """Discover hosts from a provider and return as a ProviderHosts list."""
+    return [(provider, provider.discover_hosts(include_destroyed=True, cg=provider.mngr_ctx.concurrency_group))]
 
 
 def test_gc_machines_skips_local_hosts(local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext) -> None:
@@ -44,7 +53,7 @@ def test_gc_machines_skips_local_hosts(local_provider: LocalProviderInstance, te
 
     gc_machines(
         mngr_ctx=temp_mngr_ctx,
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -96,7 +105,7 @@ def _run_gc_machines(provider: MockProviderInstance, *, dry_run: bool = False) -
     result = GcResult()
     gc_machines(
         mngr_ctx=provider.mngr_ctx,
-        providers=[provider],
+        hosts_by_provider=_hosts_for(provider),
         dry_run=dry_run,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -673,7 +682,7 @@ def test_gc_work_dirs_no_orphans_on_fresh_provider(
     result = GcResult()
     gc_work_dirs(
         mngr_ctx=temp_mngr_ctx,
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -692,7 +701,7 @@ def test_gc_snapshots_skips_provider_without_snapshot_support(
     """gc_snapshots should skip providers that do not support snapshots."""
     result = GcResult()
     gc_snapshots(
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -725,7 +734,7 @@ def test_gc_snapshots_preserves_non_destroyed_host_snapshots(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -754,7 +763,7 @@ def test_gc_snapshots_preserves_paused_host_snapshots_snapshot_based_provider(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -787,7 +796,7 @@ def test_gc_snapshots_deletes_destroyed_host_snapshots(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -810,13 +819,67 @@ def test_gc_volumes_skips_provider_without_volume_support(
     """gc_volumes should skip providers that do not support volumes."""
     result = GcResult()
     gc_volumes(
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
     )
     assert len(result.volumes_destroyed) == 0
     assert len(result.errors) == 0
+
+
+def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_volumes must not delete volumes when the provider is present but has no hosts.
+
+    Regression test: if _discover_hosts_for_gc recorded (provider, []) on
+    discovery failure, gc_volumes would see zero active hosts and treat every
+    volume as orphaned, deleting them all. The fix is to skip the provider
+    entirely (not include it in hosts_by_provider) when discovery fails.
+    """
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("test-volume-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[
+            VolumeInfo(
+                volume_id=VolumeId("vol-00000000000000000000000000000001"),
+                name="vol-00000000000000000000000000000001",
+                size_bytes=0,
+                host_id=HostId("host-00000000000000000000000000000001"),
+            ),
+        ],
+    )
+
+    # Simulate what would happen if the provider were included with an empty
+    # host list (the dangerous case this test guards against):
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    # The volume should be deleted because there are no hosts to claim it.
+    # This is correct when the provider is ONLINE with genuinely zero hosts.
+    assert len(result.volumes_destroyed) == 1
+
+    # But when the provider is OFFLINE (discovery failed), _discover_hosts_for_gc
+    # must not include it at all. Verify that skipping the provider preserves volumes:
+    provider.deleted_volumes.clear()
+    result2 = GcResult()
+    gc_volumes(
+        hosts_by_provider=[],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result2,
+    )
+    assert len(result2.volumes_destroyed) == 0
+    assert provider.deleted_volumes == []
 
 
 # =========================================================================
