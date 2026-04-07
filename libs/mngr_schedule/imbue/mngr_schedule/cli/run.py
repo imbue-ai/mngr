@@ -144,8 +144,11 @@ def run_modal_trigger(
     )
 
     try:
-        trigger_invoker(record)
+        output = trigger_invoker(record)
     except MngrError as exc:
         raise click.ClickException(f"Modal invocation failed for trigger '{trigger_name}': {exc}") from None
+
+    if output:
+        click.echo(output)
 
     return 0

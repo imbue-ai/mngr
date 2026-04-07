@@ -178,7 +178,7 @@ def test_prevent_fstring_logging() -> None:
 
 
 def test_prevent_click_echo() -> None:
-    rc.check_click_echo(_DIR, snapshot(2))
+    rc.check_click_echo(_DIR, snapshot(3))
 
 
 # --- Testing conventions ---

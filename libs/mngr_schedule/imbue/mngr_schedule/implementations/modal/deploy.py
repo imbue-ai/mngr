@@ -581,12 +581,14 @@ def get_modal_schedule_creation_record(
         return None
 
 
-def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> None:
+def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     """Invoke the deployed modal function for a trigger.
 
     Calls modal.Function.from_name() to look up the deployed function and
-    invokes it remotely. Raises MngrError if the function is not found or
-    the invocation fails.
+    invokes it remotely. Returns the last lines of the command's output
+    (from run_scheduled_trigger's return value).
+
+    Raises MngrError if the function is not found or the invocation fails.
     """
     try:
         fn = modal.Function.from_name(
@@ -594,7 +596,8 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> None:
             "run_scheduled_trigger",
             environment_name=record.environment,
         )
-        fn.remote()
+        result = fn.remote()
+        return result if isinstance(result, str) else ""
     except modal.exception.NotFoundError:
         raise MngrError(
             f"Modal function not found (app: {record.app_name}, env: {record.environment}). "

@@ -4,20 +4,16 @@ This test requires Modal credentials and network access. It is marked
 with @pytest.mark.release and @pytest.mark.timeout(900).
 
 End-to-end flow:
-1. Create a long-running agent on Modal (sleep 300) as a test host
-2. Deploy a trigger that execs a marker file onto that agent
-3. List triggers and verify the deployed trigger appears
-4. Run the trigger via schedule run
-5. Verify the trigger actually executed by checking for the marker file
-6. Remove the trigger via schedule remove
-7. Verify the trigger is gone from the list
-8. Cleanup: destroy the agent
+1. Deploy a trigger that runs echo inside the container
+2. List triggers and verify the deployed trigger appears
+3. Run the trigger via schedule run
+4. Verify the echo output is returned (proves the command actually ran)
+5. Remove the trigger via schedule remove
+6. Verify the trigger is gone from the list
 """
 
 import json
 import subprocess
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -31,84 +27,33 @@ from imbue.mngr_schedule.testing import remove_test_trigger
 # (e.g. ANTHROPIC_API_KEY for the claude plugin).
 _ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 
-_MARKER_PATH = "/tmp/schedule-test-marker"
-
-
-def _create_temp_git_repo() -> Path:
-    """Create a minimal git repo in a temp directory for subprocess cwd."""
-    repo_dir = Path(tempfile.mkdtemp(prefix="schedule-test-"))
-    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
-    (repo_dir / "README").write_text("test repo for schedule release tests\n")
-    subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env={
-            **subprocess.os.environ,
-            "GIT_AUTHOR_NAME": "test",
-            "GIT_AUTHOR_EMAIL": "test@test",
-            "GIT_COMMITTER_NAME": "test",
-            "GIT_COMMITTER_EMAIL": "test@test",
-        },
-    )
-    return repo_dir
-
 
 @pytest.mark.release
 @pytest.mark.timeout(900)
 def test_schedule_run_and_remove_modal_trigger() -> None:
     """Test the full schedule lifecycle: add, list, run, verify, remove."""
     trigger_name = "test-schedule-run"
-    agent_name = "test-schedule-host"
     env = build_subprocess_env()
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
-    repo_dir = _create_temp_git_repo()
 
     try:
-        # Step 1: Create a long-running agent on Modal as a test host.
-        # The trigger will exec onto this agent to write a marker file.
-        create_result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "mngr",
-                "create",
-                agent_name,
-                "sleep",
-                "--no-connect",
-                "--no-ensure-clean",
-                "--provider",
-                "modal",
-                "--headless",
-                *disable_args,
-                "--",
-                "300",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-            cwd=repo_dir,
-        )
-        assert create_result.returncode == 0, (
-            f"mngr create failed\nstdout: {create_result.stdout}\nstderr: {create_result.stderr}"
-        )
-
-        # Step 2: Deploy a trigger that execs onto the test host.
-        # The trigger writes a marker file so we can verify it ran.
+        # Step 1: Deploy a trigger that creates an echo agent.
+        # The echo agent runs /bin/echo with the passthrough args, producing
+        # output that run_scheduled_trigger captures and returns via fn.remote().
+        # --verify none because the schedule run call IS the test (different
+        # code path from --verify quick which uses `modal run` CLI).
         add_result = deploy_test_trigger(
             trigger_name,
             env,
             _ENABLED_PLUGINS,
-            command="exec",
-            args=f"{agent_name} -- touch {_MARKER_PATH}",
+            command="create",
+            args="test-agent echo --no-connect --no-ensure-clean --context /tmp --branch :run-{DATE} -- hello-from-schedule-run",
         )
         assert add_result.returncode == 0, (
             f"schedule add failed\nstdout: {add_result.stdout}\nstderr: {add_result.stderr}"
         )
 
-        # Step 3: Verify the trigger appears in schedule list
+        # Step 2: Verify the trigger appears in schedule list
         list_result = subprocess.run(
             ["uv", "run", "mngr", "schedule", "list", "--provider", "modal", "--format=json", *disable_args],
             capture_output=True,
@@ -125,7 +70,10 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"Deployed trigger '{trigger_name}' not found in schedule list: {trigger_names}"
         )
 
-        # Step 4: Run the trigger immediately via schedule run
+        # Step 3: Run the trigger immediately via schedule run.
+        # run_scheduled_trigger() returns the full command output, which
+        # invoke_modal_trigger_function() returns via fn.remote(), and the
+        # CLI prints to stdout.
         run_result = subprocess.run(
             ["uv", "run", "mngr", "schedule", "run", trigger_name, "--provider", "modal", *disable_args],
             capture_output=True,
@@ -137,22 +85,16 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"schedule run failed\nstdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 
-        # Step 5: Verify the trigger actually executed by checking
-        # for the marker file on the test host.
-        verify_result = subprocess.run(
-            ["uv", "run", "mngr", "exec", agent_name, "--", "cat", _MARKER_PATH, *disable_args],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-        )
-        assert verify_result.returncode == 0, (
-            f"Marker file not found at {_MARKER_PATH} on agent {agent_name}. "
-            f"The trigger may not have actually executed.\n"
-            f"stdout: {verify_result.stdout}\nstderr: {verify_result.stderr}"
+        # Step 4: Verify the echo output proves the command ran.
+        # The echo agent passes "hello-from-schedule-run" through /bin/echo,
+        # which appears in the captured output returned by fn.remote().
+        assert "hello-from-schedule-run" in run_result.stdout, (
+            f"Expected echo output 'hello-from-schedule-run' in stdout. "
+            f"The trigger may not have actually executed the command.\n"
+            f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 
-        # Step 6: Remove the trigger
+        # Step 5: Remove the trigger
         remove_result = subprocess.run(
             ["uv", "run", "mngr", "schedule", "remove", trigger_name, "--provider", "modal", "--force", *disable_args],
             capture_output=True,
@@ -164,7 +106,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"schedule remove failed\nstdout: {remove_result.stdout}\nstderr: {remove_result.stderr}"
         )
 
-        # Step 7: Verify the trigger is gone from schedule list
+        # Step 6: Verify the trigger is gone from schedule list
         list_after_result = subprocess.run(
             ["uv", "run", "mngr", "schedule", "list", "--provider", "modal", "--format=json", *disable_args],
             capture_output=True,
@@ -182,11 +124,5 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
         )
 
     finally:
-        # Best-effort cleanup
+        # Best-effort cleanup in case a step failed before remove
         remove_test_trigger(trigger_name, env, _ENABLED_PLUGINS)
-        subprocess.run(
-            ["uv", "run", "mngr", "destroy", "--force", agent_name, *disable_args],
-            capture_output=True,
-            timeout=60,
-            env=env,
-        )
