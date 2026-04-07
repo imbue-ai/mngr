@@ -171,9 +171,9 @@ class HeadlessCommand(BaseAgent[HeadlessCommandConfig], StreamingHeadlessAgentMi
 
         # Fall back to pane capture if neither file exists
         if not parts:
-            is_stderr_exists = self._file_exists_on_host(self._get_stderr_path())
-            is_stdout_exists = self._file_exists_on_host(self._get_stdout_path())
-            if not is_stderr_exists and not is_stdout_exists:
+            stderr_exists = self._file_exists_on_host(self._get_stderr_path())
+            stdout_exists = self._file_exists_on_host(self._get_stdout_path())
+            if not stderr_exists and not stdout_exists:
                 pane_error = self._get_pane_error_message()
                 if pane_error:
                     parts.append(pane_error)
