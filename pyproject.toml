@@ -80,6 +80,7 @@ addopts = [
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
+  "--cov=imbue.cloudflare_forwarding",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
