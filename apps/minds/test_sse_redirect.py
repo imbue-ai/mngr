@@ -13,7 +13,6 @@ import re
 import socket
 import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -79,7 +78,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
             with socket.create_connection((host, port), timeout=0.1):
                 break
         except (ConnectionRefusedError, OSError):
-            time.sleep(0.1)
+            threading.Event().wait(0.1)
 
     headed = os.environ.get("HEADED", "0") == "1"
 
@@ -100,14 +99,14 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 logger.info("On creating page, waiting for SSE stream to connect...")
 
                 # Give the EventSource time to connect
-                time.sleep(1)
+                threading.Event().wait(1)
 
                 # Now simulate the creation completing: put some log lines
                 # then the sentinel into the queue
                 logger.info("Simulating creation completion...")
                 log_queue.put("[test] Building something...")
                 log_queue.put("[test] Almost done...")
-                time.sleep(0.5)
+                threading.Event().wait(0.5)
 
                 # Set status to DONE and put sentinel
                 with creator._lock:

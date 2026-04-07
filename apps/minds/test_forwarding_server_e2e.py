@@ -17,7 +17,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import dotenv
@@ -123,9 +122,9 @@ class ForwardingServerFixture:
                     logger.info("Forwarding server started on {}:{}", self.host, self.port)
                     return
             except (ConnectionRefusedError, OSError):
-                time.sleep(0.1)
+                threading.Event().wait(0.1)
 
-        raise TimeoutError("Forwarding server did not start within 5 seconds")
+        pytest.fail("Forwarding server did not start within 5 seconds")
 
     def stop(self) -> None:
         if self._stream_manager is not None:
@@ -182,10 +181,10 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
                     logger.info("Agent created successfully in {} seconds", i)
                     break
                 if status == "FAILED":
-                    raise RuntimeError(f"Agent creation failed: {data.get('error')}")
-            time.sleep(1)
+                    pytest.fail(f"Agent creation failed: {data.get('error')}")
+            threading.Event().wait(1)
         else:
-            raise TimeoutError("Agent creation did not complete within 5 minutes")
+            pytest.fail("Agent creation did not complete within 5 minutes")
 
         # Wait for the forwarding server to discover the agent's servers
         logger.info("Waiting for server discovery...")
@@ -194,9 +193,9 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
             if resp.status_code == 200 and "web" in resp.text:
                 logger.info("Web server discovered after {} seconds", i)
                 break
-            time.sleep(1)
+            threading.Event().wait(1)
         else:
-            raise TimeoutError("Web server not discovered within 60 seconds")
+            pytest.fail("Web server not discovered within 60 seconds")
 
         # Verify the web server is accessible through the proxy
         resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
@@ -209,7 +208,7 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
         logger.info("Create it to finish: touch {}", _SIGNAL_FILE)
 
         while not _SIGNAL_FILE.exists():
-            time.sleep(1)
+            threading.Event().wait(1)
 
         logger.info("Signal received, tearing down...")
 
