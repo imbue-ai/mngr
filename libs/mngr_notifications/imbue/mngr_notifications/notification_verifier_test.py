@@ -1,4 +1,7 @@
+import shutil
 from pathlib import Path
+
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_notifications.cli import _run_verification
@@ -104,10 +107,10 @@ def test_build_marker_touch_command_quotes_spaces() -> None:
 # --- check_notifier_binary ---
 
 
+@pytest.mark.skipif(shutil.which("terminal-notifier") is None, reason="terminal-notifier not installed")
 def test_check_notifier_binary_macos() -> None:
-    """On macOS (where we're running tests), terminal-notifier should be found."""
+    """check_notifier_binary returns None when terminal-notifier is available."""
     result = check_notifier_binary(MacOSNotifier())
-    # terminal-notifier is installed in the test environment
     assert result is None
 
 
