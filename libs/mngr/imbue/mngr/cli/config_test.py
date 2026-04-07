@@ -28,6 +28,7 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
+from imbue.mngr.utils.toml_config import set_plugin_enabled
 
 
 def test_parse_value_parses_true_as_boolean() -> None:
@@ -350,6 +351,21 @@ def test_save_and_load_config_file_roundtrip(tmp_path: Path) -> None:
     assert loaded_data["count"] == 42
     assert loaded_data["commands"]["create"]["connect"] is False
     assert loaded_data["commands"]["create"]["name_style"] == "english"
+
+
+def test_set_plugin_enabled_creates_and_saves(tmp_path: Path) -> None:
+    config_path = tmp_path / "settings.toml"
+    set_plugin_enabled("my_plugin", is_enabled=True, config_path=config_path)
+    data = load_config_file_tomlkit(config_path).unwrap()
+    assert data["plugins"]["my_plugin"]["enabled"] is True
+
+
+def test_set_plugin_enabled_disables_existing(tmp_path: Path) -> None:
+    config_path = tmp_path / "settings.toml"
+    set_plugin_enabled("my_plugin", is_enabled=True, config_path=config_path)
+    set_plugin_enabled("my_plugin", is_enabled=False, config_path=config_path)
+    data = load_config_file_tomlkit(config_path).unwrap()
+    assert data["plugins"]["my_plugin"]["enabled"] is False
 
 
 def test_config_list_json_format(
