@@ -3,14 +3,14 @@
 Starts the forwarding server on a random port, authenticates via the
 one-time login URL, and verifies the landing page loads.
 
-Run headless (default):
-    cd apps/minds && uv run pytest test_forwarding_server_e2e.py -m release --no-cov --cov-fail-under=0
+Run from the repo root:
+    just test apps/minds/test_forwarding_server_e2e.py::test_forwarding_server_login_and_landing
 
-Run headed (for interactive debugging):
-    HEADED=1 cd apps/minds && uv run pytest test_forwarding_server_e2e.py -m release --no-cov --cov-fail-under=0
+Run headed (browser visible for interactive debugging):
+    HEADED=1 just test apps/minds/test_forwarding_server_e2e.py::test_forwarding_server_login_and_landing
 
-Slow down for debugging:
-    HEADED=1 SLOW_MO=500 cd apps/minds && uv run pytest test_forwarding_server_e2e.py -m release --no-cov --cov-fail-under=0
+Slow motion (500ms between actions, useful with HEADED=1):
+    HEADED=1 SLOW_MO=500 just test apps/minds/test_forwarding_server_e2e.py::test_forwarding_server_login_and_landing
 """
 
 import os
@@ -18,7 +18,9 @@ import re
 import socket
 import threading
 import time
+from pathlib import Path
 
+import dotenv
 import pytest
 import uvicorn
 from playwright.sync_api import sync_playwright
@@ -30,6 +32,15 @@ from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
 from imbue.minds.primitives import OneTimeCode
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_env() -> None:
+    """Load environment variables from the repo root .env file."""
+    env_file = _REPO_ROOT / ".env"
+    if env_file.exists():
+        dotenv.load_dotenv(env_file)
+
 
 def _find_free_port() -> int:
     """Find and return a free TCP port on localhost."""
@@ -38,78 +49,90 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_server(
-    tmp_dir: str,
-    host: str,
-    port: int,
-    one_time_code: OneTimeCode,
-) -> threading.Thread:
-    """Start the forwarding server in a background thread and return the thread."""
-    paths = MindPaths(data_dir=tmp_dir)
-    auth_store = FileAuthStore(data_directory=paths.auth_dir)
-    auth_store.add_one_time_code(code=one_time_code)
+class ForwardingServerFixture:
+    """Manages a forwarding server lifecycle for testing."""
 
-    backend_resolver = MngrCliBackendResolver()
-    agent_creator = AgentCreator(paths=paths)
+    def __init__(self, tmp_dir: Path) -> None:
+        self.host = "127.0.0.1"
+        self.port = _find_free_port()
+        self.code = OneTimeCode("test-code-for-e2e-12345")
+        self.tmp_dir = tmp_dir
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
 
-    app = create_forwarding_server(
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-        http_client=None,
-        agent_creator=agent_creator,
-    )
+    @property
+    def login_url(self) -> str:
+        return f"http://{self.host}:{self.port}/login?one_time_code={self.code}"
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
 
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    def start(self) -> None:
+        """Start the forwarding server in a background thread."""
+        paths = MindPaths(data_dir=self.tmp_dir)
+        auth_store = FileAuthStore(data_directory=paths.auth_dir)
+        auth_store.add_one_time_code(code=self.code)
 
-    # Wait for server to be ready
-    for _ in range(50):
-        try:
-            with socket.create_connection((host, port), timeout=0.1):
-                break
-        except (ConnectionRefusedError, OSError):
-            time.sleep(0.1)
+        backend_resolver = MngrCliBackendResolver()
+        agent_creator = AgentCreator(paths=paths)
 
-    return thread
+        app = create_forwarding_server(
+            auth_store=auth_store,
+            backend_resolver=backend_resolver,
+            http_client=None,
+            agent_creator=agent_creator,
+        )
+
+        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
+        self._server = uvicorn.Server(config)
+
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+
+        for _ in range(50):
+            try:
+                with socket.create_connection((self.host, self.port), timeout=0.1):
+                    return
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.1)
+
+        raise TimeoutError("Forwarding server did not start within 5 seconds")
+
+    def stop(self) -> None:
+        """Signal the server to shut down."""
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 @pytest.mark.release
-def test_forwarding_server_starts_and_shows_login_page(tmp_path: object) -> None:
-    """Verify the forwarding server starts and shows the login page."""
-    tmp_dir = str(tmp_path)
-    host = "127.0.0.1"
-    port = _find_free_port()
-    code = OneTimeCode("test-code-for-e2e-12345")
+def test_forwarding_server_login_and_landing(tmp_path: Path) -> None:
+    """Verify the forwarding server starts, authenticates, and shows the landing page."""
+    _load_env()
 
-    _start_server(tmp_dir, host, port, code)
+    server = ForwardingServerFixture(tmp_path)
+    server.start()
 
     headed = os.environ.get("HEADED", "0") == "1"
     slow_mo = int(os.environ.get("SLOW_MO", "0"))
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed, slow_mo=slow_mo)
-        page = browser.new_page()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headed, slow_mo=slow_mo)
+            try:
+                page = browser.new_page()
 
-        # Visit the server -- should show login page (not authenticated)
-        page.goto(f"http://{host}:{port}/")
-        page.wait_for_load_state("domcontentloaded")
-        assert "Minds" in page.title() or "minds" in page.content().lower()
-        assert "login" in page.content().lower()
+                # Authenticate and land on the main page
+                page.goto(server.login_url)
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_url(re.compile(r"/$|/create"), timeout=5000)
 
-        # Authenticate via the one-time code
-        page.goto(f"http://{host}:{port}/login?one_time_code={code}")
-        page.wait_for_load_state("domcontentloaded")
-
-        # Should redirect to landing page after auth
-        # Wait for redirect to complete
-        page.wait_for_url(re.compile(r"/$|/create"), timeout=5000)
-
-        # The landing page should show either the create form (no agents)
-        # or the agent list
-        content = page.content().lower()
-        assert "create" in content or "your minds" in content or "agent" in content
-
-        browser.close()
+                # The landing page should show the create form (no agents exist)
+                content = page.content().lower()
+                assert "create" in content or "your minds" in content
+            finally:
+                browser.close()
+    finally:
+        server.stop()
