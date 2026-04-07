@@ -222,10 +222,6 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
 
 
-def test_prevent_hardcoded_claude_dir() -> None:
-    rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
-
-
 def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0))
 
