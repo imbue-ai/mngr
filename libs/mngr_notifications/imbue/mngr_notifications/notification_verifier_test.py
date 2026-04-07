@@ -43,8 +43,8 @@ class _MissingBinaryNotifier(MacOSNotifier):
         raise FileNotFoundError("terminal-notifier")
 
 
-class _RecordingLinuxNotifier(LinuxNotifier):
-    """A LinuxNotifier subclass that records calls instead of sending notifications."""
+class _NoOpLinuxNotifier(LinuxNotifier):
+    """A LinuxNotifier subclass that silently does nothing (simulates successful send)."""
 
     def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
         if execute_command is not None:
@@ -93,7 +93,7 @@ def test_run_test_notification_binary_not_found_via_notify(notification_cg: Conc
 
 def test_run_test_notification_linux_no_click_verification(notification_cg: ConcurrencyGroup) -> None:
     """Linux notifier returns is_clicked=None (no click detection)."""
-    notifier = _RecordingLinuxNotifier()
+    notifier = _NoOpLinuxNotifier()
     result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
 
     assert result.is_sent is True
