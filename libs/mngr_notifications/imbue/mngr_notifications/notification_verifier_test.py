@@ -114,6 +114,43 @@ def test_check_notifier_binary_macos() -> None:
     assert result is None
 
 
+@pytest.mark.skipif(shutil.which("terminal-notifier") is not None, reason="terminal-notifier is installed")
+def test_check_notifier_binary_macos_missing() -> None:
+    """check_notifier_binary returns error when terminal-notifier is not found."""
+    result = check_notifier_binary(MacOSNotifier())
+    assert result is not None
+    assert "terminal-notifier" in result
+
+
+@pytest.mark.skipif(shutil.which("notify-send") is not None, reason="notify-send is installed")
+def test_check_notifier_binary_linux_missing() -> None:
+    """check_notifier_binary returns error when notify-send is not found."""
+    result = check_notifier_binary(LinuxNotifier())
+    assert result is not None
+    assert "notify-send" in result
+
+
+@pytest.mark.skipif(shutil.which("notify-send") is None, reason="notify-send not installed")
+def test_check_notifier_binary_linux_present() -> None:
+    """check_notifier_binary returns None when notify-send is available."""
+    result = check_notifier_binary(LinuxNotifier())
+    assert result is None
+
+
+class _UnsupportedNotifier(Notifier):
+    """A notifier that is neither macOS nor Linux."""
+
+    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
+        pass
+
+
+def test_check_notifier_binary_unsupported_type() -> None:
+    """check_notifier_binary returns error for unknown notifier types."""
+    result = check_notifier_binary(_UnsupportedNotifier())
+    assert result is not None
+    assert "_UnsupportedNotifier" in result
+
+
 # --- _run_verification (CLI integration) ---
 
 
@@ -135,4 +172,28 @@ def test_run_verification_send_failed(notification_cg: ConcurrencyGroup) -> None
     """_run_verification returns False when notification sending fails."""
     notifier = MacOSNotifier()
     result = _run_verification(notifier, notification_cg, binary_checker=_binary_always_missing)
+    assert result is False
+
+
+def test_run_verification_linux_confirmed(notification_cg: ConcurrencyGroup) -> None:
+    """_run_verification returns True when user confirms they saw the notification on Linux."""
+    notifier = _NoOpLinuxNotifier()
+    result = _run_verification(
+        notifier,
+        notification_cg,
+        binary_checker=_no_binary_issues,
+        confirm_fn=lambda _prompt: True,
+    )
+    assert result is True
+
+
+def test_run_verification_linux_not_confirmed(notification_cg: ConcurrencyGroup) -> None:
+    """_run_verification returns False when user denies seeing the notification on Linux."""
+    notifier = _NoOpLinuxNotifier()
+    result = _run_verification(
+        notifier,
+        notification_cg,
+        binary_checker=_no_binary_issues,
+        confirm_fn=lambda _prompt: False,
+    )
     assert result is False
