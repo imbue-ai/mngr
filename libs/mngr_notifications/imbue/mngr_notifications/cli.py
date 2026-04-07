@@ -74,7 +74,8 @@ def _run_verification(
     click_timeout: float = DEFAULT_CLICK_TIMEOUT,
 ) -> bool:
     """Send a test notification and verify delivery. Returns True if verified."""
-    write_human_line("Verifying notification delivery... (use --no-verify to skip)")
+    write_human_line("Sending a test notification -- you should see it now. Please click it to confirm.")
+    write_human_line("(use --no-verify to skip this check)")
     result = run_test_notification(notifier, cg, click_timeout=click_timeout, binary_checker=binary_checker)
 
     if not result.is_sent:
@@ -86,7 +87,10 @@ def _run_verification(
         return True
 
     if result.is_clicked is False:
-        write_human_line("Test notification was sent but not clicked within 15 seconds.")
+        write_human_line(
+            "Test notification was sent but not clicked within {} seconds.",
+            int(click_timeout),
+        )
         write_human_line("If you did not see the notification, check your notification")
         write_human_line("permissions in System Settings > Notifications.")
         return False

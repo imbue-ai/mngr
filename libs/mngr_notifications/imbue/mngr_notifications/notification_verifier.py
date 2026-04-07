@@ -1,3 +1,4 @@
+import shlex
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -36,7 +37,7 @@ class VerifyNotificationResult(FrozenModel):
 @pure
 def _build_marker_touch_command(marker_path: Path) -> str:
     """Build a shell command that creates a marker file when executed."""
-    return f"touch {marker_path}"
+    return f"touch {shlex.quote(str(marker_path))}"
 
 
 def check_notifier_binary(notifier: Notifier) -> str | None:

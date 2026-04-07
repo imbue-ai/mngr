@@ -137,6 +137,12 @@ def test_build_marker_touch_command() -> None:
     assert cmd == "touch /tmp/mngr-notify-test-abc123"
 
 
+def test_build_marker_touch_command_quotes_spaces() -> None:
+    path = Path("/tmp/path with spaces/marker")
+    cmd = _build_marker_touch_command(path)
+    assert cmd == "touch '/tmp/path with spaces/marker'"
+
+
 # --- check_notifier_binary ---
 
 
