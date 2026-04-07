@@ -2,12 +2,19 @@ import platform
 import shlex
 from abc import ABC
 from abc import abstractmethod
+from typing import Final
 
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.terminals import get_terminal_app
+
+_ALERTER_TIMEOUT: Final[int] = 30
+_ALERTER_ACTION_LABEL: Final[str] = "Connect"
+_ALERTER_CLICKED_RESPONSES: Final[frozenset[str]] = frozenset(
+    {"@CONTENTCLICKED", "@ACTIONCLICKED", _ALERTER_ACTION_LABEL}
+)
 
 
 class Notifier(ABC):
@@ -19,16 +26,33 @@ class Notifier(ABC):
 
 
 class MacOSNotifier(Notifier):
-    """Sends notifications on macOS via terminal-notifier."""
+    """Sends notifications on macOS via alerter.
+
+    Uses alerter (brew install vjeantet/tap/alerter) which supports action
+    buttons and reports click results via stdout. When an execute_command is
+    provided, alerter blocks until the user interacts, then runs the command
+    on click. Without an execute_command, the notification is fire-and-forget.
+    """
 
     def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        cmd = ["terminal-notifier", "-title", title, "-message", message]
-        if execute_command is not None:
-            cmd.extend(["-execute", execute_command])
+        cmd = ["alerter", "--title", title, "--message", message, "--timeout", str(_ALERTER_TIMEOUT)]
+
+        if execute_command is None:
+            # No action needed on click -- fire and forget
+            try:
+                cg.run_process_in_background(cmd)
+            except FileNotFoundError:
+                logger.warning("alerter not found; install with: brew install vjeantet/tap/alerter")
+            return
+
+        # Add action button and block until user interacts or timeout
+        cmd.extend(["--actions", _ALERTER_ACTION_LABEL])
         try:
-            cg.run_process_to_completion(cmd, timeout=10, is_checked_after=False)
+            result = cg.run_process_to_completion(cmd, timeout=_ALERTER_TIMEOUT + 5, is_checked_after=False)
+            if result.stdout.strip() in _ALERTER_CLICKED_RESPONSES:
+                cg.run_process_in_background(["sh", "-c", execute_command])
         except FileNotFoundError:
-            logger.warning("terminal-notifier not found; install with: brew install terminal-notifier")
+            logger.warning("alerter not found; install with: brew install vjeantet/tap/alerter")
 
 
 class LinuxNotifier(Notifier):

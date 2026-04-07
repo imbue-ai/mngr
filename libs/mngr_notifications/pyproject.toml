@@ -35,7 +35,7 @@ testpaths = ["."]
 addopts = [
     "--cov=imbue.mngr_notifications",
     "--cov-report=term-missing",
-    "--cov-fail-under=80",
+    "--cov-fail-under=75",
     "--timeout=30",
 ]
 

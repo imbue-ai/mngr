@@ -20,7 +20,8 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_notifications.config import NotificationsPluginConfig
-from imbue.mngr_notifications.notification_verifier import DEFAULT_CLICK_TIMEOUT
+from imbue.mngr_notifications.notification_verifier import DEFAULT_VERIFY_TIMEOUT
+from imbue.mngr_notifications.notification_verifier import VerifyNotificationResult
 from imbue.mngr_notifications.notification_verifier import check_notifier_binary
 from imbue.mngr_notifications.notification_verifier import run_test_notification
 from imbue.mngr_notifications.notifier import Notifier
@@ -75,15 +76,18 @@ def _run_verification(
     notifier: Notifier,
     cg: ConcurrencyGroup,
     binary_checker: Callable[[Notifier], str | None] = check_notifier_binary,
-    click_timeout: float = DEFAULT_CLICK_TIMEOUT,
-    # Called when click detection is unavailable (e.g. Linux) to ask the user
-    # whether they saw the notification. Injected for testability.
+    verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     confirm_fn: Callable[[str], bool] = _default_confirm,
+    override_result: VerifyNotificationResult | None = None,
 ) -> bool:
     """Send a test notification and verify delivery. Returns True if verified."""
     write_human_line("Sending a test notification -- you should see it now. Please click it to confirm.")
     write_human_line("(use --no-verify to skip this check)")
-    result = run_test_notification(notifier, cg, click_timeout=click_timeout, binary_checker=binary_checker)
+
+    if override_result is not None:
+        result = override_result
+    else:
+        result = run_test_notification(notifier, cg, verify_timeout=verify_timeout, binary_checker=binary_checker)
 
     if not result.is_sent:
         write_human_line("FAILED: {}", result.error_message)
@@ -96,7 +100,7 @@ def _run_verification(
     if result.is_clicked is False:
         write_human_line(
             "Test notification was sent but not clicked within {} seconds.",
-            int(click_timeout),
+            int(verify_timeout),
         )
         write_human_line("If you did not see the notification, check your notification")
         write_human_line("permissions in System Settings > Notifications.")
@@ -177,8 +181,8 @@ to skip this check.
 
 Automatically starts `mngr observe` in the background if it is not already running.
 
-On macOS, notifications are sent via terminal-notifier (install with:
-brew install terminal-notifier). On Linux, via notify-send (libnotify).
+On macOS, notifications are sent via alerter (install with:
+brew install vjeantet/tap/alerter). On Linux, via notify-send (libnotify).
 
 To enable click-to-connect (opens a terminal tab running mngr connect),
 configure the plugin in settings.toml:
