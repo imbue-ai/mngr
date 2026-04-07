@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -58,15 +59,21 @@ def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
 
 
-def _setup_agent_output_dir(host: Host, agent: HeadlessClaude) -> Path:
-    """Create the agent state directory and return it.
+def _write_fake_agent_output(
+    host: Host,
+    agent: HeadlessClaude,
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    """Write synthetic stdout.jsonl and stderr.log to simulate claude output.
 
-    The returned directory is where stdout.jsonl and stderr.log live.
-    Callers can write test fixtures to agent_dir / "stdout.jsonl" etc.
+    Creates the agent state directory (normally set up by the agent lifecycle)
+    and writes the provided content to the output files.
     """
     agent_dir = host.host_dir / "agents" / str(agent.id)
     agent_dir.mkdir(parents=True, exist_ok=True)
-    return agent_dir
+    (agent_dir / "stdout.jsonl").write_text(stdout)
+    (agent_dir / "stderr.log").write_text(stderr)
 
 
 # =============================================================================
@@ -218,13 +225,12 @@ def test_stream_output_yields_text_deltas(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
     lines = [
         _make_stream_json_line("Hello "),
         _make_stream_json_line("world!"),
         json.dumps({"type": "result", "is_error": False}),
     ]
-    (agent_dir / "stdout.jsonl").write_text("\n".join(lines) + "\n")
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
 
     chunks = list(agent.stream_output())
 
@@ -244,9 +250,7 @@ def test_stream_output_raises_when_empty_file(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
-    (agent_dir / "stderr.log").write_text("")
+    _write_fake_agent_output(host, agent)
 
     with pytest.raises(MngrError, match="no details available"):
         list(agent.stream_output())
@@ -261,29 +265,11 @@ def test_stream_output_handles_file_without_trailing_newline(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    content = _make_stream_json_line("no trailing newline")
-    (agent_dir / "stdout.jsonl").write_text(content)
+    _write_fake_agent_output(host, agent, stdout=_make_stream_json_line("no trailing newline"))
 
     chunks = list(agent.stream_output())
 
     assert chunks == ["no trailing newline"]
-
-
-def test_stream_output_raises_with_stdout_error_text(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """stream_output should surface non-JSON text from stdout as the error message."""
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
-
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("Not logged in · Please run /login\n")
-
-    with pytest.raises(MngrError, match="Not logged in"):
-        list(agent.stream_output())
 
 
 def test_stream_output_raises_with_stream_json_error_result(
@@ -295,14 +281,84 @@ def test_stream_output_raises_with_stream_json_error_result(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text(
-        '{"type":"system","subtype":"init","session_id":"abc"}\n'
-        '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            '{"type":"system","subtype":"init","session_id":"abc"}\n'
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-7f3a9b2e"}\n'
+        ),
     )
 
-    with pytest.raises(MngrError, match="Not logged in"):
+    with pytest.raises(MngrError, match="err-7f3a9b2e"):
         list(agent.stream_output())
+
+
+def test_stream_output_raises_error_result_even_after_yielding_text(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should raise MngrError for is_error result even if text was yielded first."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            _make_stream_json_line("partial output") + "\n"
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-c4d8e1f0"}\n'
+        ),
+    )
+
+    with pytest.raises(MngrError, match="err-c4d8e1f0"):
+        list(agent.stream_output())
+
+
+def test_stream_output_combines_result_error_and_stderr_after_partial_output(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should combine result error and stderr even after yielding text."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout=(
+            _make_stream_json_line("partial") + "\n"
+            '{"type":"result","subtype":"success","is_error":true,"result":"err-a1b2c3d4"}\n'
+        ),
+        stderr="stderr-e5f6g7h8\n",
+    )
+
+    with pytest.raises(MngrError, match="err-a1b2c3d4") as exc_info:
+        list(agent.stream_output())
+    assert "stderr-e5f6g7h8" in str(exc_info.value)
+
+
+def test_stream_output_combines_stderr_and_stdout_errors(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should include both stderr and stdout errors when both are present."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    _write_fake_agent_output(
+        host,
+        agent,
+        stdout='{"type":"result","subtype":"success","is_error":true,"result":"err-d9e0f1a2"}\n',
+        stderr="stderr-b3c4d5e6\n",
+    )
+
+    with pytest.raises(MngrError, match="err-d9e0f1a2") as exc_info:
+        list(agent.stream_output())
+    assert "stderr-b3c4d5e6" in str(exc_info.value)
 
 
 def test_stream_output_raises_with_stderr_content(
@@ -314,11 +370,9 @@ def test_stream_output_raises_with_stderr_content(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
-    (agent_dir / "stderr.log").write_text("Error: authentication required\n")
+    _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
 
-    with pytest.raises(MngrError, match="authentication required"):
+    with pytest.raises(MngrError, match="stderr-f7g8h9i0"):
         list(agent.stream_output())
 
 
@@ -328,20 +382,38 @@ def test_stream_output_falls_back_to_pane_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should fall back to pane capture when stderr and stdout are empty.
+    """stream_output should fall back to pane capture when no redirect files exist.
 
-    With no stderr.log on disk and empty stdout.jsonl, the fallback chain
-    reaches tmux pane capture. Since no tmux session exists for this test
-    agent, pane capture returns None and we get 'no details available'.
+    Creates a real tmux session with error text visible in the pane, then
+    verifies the fallback chain reaches pane capture and surfaces that text.
     """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+    session = agent.session_name
 
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
-
-    with pytest.raises(MngrError, match="no details available"):
-        list(agent.stream_output())
+    # Start a session that immediately prints error text and exits.
+    # Using a command argument to new-session ensures the text is in the
+    # pane buffer without needing send-keys + sleep.
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "echo pane-err-j1k2l3m4; exec cat",
+        ],
+        check=True,
+    )
+    try:
+        with pytest.raises(MngrError, match="pane-err-j1k2l3m4"):
+            list(agent.stream_output())
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", session], check=False)
 
 
 # =============================================================================

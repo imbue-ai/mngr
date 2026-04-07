@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 from typing import Never
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -42,6 +43,8 @@ def extract_text_delta(line: str) -> str | None:
     try:
         parsed = json.loads(line)
     except (json.JSONDecodeError, ValueError):
+        # Expected: the stream contains non-JSON lines (blank lines, debug
+        # output that claude sometimes leaks to stdout). Skip them silently.
         return None
 
     if parsed.get("type") != "stream_event":
@@ -74,8 +77,25 @@ def _is_result_event(line: str) -> bool:
     try:
         parsed = json.loads(line)
     except (json.JSONDecodeError, ValueError):
+        # Expected: non-JSON lines in the stream (see extract_text_delta).
         return False
     return parsed.get("type") == "result"
+
+
+@pure
+def _extract_result_error(line: str) -> str | None:
+    """Extract error text from a stream-json result event with is_error=true.
+
+    Returns the error message if this is an error result, None otherwise.
+    """
+    try:
+        parsed = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        # Expected: non-JSON lines in the stream (see extract_text_delta).
+        return None
+    if parsed.get("type") == "result" and parsed.get("is_error"):
+        return parsed.get("result", "unknown error")
+    return None
 
 
 def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
@@ -102,6 +122,7 @@ class _StreamTailState(MutableModel):
     last_mtime: datetime | None = None
     chars_consumed: int = 0
     line_buffer: str = ""
+    result_error: str | None = None
 
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
@@ -140,6 +161,7 @@ class _StreamTailState(MutableModel):
                     if not stripped:
                         continue
                     if _is_result_event(stripped):
+                        self.result_error = _extract_result_error(stripped)
                         got_result = True
                         break
                     text = extract_text_delta(stripped)
@@ -154,7 +176,16 @@ class _StreamTailState(MutableModel):
                 return
             remaining = self.line_buffer + content[self.chars_consumed :]
             if remaining:
-                yield from _yield_text_deltas_from_lines(remaining.split("\n"))
+                for line in remaining.split("\n"):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if _is_result_event(stripped):
+                        self.result_error = _extract_result_error(stripped)
+                        break
+                    text = extract_text_delta(stripped)
+                    if text is not None:
+                        yield text
 
 
 class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
@@ -283,20 +314,56 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         return "".join(self.stream_output())
 
     def _raise_no_output_error(self) -> Never:
-        """Raise MngrError with the best available error detail.
+        """Raise MngrError collecting all available error detail.
 
-        Checks, in order: stderr.log, stdout.jsonl (for non-JSON text),
-        then tmux pane content as a last resort.
+        Collects errors from all file-based sources (stderr.log and stdout.jsonl)
+        since they can contain complementary information (e.g. stderr has a stack
+        trace while stdout has the user-facing error message). Falls back to tmux
+        pane capture only when neither redirect file exists (the shell never ran).
+
+        Error sources:
+
+        - stderr.log: claude CLI crashes (unhandled promise rejections) write
+          stack traces here. Claude's stderr behavior is unreliable (some errors
+          leak to stdout instead), so this rarely fires in practice.
+
+        - stdout.jsonl stream-json error result: the primary error channel.
+          With --output-format stream-json --verbose, auth failures and API
+          errors appear as result events with is_error=true.
+
+        - tmux pane capture: last resort when neither redirect file exists,
+          meaning the shell itself failed before running the command. Extremely
+          unlikely since the shell redirect creates both files before executing.
         """
-        error_detail = (
-            self._get_stderr_error_message() or self._get_stdout_error_message() or self._get_pane_error_message()
-        )
-        if error_detail:
-            raise MngrError(f"claude exited without producing output:\n{error_detail}")
+        parts: list[str] = []
+        # stderr: crashes, stack traces, tool errors
+        stderr_error = self._get_stderr_error_message()
+        if stderr_error:
+            parts.append(stderr_error)
+        # stdout: stream-json result events with is_error=true
+        stdout_error = self._get_stdout_stream_json_error()
+        if stdout_error:
+            parts.append(stdout_error)
+        # pane capture: only if the shell never created the redirect files
+        if not parts:
+            stderr_exists = self._file_exists_on_host(self._get_stderr_path())
+            stdout_exists = self._file_exists_on_host(self._get_stdout_path())
+            if not stderr_exists and not stdout_exists:
+                pane_error = self._get_pane_error_message()
+                if pane_error:
+                    parts.append(pane_error)
+        if parts:
+            detail = "\n".join(parts)
+            raise MngrError(f"claude exited without producing output:\n{detail}")
         raise MngrError("claude exited without producing output (no details available)")
 
     def _get_stderr_error_message(self) -> str | None:
-        """Read stderr.log for error output from the claude process."""
+        """Read stderr.log for error output from the claude process.
+
+        Relevant when: claude crashes with an unhandled exception (the Node.js
+        runtime writes the stack trace to stderr), or other tools in the
+        shell pipeline write errors to stderr.
+        """
         stderr_path = self._get_stderr_path()
         try:
             content = self.host.read_text_file(stderr_path)
@@ -305,24 +372,21 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         stripped = content.strip()
         return stripped if stripped else None
 
-    def _get_stdout_error_message(self) -> str | None:
-        """Check stdout.jsonl for error content.
+    def _get_stdout_stream_json_error(self) -> str | None:
+        """Extract error message from a stream-json result event in stdout.jsonl.
 
-        Handles two cases:
-        1. Plain text errors (when claude prints without --output-format)
-        2. Stream-json result events with is_error=true (e.g. auth failures
-           with --output-format stream-json --verbose)
+        Relevant when: claude starts successfully but encounters an error
+        (auth failure, API error, rate limit). With --output-format stream-json
+        --verbose, these appear as {"type": "result", "is_error": true,
+        "result": "Not logged in"} events in the stdout stream. This is the
+        primary error channel for headless claude.
         """
         stdout_path = self._get_stdout_path()
         try:
             content = self.host.read_text_file(stdout_path)
         except FileNotFoundError:
             return None
-        stripped = content.strip()
-        if not stripped:
-            return None
-        # Check each line for error result events or plain text
-        for line in stripped.split("\n"):
+        for line in content.split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -331,15 +395,20 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
                 if parsed.get("type") == "result" and parsed.get("is_error"):
                     return parsed.get("result", "unknown error")
             except (json.JSONDecodeError, ValueError):
-                # Non-JSON line -- likely a plain text error message
-                return line
+                # Non-JSON in stdout.jsonl after an error -- could indicate
+                # debug output leaking to stdout (known claude CLI bug).
+                logger.debug("Non-JSON line in stdout.jsonl during error recovery: {}", line)
+                continue
         return None
 
     def _get_pane_error_message(self) -> str | None:
         """Capture the tmux pane content to extract an error message.
 
-        Fallback for when stderr content is visible in the pane (e.g. the
-        process crashed before writing anything to stdout).
+        Relevant when: the shell command never ran far enough to create the
+        redirect files (stderr.log, stdout.jsonl). This would happen if tmux
+        send-keys failed to reach a shell prompt, or the shell itself crashed
+        before executing the redirect. Extremely unlikely in practice --
+        mostly defense-in-depth.
         """
         content = self.capture_pane_content()
         if content is None:
@@ -358,11 +427,9 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         Yields text delta chunks parsed from stream-json events. Completes when
         the agent process exits and the file is fully consumed.
 
-        Raises MngrError if the agent exits without producing any output,
-        which typically indicates a startup failure (e.g. authentication error).
-        The check covers both cases: stdout file never created, and stdout file
-        created but empty (e.g. shell redirect creates the file before claude
-        fails).
+        Raises MngrError if the stream-json result event has is_error=true
+        (even if some text was yielded before the error), or if the agent exits
+        without producing any output (startup failure, auth error, etc.).
         """
         stdout_path = self._get_stdout_path()
 
@@ -379,6 +446,20 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
             yielded_any = True
             yield chunk
 
+        # After streaming completes, check for errors. result_error is
+        # captured from the stream-json result event during tailing (covers
+        # both "error with no output" and "error after partial output").
+        # Also check stderr since it may have complementary info (e.g. a
+        # stack trace alongside the user-facing error in the result event).
+        if state.result_error:
+            parts = [state.result_error]
+            stderr_error = self._get_stderr_error_message()
+            if stderr_error:
+                parts.append(stderr_error)
+            detail = "\n".join(parts)
+            raise MngrError(f"claude returned an error:\n{detail}")
+        # If nothing was yielded and no result error was captured, fall back
+        # to the full error chain (re-reads stdout for errors, checks pane).
         if not yielded_any:
             self._raise_no_output_error()
 

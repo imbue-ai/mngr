@@ -711,6 +711,11 @@ def get_stash_count(path: Path) -> int:
     return len([line for line in lines if line])
 
 
+def is_claude_installed() -> bool:
+    """Check if the Claude Code CLI is installed and available on PATH."""
+    return shutil.which("claude") is not None
+
+
 def setup_claude_trust_config_for_subprocess(
     trusted_paths: list[Path],
     root_name: str = "mngr-acceptance-test",

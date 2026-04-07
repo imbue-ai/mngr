@@ -23,9 +23,6 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import get_config_path
-from imbue.mngr.cli.config import load_config_file_tomlkit
-from imbue.mngr.cli.config import save_config_file
-from imbue.mngr.cli.config import set_nested_value
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
@@ -41,6 +38,7 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.utils.toml_config import set_plugin_enabled
 from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
@@ -701,18 +699,6 @@ def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool) -> None:
     set_plugin_enabled(name, is_enabled=is_enabled, config_path=config_path)
 
     _emit_plugin_toggle_result(name, is_enabled, scope, config_path, output_opts)
-
-
-def set_plugin_enabled(name: str, *, is_enabled: bool, config_path: Path) -> None:
-    """Set a plugin's enabled state in a config file.
-
-    This is the core logic shared by ``mngr plugin enable/disable``
-    and the install wizard.  It loads the TOML, sets
-    ``plugins.<name>.enabled``, and saves.
-    """
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, f"plugins.{name}.enabled", is_enabled)
-    save_config_file(config_path, doc)
 
 
 def _validate_plugin_name_is_known(name: str, mngr_ctx: MngrContext) -> None:
