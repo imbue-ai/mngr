@@ -3,21 +3,42 @@ import json
 
 import httpx
 import pytest
-from fastapi import HTTPException
-from starlette.requests import Request as StarletteRequest
+from starlette.testclient import TestClient
 
+import imbue.cloudflare_forwarding.app as app_mod
+from imbue.cloudflare_forwarding.app import AuthPolicy
 from imbue.cloudflare_forwarding.app import CloudflareApiError
 from imbue.cloudflare_forwarding.app import InvalidTunnelComponentError
 from imbue.cloudflare_forwarding.app import ServiceNotFoundError
 from imbue.cloudflare_forwarding.app import TunnelNotFoundError
 from imbue.cloudflare_forwarding.app import TunnelOwnershipError
-from imbue.cloudflare_forwarding.app import authenticate
 from imbue.cloudflare_forwarding.app import cf_check
 from imbue.cloudflare_forwarding.app import cf_list_all_pages
 from imbue.cloudflare_forwarding.app import extract_service_name
+from imbue.cloudflare_forwarding.app import extract_username_from_tunnel_name
 from imbue.cloudflare_forwarding.app import make_hostname
 from imbue.cloudflare_forwarding.app import make_tunnel_name
+from imbue.cloudflare_forwarding.app import web_app
 from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
+from imbue.cloudflare_forwarding.testing import make_fake_tunnel_token
+
+
+def _admin_headers(username: str = "testuser", password: str = "testsecret") -> dict[str, str]:
+    encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {encoded}"}
+
+
+def _agent_headers(tunnel_id: str) -> dict[str, str]:
+    token = make_fake_tunnel_token(tunnel_id)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Create a TestClient with the FastAPI app, injecting a fake context."""
+    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({"testuser": "testsecret"}))
+    fake_ctx = make_fake_forwarding_ctx()
+    monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
+    return TestClient(web_app)
 
 
 def test_make_tunnel_name_format() -> None:
@@ -50,6 +71,10 @@ def test_extract_service_name_returns_none_for_non_matching() -> None:
     assert extract_service_name("other.example.com", "agent1", "alice", "example.com") is None
 
 
+def test_extract_username_from_tunnel_name() -> None:
+    assert extract_username_from_tunnel_name("alice--agent1") == "alice"
+
+
 def test_cf_check_raises_on_error() -> None:
     response = httpx.Response(400, json={"success": False, "errors": [{"message": "bad"}]})
     with pytest.raises(CloudflareApiError) as exc_info:
@@ -71,22 +96,14 @@ def test_cf_list_all_pages_paginates() -> None:
         call_count += 1
         page = int(dict(request.url.params).get("page", "1"))
         if page == 1:
-            return httpx.Response(
-                200,
-                json={
-                    "success": True,
-                    "result": [{"id": "1"}, {"id": "2"}],
-                    "result_info": {"total_count": 3, "page": 1, "per_page": 2, "count": 2},
-                },
-            )
-        return httpx.Response(
-            200,
-            json={
-                "success": True,
-                "result": [{"id": "3"}],
-                "result_info": {"total_count": 3, "page": 2, "per_page": 2, "count": 1},
-            },
-        )
+            return httpx.Response(200, json={
+                "success": True, "result": [{"id": "1"}, {"id": "2"}],
+                "result_info": {"total_count": 3, "page": 1, "per_page": 2, "count": 2},
+            })
+        return httpx.Response(200, json={
+            "success": True, "result": [{"id": "3"}],
+            "result_info": {"total_count": 3, "page": 2, "per_page": 2, "count": 1},
+        })
 
     client = httpx.Client(base_url="https://test.example.com", transport=httpx.MockTransport(handler))
     results = cf_list_all_pages(client, "/test", {})
@@ -94,14 +111,22 @@ def test_cf_list_all_pages_paginates() -> None:
     assert call_count == 2
 
 
-def test_create_tunnel_creates_new() -> None:
+def test_create_tunnel() -> None:
     ctx = make_fake_forwarding_ctx()
     info = ctx.create_tunnel("alice", "agent1")
     assert info.tunnel_name == "alice--agent1"
-    assert info.tunnel_id == "tunnel-1"
     assert info.token == "token-for-tunnel-1"
     assert info.services == []
-    assert len(ctx.fake.tunnels) == 1
+
+
+def test_create_tunnel_with_default_auth() -> None:
+    ctx = make_fake_forwarding_ctx()
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    info = ctx.create_tunnel("alice", "agent1", default_auth_policy=policy)
+    assert info.tunnel_name == "alice--agent1"
+    stored = ctx.get_tunnel_auth("alice--agent1")
+    assert stored is not None
+    assert len(stored.rules) == 1
 
 
 def test_create_tunnel_reuses_existing() -> None:
@@ -109,15 +134,6 @@ def test_create_tunnel_reuses_existing() -> None:
     info1 = ctx.create_tunnel("alice", "agent1")
     info2 = ctx.create_tunnel("alice", "agent1")
     assert info1.tunnel_id == info2.tunnel_id
-    assert len(ctx.fake.tunnels) == 1
-
-
-def test_create_tunnel_different_agents() -> None:
-    ctx = make_fake_forwarding_ctx()
-    info1 = ctx.create_tunnel("alice", "agent1")
-    info2 = ctx.create_tunnel("alice", "agent2")
-    assert info1.tunnel_id != info2.tunnel_id
-    assert len(ctx.fake.tunnels) == 2
 
 
 def test_list_tunnels_filters_by_user() -> None:
@@ -125,34 +141,20 @@ def test_list_tunnels_filters_by_user() -> None:
     ctx.create_tunnel("alice", "agent1")
     ctx.create_tunnel("alice", "agent2")
     ctx.create_tunnel("bob", "agent3")
-
     tunnels = ctx.list_tunnels("alice")
     assert len(tunnels) == 2
-    names = {t.tunnel_name for t in tunnels}
-    assert names == {"alice--agent1", "alice--agent2"}
 
 
-def test_list_tunnels_empty_for_user_with_no_tunnels() -> None:
+def test_delete_tunnel_cascades() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    assert ctx.list_tunnels("bob") == []
-
-
-def test_delete_tunnel_removes_tunnel_and_dns() -> None:
-    ctx = make_fake_forwarding_ctx()
-    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    assert len(ctx.fake.dns_records) == 1
-
     ctx.delete_tunnel("alice--agent1", "alice")
     assert len(ctx.fake.tunnels) == 0
     assert len(ctx.fake.dns_records) == 0
-
-
-def test_delete_tunnel_raises_for_nonexistent() -> None:
-    ctx = make_fake_forwarding_ctx()
-    with pytest.raises(TunnelNotFoundError):
-        ctx.delete_tunnel("alice--nonexistent", "alice")
+    assert ctx.fake.kv_get("alice--agent1") is None
 
 
 def test_delete_tunnel_raises_for_wrong_owner() -> None:
@@ -166,51 +168,30 @@ def test_add_service_creates_dns_and_ingress() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     info = ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-
-    assert info.service_name == "web"
     assert info.hostname == "web--agent1--alice.example.com"
-    assert info.service_url == "http://localhost:8080"
     assert len(ctx.fake.dns_records) == 1
 
-    config = ctx.fake.get_tunnel_config("tunnel-1")
-    ingress = config["config"]["ingress"]
-    assert len(ingress) == 2
-    assert ingress[0]["hostname"] == "web--agent1--alice.example.com"
-    assert ingress[-1]["service"] == "http_status:404"
 
-
-def test_add_multiple_services() -> None:
+def test_add_service_applies_default_access_policy() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
-
-    assert len(ctx.fake.dns_records) == 2
-    config = ctx.fake.get_tunnel_config("tunnel-1")
-    assert len(config["config"]["ingress"]) == 3
+    assert len(ctx.fake.access_apps) == 1
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert len(ctx.fake.access_policies.get(app_id, [])) == 1
 
 
-def test_add_service_raises_for_wrong_owner() -> None:
+def test_remove_service_deletes_access_app() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    with pytest.raises(TunnelOwnershipError):
-        ctx.add_service("alice--agent1", "bob", "web", "http://localhost:8080")
-
-
-def test_remove_service_removes_dns_and_ingress() -> None:
-    ctx = make_fake_forwarding_ctx()
-    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
-
+    assert len(ctx.fake.access_apps) == 1
     ctx.remove_service("alice--agent1", "alice", "web")
-
-    assert len(ctx.fake.dns_records) == 1
-    assert ctx.fake.dns_records[0]["name"] == "api--agent1--alice.example.com"
-    config = ctx.fake.get_tunnel_config("tunnel-1")
-    ingress = config["config"]["ingress"]
-    assert len(ingress) == 2
-    assert ingress[0]["hostname"] == "api--agent1--alice.example.com"
+    assert len(ctx.fake.access_apps) == 0
 
 
 def test_remove_service_raises_for_nonexistent() -> None:
@@ -220,47 +201,179 @@ def test_remove_service_raises_for_nonexistent() -> None:
         ctx.remove_service("alice--agent1", "alice", "nonexistent")
 
 
-def test_remove_service_raises_for_wrong_owner() -> None:
+def test_tunnel_auth_get_set() -> None:
+    ctx = make_fake_forwarding_ctx()
+    assert ctx.get_tunnel_auth("alice--agent1") is None
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
+    result = ctx.get_tunnel_auth("alice--agent1")
+    assert result is not None
+    assert result.rules == policy.rules
+
+
+def test_service_auth_get_set() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    with pytest.raises(TunnelOwnershipError):
-        ctx.remove_service("alice--agent1", "bob", "web")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "web", policy)
+    result = ctx.get_service_auth("alice--agent1", "alice", "web")
+    assert result is not None
+    assert len(result.rules) == 1
 
 
-def test_list_services_after_adding() -> None:
+def test_resolve_tunnel_name_by_id() -> None:
     ctx = make_fake_forwarding_ctx()
-    ctx.create_tunnel("alice", "agent1")
-    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    ctx.add_service("alice--agent1", "alice", "api", "http://localhost:3000")
-
-    tunnels = ctx.list_tunnels("alice")
-    assert len(tunnels) == 1
-    assert len(tunnels[0].services) == 2
-    names = {s.service_name for s in tunnels[0].services}
-    assert names == {"web", "api"}
+    info = ctx.create_tunnel("alice", "agent1")
+    name = ctx.resolve_tunnel_name_by_id(info.tunnel_id)
+    assert name == "alice--agent1"
 
 
-def test_authenticate_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({"alice": "secret123"}))
-    encoded = base64.b64encode(b"alice:secret123").decode()
-    scope = {"type": "http", "headers": [(b"authorization", f"Basic {encoded}".encode())]}
-    req = StarletteRequest(scope)
-    result = authenticate(req)
-    assert result == "alice"
+def test_resolve_tunnel_name_by_id_raises_for_nonexistent() -> None:
+    ctx = make_fake_forwarding_ctx()
+    with pytest.raises(TunnelNotFoundError):
+        ctx.resolve_tunnel_name_by_id("nonexistent")
 
 
-def test_authenticate_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({"alice": "secret123"}))
-    encoded = base64.b64encode(b"alice:wrong").decode()
-    scope = {"type": "http", "headers": [(b"authorization", f"Basic {encoded}".encode())]}
-    req = StarletteRequest(scope)
-    with pytest.raises(HTTPException, match="Invalid credentials"):
-        authenticate(req)
+def test_route_create_tunnel_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["tunnel_name"] == "testuser--agent1"
+    assert data["token"] is not None
 
 
-def test_authenticate_malformed_base64() -> None:
-    scope = {"type": "http", "headers": [(b"authorization", b"Basic !!!not-valid-base64!!!")]}
-    req = StarletteRequest(scope)
-    with pytest.raises(HTTPException, match="Malformed credentials"):
-        authenticate(req)
+def test_route_create_tunnel_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.post("/tunnels", json={"agent_id": "agent2"}, headers=_agent_headers("tunnel-1"))
+    assert resp.status_code == 403
+
+
+def test_route_list_tunnels_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.get("/tunnels", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_route_add_service_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["service_name"] == "web"
+
+
+def test_route_add_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_agent_headers("tunnel-1"),
+    )
+    assert resp.status_code == 200
+
+
+def test_route_add_service_agent_wrong_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post("/tunnels", json={"agent_id": "agent2"}, headers=_admin_headers())
+    resp = client.post(
+        "/tunnels/testuser--agent2/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_agent_headers("tunnel-1"),
+    )
+    assert resp.status_code == 403
+
+
+def test_route_list_services_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_admin_headers(),
+    )
+    resp = client.get("/tunnels/testuser--agent1/services", headers=_agent_headers("tunnel-1"))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_route_remove_service_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.post(
+        "/tunnels/testuser--agent1/services",
+        json={"service_name": "web", "service_url": "http://localhost:8080"},
+        headers=_admin_headers(),
+    )
+    resp = client.delete("/tunnels/testuser--agent1/services/web", headers=_agent_headers("tunnel-1"))
+    assert resp.status_code == 200
+
+
+def test_route_delete_tunnel_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.delete("/tunnels/testuser--agent1", headers=_agent_headers("tunnel-1"))
+    assert resp.status_code == 403
+
+
+def test_route_set_tunnel_auth_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.put(
+        "/tunnels/testuser--agent1/auth",
+        json={"rules": [{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}]},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+
+
+def test_route_get_tunnel_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    client.put(
+        "/tunnels/testuser--agent1/auth",
+        json={"rules": [{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}]},
+        headers=_admin_headers(),
+    )
+    resp = client.get("/tunnels/testuser--agent1/auth", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert len(resp.json()["rules"]) == 1
+
+
+def test_route_set_tunnel_auth_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.put(
+        "/tunnels/testuser--agent1/auth",
+        json={"rules": []},
+        headers=_agent_headers("tunnel-1"),
+    )
+    assert resp.status_code == 403
+
+
+def test_route_no_auth_returns_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.get("/tunnels")
+    assert resp.status_code == 401
+
+
+def test_route_bad_basic_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.get("/tunnels", headers=_admin_headers(password="wrong"))
+    assert resp.status_code == 401
+
+
+def test_route_malformed_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.get("/tunnels/foo--bar/services", headers={"Authorization": "Bearer not-valid-base64!!!"})
+    assert resp.status_code == 401

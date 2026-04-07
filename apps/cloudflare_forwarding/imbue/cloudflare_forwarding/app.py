@@ -20,6 +20,7 @@ from typing import Protocol
 
 import httpx
 import modal
+from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _CF_BASE_URL = "https://api.cloudflare.com/client/v4"
 TUNNEL_NAME_SEP = "--"
+KV_NAMESPACE_TITLE = "cloudflare-forwarding-defaults"
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +84,13 @@ class InvalidTunnelComponentError(ValueError):
 # ---------------------------------------------------------------------------
 
 
+class AuthPolicy(BaseModel):
+    rules: list[dict[str, Any]] = Field(description="Cloudflare Access-style policy rules")
+
+
 class CreateTunnelRequest(BaseModel):
     agent_id: str = Field(description="The mngr agent ID for this tunnel")
+    default_auth_policy: AuthPolicy | None = Field(default=None, description="Optional default auth policy for new services")
 
 
 class AddServiceRequest(BaseModel):
@@ -102,6 +109,18 @@ class TunnelInfo(BaseModel):
     tunnel_id: str = Field(description="Cloudflare tunnel UUID")
     token: str | None = Field(default=None, description="Tunnel token for cloudflared (only on create)")
     services: list[ServiceInfo] = Field(default_factory=list, description="Configured services")
+
+
+class AdminAuth(BaseModel):
+    username: str
+
+
+class AgentAuth(BaseModel):
+    tunnel_id: str
+    tunnel_name: str
+
+
+AuthResult = AdminAuth | AgentAuth
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +154,8 @@ def cf_list_all_pages(client: httpx.Client, url: str, params: dict[str, str]) ->
     return all_results
 
 
+# --- Tunnel operations ---
+
 def cf_create_tunnel(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
     response = client.post(f"/accounts/{account_id}/cfd_tunnel", json={"name": name, "config_src": "cloudflare"})
     return cf_check(response)["result"]
@@ -156,6 +177,15 @@ def cf_get_tunnel_by_name(client: httpx.Client, account_id: str, name: str) -> d
     return None
 
 
+def cf_get_tunnel_by_id(client: httpx.Client, account_id: str, tunnel_id: str) -> dict[str, Any] | None:
+    response = client.get(f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}")
+    try:
+        data = cf_check(response)
+        return data["result"]
+    except CloudflareApiError:
+        return None
+
+
 def cf_get_tunnel_token(client: httpx.Client, account_id: str, tunnel_id: str) -> str:
     response = client.get(f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/token")
     return cf_check(response)["result"]
@@ -174,6 +204,8 @@ def cf_put_tunnel_config(client: httpx.Client, account_id: str, tunnel_id: str, 
     cf_check(client.put(f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", json=config))
 
 
+# --- DNS operations ---
+
 def cf_create_cname(client: httpx.Client, zone_id: str, name: str, target: str) -> dict[str, Any]:
     response = client.post(
         f"/zones/{zone_id}/dns_records",
@@ -191,6 +223,101 @@ def cf_list_dns_records(client: httpx.Client, zone_id: str, name: str = "") -> l
 
 def cf_delete_dns_record(client: httpx.Client, zone_id: str, record_id: str) -> None:
     cf_check(client.delete(f"/zones/{zone_id}/dns_records/{record_id}"))
+
+
+# --- Access operations ---
+
+def cf_create_access_app(client: httpx.Client, account_id: str, hostname: str, app_name: str) -> dict[str, Any]:
+    response = client.post(
+        f"/accounts/{account_id}/access/apps",
+        json={
+            "name": app_name,
+            "domain": hostname,
+            "type": "self_hosted",
+            "session_duration": "24h",
+        },
+    )
+    return cf_check(response)["result"]
+
+
+def cf_delete_access_app(client: httpx.Client, account_id: str, app_id: str) -> None:
+    cf_check(client.delete(f"/accounts/{account_id}/access/apps/{app_id}"))
+
+
+def cf_get_access_app_by_domain(client: httpx.Client, account_id: str, hostname: str) -> dict[str, Any] | None:
+    response = client.get(f"/accounts/{account_id}/access/apps")
+    data = cf_check(response)
+    for app_item in data["result"]:
+        if app_item.get("domain") == hostname:
+            return app_item
+    return None
+
+
+def cf_list_access_policies(client: httpx.Client, account_id: str, app_id: str) -> list[dict[str, Any]]:
+    response = client.get(f"/accounts/{account_id}/access/apps/{app_id}/policies")
+    return cf_check(response)["result"]
+
+
+def cf_create_access_policy(
+    client: httpx.Client, account_id: str, app_id: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/access/apps/{app_id}/policies", json=policy)
+    return cf_check(response)["result"]
+
+
+def cf_update_access_policy(
+    client: httpx.Client, account_id: str, app_id: str, policy_id: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    response = client.put(f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}", json=policy)
+    return cf_check(response)["result"]
+
+
+def cf_delete_access_policy(client: httpx.Client, account_id: str, app_id: str, policy_id: str) -> None:
+    cf_check(client.delete(f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}"))
+
+
+# --- Workers KV operations ---
+
+def cf_kv_list_namespaces(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
+    response = client.get(f"/accounts/{account_id}/storage/kv/namespaces")
+    return cf_check(response)["result"]
+
+
+def cf_kv_create_namespace(client: httpx.Client, account_id: str, title: str) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/storage/kv/namespaces", json={"title": title})
+    return cf_check(response)["result"]
+
+
+def cf_kv_get(client: httpx.Client, account_id: str, namespace_id: str, key: str) -> str | None:
+    response = client.get(f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}")
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.text
+
+
+def cf_kv_put(client: httpx.Client, account_id: str, namespace_id: str, key: str, value: str) -> None:
+    response = client.put(
+        f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}",
+        content=value,
+        headers={"Content-Type": "text/plain"},
+    )
+    cf_check(response)
+
+
+def cf_kv_delete(client: httpx.Client, account_id: str, namespace_id: str, key: str) -> None:
+    response = client.delete(f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}")
+    cf_check(response)
+
+
+def cf_kv_ensure_namespace(client: httpx.Client, account_id: str, title: str) -> str:
+    """Find or create a KV namespace by title. Returns the namespace ID."""
+    namespaces = cf_kv_list_namespaces(client, account_id)
+    for ns in namespaces:
+        if ns["title"] == title:
+            return ns["id"]
+    result = cf_kv_create_namespace(client, account_id, title)
+    return result["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +351,12 @@ def extract_service_name(hostname: str, agent_id: str, username: str, domain: st
     return hostname[: -len(expected_suffix)]
 
 
+def extract_username_from_tunnel_name(tunnel_name: str) -> str:
+    """Extract the username portion from a tunnel name."""
+    parts = tunnel_name.split(TUNNEL_NAME_SEP, 1)
+    return parts[0]
+
+
 # ---------------------------------------------------------------------------
 # Ingress config helpers
 # ---------------------------------------------------------------------------
@@ -238,6 +371,35 @@ def wrap_ingress(rules: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Auth policy helpers
+# ---------------------------------------------------------------------------
+
+
+def policy_to_cf_rules(policy: AuthPolicy) -> list[dict[str, Any]]:
+    """Convert our AuthPolicy format to Cloudflare Access policy create/update format."""
+    cf_policies = []
+    for rule in policy.rules:
+        cf_policies.append({
+            "name": "Policy rule",
+            "decision": rule.get("action", "allow"),
+            "include": rule.get("include", []),
+            "precedence": len(cf_policies) + 1,
+        })
+    return cf_policies
+
+
+def cf_policies_to_auth_policy(cf_policies: list[dict[str, Any]]) -> AuthPolicy:
+    """Convert Cloudflare Access policies back to our AuthPolicy format."""
+    rules = []
+    for p in cf_policies:
+        rules.append({
+            "action": p.get("decision", "allow"),
+            "include": p.get("include", []),
+        })
+    return AuthPolicy(rules=rules)
+
+
+# ---------------------------------------------------------------------------
 # Cloudflare operations protocol
 # ---------------------------------------------------------------------------
 
@@ -248,6 +410,7 @@ class CloudflareOps(Protocol):
     def create_tunnel(self, name: str) -> dict[str, Any]: ...
     def list_tunnels(self, include_prefix: str = "") -> list[dict[str, Any]]: ...
     def get_tunnel_by_name(self, name: str) -> dict[str, Any] | None: ...
+    def get_tunnel_by_id(self, tunnel_id: str) -> dict[str, Any] | None: ...
     def get_tunnel_token(self, tunnel_id: str) -> str: ...
     def delete_tunnel(self, tunnel_id: str) -> None: ...
     def get_tunnel_config(self, tunnel_id: str) -> dict[str, Any]: ...
@@ -255,6 +418,16 @@ class CloudflareOps(Protocol):
     def create_cname(self, name: str, target: str) -> dict[str, Any]: ...
     def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
     def delete_dns_record(self, record_id: str) -> None: ...
+    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]: ...
+    def delete_access_app(self, app_id: str) -> None: ...
+    def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None: ...
+    def list_access_policies(self, app_id: str) -> list[dict[str, Any]]: ...
+    def create_access_policy(self, app_id: str, policy: dict[str, Any]) -> dict[str, Any]: ...
+    def update_access_policy(self, app_id: str, policy_id: str, policy: dict[str, Any]) -> dict[str, Any]: ...
+    def delete_access_policy(self, app_id: str, policy_id: str) -> None: ...
+    def kv_get(self, key: str) -> str | None: ...
+    def kv_put(self, key: str, value: str) -> None: ...
+    def kv_delete(self, key: str) -> None: ...
 
 
 class HttpCloudflareOps:
@@ -268,6 +441,12 @@ class HttpCloudflareOps:
         )
         self.account_id = account_id
         self.zone_id = zone_id
+        self._kv_namespace_id: str | None = None
+
+    def _ensure_kv_namespace(self) -> str:
+        if self._kv_namespace_id is None:
+            self._kv_namespace_id = cf_kv_ensure_namespace(self.client, self.account_id, KV_NAMESPACE_TITLE)
+        return self._kv_namespace_id
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         return cf_create_tunnel(self.client, self.account_id, name)
@@ -277,6 +456,9 @@ class HttpCloudflareOps:
 
     def get_tunnel_by_name(self, name: str) -> dict[str, Any] | None:
         return cf_get_tunnel_by_name(self.client, self.account_id, name)
+
+    def get_tunnel_by_id(self, tunnel_id: str) -> dict[str, Any] | None:
+        return cf_get_tunnel_by_id(self.client, self.account_id, tunnel_id)
 
     def get_tunnel_token(self, tunnel_id: str) -> str:
         return cf_get_tunnel_token(self.client, self.account_id, tunnel_id)
@@ -298,6 +480,39 @@ class HttpCloudflareOps:
 
     def delete_dns_record(self, record_id: str) -> None:
         cf_delete_dns_record(self.client, self.zone_id, record_id)
+
+    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]:
+        return cf_create_access_app(self.client, self.account_id, hostname, app_name)
+
+    def delete_access_app(self, app_id: str) -> None:
+        cf_delete_access_app(self.client, self.account_id, app_id)
+
+    def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None:
+        return cf_get_access_app_by_domain(self.client, self.account_id, hostname)
+
+    def list_access_policies(self, app_id: str) -> list[dict[str, Any]]:
+        return cf_list_access_policies(self.client, self.account_id, app_id)
+
+    def create_access_policy(self, app_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        return cf_create_access_policy(self.client, self.account_id, app_id, policy)
+
+    def update_access_policy(self, app_id: str, policy_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        return cf_update_access_policy(self.client, self.account_id, app_id, policy_id, policy)
+
+    def delete_access_policy(self, app_id: str, policy_id: str) -> None:
+        cf_delete_access_policy(self.client, self.account_id, app_id, policy_id)
+
+    def kv_get(self, key: str) -> str | None:
+        ns_id = self._ensure_kv_namespace()
+        return cf_kv_get(self.client, self.account_id, ns_id, key)
+
+    def kv_put(self, key: str, value: str) -> None:
+        ns_id = self._ensure_kv_namespace()
+        cf_kv_put(self.client, self.account_id, ns_id, key, value)
+
+    def kv_delete(self, key: str) -> None:
+        ns_id = self._ensure_kv_namespace()
+        cf_kv_delete(self.client, self.account_id, ns_id, key)
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +537,14 @@ class ForwardingCtx:
             raise TunnelNotFoundError(tunnel_name)
         return tunnel
 
-    def create_tunnel(self, username: str, agent_id: str) -> TunnelInfo:
+    def resolve_tunnel_name_by_id(self, tunnel_id: str) -> str:
+        """Look up tunnel name from tunnel ID."""
+        tunnel = self.ops.get_tunnel_by_id(tunnel_id)
+        if tunnel is None:
+            raise TunnelNotFoundError(tunnel_id)
+        return tunnel["name"]
+
+    def create_tunnel(self, username: str, agent_id: str, default_auth_policy: AuthPolicy | None = None) -> TunnelInfo:
         name = make_tunnel_name(username, agent_id)
         existing = self.ops.get_tunnel_by_name(name)
         if existing is not None:
@@ -335,6 +557,10 @@ class ForwardingCtx:
         tid = result["id"]
         token = self.ops.get_tunnel_token(tid)
         self.ops.put_tunnel_config(tid, wrap_ingress([]))
+
+        if default_auth_policy is not None:
+            self.ops.kv_put(name, default_auth_policy.model_dump_json())
+
         return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=[])
 
     def list_tunnels(self, username: str) -> list[TunnelInfo]:
@@ -358,9 +584,11 @@ class ForwardingCtx:
         for rule in non_catchall_rules(config.get("config", {}).get("ingress", [])):
             hostname = rule.get("hostname", "")
             if hostname:
+                self._delete_access_app_for_hostname(hostname)
                 self._delete_dns_by_name(hostname)
         self.ops.put_tunnel_config(tid, wrap_ingress([]))
         self.ops.delete_tunnel(tid)
+        self._kv_delete_safe(tunnel_name)
 
     def add_service(self, tunnel_name: str, username: str, service_name: str, service_url: str) -> ServiceInfo:
         self.verify_ownership(tunnel_name, username)
@@ -373,6 +601,9 @@ class ForwardingCtx:
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         rules.append({"hostname": hostname, "service": service_url})
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
+
+        self._apply_default_access_policy(tunnel_name, hostname)
+
         return ServiceInfo(service_name=service_name, hostname=hostname, service_url=service_url)
 
     def remove_service(self, tunnel_name: str, username: str, service_name: str) -> None:
@@ -387,7 +618,44 @@ class ForwardingCtx:
         if len(new_rules) == len(rules):
             raise ServiceNotFoundError(service_name, tunnel_name)
         self.ops.put_tunnel_config(tid, wrap_ingress(new_rules))
+        self._delete_access_app_for_hostname(hostname)
         self._delete_dns_by_name(hostname)
+
+    def get_tunnel_auth(self, tunnel_name: str) -> AuthPolicy | None:
+        """Get the default auth policy for a tunnel from KV."""
+        raw = self.ops.kv_get(tunnel_name)
+        if raw is None:
+            return None
+        return AuthPolicy.model_validate_json(raw)
+
+    def set_tunnel_auth(self, tunnel_name: str, policy: AuthPolicy) -> None:
+        """Set the default auth policy for a tunnel in KV."""
+        self.ops.kv_put(tunnel_name, policy.model_dump_json())
+
+    def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
+        """Get the auth policy for a specific service from its Access Application."""
+        agent_id = extract_agent_id(tunnel_name, username)
+        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        access_app = self.ops.get_access_app_by_domain(hostname)
+        if access_app is None:
+            return None
+        policies = self.ops.list_access_policies(access_app["id"])
+        return cf_policies_to_auth_policy(policies)
+
+    def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
+        """Set the auth policy for a specific service on its Access Application."""
+        agent_id = extract_agent_id(tunnel_name, username)
+        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        access_app = self.ops.get_access_app_by_domain(hostname)
+        if access_app is None:
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}")
+
+        existing_policies = self.ops.list_access_policies(access_app["id"])
+        for ep in existing_policies:
+            self.ops.delete_access_policy(access_app["id"], ep["id"])
+
+        for cf_policy in policy_to_cf_rules(policy):
+            self.ops.create_access_policy(access_app["id"], cf_policy)
 
     def _list_services(self, tunnel_id: str, tunnel_name: str, username: str) -> list[ServiceInfo]:
         agent_id = extract_agent_id(tunnel_name, username)
@@ -407,18 +675,54 @@ class ForwardingCtx:
         for record in records:
             self.ops.delete_dns_record(record["id"])
 
+    def _delete_access_app_for_hostname(self, hostname: str) -> None:
+        try:
+            access_app = self.ops.get_access_app_by_domain(hostname)
+            if access_app is not None:
+                self.ops.delete_access_app(access_app["id"])
+        except (CloudflareApiError, Exception) as exc:
+            logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
+
+    def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
+        """Apply the tunnel's default auth policy to a new service, if one is set."""
+        try:
+            raw = self.ops.kv_get(tunnel_name)
+            if raw is None:
+                return
+            policy = AuthPolicy.model_validate_json(raw)
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}")
+            for cf_policy in policy_to_cf_rules(policy):
+                self.ops.create_access_policy(access_app["id"], cf_policy)
+        except (CloudflareApiError, Exception) as exc:
+            logger.warning("Failed to apply Access policy for %s: %s", hostname, exc)
+
+    def _kv_delete_safe(self, key: str) -> None:
+        try:
+            self.ops.kv_delete(key)
+        except (CloudflareApiError, Exception) as exc:
+            logger.warning("Failed to delete KV entry for %s: %s", key, exc)
+
 
 # ---------------------------------------------------------------------------
-# Auth helper
+# Auth
 # ---------------------------------------------------------------------------
 
 
-def authenticate(request: Request) -> str:
-    """Extract and verify HTTP Basic Auth from the request. Returns the username."""
+def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
+    """Authenticate a request. Returns AdminAuth or AgentAuth."""
     auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("basic "):
-        raise HTTPException(status_code=401, detail="Missing credentials")
 
+    if auth_header.lower().startswith("bearer "):
+        return _authenticate_agent(auth_header[7:], ops)
+
+    if auth_header.lower().startswith("basic "):
+        return _authenticate_admin(auth_header)
+
+    raise HTTPException(status_code=401, detail="Missing credentials")
+
+
+def _authenticate_admin(auth_header: str) -> AdminAuth:
+    """Validate HTTP Basic Auth credentials. Returns AdminAuth with username."""
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError) as exc:
@@ -433,7 +737,43 @@ def authenticate(request: Request) -> str:
     expected = creds.get(username)
     if expected is None or not secrets_module.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return username
+    return AdminAuth(username=username)
+
+
+def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
+    """Validate a tunnel token. Returns AgentAuth with tunnel_id and tunnel_name."""
+    try:
+        decoded = base64.b64decode(token).decode("utf-8")
+        token_data = json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=401, detail="Malformed tunnel token") from exc
+
+    tunnel_id = token_data.get("t")
+    if not tunnel_id:
+        raise HTTPException(status_code=401, detail="Invalid tunnel token: missing tunnel ID")
+
+    tunnel = ops.get_tunnel_by_id(tunnel_id)
+    if tunnel is None:
+        raise HTTPException(status_code=401, detail="Invalid tunnel token: tunnel not found")
+
+    return AgentAuth(tunnel_id=tunnel_id, tunnel_name=tunnel["name"])
+
+
+def require_admin(auth: AuthResult) -> AdminAuth:
+    """Require admin auth. Raises 403 if agent auth."""
+    if isinstance(auth, AgentAuth):
+        raise HTTPException(status_code=403, detail="This operation requires admin credentials")
+    return auth
+
+
+def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
+    """Require access to a specific tunnel. Returns the username.
+    Admin can access any tunnel. Agent can only access their own tunnel."""
+    if isinstance(auth, AdminAuth):
+        return auth.username
+    if auth.tunnel_name != tunnel_name:
+        raise HTTPException(status_code=403, detail=f"Token does not grant access to tunnel '{tunnel_name}'")
+    return extract_username_from_tunnel_name(tunnel_name)
 
 
 # ---------------------------------------------------------------------------
@@ -480,56 +820,123 @@ def handle_endpoint_errors() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+web_app = FastAPI()
+
+
+@web_app.post("/tunnels")
+def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
+    """Create a tunnel (idempotent) and return its info with token."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        return get_ctx().create_tunnel(admin.username, body.agent_id, body.default_auth_policy).model_dump()
+
+
+@web_app.get("/tunnels")
+def list_tunnels(request: Request) -> list[dict[str, object]]:
+    """List all tunnels belonging to the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        return [t.model_dump() for t in get_ctx().list_tunnels(admin.username)]
+
+
+@web_app.delete("/tunnels/{tunnel_name}")
+def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
+    """Delete a tunnel and all its associated DNS records, Access Applications, ingress rules, and KV entries."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        get_ctx().delete_tunnel(tunnel_name, admin.username)
+        return {"status": "deleted"}
+
+
+@web_app.post("/tunnels/{tunnel_name}/services")
+def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
+    """Add a service to a tunnel. Works with both admin and agent auth."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        username = require_tunnel_access(auth, tunnel_name)
+        return get_ctx().add_service(tunnel_name, username, body.service_name, body.service_url).model_dump()
+
+
+@web_app.delete("/tunnels/{tunnel_name}/services/{service_name}")
+def remove_service(request: Request, tunnel_name: str, service_name: str) -> dict[str, str]:
+    """Remove a service from a tunnel. Works with both admin and agent auth."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        username = require_tunnel_access(auth, tunnel_name)
+        get_ctx().remove_service(tunnel_name, username, service_name)
+        return {"status": "deleted"}
+
+
+@web_app.get("/tunnels/{tunnel_name}/services")
+def list_services(request: Request, tunnel_name: str) -> list[dict[str, object]]:
+    """List services on a tunnel. Works with both admin and agent auth."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        username = require_tunnel_access(auth, tunnel_name)
+        tunnel = get_ctx().get_tunnel_or_raise(tunnel_name)
+        services = get_ctx()._list_services(tunnel["id"], tunnel_name, username)
+        return [s.model_dump() for s in services]
+
+
+@web_app.get("/tunnels/{tunnel_name}/auth")
+def get_tunnel_auth(request: Request, tunnel_name: str) -> dict[str, object]:
+    """Get the default auth policy for a tunnel."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        policy = get_ctx().get_tunnel_auth(tunnel_name)
+        if policy is None:
+            return {"rules": []}
+        return policy.model_dump()
+
+
+@web_app.put("/tunnels/{tunnel_name}/auth")
+def set_tunnel_auth(request: Request, tunnel_name: str, body: AuthPolicy) -> dict[str, str]:
+    """Set the default auth policy for a tunnel."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        get_ctx().set_tunnel_auth(tunnel_name, body)
+        return {"status": "updated"}
+
+
+@web_app.get("/tunnels/{tunnel_name}/services/{service_name}/auth")
+def get_service_auth(request: Request, tunnel_name: str, service_name: str) -> dict[str, object]:
+    """Get the auth policy for a specific service."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        policy = get_ctx().get_service_auth(tunnel_name, admin.username, service_name)
+        if policy is None:
+            return {"rules": []}
+        return policy.model_dump()
+
+
+@web_app.put("/tunnels/{tunnel_name}/services/{service_name}/auth")
+def set_service_auth(request: Request, tunnel_name: str, service_name: str, body: AuthPolicy) -> dict[str, str]:
+    """Set the auth policy for a specific service."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        get_ctx().set_service_auth(tunnel_name, admin.username, service_name, body)
+        return {"status": "updated"}
+
+
+# ---------------------------------------------------------------------------
 # Modal deployment
 # ---------------------------------------------------------------------------
 
 image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx")
 app = modal.App(name="cloudflare-forwarding", image=image)
-_secrets = [modal.Secret.from_name("cloudflare-forwarding-secrets")]
 
 
-@app.function(secrets=_secrets)
-@modal.fastapi_endpoint(method="POST", docs=True)
-def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
-    """Create a tunnel (idempotent) and return its info with token."""
-    with handle_endpoint_errors():
-        username = authenticate(request)
-        return get_ctx().create_tunnel(username, body.agent_id).model_dump()
-
-
-@app.function(secrets=_secrets)
-@modal.fastapi_endpoint(method="GET", docs=True)
-def list_tunnels(request: Request) -> list[dict[str, object]]:
-    """List all tunnels belonging to the authenticated user."""
-    with handle_endpoint_errors():
-        username = authenticate(request)
-        return [t.model_dump() for t in get_ctx().list_tunnels(username)]
-
-
-@app.function(secrets=_secrets)
-@modal.fastapi_endpoint(method="DELETE", docs=True)
-def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
-    """Delete a tunnel and all its associated DNS records and ingress rules."""
-    with handle_endpoint_errors():
-        username = authenticate(request)
-        get_ctx().delete_tunnel(tunnel_name, username)
-        return {"status": "deleted"}
-
-
-@app.function(secrets=_secrets)
-@modal.fastapi_endpoint(method="POST", docs=True)
-def add_service(request: Request, tunnel_name: str, body: AddServiceRequest) -> dict[str, object]:
-    """Add a service to a tunnel."""
-    with handle_endpoint_errors():
-        username = authenticate(request)
-        return get_ctx().add_service(tunnel_name, username, body.service_name, body.service_url).model_dump()
-
-
-@app.function(secrets=_secrets)
-@modal.fastapi_endpoint(method="DELETE", docs=True)
-def remove_service(request: Request, tunnel_name: str, service_name: str) -> dict[str, str]:
-    """Remove a service from a tunnel."""
-    with handle_endpoint_errors():
-        username = authenticate(request)
-        get_ctx().remove_service(tunnel_name, username, service_name)
-        return {"status": "deleted"}
+@app.function(secrets=[modal.Secret.from_name("cloudflare-forwarding-secrets")])
+@modal.asgi_app()
+def fastapi_app() -> FastAPI:
+    return web_app
