@@ -176,7 +176,15 @@ def _get_string_session() -> str:
             ) from exc
         auth_key_raw = ls.get(f"dc{dc_id}_auth_key", "")
         # The value may be JSON-encoded (wrapped in extra quotes)
-        auth_key_hex = json.loads(auth_key_raw) if auth_key_raw.startswith('"') else auth_key_raw
+        if auth_key_raw.startswith('"'):
+            try:
+                auth_key_hex = json.loads(auth_key_raw)
+            except json.JSONDecodeError as exc:
+                raise TelegramCredentialError(
+                    f"Could not parse auth_key for DC {dc_id} in {LATCHKEY_DUMP_PATH}: {exc}"
+                ) from exc
+        else:
+            auth_key_hex = auth_key_raw
         if not auth_key_hex:
             raise TelegramCredentialError(
                 f"No auth_key for DC {dc_id} in dump"
