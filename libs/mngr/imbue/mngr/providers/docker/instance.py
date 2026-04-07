@@ -179,10 +179,11 @@ def _get_docker_context_host() -> str | None:
     """
     try:
         ctx = docker.context.ContextAPI.get_current_context()
-    except Exception:
+    except Exception as e:
         # The Docker SDK raises bare ``Exception`` when context metadata is
         # corrupted, so we must catch broadly here.  This is a best-effort
         # lookup; any failure falls back to ``docker.from_env()``.
+        logger.debug("Failed to read Docker context (falling back to default): {}", e)
         return None
 
     if ctx is None or ctx.Name == "default":
