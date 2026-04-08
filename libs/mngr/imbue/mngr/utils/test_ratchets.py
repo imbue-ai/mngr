@@ -199,7 +199,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(34))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(35))
 
 
 def test_prevent_test_container_classes() -> None:

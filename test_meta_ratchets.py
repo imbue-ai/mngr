@@ -251,6 +251,36 @@ def test_no_gitignored_files_are_tracked() -> None:
     )
 
 
+def test_gitignore_patterns_use_double_star() -> None:
+    """Ensure every active .gitignore pattern starts with **/ or contains a path separator.
+
+    All patterns must use **/ so they are directly compatible with .dockerignore
+    syntax (where bare names only match at root). Patterns with an interior /
+    (like */*/_tasks/) are already path-qualified and are allowed.
+
+    The offload justfile copies .gitignore to .dockerignore at build time,
+    so keeping the formats compatible avoids a separate generation step.
+    """
+    gitignore = (_REPO_ROOT / ".gitignore").read_text()
+    violations: list[str] = []
+    for lineno, line in enumerate(gitignore.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        pattern = stripped.lstrip("!")
+        if pattern.startswith("**/"):
+            continue
+        # Contains a / before the last char (e.g. */*/_tasks/)
+        core = pattern.rstrip("/")
+        if "/" in core:
+            continue
+        violations.append(f"  line {lineno}: {stripped}")
+    assert len(violations) == 0, (
+        "The following .gitignore patterns need a **/ prefix.\n"
+        "This keeps .gitignore directly compatible with .dockerignore:\n" + "\n".join(violations)
+    )
+
+
 def test_every_project_with_tests_has_coverage_config() -> None:
     """Ensure each project with tests has pytest coverage configuration in its pyproject.toml.
 

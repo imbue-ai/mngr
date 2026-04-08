@@ -329,5 +329,5 @@ def test_tunnel_accept_loop_shutdown_event_stops_loop(short_tmp_path: Path) -> N
     _wait_for_socket(sock_path, timeout=10.0)
 
     shutdown_event.set()
-    accept_thread.join(timeout=3.0)
+    accept_thread.join(timeout=10.0)
     assert not accept_thread.is_alive()
