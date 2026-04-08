@@ -51,16 +51,16 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
-from imbue.mngr_claude.plugin import _archive_session_files
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
-from imbue.mngr_claude.plugin import _get_session_archive_dir
+from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
+from imbue.mngr_claude.plugin import _preserve_session_files
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import agent_field_generators
@@ -1280,75 +1280,75 @@ def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
     }
 
 
-def test_on_destroy_archives_session_files(
+def test_on_destroy_preserves_session_files(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_destroy should archive session files when archive_sessions_on_destroy is True."""
+    """on_destroy should preserve session files when preserve_sessions_on_destroy is True."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     files = _populate_session_files(agent)
     _write_mngr_trust_entry(agent.work_dir)
 
     agent.on_destroy(host)
 
-    archive_dir = _get_session_archive_dir(host, agent)
-    assert archive_dir.exists()
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
 
-    # Session JSONL files should be archived
-    archived_projects = archive_dir / "projects"
-    assert archived_projects.exists()
-    archived_session_files = list(archived_projects.rglob("*.jsonl"))
-    assert len(archived_session_files) == 1
-    assert archived_session_files[0].read_text() == files["session_file"].read_text()
+    # Session JSONL files should be preserved (copy_directory copies the projects/ dir)
+    preserved_projects = dest_dir / "projects"
+    assert preserved_projects.exists()
+    preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(preserved_session_files) == 1
+    assert preserved_session_files[0].read_text() == files["session_file"].read_text()
 
-    # Raw transcript should be archived
-    archived_raw_transcript = archive_dir / "claude_transcript.jsonl"
-    assert archived_raw_transcript.exists()
-    assert archived_raw_transcript.read_text() == '{"type":"message"}\n'
+    # Raw transcript dir should be preserved (copy_directory copies the directory)
+    preserved_raw_transcript = dest_dir / "raw_transcript" / "events.jsonl"
+    assert preserved_raw_transcript.exists()
+    assert preserved_raw_transcript.read_text() == '{"type":"message"}\n'
 
-    # Common transcript should be archived
-    archived_common_transcript = archive_dir / "common_transcript.jsonl"
-    assert archived_common_transcript.exists()
-    assert archived_common_transcript.read_text() == '{"type":"user_message","text":"hello"}\n'
+    # Common transcript dir should be preserved
+    preserved_common_transcript = dest_dir / "common_transcript" / "events.jsonl"
+    assert preserved_common_transcript.exists()
+    assert preserved_common_transcript.read_text() == '{"type":"user_message","text":"hello"}\n'
 
-    # Session history should be archived
-    archived_history = archive_dir / "claude_session_id_history"
-    assert archived_history.exists()
-    assert archived_history.read_text() == "abc123 create\n"
+    # Session history should be preserved (single file copy)
+    preserved_history = dest_dir / "claude_session_id_history"
+    assert preserved_history.exists()
+    assert preserved_history.read_text() == "abc123 create\n"
 
 
-def test_on_destroy_skips_archival_when_disabled(
+def test_on_destroy_skips_preservation_when_disabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_destroy should not archive when archive_sessions_on_destroy is False."""
-    agent_config = ClaudeAgentConfig(check_installation=False, archive_sessions_on_destroy=False)
+    """on_destroy should not preserve sessions when preserve_sessions_on_destroy is False."""
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=False)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
     _populate_session_files(agent)
     _write_mngr_trust_entry(agent.work_dir)
 
     agent.on_destroy(host)
 
-    archive_dir = _get_session_archive_dir(host, agent)
-    assert not archive_dir.exists()
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert not dest_dir.exists()
 
 
 def test_on_destroy_handles_no_session_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_destroy should not create an archive dir when there is no session data."""
+    """on_destroy should not create a preserved_sessions dir when there is no session data."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     _write_mngr_trust_entry(agent.work_dir)
 
     # No session files populated -- just destroy
     agent.on_destroy(host)
 
-    archive_dir = _get_session_archive_dir(host, agent)
-    assert not archive_dir.exists()
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert not dest_dir.exists()
 
 
-def test_archive_session_files_partial_data(
+def test_preserve_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Archival should work when only some session data exists (e.g., only raw transcript)."""
+    """Preservation should work when only some session data exists (e.g., only raw transcript)."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -1358,14 +1358,14 @@ def test_archive_session_files_partial_data(
     transcript_dir.mkdir(parents=True, exist_ok=True)
     (transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
 
-    _archive_session_files(agent, host)
+    _preserve_session_files(agent, host)
 
-    archive_dir = _get_session_archive_dir(host, agent)
-    assert archive_dir.exists()
-    assert (archive_dir / "claude_transcript.jsonl").exists()
-    assert not (archive_dir / "projects").exists()
-    assert not (archive_dir / "common_transcript.jsonl").exists()
-    assert not (archive_dir / "claude_session_id_history").exists()
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
+    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "projects").exists()
+    assert not (dest_dir / "common_transcript").exists()
+    assert not (dest_dir / "claude_session_id_history").exists()
 
 
 def test_provision_prompts_for_all_dialogs_when_interactive(

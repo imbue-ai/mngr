@@ -233,11 +233,12 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "events/claude/common_transcript/events.jsonl. The common format includes user messages, "
         "assistant messages, and tool call/result summaries.",
     )
-    archive_sessions_on_destroy: bool = Field(
+    preserve_sessions_on_destroy: bool = Field(
         default=True,
-        description="Archive Claude session files before the agent's state directory is deleted on destroy. "
+        description="Preserve Claude session files locally before the agent's state directory is deleted on destroy. "
         "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
-        "are copied to <host_dir>/plugin/mngr_claude/session_archives/<agent-name>--<agent-id>/. "
+        "are copied to <local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/. "
+        "For remote agents, files are pulled to the local machine so they survive host destruction. "
         "Set to False to discard session data on destroy.",
     )
 
@@ -1752,20 +1753,21 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
-        """Archive session files and clean up per-agent credentials and trust entries.
+        """Preserve session files and clean up per-agent credentials and trust entries.
 
-        When archive_sessions_on_destroy is enabled (default), copies session JSONL
-        files, the aggregated transcript, and session history to a persistent archive
-        directory before the agent state directory is deleted.
+        When preserve_sessions_on_destroy is enabled (default), copies session JSONL
+        files, transcripts, and session history to the local mngr data directory
+        before the agent state directory is deleted. For remote agents, files are
+        pulled to the local machine so they survive host destruction.
 
         For agents with per-agent config dirs: cleans up macOS keychain entries
         (the config dir itself is deleted with the agent state).
         For legacy agents without per-agent config dirs: cleans up the global
         ~/.claude.json trust entry.
         """
-        # Archive session files before the state dir is deleted
-        if self.agent_config.archive_sessions_on_destroy:
-            _archive_session_files(self, host)
+        # Preserve session files before the state dir is deleted
+        if self.agent_config.preserve_sessions_on_destroy:
+            _preserve_session_files(self, host)
 
         config_dir = self.get_claude_config_dir()
         per_agent_config_exists = host.execute_idempotent_command(
@@ -1790,80 +1792,115 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             pass
 
 
-def _get_session_archive_dir(host: OnlineHostInterface, agent: ClaudeAgent) -> Path:
-    """Return the archive directory path for an agent's session files."""
-    return host.host_dir / "plugin" / "mngr_claude" / "session_archives" / f"{agent.name}--{agent.id}"
+def _get_preserved_sessions_dir(agent: ClaudeAgent) -> Path:
+    """Return the local directory path for an agent's preserved session files.
+
+    Always resolves to a path under the local mngr data directory, regardless
+    of whether the agent ran locally or remotely.
+    """
+    local_host_dir = Path(agent.mngr_ctx.config.default_host_dir).expanduser()
+    return local_host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent.name}--{agent.id}"
 
 
-def _archive_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
-    """Copy session files to a persistent archive before the agent state dir is deleted.
+def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
+    """Copy session files to the local mngr data directory before the agent state dir is deleted.
 
-    Archives four categories of data:
+    Preserves four categories of data:
     - Session JSONL files from the per-agent Claude config dir (projects/)
     - The raw transcript (logs/claude_transcript/events.jsonl)
     - The common (agent-agnostic) transcript (events/claude/common_transcript/events.jsonl)
     - The session ID history file (claude_session_id_history)
 
-    Uses a single batched shell command to minimize SSH roundtrips for remote hosts.
+    For local agents, this is a same-host copy. For remote agents, files are
+    pulled to the local machine via copy_directory (rsync over SSH).
     Failures are logged as warnings but do not prevent agent destruction.
     """
     agent_dir = agent._get_agent_dir()
-    archive_dir = _get_session_archive_dir(host, agent)
 
-    # Source paths for session data
+    # Source paths for session data (on the agent's host)
     config_dir = agent.get_claude_config_dir()
     projects_dir = config_dir / "projects"
-    raw_transcript_path = agent_dir / "logs" / "claude_transcript" / "events.jsonl"
-    common_transcript_path = agent_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
+    raw_transcript_path = agent_dir / "logs" / "claude_transcript"
+    common_transcript_path = agent_dir / "events" / "claude" / "common_transcript"
     history_path = agent_dir / "claude_session_id_history"
 
-    # Build a single shell script that checks existence and copies in one roundtrip
-    archive_script = _build_archive_script(
-        archive_dir=archive_dir,
-        projects_dir=projects_dir,
-        raw_transcript_path=raw_transcript_path,
-        common_transcript_path=common_transcript_path,
-        history_path=history_path,
-    )
-
-    with log_span("Archiving session files for agent {}", agent.name):
-        result = host.execute_idempotent_command(archive_script, timeout_seconds=30.0)
-        if not result.success:
-            logger.warning("Session archival failed for agent {}: {}", agent.name, result.stderr)
-        elif result.stdout.strip():
-            logger.debug("Archived session data for agent {}: {}", agent.name, result.stdout.strip())
-        else:
-            logger.debug("No session data to archive for agent {}", agent.name)
-
-
-def _build_archive_script(
-    archive_dir: Path,
-    projects_dir: Path,
-    raw_transcript_path: Path,
-    common_transcript_path: Path,
-    history_path: Path,
-) -> str:
-    """Build a shell script that checks for session data and copies it in a single invocation."""
-    q_archive = shlex.quote(str(archive_dir))
-    q_projects = shlex.quote(str(projects_dir))
-    q_raw_transcript = shlex.quote(str(raw_transcript_path))
-    q_common_transcript = shlex.quote(str(common_transcript_path))
-    q_history = shlex.quote(str(history_path))
-
-    return (
-        f"_has_data=false;"
-        f" [ -d {q_projects} ] && _has_data=true;"
-        f" [ -f {q_raw_transcript} ] && _has_data=true;"
-        f" [ -f {q_common_transcript} ] && _has_data=true;"
-        f" [ -f {q_history} ] && _has_data=true;"
-        f' if [ "$_has_data" = false ]; then exit 0; fi;'
-        f" mkdir -p {q_archive};"
-        f" [ -d {q_projects} ] && cp -r {q_projects} {q_archive}/projects && echo projects;"
-        f" [ -f {q_raw_transcript} ] && cp {q_raw_transcript} {q_archive}/claude_transcript.jsonl && echo raw_transcript;"
-        f" [ -f {q_common_transcript} ] && cp {q_common_transcript} {q_archive}/common_transcript.jsonl && echo common_transcript;"
-        f" [ -f {q_history} ] && cp {q_history} {q_archive}/claude_session_id_history && echo history;"
+    # Check which source directories/files exist on the agent's host (single roundtrip)
+    check_script = (
+        f"[ -d {shlex.quote(str(projects_dir))} ] && echo projects;"
+        f" [ -d {shlex.quote(str(raw_transcript_path))} ] && echo raw_transcript;"
+        f" [ -d {shlex.quote(str(common_transcript_path))} ] && echo common_transcript;"
+        f" [ -f {shlex.quote(str(history_path))} ] && echo history;"
         f" true"
     )
+    check_result = host.execute_idempotent_command(check_script, timeout_seconds=5.0)
+    available = set(check_result.stdout.strip().split()) if check_result.stdout.strip() else set()
+
+    if not available:
+        logger.debug("No session data to preserve for agent {}", agent.name)
+        return
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+
+    # Get the local host for copy_directory (the CLI always runs locally)
+    local_host = _get_local_host(agent.mngr_ctx)
+
+    with log_span("Preserving session files for agent {}", agent.name):
+        # Copy each available data category using copy_directory
+        if "projects" in available:
+            _copy_to_local(local_host, host, projects_dir, dest_dir / "projects", "session projects", agent.name)
+
+        if "raw_transcript" in available:
+            _copy_to_local(
+                local_host, host, raw_transcript_path, dest_dir / "raw_transcript", "raw transcript", agent.name
+            )
+
+        if "common_transcript" in available:
+            _copy_to_local(
+                local_host,
+                host,
+                common_transcript_path,
+                dest_dir / "common_transcript",
+                "common transcript",
+                agent.name,
+            )
+
+        if "history" in available:
+            # Session history is a single file -- copy its parent dir and it comes along
+            # Use a targeted approach: read the file content and write it locally
+            _copy_single_file_to_local(host, history_path, dest_dir / "claude_session_id_history", agent.name)
+
+
+def _copy_to_local(
+    local_host: OnlineHostInterface,
+    source_host: OnlineHostInterface,
+    source_path: Path,
+    dest_path: Path,
+    label: str,
+    agent_name: str,
+) -> None:
+    """Copy a directory from the source host to the local host."""
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        local_host.copy_directory(source_host, source_path, dest_path)
+        logger.debug("Preserved {} for agent {}", label, agent_name)
+    except (MngrError, OSError) as e:
+        logger.warning("Failed to preserve {} for agent {}: {}", label, agent_name, e)
+
+
+def _copy_single_file_to_local(
+    source_host: OnlineHostInterface,
+    source_path: Path,
+    dest_path: Path,
+    agent_name: str,
+) -> None:
+    """Copy a single file from the source host to a local path."""
+    try:
+        content = source_host.read_text_file(source_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text(content)
+        logger.debug("Preserved session history for agent {}", agent_name)
+    except (MngrError, OSError) as e:
+        logger.warning("Failed to preserve session history for agent {}: {}", agent_name, e)
 
 
 def _generate_claude_home_settings() -> dict[str, Any]:
