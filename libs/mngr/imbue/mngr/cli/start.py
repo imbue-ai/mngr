@@ -219,8 +219,8 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         else:
             connection_opts = ConnectionOptions(
                 is_reconnect=True,
-                retry_count=3,
-                retry_delay="5s",
+                retry_count=mngr_ctx.config.retry.connect_retry_times,
+                retry_delay=mngr_ctx.config.retry.connect_retry_delay,
                 attach_command=None,
                 is_unknown_host_allowed=False,
             )
