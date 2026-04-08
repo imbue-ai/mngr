@@ -3,7 +3,7 @@ name = "imbue-mngr-schedule"
 version = "0.1.0"
 description = "Schedule command plugin for mngr - schedule remote invocations of mngr commands"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr",
     "imbue-common",
@@ -78,5 +78,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]

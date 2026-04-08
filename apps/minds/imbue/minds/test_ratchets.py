@@ -20,11 +20,11 @@ def test_prevent_todos() -> None:
     rc.check_todos(_DIR, snapshot(0))
 
 
-def test_prevent_exec_usage() -> None:
+def test_prevent_exec() -> None:
     rc.check_exec(_DIR, snapshot(0))
 
 
-def test_prevent_eval_usage() -> None:
+def test_prevent_eval() -> None:
     rc.check_eval(_DIR, snapshot(0))
 
 
@@ -105,7 +105,7 @@ def test_prevent_dataclasses_import() -> None:
     rc.check_dataclasses_import(_DIR, snapshot(0))
 
 
-def test_prevent_namedtuple_usage() -> None:
+def test_prevent_namedtuple() -> None:
     rc.check_namedtuple(_DIR, snapshot(0))
 
 
@@ -115,6 +115,17 @@ def test_prevent_yaml_usage() -> None:
 
 def test_prevent_functools_partial() -> None:
     rc.check_functools_partial(_DIR, snapshot(0))
+
+
+def test_prevent_exit_stack() -> None:
+    rc.check_exit_stack(_DIR, snapshot(0))
+
+
+# --- Hardcoded paths ---
+
+
+def test_prevent_hardcoded_claude_dir() -> None:
+    rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
 # --- Naming conventions ---
@@ -208,7 +219,11 @@ def test_prevent_os_fork() -> None:
     rc.check_os_fork(_DIR, snapshot(0))
 
 
-def test_prevent_direct_subprocess_usage() -> None:
+def test_prevent_bare_urwid_tty_signal_keys() -> None:
+    rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
+
+
+def test_prevent_direct_subprocess() -> None:
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
@@ -220,11 +235,11 @@ def test_prevent_if_elif_without_else() -> None:
     rc.check_if_elif_without_else(_DIR, snapshot(0))
 
 
-def test_prevent_inline_functions_in_non_test_code() -> None:
+def test_prevent_inline_functions() -> None:
     rc.check_inline_functions(_DIR, snapshot(0))
 
 
-def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
+def test_prevent_underscore_imports() -> None:
     rc.check_underscore_imports(_DIR, snapshot(0))
 
 
@@ -236,7 +251,7 @@ def test_prevent_cast_usage() -> None:
     rc.check_cast_usage(_DIR, snapshot(0))
 
 
-def test_prevent_assert_isinstance_usage() -> None:
+def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 

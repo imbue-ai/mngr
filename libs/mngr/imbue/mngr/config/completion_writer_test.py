@@ -47,23 +47,20 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
 
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """write_cli_completions_cache should silently handle OSError."""
-    # Point to a read-only directory so the atomic_write fails
-    read_only_dir = tmp_path / "readonly"
-    read_only_dir.mkdir()
-    read_only_dir.chmod(0o444)
-    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(read_only_dir))
+    # Monkeypatch atomic_write to simulate a write failure. We can't use chmod
+    # because Modal sandboxes run as root, which bypasses permission checks.
+    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
 
-    # Create a minimal click.Group
+    def _raise_oserror(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr("imbue.mngr.config.completion_writer.atomic_write", _raise_oserror)
+
     group = click.Group(name="test", commands={"hello": click.Command("hello")})
 
-    try:
-        # Should not raise despite filesystem error
-        write_cli_completions_cache(cli_group=group)
-    finally:
-        read_only_dir.chmod(0o755)
-    # Verify the cache file was NOT created (write failed silently).
-    # Check after restoring permissions so Path.exists() doesn't raise PermissionError.
-    assert not (read_only_dir / COMPLETION_CACHE_FILENAME).exists()
+    # Should not raise despite the OSError from atomic_write
+    write_cli_completions_cache(cli_group=group)
+    assert not (tmp_path / COMPLETION_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_writes_valid_json(completion_cache_dir: Path) -> None:

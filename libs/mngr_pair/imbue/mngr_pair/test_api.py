@@ -237,7 +237,9 @@ def test_pair_files_syncs_git_state_before_starting(pair_ctx: SyncTestContext, c
         # The file should now exist in target
         assert (pair_ctx.local_dir / "agent_commit.txt").exists()
 
-        # Stop immediately - we just want to test git sync
+        # Wait for unison to actually start before stopping, otherwise the
+        # resource guard fires because the unison binary was never invoked.
+        syncer.wait_for_started(timeout=10.0)
         syncer.stop()
 
 

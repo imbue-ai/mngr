@@ -179,6 +179,10 @@ class UnisonSyncer(MutableModel):
             return False
         return self._started_event.is_set()
 
+    def wait_for_started(self, timeout: float) -> None:
+        """Block until unison has produced its first output line."""
+        self._started_event.wait(timeout=timeout)
+
 
 _UNISON = SystemDependency(
     binary="unison",

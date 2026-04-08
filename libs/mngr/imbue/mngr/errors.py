@@ -164,6 +164,26 @@ class ProviderError(MngrError):
     """Base class for all provider-related errors."""
 
 
+class ProviderUnavailableError(ProviderError):
+    """Provider backend is not reachable (e.g. Docker daemon not running).
+
+    Commands that query multiple providers catch this and continue with
+    the providers that *are* available, so a single offline backend does
+    not block the entire operation.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
+        self.provider_name = provider_name
+        super().__init__(
+            f"Provider '{provider_name}' is not available: {reason}. "
+            f"Any agents managed by this provider could not be reached."
+        )
+        self.user_help_text = (
+            f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
+            f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
+        )
+
+
 class ProviderInstanceNotFoundError(ProviderError):
     """No provider instance with this name exists."""
 

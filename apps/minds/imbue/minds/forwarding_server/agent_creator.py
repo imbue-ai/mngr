@@ -298,6 +298,7 @@ class AgentCreator(MutableModel):
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
+    _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def start_creation(
@@ -328,7 +329,16 @@ class AgentCreator(MutableModel):
             name="agent-creator-{}".format(agent_id),
         )
         thread.start()
+        with self._lock:
+            self._threads.append(thread)
         return agent_id
+
+    def wait_for_all(self, timeout: float = 10.0) -> None:
+        """Wait for all background creation threads to finish."""
+        with self._lock:
+            threads = list(self._threads)
+        for t in threads:
+            t.join(timeout=timeout)
 
     def get_creation_info(self, agent_id: AgentId) -> AgentCreationInfo | None:
         """Get the current creation status for an agent, or None if not tracked."""

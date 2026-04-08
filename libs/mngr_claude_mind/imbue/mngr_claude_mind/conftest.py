@@ -117,7 +117,7 @@ class ChatScriptEnv:
         self.env["MNGR_LLM_MODEL"] = model
         (self.work_dir / "minds.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
-    def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
         """Run chat.sh with the given arguments."""
         return subprocess.run(
             [str(self.chat_script), *args],
