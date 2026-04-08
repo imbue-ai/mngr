@@ -15,7 +15,7 @@ from imbue.mngr.primitives import PluginTier
 
 # Packages not yet published on PyPI. Excluded from the install wizard.
 # Remove entries from here as they get published.
-_UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
+UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
         "imbue-mngr-claude-mind",
         "imbue-mngr-llm",
@@ -280,7 +280,7 @@ def get_installable_packages() -> tuple[CatalogEntry, ...]:
     seen: set[str] = set()
     result: list[CatalogEntry] = []
     for entry in PLUGIN_CATALOG:
-        if entry.package_name in _UNPUBLISHED_PACKAGES:
+        if entry.package_name in UNPUBLISHED_PACKAGES:
             continue
         if entry.package_name not in seen:
             seen.add(entry.package_name)
