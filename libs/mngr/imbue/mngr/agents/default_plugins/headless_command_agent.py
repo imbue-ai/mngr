@@ -112,12 +112,12 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
             host=self.host,
             is_finished=self._is_agent_finished,
         )
-        is_yielded_any = False
+        is_any_output_yielded = False
         for chunk in state.tail_until_done():
-            is_yielded_any = True
+            is_any_output_yielded = True
             yield chunk
 
-        if not is_yielded_any:
+        if not is_any_output_yielded:
             self._raise_no_output_error()
 
 

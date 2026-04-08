@@ -144,9 +144,9 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         parts.extend(self._get_extra_error_sources())
 
         if not parts:
-            is_stderr_exists = self._file_exists_on_host(self._get_stderr_path())
-            is_stdout_exists = self._file_exists_on_host(self._get_stdout_path())
-            if not is_stderr_exists and not is_stdout_exists:
+            is_stderr_present = self._file_exists_on_host(self._get_stderr_path())
+            is_stdout_present = self._file_exists_on_host(self._get_stdout_path())
+            if not is_stderr_present and not is_stdout_present:
                 pane_error = self._get_pane_error_message()
                 if pane_error:
                     parts.append(pane_error)
