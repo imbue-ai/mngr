@@ -281,14 +281,14 @@ def test_parse_providers_unknown_backend_mentions_disabled_plugins() -> None:
 def test_parse_agent_types_parses_valid_agent() -> None:
     """_parse_agent_types should parse valid agent type configs."""
     raw = {"claude": {"cli_args": "--verbose"}}
-    result = _parse_agent_types(raw)
+    result = _parse_agent_types(raw, disabled_plugins=frozenset())
     assert AgentTypeName("claude") in result
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
 
 
 def test_parse_agent_types_handles_empty_dict() -> None:
     """_parse_agent_types should handle empty dict."""
-    result = _parse_agent_types({})
+    result = _parse_agent_types({}, disabled_plugins=frozenset())
     assert result == {}
 
 
@@ -296,13 +296,13 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
     """_parse_agent_types should raise ConfigParseError for unknown fields by default."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
     with pytest.raises(ConfigParseError, match="Unknown fields in agent_types.claude.*bogus_option"):
-        _parse_agent_types(raw)
+        _parse_agent_types(raw, disabled_plugins=frozenset())
 
 
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_agent_types with strict=False should warn about unknown fields and strip them."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
-    result = _parse_agent_types(raw, strict=False)
+    result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False)
     assert AgentTypeName("claude") in result
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
     assert "bogus_option" not in raw["claude"]
@@ -323,7 +323,7 @@ def test_parse_agent_types_uses_parent_type_config_class() -> None:
 
         # A custom type referencing parent_type should accept the parent's fields
         raw = {"worker": {"parent_type": "test-parent", "extra_field": True, "cli_args": "--verbose"}}
-        result = _parse_agent_types(raw)
+        result = _parse_agent_types(raw, disabled_plugins=frozenset())
 
         worker_config = result[AgentTypeName("worker")]
         assert isinstance(worker_config, _TestParentConfig)
@@ -342,9 +342,62 @@ def test_parse_agent_types_rejects_unknown_fields_even_with_parent_type() -> Non
 
         raw = {"worker": {"parent_type": "test-parent", "totally_bogus": True}}
         with pytest.raises(ConfigParseError, match="Unknown fields in agent_types.worker.*totally_bogus"):
-            _parse_agent_types(raw)
+            _parse_agent_types(raw, disabled_plugins=frozenset())
     finally:
         reset_agent_config_registry()
+
+
+def test_parse_agent_types_skips_disabled_plugin_type() -> None:
+    """_parse_agent_types should skip agent types whose name matches a disabled plugin."""
+    raw = {
+        "claude": {"cli_args": "--verbose"},
+        "codex": {"cli_args": "--debug"},
+    }
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"claude"}))
+    assert AgentTypeName("claude") not in result
+    assert AgentTypeName("codex") in result
+
+
+def test_parse_agent_types_skips_custom_type_with_disabled_parent() -> None:
+    """_parse_agent_types should skip custom types whose parent_type is a disabled plugin."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("test-parent", _TestParentConfig)
+
+        raw = {"worker": {"parent_type": "test-parent", "extra_field": True}}
+        result = _parse_agent_types(raw, disabled_plugins=frozenset({"test-parent"}))
+        assert AgentTypeName("worker") not in result
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_skips_type_with_disabled_grandparent() -> None:
+    """_parse_agent_types should walk the full parent chain and skip if any ancestor is disabled."""
+    raw = {
+        "root-plugin": {"cli_args": "--root"},
+        "mid-type": {"parent_type": "root-plugin"},
+        "leaf-type": {"parent_type": "mid-type"},
+        "unrelated": {"cli_args": "--ok"},
+    }
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"root-plugin"}))
+    assert AgentTypeName("root-plugin") not in result
+    assert AgentTypeName("mid-type") not in result
+    assert AgentTypeName("leaf-type") not in result
+    assert AgentTypeName("unrelated") in result
+
+
+def test_parse_agent_types_uses_explicit_plugin_field() -> None:
+    """_parse_agent_types should use an explicit plugin field to determine the owning plugin."""
+    raw = {"my-type": {"plugin": "real-plugin", "cli_args": "--verbose"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"real-plugin"}))
+    assert AgentTypeName("my-type") not in result
+
+
+def test_parse_agent_types_explicit_plugin_overrides_name() -> None:
+    """An explicit plugin field pointing to an enabled plugin should keep the type even if name matches a disabled plugin."""
+    raw = {"disabled-name": {"plugin": "enabled-plugin", "cli_args": "--verbose"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset({"disabled-name"}))
+    assert AgentTypeName("disabled-name") in result
 
 
 # =============================================================================

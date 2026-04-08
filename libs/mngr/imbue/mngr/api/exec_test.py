@@ -181,6 +181,30 @@ def test_exec_command_on_agent_returns_failure(
     assert result.success is False
 
 
+@pytest.mark.tmux
+def test_exec_command_on_agent_sources_agent_env(
+    temp_mngr_ctx: MngrContext,
+    running_test_agent: RunningTestAgent,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Test that exec sources the agent env file so MNGR_* vars are available."""
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    agent = running_test_agent.agent
+
+    # Write an env var to the agent's env file
+    agent_env_path = host.get_agent_env_path(agent)
+    agent_env_path.write_text("MNGR_TEST_EXEC_VAR=hello_from_env\n")
+
+    result = exec_command_on_agent(
+        mngr_ctx=temp_mngr_ctx,
+        agent_str=str(agent.name),
+        command="echo $MNGR_TEST_EXEC_VAR",
+    )
+
+    assert result.success is True
+    assert "hello_from_env" in result.stdout
+
+
 def test_multi_exec_result_fields() -> None:
     """Test MultiExecResult has the expected fields."""
     result = MultiExecResult()

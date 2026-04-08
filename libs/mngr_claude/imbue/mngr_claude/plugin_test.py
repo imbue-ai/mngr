@@ -49,18 +49,20 @@ from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
+from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
-from imbue.mngr_claude.plugin import _apply_settings_json_overrides
 from imbue.mngr_claude.plugin import _archive_session_files
 from imbue.mngr_claude.plugin import _build_install_command_hint
-from imbue.mngr_claude.plugin import _build_settings_json_content
+from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
+from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _get_session_archive_dir
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
+from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
@@ -552,16 +554,20 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 2
+    assert len(hooks) == 3
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
     assert "touch" in hooks[0]["command"]
     assert "session_started" in hooks[0]["command"]
 
-    # Second hook: tracks current session ID for session replacement detection
-    session_id_hook = hooks[1]["command"]
+    # Second hook: echoes the base branch for the agent's context
     assert hooks[1]["type"] == "command"
+    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+
+    # Third hook: tracks current session ID for session replacement detection
+    session_id_hook = hooks[2]["command"]
+    assert hooks[2]["type"] == "command"
     assert "claude_session_id" in session_id_hook
     assert "session_id" in session_id_hook
     assert "MNGR_AGENT_STATE_DIR" in session_id_hook
@@ -1106,8 +1112,8 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
 def test_provision_trusts_working_directory_when_enabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should add trust for work_dir when trust_working_directory is True."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    """provision should add trust for work_dir when auto_dismiss_dialogs is True."""
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
@@ -1121,10 +1127,10 @@ def test_provision_trusts_working_directory_when_enabled(
     assert claude_config["effortCalloutDismissed"] is True
 
 
-def test_provision_does_not_trust_working_directory_when_disabled(
+def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should not add trust when trust_working_directory is False (default)."""
+    """provision should not add trust when auto_dismiss_dialogs is False (default)."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     _write_all_dialogs_dismissed(agent.work_dir)
 
@@ -1133,16 +1139,16 @@ def test_provision_does_not_trust_working_directory_when_disabled(
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     # The global config should only contain what _write_all_dialogs_dismissed wrote.
-    # trust_working_directory=False (default) means no additional trust was added.
+    # auto_dismiss_dialogs=False (default) means no additional trust was added.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
     assert str(agent.work_dir.resolve()) in config["projects"]
 
 
-def test_trust_working_directory_defaults_to_false() -> None:
-    """Verify that trust_working_directory defaults to False for ClaudeAgentConfig."""
+def test_auto_dismiss_dialogs_defaults_to_false() -> None:
+    """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
     config = ClaudeAgentConfig()
-    assert config.trust_working_directory is False
+    assert config.auto_dismiss_dialogs is False
 
 
 def test_on_before_provisioning_raises_for_worktree_on_remote_host(
@@ -2291,6 +2297,21 @@ def test_get_files_for_deploy_includes_credentials(temp_mngr_ctx: MngrContext, t
     assert result[Path("~/.claude/.credentials.json")] == credentials
 
 
+def test_get_files_for_deploy_includes_keybindings(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """get_files_for_deploy includes ~/.claude/keybindings.json when it exists."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    keybindings = claude_dir / "keybindings.json"
+    keybindings.write_text('{"bindings": []}')
+
+    result = get_files_for_deploy(
+        mngr_ctx=temp_mngr_ctx, include_user_settings=True, include_project_settings=False, repo_root=tmp_path
+    )
+
+    assert Path("~/.claude/keybindings.json") in result
+    assert result[Path("~/.claude/keybindings.json")] == keybindings
+
+
 # =============================================================================
 # Version Pinning Tests
 # =============================================================================
@@ -2555,7 +2576,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should find session by ID, copy project dir, and write session ID."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2627,7 +2648,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """Session lookup should find sessions in ~/.claude/ even when CLAUDE_CONFIG_DIR points elsewhere."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2649,7 +2670,10 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
         plugin_data={"adopt_session": (target_session_id,)},
     )
 
-    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir)}):
+    home_claude = str(Path.home() / ".claude")
+    with patch.dict(
+        "os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir), "ORIGINAL_CLAUDE_CONFIG_DIR": home_claude}
+    ):
         agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
         agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
@@ -2666,7 +2690,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should accept a .jsonl file path and extract the session ID."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2750,167 +2774,321 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
 
 
 # =============================================================================
-# _build_settings_json_content tests
+# _rewrite_installed_plugins_paths Tests
 # =============================================================================
 
 
-def test_build_settings_json_content_defaults() -> None:
-    """_build_settings_json_content with no overrides returns base settings."""
-    content = _build_settings_json_content(sync_local=False)
+def test_rewrite_installed_plugins_paths_rebases_install_paths() -> None:
+    """installPath values under local_claude_dir are rebased onto remote_config_dir."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/mngr/agents/abc123/plugin/claude/anthropic")
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "my-plugin@my-org": [
+                    {
+                        "scope": "user",
+                        "installPath": "/Users/testuser/.claude/plugins/cache/my-org/my-plugin/1.0.0",
+                        "version": "1.0.0",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+
+    entry = result["plugins"]["my-plugin@my-org"][0]
+    assert entry["installPath"] == "/mngr/agents/abc123/plugin/claude/anthropic/plugins/cache/my-org/my-plugin/1.0.0"
+
+
+def test_rewrite_installed_plugins_paths_handles_multiple_plugins() -> None:
+    """All plugins in the file have their installPath rewritten."""
+    local_claude_dir = Path("/home/user/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "plugin-a@org-a": [
+                    {
+                        "installPath": "/home/user/.claude/plugins/cache/org-a/plugin-a/1.0.0",
+                        "version": "1.0.0",
+                    }
+                ],
+                "plugin-b@org-b": [
+                    {
+                        "installPath": "/home/user/.claude/plugins/cache/org-b/plugin-b/2.0.0",
+                        "version": "2.0.0",
+                    }
+                ],
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+
+    assert result["plugins"]["plugin-a@org-a"][0]["installPath"] == "/remote/config/plugins/cache/org-a/plugin-a/1.0.0"
+    assert result["plugins"]["plugin-b@org-b"][0]["installPath"] == "/remote/config/plugins/cache/org-b/plugin-b/2.0.0"
+
+
+def test_rewrite_installed_plugins_paths_rewrites_non_matching_prefix_best_effort() -> None:
+    """installPath values that don't start with the expected prefix are rewritten best-effort."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "other-plugin@other-org": [
+                    {
+                        "installPath": "/some/other/path/plugins/cache/other-org/other-plugin/1.0.0",
+                        "version": "1.0.0",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+    entry = result["plugins"]["other-plugin@other-org"][0]
+    assert entry["installPath"] == "/remote/config/plugins/cache/other-org/other-plugin/1.0.0"
+
+
+def test_rewrite_installed_plugins_paths_preserves_other_fields() -> None:
+    """Fields other than installPath are preserved unchanged."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "my-plugin@my-org": [
+                    {
+                        "scope": "user",
+                        "installPath": "/Users/testuser/.claude/plugins/cache/my-org/my-plugin/1.0.0",
+                        "version": "1.0.0",
+                        "installedAt": "2026-01-14T22:13:26.484Z",
+                        "gitCommitSha": "abc123",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+
+    entry = result["plugins"]["my-plugin@my-org"][0]
+    assert entry["scope"] == "user"
+    assert entry["version"] == "1.0.0"
+    assert entry["installedAt"] == "2026-01-14T22:13:26.484Z"
+    assert entry["gitCommitSha"] == "abc123"
+    assert result["version"] == 2
+
+
+def test_rewrite_installed_plugins_paths_handles_empty_plugins() -> None:
+    """An installed_plugins.json with no plugins is handled gracefully."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps({"version": 2, "plugins": {}})
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+
+    assert result["version"] == 2
+    assert result["plugins"] == {}
+
+
+def test_rewrite_installed_plugins_paths_rewrites_similar_prefix_best_effort() -> None:
+    """A path like /Users/testuser/.claude2/ is rewritten best-effort via the plugins/ marker."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "plugin@org": [
+                    {
+                        "installPath": "/Users/testuser/.claude2/plugins/cache/org/plugin/1.0.0",
+                        "version": "1.0.0",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+    entry = result["plugins"]["plugin@org"][0]
+    assert entry["installPath"] == "/remote/config/plugins/cache/org/plugin/1.0.0"
+
+
+# =============================================================================
+# _generate_installed_plugins_content Tests
+# =============================================================================
+
+
+def test_generate_installed_plugins_content_rewrites_paths(tmp_path: Path) -> None:
+    """_generate_installed_plugins_content rewrites installPaths from source to target."""
+    source_claude_dir = tmp_path / "source_claude"
+    plugins_dir = source_claude_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    target_config_dir = tmp_path / "target"
+
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "test@org": [
+                        {
+                            "installPath": f"{source_claude_dir}/plugins/cache/org/test/1.0.0",
+                            "version": "1.0.0",
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    content = _generate_installed_plugins_content(source_claude_dir, target_config_dir)
+
+    assert content is not None
+    result = json.loads(content)
+    assert result["plugins"]["test@org"][0]["installPath"] == str(
+        target_config_dir / "plugins" / "cache" / "org" / "test" / "1.0.0"
+    )
+
+
+def test_generate_installed_plugins_content_returns_none_when_no_file(tmp_path: Path) -> None:
+    """_generate_installed_plugins_content returns None when file does not exist."""
+    source_claude_dir = tmp_path / "source_claude"
+    source_claude_dir.mkdir()
+    target_config_dir = tmp_path / "target"
+
+    result = _generate_installed_plugins_content(source_claude_dir, target_config_dir)
+    assert result is None
+
+
+# =============================================================================
+# get_files_for_deploy sentinel rewrite Tests
+# =============================================================================
+
+
+def test_get_files_for_deploy_rewrites_install_paths_to_sentinel(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """get_files_for_deploy rewrites installPath values to use the sentinel prefix."""
+    claude_dir = Path.home() / ".claude"
+    plugins_dir = claude_dir / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "test@org": [
+                        {
+                            "installPath": f"{claude_dir}/plugins/cache/org/test/1.0.0",
+                            "version": "1.0.0",
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    result = get_files_for_deploy(
+        mngr_ctx=temp_mngr_ctx, include_user_settings=True, include_project_settings=False, repo_root=tmp_path
+    )
+
+    plugins_json_key = Path("~/.claude/plugins/installed_plugins.json")
+    assert plugins_json_key in result
+    plugins_json_content = result[plugins_json_key]
+    assert isinstance(plugins_json_content, str)
+    data = json.loads(plugins_json_content)
+    assert data["plugins"]["test@org"][0]["installPath"] == "/__mngr_plugins_source__/plugins/cache/org/test/1.0.0"
+    # No marker file should be present
+    marker_key = Path("~/.claude/plugins/.installed_plugins_source_dir")
+    assert marker_key not in result
+
+
+# =============================================================================
+# _build_settings_json tests
+# =============================================================================
+
+
+def test_build_settings_json_unattended_defaults() -> None:
+    """_build_settings_json with unattended context returns base settings with unattended flags."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["skipDangerousModePermissionPrompt"] is True
     assert "model" not in data
-    assert data.get("fastMode") is not True
+    assert data["fastMode"] is False
 
 
-def test_build_settings_json_content_sets_model() -> None:
-    """_build_settings_json_content with model sets the model field."""
-    content = _build_settings_json_content(sync_local=False, model="opus[1m]")
+def test_build_settings_json_settings_overrides_model() -> None:
+    """_build_settings_json with settings_overrides sets the model field."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "opus[1m]"})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["model"] == "opus[1m]"
 
 
-def test_build_settings_json_content_sets_is_fast() -> None:
-    """_build_settings_json_content with is_fast=True sets fastMode."""
-    content = _build_settings_json_content(sync_local=False, is_fast=True)
+def test_build_settings_json_settings_overrides_fast_mode() -> None:
+    """_build_settings_json with settings_overrides fastMode=True sets fastMode."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"fastMode": True})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_sets_model_and_is_fast() -> None:
-    """_build_settings_json_content with both model and is_fast sets both."""
-    content = _build_settings_json_content(sync_local=False, model="sonnet", is_fast=True)
+def test_build_settings_json_settings_overrides_model_and_fast() -> None:
+    """_build_settings_json with both model and fastMode in overrides."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "sonnet", "fastMode": True})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["model"] == "sonnet"
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_preserves_local_is_fast_when_config_enables_it() -> None:
-    """When is_fast=True, local fastMode is not disabled even if sync_local is True."""
+def test_build_settings_json_overrides_win_over_local() -> None:
+    """settings_overrides take precedence over local settings."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True}))
 
-    content = _build_settings_json_content(sync_local=True, is_fast=True)
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"fastMode": True})
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
     data = json.loads(content)
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_disables_local_is_fast_when_config_does_not_enable_it() -> None:
-    """When is_fast=False, local fastMode is disabled with a warning."""
+def test_build_settings_json_unattended_disables_fast_by_default() -> None:
+    """Unattended context disables fastMode by default (API limitation)."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True, "other": "value"}))
 
-    content = _build_settings_json_content(sync_local=True, is_fast=False)
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
     data = json.loads(content)
     assert data["fastMode"] is False
     assert data["other"] == "value"
 
 
-# =============================================================================
-# _apply_settings_json_overrides tests
-# =============================================================================
-
-
-def test_apply_settings_json_overrides_noop_when_no_overrides(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides is a no-op when model=None and is_fast=False."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    settings_path = config_dir / "settings.json"
-    original = json.dumps({"existing": True})
-    settings_path.write_text(original)
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False)
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    # File unchanged
-    assert settings_path.read_text() == original
-
-
-def test_apply_settings_json_overrides_creates_file_with_model(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides creates settings.json with model when none exists."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    data = json.loads(settings_path.read_text())
+def test_build_settings_json_local_context_no_flags() -> None:
+    """Local (attended) context applies no extra flags."""
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "opus[1m]"})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
     assert data["model"] == "opus[1m]"
-
-
-def test_apply_settings_json_overrides_creates_file_with_is_fast(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides creates settings.json with fastMode when none exists."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, is_fast=True)
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    data = json.loads(settings_path.read_text())
-    assert data["fastMode"] is True
-
-
-def test_apply_settings_json_overrides_merges_with_existing(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides merges overrides into existing settings."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    settings_path = config_dir / "settings.json"
-    settings_path.write_text(json.dumps({"existing": "value", "skipDangerousModePermissionPrompt": True}))
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="sonnet", is_fast=True)
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    data = json.loads(settings_path.read_text())
-    assert data["existing"] == "value"
-    assert data["model"] == "sonnet"
-    assert data["fastMode"] is True
-    assert data["skipDangerousModePermissionPrompt"] is True
-
-
-def test_apply_settings_json_overrides_replaces_symlink(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides replaces a symlink with a regular file."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    # Create a "global" settings file and symlink to it
-    global_settings = tmp_path / "global_settings.json"
-    global_settings.write_text(json.dumps({"global": True}))
-    settings_path = config_dir / "settings.json"
-    settings_path.symlink_to(global_settings)
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    # settings.json should now be a regular file (not a symlink)
-    assert not settings_path.is_symlink()
-    data = json.loads(settings_path.read_text())
-    assert data["model"] == "opus[1m]"
-    # Existing content from the symlink target is preserved
-    assert data["global"] is True
-    # Global file should be unmodified
-    assert json.loads(global_settings.read_text()) == {"global": True}
-
-
-def test_apply_settings_json_overrides_replaces_corrupt_json(tmp_path: Path) -> None:
-    """_apply_settings_json_overrides replaces corrupt settings.json with overrides only."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    settings_path = config_dir / "settings.json"
-    settings_path.write_text("not valid json{{{")
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
-    _apply_settings_json_overrides(host, config_dir, config)
-
-    # Corrupt file should be replaced with valid JSON containing only the override
-    data = json.loads(settings_path.read_text())
-    assert data["model"] == "opus[1m]"
-    assert len(data) == 1
+    # _generate_claude_home_settings provides skipDangerousModePermissionPrompt
+    assert "skipDangerousModePermissionPrompt" in data
+    # Local (attended) context does not force fastMode
+    assert "fastMode" not in data

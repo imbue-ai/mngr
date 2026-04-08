@@ -1,4 +1,5 @@
 import bdb
+import os
 import sys
 from typing import Any
 
@@ -12,6 +13,7 @@ from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.ask import ask
 from imbue.mngr.cli.capture import capture
+from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.cli.cleanup import cleanup
 from imbue.mngr.cli.clone import clone
 from imbue.mngr.cli.common_opts import TCommand
@@ -25,6 +27,7 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
+from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
@@ -54,6 +57,7 @@ from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.click_utils import detect_aliases_by_command
+from imbue.mngr.utils.env_utils import parse_bool_env
 
 # Module-level container for the plugin manager singleton, created lazily.
 # Using a dict avoids the need for the 'global' keyword while still allowing module-level state.
@@ -254,6 +258,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
     setuptools entrypoints are loaded, so they are never registered. CLI-level
     --disable-plugin flags are handled later in load_config().
 
+    Setting the MNGR_LOAD_ALL_PLUGINS environment variable skips the
+    config-based blocking so that tooling (e.g. doc generation) can load
+    every provider regardless of local configuration.
+
     This should only really be called once from the main command (or during testing).
     """
     # Create plugin manager and load registries first (needed for config parsing)
@@ -262,7 +270,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     # Block plugins that are disabled in config files. This must happen before
     # load_setuptools_entrypoints so disabled plugins are never registered.
-    block_disabled_plugins(pm, read_disabled_plugins())
+    # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
+    # can produce output that reflects all providers regardless of local config.
+    if not parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")):
+        block_disabled_plugins(pm, read_disabled_plugins())
 
     # Automatically discover and load plugins registered via setuptools entry points.
     # External packages can register hooks by adding an entry point for the "mngr" group.
@@ -305,10 +316,12 @@ def reset_plugin_manager() -> None:
 BUILTIN_COMMANDS: list[click.Command] = [
     ask,
     capture,
+    check_deps,
     create,
     cleanup,
     destroy,
     exec_command,
+    extras,
     list_command,
     events,
     connect,
