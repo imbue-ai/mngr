@@ -73,7 +73,7 @@ mngr create my-task --provider modal --edit-message
 ## SPECIFYING DATA FOR THE AGENT
 
 # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
-mngr create my-task --source-path /path/to/some/other/project
+mngr create my-task --from /path/to/some/other/project
 
 # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
 mngr create my-task --project my-project
@@ -81,7 +81,7 @@ mngr create my-task --project my-project
 # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mngr create my-task --source-path /tmp/my_random_folder --command python -- script.py
+mngr create my-task --from /tmp/my_random_folder --command python -- script.py
 
 # however, if you do use git, mngr makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -118,7 +118,7 @@ mngr create my-task --depth 1
 
 # you can clone from an existing agent's work directory:
 mngr create my-task --from other-agent
-# (--source, --source-agent, and --source-host are alternative forms for more specific control)
+# (--source is an alias for --from; the format supports agent@host.provider:path)
 
 # you can use rsync to transfer extra data as well, beyond just the git data:
 mngr create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
