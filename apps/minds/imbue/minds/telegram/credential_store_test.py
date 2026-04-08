@@ -63,6 +63,27 @@ def test_load_user_credentials_returns_none_for_corrupted_file(tmp_path: Path) -
     assert load_telegram_user_credentials(data_dir) is None
 
 
+def test_load_user_credentials_returns_none_for_invalid_schema(tmp_path: Path) -> None:
+    data_dir = tmp_path
+    creds_path = data_dir / "telegram" / "user_credentials.json"
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    # Valid JSON but missing required fields (dc_id, auth_key_hex, user_id, first_name)
+    creds_path.write_text('{"unexpected_field": "value"}')
+
+    assert load_telegram_user_credentials(data_dir) is None
+
+
+def test_load_bot_credentials_returns_none_for_invalid_schema(tmp_path: Path) -> None:
+    data_dir = tmp_path
+    agent_id = AgentId()
+    creds_path = data_dir / "telegram" / "bots" / f"{agent_id}.json"
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    # Valid JSON but missing required fields (bot_token, bot_username)
+    creds_path.write_text('{"unexpected_field": "value"}')
+
+    assert load_agent_bot_credentials(data_dir, agent_id) is None
+
+
 def test_multiple_agents_have_independent_bot_credentials(tmp_path: Path) -> None:
     data_dir = tmp_path
     agent_1 = AgentId()
