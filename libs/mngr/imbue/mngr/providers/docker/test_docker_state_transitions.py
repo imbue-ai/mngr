@@ -9,8 +9,6 @@ only writes a host record) to ensure the full discovery -> state derivation
 pipeline works end-to-end.
 """
 
-from collections.abc import Generator
-
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
@@ -19,14 +17,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 
 pytestmark = [pytest.mark.timeout(120)]
-
-
-@pytest.fixture
-def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
-    yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
 def _find_host_state(hosts: list[DiscoveredHost], host_id: HostId) -> HostState | None:

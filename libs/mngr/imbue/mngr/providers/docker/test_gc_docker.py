@@ -7,8 +7,6 @@ Verifies that:
 - GC continues processing other providers when one is offline
 """
 
-from collections.abc import Generator
-
 import pytest
 
 from imbue.mngr.api.data_types import GcResourceTypes
@@ -23,16 +21,10 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 pytestmark = [pytest.mark.timeout(120)]
-
-
-@pytest.fixture
-def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
-    yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
 # =========================================================================
