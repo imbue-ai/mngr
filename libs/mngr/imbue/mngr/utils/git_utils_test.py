@@ -503,6 +503,15 @@ def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Pa
     )
     assert "refs/remotes/origin/" in ref_result.stdout, "Source must have remote-tracking refs"
 
+    # Determine the actual branch name (depends on system git config)
+    source_branch_result = subprocess.run(
+        ["git", "-C", str(temp_git_repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    source_branch = source_branch_result.stdout.strip()
+
     # Create a fresh bare target repo and push using GIT_MIRROR_PUSH_REFSPECS
     target = tmp_path / "target.git"
     subprocess.run(
@@ -524,7 +533,9 @@ def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Pa
         text=True,
         check=True,
     )
-    assert "main" in branch_result.stdout, "Branch 'main' should be pushed to the target"
+    assert source_branch in branch_result.stdout, (
+        f"Branch '{source_branch}' should be pushed to the target, got: {branch_result.stdout}"
+    )
 
     # Verify NO remote-tracking refs were pushed -- this is the key assertion.
     # Without explicit refspecs, git push --mirror pushes refs/remotes/* to
