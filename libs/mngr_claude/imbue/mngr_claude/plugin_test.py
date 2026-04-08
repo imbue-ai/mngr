@@ -63,6 +63,7 @@ from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
+from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
@@ -2990,3 +2991,33 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
+
+
+# =============================================================================
+# _write_generated_files Tests
+# =============================================================================
+
+
+def test_write_generated_files_unlinks_symlink_before_writing(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Writing a generated file should replace a symlink rather than following it."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_file = source_dir / "installed_plugins.json"
+    source_file.write_text('{"original": true}')
+
+    config_dir = tmp_path / "config"
+    plugins_dir = config_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    symlink = plugins_dir / "installed_plugins.json"
+    symlink.symlink_to(source_file)
+
+    host = FakeHost()
+    generated_files = {Path("plugins/installed_plugins.json"): '{"rewritten": true}'}
+
+    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+
+    # The symlink should be replaced with a regular file
+    assert not symlink.is_symlink()
+    assert json.loads(symlink.read_text()) == {"rewritten": True}
+    # The original source file should be untouched
+    assert json.loads(source_file.read_text()) == {"original": True}

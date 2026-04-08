@@ -756,6 +756,11 @@ def _write_generated_files(
         for relative, content in generated_files.items():
             dest = config_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # Remove any symlink so we write a regular file instead of
+            # following the symlink back into ~/.claude/ (which would
+            # corrupt the user's global config with agent-scoped paths).
+            if dest.is_symlink():
+                dest.unlink()
             host.write_text_file(dest, content)
     else:
         local_host = _get_local_host(mngr_ctx)
