@@ -4,7 +4,11 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "minds>=0.1.0",
+    "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-modal>=0.2.0",
 ]
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
+imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
+imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
