@@ -239,7 +239,7 @@ def test_cloudflare_email_header_authenticates_when_owner_email_matches(
 ) -> None:
     """Requests with a matching Cf-Access-Authenticated-User-Email header are authenticated."""
     monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")
-    client, _, agent_id = _setup_test_server(tmp_path)
+    client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get(
         "/",
@@ -255,7 +255,7 @@ def test_cloudflare_email_header_case_insensitive(
 ) -> None:
     """Cloudflare email comparison is case-insensitive."""
     monkeypatch.setenv("OWNER_EMAIL", "Owner@Example.COM")
-    client, _, agent_id = _setup_test_server(tmp_path)
+    client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get(
         "/",
@@ -270,7 +270,7 @@ def test_cloudflare_email_header_rejects_wrong_email(
 ) -> None:
     """A Cf-Access-Authenticated-User-Email that does not match OWNER_EMAIL is rejected."""
     monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")
-    client, _, agent_id = _setup_test_server(tmp_path)
+    client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get(
         "/",
@@ -283,7 +283,7 @@ def test_cloudflare_email_header_rejects_wrong_email(
 
 def test_cloudflare_email_header_ignored_when_owner_email_unset(tmp_path: Path) -> None:
     """Without OWNER_EMAIL set, the Cloudflare header is ignored."""
-    client, _, agent_id = _setup_test_server(tmp_path)
+    client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get(
         "/",
