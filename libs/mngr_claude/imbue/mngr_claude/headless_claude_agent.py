@@ -31,6 +31,10 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
 _TAIL_POLL_INTERVAL: float = 0.05
 _TAIL_POLL_TIMEOUT: float = 300.0
+# Grace period before trusting lifecycle state. Claude can take several seconds
+# to start (especially on first run or via nvm), during which the tmux pane shows
+# bash as the current command, making the agent look DONE/STOPPED.
+_STARTUP_GRACE_SECONDS: float = 10.0
 
 
 @pure
@@ -231,6 +235,9 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     interactive messages, paste detection, or TUI readiness checking.
     """
 
+    _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
+    _stdout_poll_timeout: float = _TAIL_POLL_TIMEOUT
+
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages."""
         raise SendMessageError(
@@ -301,10 +308,26 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         """Wait for the stdout file to be created or the agent to exit.
 
         Returns True if the file exists, False if the agent exited without creating it.
+
+        Two phases:
+        1. Startup grace period -- wait for the file only, ignoring lifecycle
+           state. Claude can take several seconds to start (nvm resolution,
+           node startup), during which tmux shows bash as the current command
+           and lifecycle detection incorrectly reports DONE.
+        2. After the grace period, also check lifecycle state so we don't wait
+           forever if claude genuinely failed to start.
         """
+        # Phase 1: wait for stdout file, ignoring lifecycle state
+        if poll_until(
+            lambda: self._file_exists_on_host(stdout_path),
+            timeout=self._startup_grace_seconds,
+            poll_interval=_TAIL_POLL_INTERVAL,
+        ):
+            return True
+        # Phase 2: file didn't appear during grace period, now also check lifecycle
         poll_until(
             lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
-            timeout=_TAIL_POLL_TIMEOUT,
+            timeout=self._stdout_poll_timeout - self._startup_grace_seconds,
             poll_interval=_TAIL_POLL_INTERVAL,
         )
         return self._file_exists_on_host(stdout_path)

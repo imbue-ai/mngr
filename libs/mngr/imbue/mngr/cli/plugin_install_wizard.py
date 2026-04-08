@@ -5,14 +5,12 @@ which ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
 
-import sys
 from typing import Any
 from typing import Final
 
 import click
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -33,6 +31,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -167,16 +167,14 @@ def _run_selection_screen(
 
     input_filter = _WizardInputFilter(state=state)
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
-
-    loop = MainLoop(
-        frame,
-        palette=palette,
-        input_filter=input_filter,
-        screen=screen,
-    )
-    loop.run()
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=palette,
+            input_filter=input_filter,
+            screen=screen,
+        )
+        loop.run()
 
     if not state.is_confirmed:
         return None
@@ -300,9 +298,10 @@ def install_wizard_impl() -> None:
         write_human_line("All plugins are already installed.")
         return
 
-    # Guard against non-interactive contexts (CI, cron, curl|bash without /dev/tty redirect).
-    # urwid requires a real terminal on stdin; without one it raises RuntimeError.
-    if not sys.stdin.isatty():
+    # Guard against non-interactive contexts (CI, cron, headless containers).
+    # has_interactive_terminal() checks stdin first, then /dev/tty as a
+    # fallback for cases where stdin is piped (e.g. via ``uv run``).
+    if not has_interactive_terminal():
         write_human_line("No interactive terminal detected; skipping plugin install wizard.")
         write_human_line(_RELAUNCH_HINT)
         return
