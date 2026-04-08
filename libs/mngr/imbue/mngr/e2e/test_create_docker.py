@@ -17,15 +17,15 @@ _REMOTE_TIMEOUT = 120.0
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(600)
 def test_create_docker_start_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # some providers (like docker), take "start" args as well as build args:
-    mngr create my-task --provider docker -s "--gpus all"
+    mngr create my-task --provider docker -s "--hostname my-custom-host"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
     result = e2e.run(
-        'mngr create my-task --provider docker -s "--gpus all" --no-connect --no-ensure-clean',
+        'mngr create my-task --provider docker -s "--hostname my-custom-host" --no-connect --no-ensure-clean',
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,
     )

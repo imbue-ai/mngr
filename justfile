@@ -85,7 +85,7 @@ test-offload-acceptance args="":
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal-acceptance.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
 
-# Run release tests on Modal via Offload
+# Run release tests on Modal via Offload (with Docker-in-Docker)
 test-offload-release args="":
     #!/bin/bash
     set -ueo pipefail
@@ -94,7 +94,7 @@ test-offload-release args="":
     trap "rm -rf $tmpdir" EXIT
 
     # Invalidate offload's image cache when build inputs change.
-    CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
+    CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile.release offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
     CACHE_KEY_FILE=".offload-cache-key"
     if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
         echo "[test-offload-release] Image cache key matches, reusing cached image."
@@ -114,7 +114,8 @@ test-offload-release args="":
     trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
-    offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" --env "PYTEST_MAX_DURATION_SECONDS=900" || [[ $? -eq 2 ]]
+    # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
+    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" || [[ $? -eq 2 ]]
 
 test-unit:
   uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36

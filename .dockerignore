@@ -1,0 +1,12 @@
+# Exclude large directories not needed in the release test image
+.venv
+.git
+.jj
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+node_modules
+test-results
+.offload-image-cache
+*.egg-info
