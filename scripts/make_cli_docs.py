@@ -60,6 +60,7 @@ SECONDARY_COMMANDS = {
     "observe",
     "plugin",
     "provision",
+    "run",
     "schedule",
     "snapshot",
     "tmr",

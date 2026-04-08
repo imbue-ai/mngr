@@ -197,21 +197,21 @@ def test_no_query_json_output(
 # =============================================================================
 
 
-def testaccumulate_chunks_joins_all_chunks() -> None:
+def test_accumulate_chunks_joins_all_chunks() -> None:
     """accumulate_chunks should join all chunks into a single string."""
     chunks = iter(["Hello ", "world", "!"])
     result = accumulate_chunks(chunks)
     assert result == "Hello world!"
 
 
-def testaccumulate_chunks_empty_iterator() -> None:
+def test_accumulate_chunks_empty_iterator() -> None:
     """accumulate_chunks should return empty string for empty iterator."""
     chunks = iter([])
     result = accumulate_chunks(chunks)
     assert result == ""
 
 
-def testaccumulate_chunks_single_chunk() -> None:
+def test_accumulate_chunks_single_chunk() -> None:
     """accumulate_chunks should work with a single chunk."""
     chunks = iter(["Hello"])
     result = accumulate_chunks(chunks)
