@@ -12,6 +12,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+import tomlkit
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.utils.polling import poll_until
@@ -220,6 +221,28 @@ def _write_destroy_script(
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+# Resolve the real home directory at import time, before any test fixture
+# monkeypatches HOME to an isolated temp directory.
+_REAL_HOME = Path.home()
+
+
+def _load_modal_credentials(env: dict[str, str]) -> None:
+    """Load Modal credentials from ~/.modal.toml into the env dict.
+
+    Mirrors the logic in mngr_modal's conftest, which uses monkeypatch for
+    in-process tests. E2e subprocesses need the vars set explicitly since
+    monkeypatch doesn't propagate to child processes.
+    """
+    modal_toml_path = _REAL_HOME / ".modal.toml"
+    if not modal_toml_path.exists():
+        return
+    for value in tomlkit.loads(modal_toml_path.read_text()).values():
+        if isinstance(value, dict) and value.get("active", ""):
+            env["MODAL_TOKEN_ID"] = value.get("token_id", "")
+            env["MODAL_TOKEN_SECRET"] = value.get("token_secret", "")
+            break
+
+
 @pytest.fixture
 def e2e(
     temp_host_dir: Path,
@@ -256,6 +279,13 @@ def e2e(
     # are already set by the parent autouse fixture and inherited via
     # os.environ.copy().
     env = os.environ.copy()
+
+    # Load Modal credentials from ~/.modal.toml if present and not already in
+    # env vars. The Modal conftest does this via monkeypatch for in-process
+    # tests, but e2e subprocesses need the vars set explicitly.
+    if "MODAL_TOKEN_ID" not in env:
+        _load_modal_credentials(env)
+
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
@@ -271,8 +301,10 @@ def e2e(
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start
-    # Remote providers (Modal, Docker) are left enabled so that e2e tests exercise them
+    # Configure connect_command for create/start.
+    # Remote providers (Modal, Docker) are left enabled so that e2e tests
+    # exercise the full discovery path. Tests that trigger Modal (via
+    # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"

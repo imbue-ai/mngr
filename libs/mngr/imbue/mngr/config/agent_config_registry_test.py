@@ -6,6 +6,7 @@ from pydantic import Field
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
+from imbue.mngr.config.agent_class_registry import set_default_agent_class
 from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_parent_config
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
@@ -329,6 +330,139 @@ def test_resolve_agent_type_preserves_subclass_fields() -> None:
         assert isinstance(resolved_config, _SubclassAgentConfig)
         assert resolved_config.extra_bool is True
         assert resolved_config.extra_str == "custom-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+# =============================================================================
+# resolve_agent_type disabled plugin tests
+# =============================================================================
+
+
+def test_resolve_agent_type_raises_when_plugin_disabled() -> None:
+    """resolve_agent_type should raise MngrError when the agent type's plugin is disabled."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        set_default_agent_class(_FakeAgentClass)
+        register_agent_class("my-plugin", _FakeAgentClass)
+        register_agent_config("my-plugin", AgentTypeConfig)
+
+        config = MngrConfig(disabled_plugins=frozenset({"my-plugin"}))
+
+        with pytest.raises(MngrError, match="plugin 'my-plugin' is disabled"):
+            resolve_agent_type(AgentTypeName("my-plugin"), config)
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_raises_when_parent_type_plugin_disabled() -> None:
+    """resolve_agent_type should raise when a custom type's parent_type plugin is disabled."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-plugin", _FakeAgentClass)
+        register_agent_config("parent-plugin", AgentTypeConfig)
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("child-type"): AgentTypeConfig(
+                    parent_type=AgentTypeName("parent-plugin"),
+                ),
+            },
+            disabled_plugins=frozenset({"parent-plugin"}),
+        )
+
+        with pytest.raises(MngrError, match="plugin 'parent-plugin' is disabled"):
+            resolve_agent_type(AgentTypeName("child-type"), config)
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_raises_when_grandparent_plugin_disabled() -> None:
+    """resolve_agent_type should walk the full parent chain and catch a disabled grandparent."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("root-plugin", _FakeAgentClass)
+        register_agent_config("root-plugin", AgentTypeConfig)
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("mid-type"): AgentTypeConfig(
+                    parent_type=AgentTypeName("root-plugin"),
+                ),
+                AgentTypeName("leaf-type"): AgentTypeConfig(
+                    parent_type=AgentTypeName("mid-type"),
+                ),
+            },
+            disabled_plugins=frozenset({"root-plugin"}),
+        )
+
+        with pytest.raises(MngrError, match="plugin 'root-plugin' is disabled"):
+            resolve_agent_type(AgentTypeName("leaf-type"), config)
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_uses_explicit_plugin_field() -> None:
+    """resolve_agent_type should use the explicit plugin field when set."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        set_default_agent_class(_FakeAgentClass)
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("my-type"): AgentTypeConfig(plugin="real-plugin"),
+            },
+            disabled_plugins=frozenset({"real-plugin"}),
+        )
+
+        with pytest.raises(MngrError, match="plugin 'real-plugin' is disabled"):
+            resolve_agent_type(AgentTypeName("my-type"), config)
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_explicit_plugin_field_overrides_name() -> None:
+    """An explicit plugin field pointing to an enabled plugin should allow resolution even if the type name matches a disabled plugin."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        set_default_agent_class(_FakeAgentClass)
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("disabled-name"): AgentTypeConfig(plugin="enabled-plugin"),
+            },
+            disabled_plugins=frozenset({"disabled-name"}),
+        )
+
+        result = resolve_agent_type(AgentTypeName("disabled-name"), config)
+        assert result.agent_class is _FakeAgentClass
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_allows_non_disabled_plugin() -> None:
+    """resolve_agent_type should work normally when the plugin is not disabled."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("enabled-plugin", _FakeAgentClass)
+        register_agent_config("enabled-plugin", AgentTypeConfig)
+
+        config = MngrConfig(disabled_plugins=frozenset({"other-plugin"}))
+
+        result = resolve_agent_type(AgentTypeName("enabled-plugin"), config)
+        assert result.agent_class is _FakeAgentClass
     finally:
         reset_agent_class_registry()
         reset_agent_config_registry()

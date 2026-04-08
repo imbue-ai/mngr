@@ -123,6 +123,22 @@ class FakeCloudflareOps:
     def kv_delete(self, key: str) -> None:
         self.kv_store.pop(key, None)
 
+    def create_service_token(self, name: str) -> dict[str, Any]:
+        token_id = f"svc-token-{self._next_policy_id}"
+        self._next_policy_id += 1
+        return {
+            "id": token_id,
+            "client_id": f"client-{token_id}",
+            "client_secret": f"secret-{token_id}",
+            "name": name,
+        }
+
+    def list_service_tokens(self) -> list[dict[str, Any]]:
+        return []
+
+    def delete_service_token(self, token_id: str) -> None:
+        pass
+
 
 class FakeForwardingCtx(ForwardingCtx):
     """ForwardingCtx backed by FakeCloudflareOps for testing."""

@@ -410,6 +410,32 @@ def test_logging_suppressor_disable_is_idempotent() -> None:
     assert not LoggingSuppressor.is_suppressed()
 
 
+def test_logging_suppressor_context_manager_enables_and_disables() -> None:
+    """Context manager should enable suppression on enter and disable on exit."""
+    with LoggingSuppressor.suppressed(console_level=LogLevel.INFO, clear_screen=False):
+        assert LoggingSuppressor.is_suppressed()
+    assert not LoggingSuppressor.is_suppressed()
+
+
+def test_logging_suppressor_context_manager_disables_on_exception() -> None:
+    """Context manager should disable suppression even when an exception occurs."""
+    with pytest.raises(RuntimeError, match="test error"):
+        with LoggingSuppressor.suppressed(console_level=LogLevel.INFO, clear_screen=False):
+            assert LoggingSuppressor.is_suppressed()
+            raise RuntimeError("test error")
+    assert not LoggingSuppressor.is_suppressed()
+
+
+def test_logging_suppressor_context_manager_buffers_messages() -> None:
+    """Context manager should buffer messages during suppression."""
+    with LoggingSuppressor.suppressed(console_level=LogLevel.INFO, clear_screen=False):
+        logger.info("Context manager message")
+        buffered = LoggingSuppressor.get_buffered_messages()
+        assert any("Context manager message" in msg.formatted_message for msg in buffered)
+    # Buffer cleared after exit
+    assert len(LoggingSuppressor.get_buffered_messages()) == 0
+
+
 def test_buffered_message_tracks_stderr_destination() -> None:
     """BufferedMessage should track whether message goes to stderr."""
     stdout_msg = BufferedMessage(formatted_message="stdout message", is_stderr=False)

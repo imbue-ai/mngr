@@ -111,6 +111,17 @@ class TunnelInfo(BaseModel):
     services: list[ServiceInfo] = Field(default_factory=list, description="Configured services")
 
 
+class CreateServiceTokenRequest(BaseModel):
+    name: str = Field(description="Human-readable name for the service token")
+
+
+class ServiceTokenInfo(BaseModel):
+    token_id: str = Field(description="Cloudflare service token ID")
+    client_id: str = Field(description="Client ID for CF-Access-Client-Id header")
+    client_secret: str | None = Field(default=None, description="Client secret (only returned on creation)")
+    name: str = Field(description="Token name")
+
+
 class AdminAuth(BaseModel):
     username: str
 
@@ -278,6 +289,27 @@ def cf_delete_access_policy(client: httpx.Client, account_id: str, app_id: str, 
     cf_check(client.delete(f"/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}"))
 
 
+# --- Service token operations ---
+
+def cf_create_service_token(
+    client: httpx.Client, account_id: str, name: str, duration: str = "8760h"
+) -> dict[str, Any]:
+    response = client.post(
+        f"/accounts/{account_id}/access/service_tokens",
+        json={"name": name, "duration": duration},
+    )
+    return cf_check(response)["result"]
+
+
+def cf_list_service_tokens(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
+    response = client.get(f"/accounts/{account_id}/access/service_tokens")
+    return cf_check(response)["result"]
+
+
+def cf_delete_service_token(client: httpx.Client, account_id: str, token_id: str) -> None:
+    cf_check(client.delete(f"/accounts/{account_id}/access/service_tokens/{token_id}"))
+
+
 # --- Workers KV operations ---
 
 def cf_kv_list_namespaces(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
@@ -430,6 +462,9 @@ class CloudflareOps(Protocol):
     def kv_get(self, key: str) -> str | None: ...
     def kv_put(self, key: str, value: str) -> None: ...
     def kv_delete(self, key: str) -> None: ...
+    def create_service_token(self, name: str) -> dict[str, Any]: ...
+    def list_service_tokens(self) -> list[dict[str, Any]]: ...
+    def delete_service_token(self, token_id: str) -> None: ...
 
 
 class HttpCloudflareOps:
@@ -515,6 +550,15 @@ class HttpCloudflareOps:
     def kv_delete(self, key: str) -> None:
         ns_id = self._ensure_kv_namespace()
         cf_kv_delete(self.client, self.account_id, ns_id, key)
+
+    def create_service_token(self, name: str) -> dict[str, Any]:
+        return cf_create_service_token(self.client, self.account_id, name)
+
+    def list_service_tokens(self) -> list[dict[str, Any]]:
+        return cf_list_service_tokens(self.client, self.account_id)
+
+    def delete_service_token(self, token_id: str) -> None:
+        cf_delete_service_token(self.client, self.account_id, token_id)
 
 
 # ---------------------------------------------------------------------------
@@ -709,6 +753,56 @@ class ForwardingCtx:
             self.ops.kv_delete(key)
         except (CloudflareApiError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete KV entry for %s: %s", key, exc)
+
+    def create_service_token(self, tunnel_name: str, username: str, name: str) -> ServiceTokenInfo:
+        """Create a Cloudflare Access service token and add it to all existing services on the tunnel.
+
+        The service token can be used for programmatic access via
+        CF-Access-Client-Id and CF-Access-Client-Secret headers.
+        """
+        self.verify_ownership(tunnel_name, username)
+        result = self.ops.create_service_token(name)
+        token_id = result["id"]
+        client_id = result["client_id"]
+        client_secret = result["client_secret"]
+
+        # Add a non_identity policy for this service token to all existing services
+        tunnel = self.get_tunnel_or_raise(tunnel_name)
+        config = self.ops.get_tunnel_config(tunnel["id"])
+        rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
+        for rule in rules:
+            hostname = rule.get("hostname", "")
+            try:
+                access_app = self.ops.get_access_app_by_domain(hostname)
+                if access_app is not None:
+                    self.ops.create_access_policy(access_app["id"], {
+                        "name": f"Service token: {name}",
+                        "decision": "non_identity",
+                        "include": [{"service_token": {"token_id": token_id}}],
+                        "precedence": 10,
+                    })
+            except (CloudflareApiError, httpx.HTTPError) as exc:
+                logger.warning("Failed to add service token policy for %s: %s", hostname, exc)
+
+        return ServiceTokenInfo(
+            token_id=token_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            name=name,
+        )
+
+    def list_service_tokens(self) -> list[ServiceTokenInfo]:
+        """List all service tokens in the account."""
+        tokens = self.ops.list_service_tokens()
+        return [
+            ServiceTokenInfo(
+                token_id=t["id"],
+                client_id=t["client_id"],
+                client_secret=None,
+                name=t["name"],
+            )
+            for t in tokens
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +1016,27 @@ def get_service_auth(request: Request, tunnel_name: str, service_name: str) -> d
         if policy is None:
             return {"rules": []}
         return policy.model_dump()
+
+
+@web_app.post("/tunnels/{tunnel_name}/service-tokens")
+def create_service_token_endpoint(
+    request: Request, tunnel_name: str, body: CreateServiceTokenRequest
+) -> dict[str, object]:
+    """Create a service token for programmatic access to this tunnel's services."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        token = get_ctx().create_service_token(tunnel_name, admin.username, body.name)
+        return token.model_dump()
+
+
+@web_app.get("/tunnels/{tunnel_name}/service-tokens")
+def list_service_tokens_endpoint(request: Request, tunnel_name: str) -> list[dict[str, object]]:
+    """List service tokens. Note: secrets are not returned."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        return [t.model_dump() for t in get_ctx().list_service_tokens()]
 
 
 @web_app.put("/tunnels/{tunnel_name}/services/{service_name}/auth")

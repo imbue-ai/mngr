@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -438,10 +439,17 @@ def create(ctx: click.Context, **kwargs) -> None:
     # Start capturing output early when --edit-message is set so that logs from
     # address parsing, provider merging, and other pre-editor work are included
     # in the replay after the editor closes (which clears the screen).
-    if opts.edit_message:
-        LoggingSuppressor.enable(logging_config.console_level)
-
-    try:
+    # On the happy path, suppression is disabled by _on_editor_exit or
+    # _finish_create (with clear_screen=True). This context manager is the
+    # safety net: if something raises before those run, it restores
+    # stdout/stderr so error messages are not swallowed (clear_screen=False
+    # because on an error path we don't want to hide prior output).
+    suppressor = (
+        LoggingSuppressor.suppressed(logging_config.console_level, clear_screen=False)
+        if opts.edit_message
+        else nullcontext()
+    )
+    with suppressor:
         # Parse agent address from the positional argument or --name flag.
         # Both accept agent addresses; they are equivalent but mutually exclusive.
         if opts.positional_name and opts.name:
@@ -484,11 +492,6 @@ def create(ctx: click.Context, **kwargs) -> None:
         create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
         _post_create(create_result, connection_opts, opts, mngr_ctx)
         _finish_create(create_result, setup, output_opts)
-    finally:
-        # Restore stdout/stderr if suppression is still active so that error
-        # messages from Click (or the user's shell) are not swallowed.
-        if LoggingSuppressor.is_suppressed():
-            LoggingSuppressor.disable_and_replay(clear_screen=False)
 
 
 class _AutoLabels(FrozenModel):
@@ -600,6 +603,17 @@ def _create_agent(
         agent_and_host_loader=setup.agent_and_host_loader,
         lifecycle=setup.host_lifecycle,
     )
+
+    # Reject lifecycle options on the local provider (idle timeout, idle mode).
+    # The local host cannot be stopped by mngr, so idle detection is meaningless.
+    _is_local = target_host is None or (
+        isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
+    )
+    if _is_local and setup.host_lifecycle != HostLifecycleOptions():
+        raise UserInputError(
+            "Idle timeout and idle mode are not supported for the local provider. "
+            "Use a remote provider (e.g. --provider modal) for idle detection."
+        )
 
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None

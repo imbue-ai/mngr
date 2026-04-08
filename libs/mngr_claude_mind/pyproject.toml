@@ -3,7 +3,7 @@ name = "imbue-mngr-claude-mind"
 version = "0.1.0"
 description = "Claude mind agent plugin for mngr - base class for mind agents built on Claude Code"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.1.7",
     "imbue-mngr-claude==0.1.0",
@@ -79,5 +79,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]

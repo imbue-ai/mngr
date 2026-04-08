@@ -48,7 +48,7 @@ mngr create my-agent@.modal -b gpu=h100
 mngr create my-agent@.modal -b cpu=4 -b memory=16
 
 # Create with custom image and longer timeout
-mngr create my-agent@.modal -b image=python:3.11-slim -b timeout=3600
+mngr create my-agent@.modal -b image=python:3.12-slim -b timeout=3600
 
 # Create with network restricted to specific CIDR ranges
 mngr create my-agent@.modal -b cidr-allowlist=203.0.113.0/24 -b cidr-allowlist=10.0.0.0/8
@@ -95,7 +95,7 @@ mngr create my-agent@.modal -b file=./Dockerfile -b secret=NPM_TOKEN -b secret=G
 In your Dockerfile, access the secret using `--mount=type=secret`:
 
 ```dockerfile
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Install a private npm package using NPM_TOKEN
 RUN --mount=type=secret,id=NPM_TOKEN \

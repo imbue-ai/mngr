@@ -1,31 +1,48 @@
 # minds
 
-Run your own Minds: self-improving, proactive, persistent, specialized AI agents
+Run persistent, autonomous AI agents with web access and global forwarding.
 
 ## Overview
 
-`Minds` makes it easy to create AI agents that are *fully* yours:
+The minds app creates and manages persistent Claude agents running in Docker containers. Each agent gets:
 
-- **[Create](TK):** start new Minds instantly! Run them locally or remotely.
-- **[Access](TK):** chat with your Minds from anywhere via the web interface, or just message them on whatever platform you like.
-- **[Manage](TK):** understand what your Minds are doing; stop, restart, or delete them anytime.
-- **[Upgrade](TK):** allow your Mind to improve itself without losing its memories or conversation history.
+- A local web interface accessible through the forwarding server
+- Optional global access via Cloudflare tunnels (with Google OAuth protection)
+- Background services (web server, terminal, telegram bot, etc.) managed by a bootstrap service manager
+- The ability to expose application ports via both local and global URLs
 
 ## Getting started
 
 ```bash
-# install the Minds application...
+# Install
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install.sh | bash
 
-# Start the server...
-mind
+# Start the forwarding server
+mind forward
 
-# and a new Mind will be automatically created for you!
+# Visit the URL printed in the terminal to create your first agent
 ```
+
+## How it works
+
+1. The **forwarding server** (`mind forward`) runs locally and provides:
+   - Authentication via one-time login codes
+   - A web UI for creating agents from template repositories
+   - Reverse proxying to agent web servers (HTTP + WebSocket)
+   - A servers page showing local and global URLs per agent
+   - Toggle controls for enabling/disabling global Cloudflare forwarding
+
+2. **Agents** are created from template repositories (like [forever-claude-template](https://github.com/imbue-ai/forever-claude-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
+
+3. Inside each agent's Docker container:
+   - A **bootstrap service manager** watches `services.toml` and starts/stops tmux windows for each service
+   - Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
+   - An **app watcher** service monitors `applications.toml` and writes server events to `events.jsonl` for discovery
+   - A **cloudflared** service watches `runtime/secrets` for a tunnel token and runs the Cloudflare tunnel
 
 ## Learn more
 
-- [How it works](./docs/overview.md)
-- [Desktop app](./docs/desktop-app.md)
+- [Architecture and design](./docs/design.md)
+- [Forwarding server internals](./imbue/minds/forwarding_server/README.md)
 - [Glossary of key concepts](./docs/mind/glossary.md)
-- [Design principles and mind architecture](./docs/design.md)
+- [Desktop app](./docs/desktop-app.md)

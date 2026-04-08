@@ -10,7 +10,19 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.utils.testing import make_mngr_ctx
+
+
+@pytest.fixture
+def enabled_plugins() -> frozenset[str]:
+    """Enable BASIC-tier plugins plus all claude-package entry points.
+
+    The mngr_claude package provides claude (BASIC) plus code_guardian,
+    fixme_fairy, and headless_claude (EXTRA). Tests in this package need
+    all of them loaded.
+    """
+    return get_independent_entry_point_names() | {"code_guardian", "fixme_fairy", "headless_claude"}
 
 
 @pytest.fixture()

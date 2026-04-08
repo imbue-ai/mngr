@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.capture import capture
+from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.cli.cleanup import cleanup
 from imbue.mngr.cli.config import config
 from imbue.mngr.cli.connect import ConnectCliOptions
@@ -16,6 +17,7 @@ from imbue.mngr.cli.connect import connect
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
+from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.label import label
@@ -231,11 +233,13 @@ def editor_recovery_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
 _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (archive, ["--help"], "archive"),
     (capture, ["--help"], "capture"),
+    (check_deps, ["--help"], "dependencies"),
     (cleanup, ["--help"], "cleanup"),
     (config, ["--help"], "config"),
     (connect, ["--help"], "connect"),
     (destroy, ["--help"], "destroy"),
     (exec_command, ["--help"], "exec"),
+    (extras, ["--help"], "extras"),
     (gc, ["--help"], "gc"),
     (help_command, ["--help"], "help"),
     (label, ["--help"], "label"),
