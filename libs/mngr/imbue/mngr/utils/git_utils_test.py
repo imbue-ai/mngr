@@ -7,6 +7,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -455,3 +456,85 @@ def test_get_head_commit_returns_none_for_non_git_dir(tmp_path: Path, cg: Concur
     plain_dir.mkdir()
     result = get_head_commit(plain_dir, cg)
     assert result is None
+
+
+# =============================================================================
+# GIT_MIRROR_PUSH_REFSPECS Tests
+# =============================================================================
+
+
+def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Path, tmp_path: Path) -> None:
+    """GIT_MIRROR_PUSH_REFSPECS must not push remote-tracking refs to the target.
+
+    Pushing remote-tracking refs (refs/remotes/*) causes "inconsistent aliased
+    update" errors on git 2.45+ when the source has symbolic refs like
+    refs/remotes/origin/HEAD. The fix uses explicit refspecs for branches and
+    tags only, ensuring remote-tracking refs are never pushed.
+    """
+    # Set up the source repo with remote-tracking refs including the symbolic
+    # refs/remotes/origin/HEAD that triggers the bug over SSH.
+    upstream = tmp_path / "upstream.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(temp_git_repo), str(upstream)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(upstream)],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "fetch", "origin"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Verify the source has remote-tracking refs (precondition for the test)
+    ref_result = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", "refs/remotes/"],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "refs/remotes/origin/" in ref_result.stdout, "Source must have remote-tracking refs"
+
+    # Create a fresh bare target repo and push using GIT_MIRROR_PUSH_REFSPECS
+    target = tmp_path / "target.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    push_result = subprocess.run(
+        ["git", "-C", str(temp_git_repo), "push", "--force", "--prune", str(target), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push_result.returncode == 0, f"Push with GIT_MIRROR_PUSH_REFSPECS failed:\n{push_result.stderr}"
+
+    # Verify branches were pushed
+    branch_result = subprocess.run(
+        ["git", "-C", str(target), "branch"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "main" in branch_result.stdout, "Branch 'main' should be pushed to the target"
+
+    # Verify NO remote-tracking refs were pushed -- this is the key assertion.
+    # On main (before the fix), git push --mirror pushes refs/remotes/* to the
+    # target, which causes "inconsistent aliased update" errors over SSH on
+    # git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
+    target_refs = subprocess.run(
+        ["git", "-C", str(target), "for-each-ref", "--format=%(refname)", "refs/remotes/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert target_refs.stdout.strip() == "", (
+        f"Remote-tracking refs should NOT be pushed to the target, but found:\n{target_refs.stdout}"
+    )
