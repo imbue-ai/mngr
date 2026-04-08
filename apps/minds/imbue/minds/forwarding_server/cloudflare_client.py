@@ -60,12 +60,13 @@ class CloudflareForwardingClient(FrozenModel):
         """Build the tunnel name for an agent."""
         return f"{self.username}--{agent_id}"
 
-    def create_tunnel(self, agent_id: AgentId) -> str | None:
-        """Create a Cloudflare tunnel for the agent and return the tunnel token.
+    def create_tunnel(self, agent_id: AgentId) -> tuple[str | None, str]:
+        """Create a Cloudflare tunnel for the agent and return (token, message).
 
         Sets a default Google OAuth policy for the owner's email.
-        Returns the tunnel token string, or None if creation fails.
+        Returns (token, success_message) on success, or (None, error_message) on failure.
         """
+        tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.post(
                 f"{self.forwarding_url}/tunnels",
@@ -81,18 +82,21 @@ class CloudflareForwardingClient(FrozenModel):
                 timeout=30.0,
             )
             if response.status_code not in (200, 201):
-                logger.warning("Failed to create tunnel: {} {}", response.status_code, response.text)
-                return None
+                msg = f"Tunnel creation failed ({response.status_code}): {response.text[:200]}"
+                logger.warning(msg)
+                return None, msg
 
             tunnel_info = response.json()
             token = tunnel_info.get("token")
-            tunnel_name = tunnel_info.get("tunnel_name", "")
-            logger.info("Cloudflare tunnel created: {}", tunnel_name)
-            return token
+            actual_name = tunnel_info.get("tunnel_name", tunnel_name)
+            msg = f"Cloudflare tunnel created: {actual_name}"
+            logger.info(msg)
+            return token, msg
 
         except httpx.HTTPError as e:
-            logger.warning("Failed to create tunnel: {}", e)
-            return None
+            msg = f"Tunnel creation failed: {e}"
+            logger.warning(msg)
+            return None, msg
 
     def list_services(self, agent_id: AgentId) -> dict[str, str] | None:
         """Query services registered on the agent's tunnel.

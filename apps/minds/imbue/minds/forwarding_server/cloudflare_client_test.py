@@ -28,10 +28,11 @@ def test_auth_header_is_basic() -> None:
     assert header.startswith("Basic ")
 
 
-def test_create_tunnel_returns_none_on_connection_error() -> None:
+def test_create_tunnel_returns_none_and_message_on_connection_error() -> None:
     client = _make_client()
-    result = client.create_tunnel(AgentId())
-    assert result is None
+    token, message = client.create_tunnel(AgentId())
+    assert token is None
+    assert "failed" in message.lower()
 
 
 def test_list_services_returns_none_on_connection_error() -> None:

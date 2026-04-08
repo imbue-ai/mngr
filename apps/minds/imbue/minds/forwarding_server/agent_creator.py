@@ -87,8 +87,14 @@ def extract_repo_name(git_url: str) -> str:
 
 
 def _is_local_path(repo_source: str) -> bool:
-    """Check if a repo source is a local path rather than a URL."""
-    return repo_source.startswith("/") or repo_source.startswith("./") or repo_source.startswith("~")
+    """Check if a repo source is a local path rather than a URL.
+
+    Anything starting with /, ./, ../, or ~ is treated as a local path.
+    Anything containing :// is treated as a URL.
+    """
+    if "://" in repo_source:
+        return False
+    return repo_source.startswith(("/", "./", "../", "~"))
 
 
 def clone_git_repo(
@@ -233,7 +239,7 @@ def _inject_tunnel_token(
             MNGR_BINARY,
             "exec",
             str(agent_id),
-            f"mkdir -p runtime && echo 'export CLOUDFLARE_TUNNEL_TOKEN='{safe_token} >> runtime/secrets",
+            f"mkdir -p runtime && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} >> runtime/secrets",
         ]
         result = cg.run_process_to_completion(
             command=command,
@@ -399,9 +405,10 @@ class AgentCreator(MutableModel):
             return
 
         log_queue.put("[minds] Creating Cloudflare tunnel...")
-        token = self.cloudflare_client.create_tunnel(agent_id)
+        token, message = self.cloudflare_client.create_tunnel(agent_id)
+        log_queue.put(f"[minds] {message}")
 
         if token is not None:
             _inject_tunnel_token(agent_id, token, log_queue)
         else:
-            log_queue.put("[minds] WARNING: Tunnel creation failed, skipping token injection.")
+            log_queue.put("[minds] Skipping tunnel token injection.")

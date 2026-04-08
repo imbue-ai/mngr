@@ -34,7 +34,7 @@ from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
 from imbue.minds.primitives import OneTimeCode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_TEMPLATE_REPO = Path.home() / "project" / "forever-claude-template"
+_TEMPLATE_REPO = Path(os.environ.get("MINDS_TEMPLATE_REPO", str(Path.home() / "project" / "forever-claude-template")))
 _SIGNAL_FILE = Path("/tmp/minds-e2e-done")
 _AGENT_NAME = "forever"
 
