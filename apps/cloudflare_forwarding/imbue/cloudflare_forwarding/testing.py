@@ -72,10 +72,12 @@ class FakeCloudflareOps:
     def delete_dns_record(self, record_id: str) -> None:
         self.dns_records = [r for r in self.dns_records if r["id"] != record_id]
 
-    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]:
+    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
         app_id = f"access-app-{self._next_access_app_id}"
         self._next_access_app_id += 1
-        access_app = {"id": app_id, "domain": hostname, "name": app_name}
+        access_app: dict[str, Any] = {"id": app_id, "domain": hostname, "name": app_name}
+        if allowed_idps is not None:
+            access_app["allowed_idps"] = allowed_idps
         self.access_apps[app_id] = access_app
         self.access_policies[app_id] = []
         return access_app

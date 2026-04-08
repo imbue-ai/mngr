@@ -240,15 +240,24 @@ def cf_delete_dns_record(client: httpx.Client, zone_id: str, record_id: str) -> 
 
 # --- Access operations ---
 
-def cf_create_access_app(client: httpx.Client, account_id: str, hostname: str, app_name: str) -> dict[str, Any]:
+def cf_create_access_app(
+    client: httpx.Client,
+    account_id: str,
+    hostname: str,
+    app_name: str,
+    allowed_idps: list[str] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "name": app_name,
+        "domain": hostname,
+        "type": "self_hosted",
+        "session_duration": "24h",
+    }
+    if allowed_idps is not None:
+        body["allowed_idps"] = allowed_idps
     response = client.post(
         f"/accounts/{account_id}/access/apps",
-        json={
-            "name": app_name,
-            "domain": hostname,
-            "type": "self_hosted",
-            "session_duration": "24h",
-        },
+        json=body,
     )
     return cf_check(response)["result"]
 
@@ -452,7 +461,7 @@ class CloudflareOps(Protocol):
     def create_cname(self, name: str, target: str) -> dict[str, Any]: ...
     def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
     def delete_dns_record(self, record_id: str) -> None: ...
-    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]: ...
+    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]: ...
     def delete_access_app(self, app_id: str) -> None: ...
     def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None: ...
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]: ...
@@ -518,8 +527,8 @@ class HttpCloudflareOps:
     def delete_dns_record(self, record_id: str) -> None:
         cf_delete_dns_record(self.client, self.zone_id, record_id)
 
-    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]:
-        return cf_create_access_app(self.client, self.account_id, hostname, app_name)
+    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
+        return cf_create_access_app(self.client, self.account_id, hostname, app_name, allowed_idps=allowed_idps)
 
     def delete_access_app(self, app_id: str) -> None:
         cf_delete_access_app(self.client, self.account_id, app_id)
@@ -569,9 +578,10 @@ class HttpCloudflareOps:
 class ForwardingCtx:
     """Holds the Cloudflare ops abstraction and domain config. Created once per container."""
 
-    def __init__(self, ops: CloudflareOps, domain: str) -> None:
+    def __init__(self, ops: CloudflareOps, domain: str, allowed_idps: list[str] | None = None) -> None:
         self.ops = ops
         self.domain = domain
+        self.allowed_idps = allowed_idps
 
     def verify_ownership(self, tunnel_name: str, username: str) -> None:
         if not tunnel_name.startswith(f"{username}{TUNNEL_NAME_SEP}"):
@@ -694,7 +704,7 @@ class ForwardingCtx:
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}")
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}", allowed_idps=self.allowed_idps)
 
         existing_policies = self.ops.list_access_policies(access_app["id"])
         for ep in existing_policies:
@@ -742,7 +752,7 @@ class ForwardingCtx:
             if raw is None:
                 return
             policy = AuthPolicy.model_validate_json(raw)
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}")
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
             for cf_policy in policy_to_cf_rules(policy):
                 self.ops.create_access_policy(access_app["id"], cf_policy)
         except (CloudflareApiError, httpx.HTTPError) as exc:
@@ -811,14 +821,7 @@ class ForwardingCtx:
 
 
 def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
-    """Authenticate a request. Returns AdminAuth or AgentAuth.
-
-    Supports three authentication methods:
-    - HTTP Basic Auth (admin credentials from USER_CREDENTIALS)
-    - Bearer token (agent tunnel token)
-    - Google OAuth via Cloudflare Access (Cf-Access-Authenticated-User-Email
-      header matched against GOOGLE_AUTH_USERS)
-    """
+    """Authenticate a request. Returns AdminAuth or AgentAuth."""
     auth_header = request.headers.get("authorization", "")
 
     if auth_header.lower().startswith("bearer "):
@@ -826,11 +829,6 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
 
     if auth_header.lower().startswith("basic "):
         return _authenticate_admin(auth_header)
-
-    # Check for Cloudflare Access Google OAuth header (no Authorization header required)
-    cf_email = request.headers.get("cf-access-authenticated-user-email")
-    if cf_email:
-        return _authenticate_google_oauth(cf_email)
 
     raise HTTPException(status_code=401, detail="Missing credentials")
 
@@ -852,31 +850,6 @@ def _authenticate_admin(auth_header: str) -> AdminAuth:
     if expected is None or not secrets_module.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return AdminAuth(username=username)
-
-
-def _authenticate_google_oauth(email: str) -> AdminAuth:
-    """Validate a Google OAuth email from Cloudflare Access.
-
-    Looks up the email (case-insensitive) in the GOOGLE_AUTH_USERS env var,
-    which is a JSON object mapping email addresses to usernames.
-    Returns AdminAuth with the mapped username.
-    """
-    raw = os.environ.get("GOOGLE_AUTH_USERS", "")
-    if not raw:
-        raise HTTPException(status_code=401, detail="Google OAuth not configured")
-
-    try:
-        users: dict[str, str] = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail="GOOGLE_AUTH_USERS is not valid JSON") from exc
-
-    # Case-insensitive email lookup
-    email_lower = email.lower()
-    for configured_email, username in users.items():
-        if configured_email.lower() == email_lower:
-            return AdminAuth(username=username)
-
-    raise HTTPException(status_code=401, detail="Email not authorized")
 
 
 def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
@@ -927,7 +900,9 @@ def get_ctx() -> ForwardingCtx:
         account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
         zone_id=os.environ["CLOUDFLARE_ZONE_ID"],
     )
-    return ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"])
+    raw_idps = os.environ.get("CLOUDFLARE_ALLOWED_IDPS", "")
+    allowed_idps = [s.strip() for s in raw_idps.split(",") if s.strip()] or None
+    return ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"], allowed_idps=allowed_idps)
 
 
 def raise_as_http(exc: Exception) -> NoReturn:
