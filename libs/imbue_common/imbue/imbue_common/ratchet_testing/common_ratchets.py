@@ -202,6 +202,12 @@ PREVENT_FUNCTOOLS_PARTIAL = RegexRatchetRule(
     pattern_string=r"\bfrom\s+functools\s+import\s+.*\bpartial\b|\bfunctools\.partial\b",
 )
 
+PREVENT_EXIT_STACK = RegexRatchetRule(
+    rule_name="contextlib.ExitStack usage",
+    rule_description="contextlib.ExitStack is banned. Use a conditional expression with nullcontext() for conditional context managers, or restructure the code to avoid dynamic context manager entry",
+    pattern_string=r"\bimport\s+ExitStack\b|\bExitStack\s*\(",
+)
+
 
 # --- Naming conventions ---
 
