@@ -1,4 +1,5 @@
 import ast
+import json
 import re
 import subprocess
 from fnmatch import fnmatch
@@ -463,6 +464,32 @@ def check_no_ruff_errors(project_root: Path) -> None:
         ]
 
         raise AssertionError("\n".join(failure_message))
+
+
+def assert_posix_compatible(command: str) -> None:
+    """Assert that a shell command string is POSIX-compatible using shellcheck.
+
+    Assembled commands sent via tmux send-keys run in the user's interactive shell,
+    which may be zsh or another POSIX shell rather than bash. This function checks
+    for non-portable constructs (shellcheck SC3xxx codes: arrays, [[ ]], declare, etc.)
+    that would break in non-bash shells.
+
+    Note: zsh is not strictly POSIX-compliant (it differs in word splitting, globbing,
+    etc.), but it supports all standard POSIX constructs. Checking against ``-s sh``
+    (pure POSIX sh) is stricter than necessary for zsh, which means commands that pass
+    this check will work in zsh and any other POSIX-superset shell.
+    """
+    result = subprocess.run(
+        ["shellcheck", "-s", "sh", "--format=json1", "-"],
+        input=command,
+        capture_output=True,
+        text=True,
+    )
+    issues = json.loads(result.stdout)
+    portability_issues = [c for c in issues.get("comments", []) if c["code"] >= 3000]
+    assert portability_issues == [], "Command contains non-POSIX constructs:\n" + "\n".join(
+        f"  SC{c['code']}: {c['message']}" for c in portability_issues
+    )
 
 
 _TEST_MODULE_GLOBS: Final[tuple[str, ...]] = (

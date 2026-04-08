@@ -440,6 +440,11 @@ def find_and_maybe_start_agent_by_name_or_id(
     # Try matching by name
     agent_name = AgentName(agent_str)
     matching: list[tuple[AgentInterface, OnlineHostInterface]] = []
+    # Track display info for error messages: (agent_id, host_name, provider_name)
+    match_display_info: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
+
+    # Track agents found during discovery but missing from get_agents()
+    missing_from_host: list[tuple[AgentId, HostName, ProviderInstanceName]] = []
 
     for host_ref, agent_refs in agents_by_host.items():
         for agent_ref in agent_refs:
@@ -450,23 +455,56 @@ def find_and_maybe_start_agent_by_name_or_id(
                     host, is_start_desired=is_start_desired, provider=provider
                 )
                 # Find the specific agent by ID (not name, to avoid duplicates)
+                found_on_host = False
                 for agent in online_host.get_agents():
                     if agent.id == agent_ref.agent_id:
                         matching.append((agent, online_host))
+                        match_display_info.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
+                        found_on_host = True
                         break
+                if not found_on_host:
+                    missing_from_host.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
+
+    if missing_from_host:
+        missing_details = ", ".join(
+            f"{agent_id}@{host_name}.{provider_name}" for agent_id, host_name, provider_name in missing_from_host
+        )
+        if not matching:
+            # This is an internal consistency error: discovery found agents but
+            # they weren't on their hosts. We don't want to hard-fail if we still
+            # have a unique agent to connect to, but since we'd fail just below
+            # anyway (no matching agents), take the opportunity to raise as
+            # RuntimeError instead of UserInputError so the unexpected-error
+            # handler suggests reporting to GitHub.
+            raise RuntimeError(
+                f"Agent '{agent_str}' was found during discovery but not on host(s). "
+                f"Missing: {missing_details}. "
+                f"This indicates a stale discovery cache or host state inconsistency."
+            )
+        # Some agents disappeared but others were found. Log a warning and proceed.
+        logger.warning(
+            "Some agents named '{}' were discovered but not found on their host(s): {}",
+            agent_str,
+            missing_details,
+        )
 
     if not matching:
         raise UserInputError(f"No agent found with name or ID: {agent_str}")
 
     if len(matching) > 1:
-        # Build helpful error message showing the matching agents
-        agent_list = "\n".join([f"  - {agent.id} (on {host.get_name()})" for agent, host in matching])
+        # Build helpful error message showing the matching agents with address syntax
+        agent_list = "\n".join(
+            [
+                f"  - {agent_str}@{host_name}.{provider_name} (ID: {agent_id})"
+                for agent_id, host_name, provider_name in match_display_info
+            ]
+        )
         raise UserInputError(
             f"Multiple agents found with name '{agent_str}':\n{agent_list}\n\n"
-            f"Please use the agent ID instead:\n"
-            f"  mngr {command_name} <agent-id>\n\n"
-            f"To see all agent IDs, run:\n"
-            f"  mngr list --fields id,name,host"
+            f"Disambiguate using the address format:\n"
+            f"  mngr {command_name} {agent_str}@<host>.<provider>\n\n"
+            f"Or use the agent ID directly:\n"
+            f"  mngr {command_name} <agent-id>"
         )
 
     # make sure the agent is started

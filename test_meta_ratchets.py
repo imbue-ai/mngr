@@ -14,7 +14,9 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_withou
 
 _REPO_ROOT = Path(__file__).parent
 
-# Projects that are excluded from ratchet requirements (scheduled for deletion)
+# Projects that are excluded from ratchet requirements (scheduled for deletion).
+# Keep in sync with EXCLUDED_RATCHET_PROJECTS in scripts/sync_common_ratchets.py
+# (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
@@ -76,30 +78,50 @@ def test_every_project_has_test_ratchets_file() -> None:
     )
 
 
+def _get_expected_ratchet_test_names() -> frozenset[str]:
+    """Derive the expected set of test function names from standard_ratchet_checks.py.
+
+    Each check_foo() function maps to test_prevent_foo(). Two additional hand-written
+    tests (test_no_type_errors, test_no_ruff_errors) are always expected.
+    """
+    checks_path = (
+        _REPO_ROOT
+        / "libs"
+        / "imbue_common"
+        / "imbue"
+        / "imbue_common"
+        / "ratchet_testing"
+        / "standard_ratchet_checks.py"
+    )
+    tree = ast.parse(checks_path.read_text())
+    test_names = {
+        f"test_prevent_{node.name.removeprefix('check_')}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("check_")
+    }
+    test_names.add("test_no_type_errors")
+    test_names.add("test_no_ruff_errors")
+    return frozenset(test_names)
+
+
 def test_all_test_ratchets_files_have_same_tests() -> None:
-    """Ensure all test_ratchets.py files define precisely the same set of test functions."""
-    test_names_by_project: dict[str, frozenset[str]] = {}
+    """Ensure all test_ratchets.py files define precisely the expected set of test functions.
+
+    The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
+    per check_* function) plus test_no_type_errors and test_no_ruff_errors.
+    """
+    reference_tests = _get_expected_ratchet_test_names()
+
+    mismatches: list[str] = []
     for project_dir in _get_all_project_dirs():
         ratchet_file = _find_test_ratchets_file(project_dir)
         if ratchet_file is None:
             continue
-        test_names_by_project[project_dir.name] = _extract_test_function_names(ratchet_file)
-
-    if not test_names_by_project:
-        raise AssertionError("No test_ratchets.py files found")
-
-    # Use the first project's test names as the reference
-    project_names = sorted(test_names_by_project.keys())
-    reference_project = project_names[0]
-    reference_tests = test_names_by_project[reference_project]
-
-    mismatches: list[str] = []
-    for project_name in project_names[1:]:
-        project_tests = test_names_by_project[project_name]
+        project_tests = _extract_test_function_names(ratchet_file)
         missing_tests = reference_tests - project_tests
         extra_tests = project_tests - reference_tests
         if missing_tests or extra_tests:
-            parts = [f"  {project_name} (vs {reference_project}):"]
+            parts = [f"  {project_dir.name} (vs standard_ratchet_checks.py):"]
             if missing_tests:
                 parts.append(f"    missing: {sorted(missing_tests)}")
             if extra_tests:
