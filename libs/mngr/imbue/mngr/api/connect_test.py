@@ -366,23 +366,32 @@ class _ConnectTestResult:
         self.subprocess_call_args: list[list[str]] = []
 
 
-def _run_connect_to_agent(
+def _run_connect_with_retries(
     local_provider: LocalProviderInstance,
     mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
-    ssh_exit_code: int,
+    ssh_exit_codes: list[int],
+    retry_count: int = 2,
     agent_name: str = "test-agent",
 ) -> _ConnectTestResult:
-    """Set up and run connect_to_agent with intercepted system calls."""
+    """Set up and run connect_to_agent with a sequence of SSH exit codes.
+
+    Each successive call to run_interactive_subprocess returns the next exit code
+    from the list. When the list is exhausted, the last exit code is repeated.
+    """
     host = _make_ssh_host(local_provider, mngr_ctx, ssh_known_hosts_file="/tmp/known_hosts")
     agent = _make_remote_agent(host, mngr_ctx, agent_name=agent_name)
-    opts = ConnectionOptions(is_unknown_host_allowed=False, retry_count=0)
+    opts = ConnectionOptions(is_unknown_host_allowed=False, retry_count=retry_count, retry_delay="1s")
 
     result = _ConnectTestResult()
+    call_index = 0
 
-    def fake_run_interactive(args, **kwargs):
+    def fake_run_interactive(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal call_index
+        exit_code = ssh_exit_codes[min(call_index, len(ssh_exit_codes) - 1)]
+        call_index += 1
         result.subprocess_call_args.append(list(args))
-        return subprocess.CompletedProcess(args=args, returncode=ssh_exit_code)
+        return subprocess.CompletedProcess(args=args, returncode=exit_code)
 
     monkeypatch.setattr(
         "imbue.mngr.api.connect.run_interactive_subprocess",
@@ -396,6 +405,24 @@ def _run_connect_to_agent(
     connect_to_agent(agent, host, mngr_ctx, opts)
 
     return result
+
+
+def _run_connect_to_agent(
+    local_provider: LocalProviderInstance,
+    mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    ssh_exit_code: int,
+    agent_name: str = "test-agent",
+) -> _ConnectTestResult:
+    """Set up and run connect_to_agent with intercepted system calls (no retries)."""
+    return _run_connect_with_retries(
+        local_provider,
+        mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[ssh_exit_code],
+        retry_count=0,
+        agent_name=agent_name,
+    )
 
 
 def test_connect_to_agent_remote_destroy_signal(
@@ -449,50 +476,6 @@ def test_connect_to_agent_remote_unknown_exit_code_no_action(
 # =========================================================================
 # Tests for connect_to_agent retry behavior
 # =========================================================================
-
-
-def _run_connect_with_retries(
-    local_provider: LocalProviderInstance,
-    mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-    ssh_exit_codes: list[int],
-    retry_count: int = 2,
-) -> _ConnectTestResult:
-    """Set up and run connect_to_agent with a sequence of SSH exit codes.
-
-    Each successive call to run_interactive_subprocess returns the next exit code.
-    Also patches poll_until to avoid sleeping during retries.
-    """
-    host = _make_ssh_host(local_provider, mngr_ctx, ssh_known_hosts_file="/tmp/known_hosts")
-    agent = _make_remote_agent(host, mngr_ctx, agent_name="test-agent")
-    opts = ConnectionOptions(is_unknown_host_allowed=False, retry_count=retry_count, retry_delay="1s")
-
-    result = _ConnectTestResult()
-    call_index = 0
-
-    def fake_run_interactive(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        nonlocal call_index
-        exit_code = ssh_exit_codes[min(call_index, len(ssh_exit_codes) - 1)]
-        call_index += 1
-        result.subprocess_call_args.append(list(args))
-        return subprocess.CompletedProcess(args=args, returncode=exit_code)
-
-    monkeypatch.setattr(
-        "imbue.mngr.api.connect.run_interactive_subprocess",
-        fake_run_interactive,
-    )
-    monkeypatch.setattr(
-        "imbue.mngr.api.connect.os.execvp",
-        lambda cmd, args: result.execvp_calls.append((cmd, list(args))),
-    )
-    monkeypatch.setattr(
-        "imbue.mngr.api.connect.poll_until",
-        lambda condition, timeout, poll_interval: False,
-    )
-
-    connect_to_agent(agent, host, mngr_ctx, opts)
-
-    return result
 
 
 def test_connect_to_agent_retries_on_ssh_failure(
