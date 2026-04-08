@@ -32,7 +32,7 @@ directly to the agent command.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
-via git push --mirror. Use --transfer to override the default.
+via git mirror push. Use --transfer to override the default.
 
 Alias: c
 
@@ -106,7 +106,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | ---- | ---- | ----------- | ------- |
 | `--target` | text | Target [HOST][:PATH]. Defaults to current dir if no other target args are given | None |
 | `--target-path` | text | Directory to mount source inside agent host. Incompatible with --transfer=none | None |
-| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: transfer via git push --mirror (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
+| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: transfer via git mirror push (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
 
 ## Agent Git Configuration
 

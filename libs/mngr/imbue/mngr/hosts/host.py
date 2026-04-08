@@ -1442,7 +1442,7 @@ class Host(BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from --mirror push),
+                    # Use set-url if origin already exists (e.g. from mirror push),
                     # otherwise add it.
                     set_or_add = (
                         f"git remote set-url origin {shlex.quote(origin_url)}"
@@ -1452,7 +1452,7 @@ class Host(BaseHost, OnlineHostInterface):
                     config_commands.append(set_or_add)
 
                 # Copy .git/info/exclude from source to target. This file is not
-                # transferred by git push --mirror since it lives outside the git
+                # transferred by git mirror push since it lives outside the git
                 # object store. We read it here and include it in the config command.
                 exclude_content = self._read_source_git_info_exclude(source_host, source_path)
                 if exclude_content is not None:

@@ -137,7 +137,7 @@ class TransferMode(UpperCaseStrEnum):
 
     NONE: Run in-place, no transfer.
     RSYNC: Transfer files via rsync (non-git projects only).
-    GIT_MIRROR: Transfer via git push --mirror (git projects, works locally and remotely).
+    GIT_MIRROR: Transfer via git mirror push (git projects, works locally and remotely).
     GIT_WORKTREE: Create a git worktree (git projects, local agents only).
     """
 

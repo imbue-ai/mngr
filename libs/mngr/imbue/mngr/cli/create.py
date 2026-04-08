@@ -295,7 +295,7 @@ class _CreateCommand(click.Command):
     help="How to transfer the project into the agent. "
     "none: run in-place (no transfer). "
     "rsync: copy via rsync (non-git projects). "
-    "git-mirror: transfer via git push --mirror (git projects). "
+    "git-mirror: transfer via git mirror push (git projects). "
     "git-worktree: create a git worktree (git projects, local only). "
     "[default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git]",
 )
@@ -1662,7 +1662,7 @@ directly to the agent command.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
-via git push --mirror. Use --transfer to override the default.""",
+via git mirror push. Use --transfer to override the default.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mngr create my-agent"),
         ("Create an agent in a new Docker container", "mngr create my-agent@.docker"),
