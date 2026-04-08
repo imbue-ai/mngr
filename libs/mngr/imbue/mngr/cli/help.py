@@ -431,7 +431,11 @@ EXAMPLES
 
 
 def _build_available_topics_section() -> str:
-    """Build the Available Topics section content from the topic registry."""
+    """Build the Available Topics section content from the topic registry.
+
+    Uses a bullet-list format that renders well in both terminal (indented
+    by the help formatter) and markdown (in generated docs).
+    """
     all_topics = get_all_topics()
     if not all_topics:
         return ""
@@ -440,7 +444,7 @@ def _build_available_topics_section() -> str:
         name_str = key
         if topic.aliases:
             name_str += f" ({', '.join(topic.aliases)})"
-        lines.append(f"{name_str:<28} {topic.one_line_description}")
+        lines.append(f"- {name_str} - {topic.one_line_description}")
     return "\n".join(lines)
 
 

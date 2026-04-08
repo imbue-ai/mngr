@@ -41,22 +41,22 @@ mngr help [OPTIONS] [TOPIC]...
 
 ## Available Topics
 
-address (addr)               Agent address syntax for targeting agents and hosts
-agent_types                  Agent Types
-agents                       Agents
-api                          mngr Plugin API
-common                       Common Options
-environment_variables        Environment Variables
-hosts                        Hosts
-idle_detection               Idle Detection
-multi_target                 Commands that target from multiple hosts/agents
-permissions                  Permissions
-plugins                      Plugins
-provider_backends            Provider Backends
-providers                    Provider Instances
-provisioning                 Provisioning
-resource_cleanup             Resource Cleanup
-snapshot                     Snapshots
+- address (addr) - Agent address syntax for targeting agents and hosts
+- agent_types - Agent Types
+- agents - Agents
+- api - mngr Plugin API
+- common - Common Options
+- environment_variables - Environment Variables
+- hosts - Hosts
+- idle_detection - Idle Detection
+- multi_target - Commands that target from multiple hosts/agents
+- permissions - Permissions
+- plugins - Plugins
+- provider_backends - Provider Backends
+- providers - Provider Instances
+- provisioning - Provisioning
+- resource_cleanup - Resource Cleanup
+- snapshot - Snapshots
 
 ## Examples
 
