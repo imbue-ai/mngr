@@ -34,3 +34,27 @@ class MngrCommandError(MindError):
     """Raised when an mngr CLI command fails."""
 
     ...
+
+
+class TelegramError(MindError):
+    """Base exception for all telegram-related errors."""
+
+    ...
+
+
+class TelegramCredentialError(TelegramError, ValueError):
+    """Raised when telegram credentials are invalid or missing."""
+
+    ...
+
+
+class TelegramCredentialExtractionError(TelegramError):
+    """Raised when credential extraction from the browser fails."""
+
+    ...
+
+
+class TelegramBotCreationError(TelegramError):
+    """Raised when bot creation via BotFather fails."""
+
+    ...

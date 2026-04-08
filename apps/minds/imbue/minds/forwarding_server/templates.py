@@ -37,7 +37,9 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     + _COMMON_STYLES
     + """
     .agent-list { list-style: none; }
-    .agent-list li { margin-bottom: 8px; }
+    .agent-list li {
+      margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+    }
     .agent-list a { """
     + """
       display: inline-block; padding: 12px 20px;
@@ -45,6 +47,17 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       border-radius: 6px; font-size: 16px;
     }
     .agent-list a:hover { background: rgb(42, 42, 78); }
+    .telegram-btn {
+      padding: 8px 14px; border-radius: 6px; font-size: 13px;
+      border: 1px solid rgb(200, 200, 210); cursor: pointer;
+      background: white; color: rgb(60, 60, 80);
+    }
+    .telegram-btn:hover { background: rgb(240, 240, 245); }
+    .telegram-btn.active {
+      background: rgb(220, 252, 231); border-color: rgb(134, 239, 172);
+      color: rgb(22, 101, 52); cursor: default;
+    }
+    .telegram-btn:disabled { cursor: wait; opacity: 0.7; }
     .empty-state { color: gray; font-size: 16px; }
     .create-section { margin-top: 32px; }
     .create-section a { color: rgb(26, 26, 46); text-decoration: underline; }
@@ -55,12 +68,79 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
   {% if agent_ids %}
   <ul class="agent-list">
     {% for agent_id in agent_ids %}
-    <li><a href="/agents/{{ agent_id }}/">{{ agent_id }}</a></li>
+    <li>
+      <a href="/agents/{{ agent_id }}/">{{ agent_id }}</a>
+      {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
+      <span class="telegram-btn active">Telegram active</span>
+      {% else %}
+      <button class="telegram-btn" id="tg-btn-{{ agent_id }}"
+              onclick="setupTelegram('{{ agent_id }}')">Setup Telegram</button>
+      {% endif %}
+    </li>
     {% endfor %}
   </ul>
   <div class="create-section">
     <a href="/create">Create another mind</a>
   </div>
+  <script>
+  async function setupTelegram(agentId) {
+    var btn = document.getElementById('tg-btn-' + agentId);
+    btn.disabled = true;
+    btn.textContent = 'Setting up...';
+    try {
+      var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
+      if (!resp.ok) {
+        var data = await resp.json();
+        alert('Failed to start Telegram setup: ' + (data.error || resp.statusText));
+        btn.disabled = false;
+        btn.textContent = 'Setup Telegram';
+        return;
+      }
+      pollTelegramStatus(agentId, btn);
+    } catch (e) {
+      alert('Failed: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = 'Setup Telegram';
+    }
+  }
+
+  function pollTelegramStatus(agentId, btn) {
+    var interval = setInterval(async function() {
+      try {
+        var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
+        if (!resp.ok) { return; }
+        var data = await resp.json();
+        btn.textContent = formatStatus(data.status);
+        if (data.status === 'DONE') {
+          clearInterval(interval);
+          btn.className = 'telegram-btn active';
+          btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
+          btn.disabled = false;
+        } else if (data.status === 'FAILED') {
+          clearInterval(interval);
+          btn.textContent = 'Setup failed';
+          btn.disabled = false;
+          btn.className = 'telegram-btn';
+          alert('Telegram setup failed: ' + (data.error || 'unknown error'));
+        }
+      } catch (e) {
+        // Ignore polling errors
+      }
+    }, 2000);
+  }
+
+  function formatStatus(status) {
+    var labels = {
+      'CHECKING_CREDENTIALS': 'Checking credentials...',
+      'WAITING_FOR_LOGIN': 'Waiting for browser login...',
+      'CREATING_BOT': 'Creating bot...',
+      'INJECTING_CREDENTIALS': 'Injecting credentials...',
+      'DONE': 'Done',
+      'FAILED': 'Failed'
+    };
+    return labels[status] || status;
+  }
+  </script>
   {% else %}
   <p class="empty-state">
     No minds are accessible. Use a login link to authenticate with a mind.
@@ -262,10 +342,18 @@ _AUTH_ERROR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 @pure
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
+    telegram_status_by_agent_id: dict[str, bool] | None = None,
 ) -> str:
-    """Render the landing page listing accessible minds."""
+    """Render the landing page listing accessible minds.
+
+    telegram_status_by_agent_id maps agent ID strings to whether they have
+    active Telegram bot credentials. When None, no telegram buttons are shown.
+    """
     template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
-    return template.render(agent_ids=accessible_agent_ids)
+    return template.render(
+        agent_ids=accessible_agent_ids,
+        telegram_status_by_agent_id=telegram_status_by_agent_id or {},
+    )
 
 
 _DEFAULT_GIT_URL: Final[str] = "https://github.com/imbue-ai/simple_mind.git"
