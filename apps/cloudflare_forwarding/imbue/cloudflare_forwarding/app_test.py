@@ -183,6 +183,38 @@ def test_add_service_applies_default_access_policy() -> None:
     assert len(ctx.fake.access_policies.get(app_id, [])) == 1
 
 
+def test_add_service_passes_allowed_idps_to_access_app() -> None:
+    """When ForwardingCtx has allowed_idps configured, they are passed to created Access Applications."""
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123"])
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123"]
+
+
+def test_add_service_no_allowed_idps_when_not_configured() -> None:
+    """When allowed_idps is None, it is not included in the Access Application."""
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert "allowed_idps" not in ctx.fake.access_apps[app_id]
+
+
+def test_set_service_auth_passes_allowed_idps() -> None:
+    """set_service_auth creates Access Applications with allowed_idps when configured."""
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123", "otp-idp-uuid-456"])
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "web", policy)
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123", "otp-idp-uuid-456"]
+
+
 def test_remove_service_deletes_access_app() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")

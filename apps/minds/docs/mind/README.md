@@ -23,7 +23,7 @@ Defines background services that run in tmux windows:
 
 ```toml
 [services.web]
-command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && python3 -m http.server 8080"
+command = "python3 scripts/forward_port.py --url http://localhost:8000 --name web && claude-web-chat"
 
 [services.terminal]
 command = "bash scripts/run_ttyd.sh"
@@ -44,7 +44,7 @@ Tracks application ports for forwarding. Written by services via `scripts/forwar
 ```toml
 [[applications]]
 name = "web"
-url = "http://localhost:8080"
+url = "http://localhost:8000"
 global = true
 ```
 
@@ -61,7 +61,7 @@ export CLOUDFLARE_TUNNEL_TOKEN=eyJ...
 Services call `scripts/forward_port.py` on startup to register their ports:
 
 ```bash
-python3 scripts/forward_port.py --url http://localhost:8080 --name web
+python3 scripts/forward_port.py --url http://localhost:8000 --name web
 python3 scripts/forward_port.py --url http://localhost:7681 --name terminal
 python3 scripts/forward_port.py --remove --name old-service
 ```

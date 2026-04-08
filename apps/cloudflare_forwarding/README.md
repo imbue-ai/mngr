@@ -21,6 +21,7 @@ Requires the following Modal Secrets (env vars):
 - `CLOUDFLARE_ZONE_ID`: Cloudflare zone ID for DNS records
 - `CLOUDFLARE_DOMAIN`: Base domain for service subdomains (e.g. `example.com`)
 - `USER_CREDENTIALS`: JSON object mapping usernames to secrets (e.g. `{"alice": "secret1"}`)
+- `CLOUDFLARE_ALLOWED_IDPS` (optional): Comma-separated list of Cloudflare identity provider UUIDs to allow on Access Applications (e.g. Google OAuth, one-time PIN). When set, created Access Applications will only offer these identity providers to users. When unset, Cloudflare uses the account default.
 
 Deploy with:
 
@@ -36,6 +37,10 @@ Endpoints accept two auth methods, distinguished by the Authorization header:
 - **Agent (Bearer token)**: `Authorization: Bearer <tunnel_token>` -- scoped to a single tunnel; can add/remove/list services but cannot create/delete tunnels or manage auth policies.
 
 Credentials are validated against a JSON object in the `USER_CREDENTIALS` env var. Agent tokens are the Cloudflare tunnel tokens returned when creating a tunnel.
+
+## Identity providers for Access Applications
+
+When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded services will restrict authentication to the specified identity providers (e.g. Google OAuth, one-time PIN). This controls how end users authenticate when visiting a tunneled service URL. Set it to a comma-separated list of Cloudflare identity provider UUIDs. You can find these UUIDs in the Cloudflare Zero Trust dashboard under Settings > Authentication.
 
 ## API
 

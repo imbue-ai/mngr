@@ -14,6 +14,7 @@ from imbue.minds.forwarding_server.agent_creator import checkout_branch
 from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import _build_mngr_create_command
 from imbue.minds.forwarding_server.agent_creator import _is_local_path
+from imbue.minds.forwarding_server.agent_creator import _make_host_name
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingUrl
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareSecret
@@ -85,6 +86,10 @@ def test_is_local_path_url() -> None:
 # -- _build_mngr_create_command tests --
 
 
+def test_make_host_name() -> None:
+    assert _make_host_name(AgentName("my-mind")) == "my-mind-host"
+
+
 def test_build_mngr_create_command_dev_mode() -> None:
     cmd = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
@@ -95,7 +100,11 @@ def test_build_mngr_create_command_dev_mode() -> None:
     assert "dev" in cmd
     assert "main" in cmd
     assert "--no-connect" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
     assert "docker" not in cmd
+    # DEV mode: address is just the agent name (no host suffix)
+    assert cmd[2] == "test-agent"
 
 
 def test_build_mngr_create_command_local_mode() -> None:
@@ -107,6 +116,10 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert "--template" in cmd
     assert "docker" in cmd
     assert "main" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
+    # LOCAL mode: address includes the host name
+    assert cmd[2] == "test-agent@test-agent-host"
 
 
 def test_build_mngr_create_command_cloud_mode_raises() -> None:
