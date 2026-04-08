@@ -113,19 +113,24 @@ def get_claude_config_path() -> Path:
     return Path.home() / ".claude.json"
 
 
-def get_user_claude_config_path() -> Path:
-    """Return the path to the user-scope Claude config file (.claude.json).
+def find_user_claude_config() -> Path:
+    """Find the user-scope Claude config file (.claude.json).
 
-    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's config dir.
-    Use this function to get the user's original .claude.json path.
+    Searches candidate locations and returns the first that exists. If no
+    config file exists on disk yet, returns the default creation path
+    (~/.claude.json).
 
-    Resolution order:
-    1. If $ORIGINAL_CLAUDE_CONFIG_DIR is set, check two locations:
-       a. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json (per-agent / custom CLAUDE_CONFIG_DIR convention)
-       b. Parent dir: e.g. ~/.claude -> ~/.claude.json (default layout where the config
-          file lives *beside* the config dir, not inside it)
-       Returns whichever exists, preferring (a). If neither exists, returns (a).
-    2. Falls back to get_claude_config_path()
+    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's isolated
+    config dir. This function looks for the *user's* original config instead.
+
+    Search order when $ORIGINAL_CLAUDE_CONFIG_DIR is set:
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json (custom CLAUDE_CONFIG_DIR convention)
+    2. Parent of $ORIGINAL_CLAUDE_CONFIG_DIR / .claude.json (default layout where the
+       config file lives *beside* the config dir: ~/.claude/ dir -> ~/.claude.json file)
+    3. Falls through to ~/.claude.json (default creation path)
+
+    Without $ORIGINAL_CLAUDE_CONFIG_DIR:
+    1. ~/.claude.json (Claude Code's default location)
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
     if original:
@@ -136,8 +141,8 @@ def get_user_claude_config_path() -> Path:
         beside = original_path.parent / ".claude.json"
         if beside.exists():
             return beside
-        return inside
-    return get_claude_config_path()
+
+    return Path.home() / ".claude.json"
 
 
 def get_claude_config_backup_path() -> Path:

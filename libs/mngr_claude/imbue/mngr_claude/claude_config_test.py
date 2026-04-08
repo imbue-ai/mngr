@@ -15,11 +15,11 @@ from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import find_project_config
+from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_backup_path
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_claude_config_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
-from imbue.mngr_claude.claude_config import get_user_claude_config_path
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 
@@ -723,41 +723,53 @@ def test_get_claude_config_backup_path_derives_from_config_path(
     assert result == custom_dir / ".claude.json.bak"
 
 
-# Tests for get_user_claude_config_path
+# Tests for find_user_claude_config
 
 
-def test_get_user_claude_config_path_defaults_to_home() -> None:
-    """Without env vars, returns ~/.claude.json."""
-    result = get_user_claude_config_path()
+def test_find_user_claude_config_defaults_to_home() -> None:
+    """Without env vars and no file on disk, returns ~/.claude.json."""
+    result = find_user_claude_config()
     assert result == Path.home() / ".claude.json"
 
 
-def test_get_user_claude_config_path_respects_original_env_var(
+def test_find_user_claude_config_returns_default_path() -> None:
+    """Without env vars, returns ~/.claude.json when it exists."""
+    config = Path.home() / ".claude.json"
+    config.write_text(json.dumps({}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == config
+
+
+def test_find_user_claude_config_defaults_to_home_with_original_dir_but_no_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With ORIGINAL_CLAUDE_CONFIG_DIR set, returns path inside that dir."""
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set but no config files, returns ~/.claude.json."""
     user_dir = tmp_path / "user-claude"
-    agent_dir = tmp_path / "agent-claude"
+    user_dir.mkdir()
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
-    result = get_user_claude_config_path()
-    assert result == user_dir / ".claude.json"
+
+    result = find_user_claude_config()
+    assert result == Path.home() / ".claude.json"
 
 
-def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without ORIGINAL_CLAUDE_CONFIG_DIR, uses CLAUDE_CONFIG_DIR."""
-    custom_dir = tmp_path / "custom-claude"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
-    result = get_user_claude_config_path()
-    assert result == custom_dir / ".claude.json"
+def test_find_user_claude_config_finds_inside_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set, finds .claude.json inside it."""
+    user_dir = tmp_path / "user-claude"
+    user_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
+
+    inside = user_dir / ".claude.json"
+    inside.write_text(json.dumps({}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == inside
 
 
-def test_get_user_claude_config_path_finds_beside_dir_config(
+def test_find_user_claude_config_finds_beside_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When ORIGINAL_CLAUDE_CONFIG_DIR=~/.claude and only ~/.claude.json exists, returns it.
+    """Finds ~/.claude.json (beside ~/.claude/) when only beside-dir config exists.
 
     The default Claude Code layout stores .claude.json beside the config dir
     (~/.claude.json), not inside it (~/.claude/.claude.json). When an agent's
@@ -768,15 +780,14 @@ def test_get_user_claude_config_path_finds_beside_dir_config(
     claude_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
 
-    # Only the beside-dir config exists (default Claude Code layout)
     beside_config = Path.home() / ".claude.json"
     beside_config.write_text(json.dumps({"projects": {}}, indent=2))
 
-    result = get_user_claude_config_path()
+    result = find_user_claude_config()
     assert result == beside_config
 
 
-def test_get_user_claude_config_path_prefers_inside_dir_when_both_exist(
+def test_find_user_claude_config_prefers_inside_dir_when_both_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When both inside-dir and beside-dir configs exist, prefers inside-dir."""
@@ -784,11 +795,25 @@ def test_get_user_claude_config_path_prefers_inside_dir_when_both_exist(
     claude_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
 
-    # Both files exist
     inside_config = claude_dir / ".claude.json"
     inside_config.write_text(json.dumps({"inside": True}, indent=2))
     beside_config = Path.home() / ".claude.json"
     beside_config.write_text(json.dumps({"beside": True}, indent=2))
 
-    result = get_user_claude_config_path()
+    result = find_user_claude_config()
     assert result == inside_config
+
+
+def test_find_user_claude_config_ignores_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without ORIGINAL_CLAUDE_CONFIG_DIR, ignores CLAUDE_CONFIG_DIR (per-agent dir)."""
+    custom_dir = tmp_path / "custom-claude"
+    custom_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
+
+    # File exists in per-agent dir but not at ~/.claude.json
+    config = custom_dir / ".claude.json"
+    config.write_text(json.dumps({}, indent=2))
+
+    # Should return the default user path, not the per-agent path
+    result = find_user_claude_config()
+    assert result == Path.home() / ".claude.json"
