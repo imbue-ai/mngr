@@ -752,3 +752,43 @@ def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
     result = get_user_claude_config_path()
     assert result == custom_dir / ".claude.json"
+
+
+def test_get_user_claude_config_path_finds_beside_dir_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ORIGINAL_CLAUDE_CONFIG_DIR=~/.claude and only ~/.claude.json exists, returns it.
+
+    The default Claude Code layout stores .claude.json beside the config dir
+    (~/.claude.json), not inside it (~/.claude/.claude.json). When an agent's
+    ORIGINAL_CLAUDE_CONFIG_DIR points to ~/.claude, the function should find
+    the config file at the beside-dir location.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    # Only the beside-dir config exists (default Claude Code layout)
+    beside_config = Path.home() / ".claude.json"
+    beside_config.write_text(json.dumps({"projects": {}}, indent=2))
+
+    result = get_user_claude_config_path()
+    assert result == beside_config
+
+
+def test_get_user_claude_config_path_prefers_inside_dir_when_both_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both inside-dir and beside-dir configs exist, prefers inside-dir."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    # Both files exist
+    inside_config = claude_dir / ".claude.json"
+    inside_config.write_text(json.dumps({"inside": True}, indent=2))
+    beside_config = Path.home() / ".claude.json"
+    beside_config.write_text(json.dumps({"beside": True}, indent=2))
+
+    result = get_user_claude_config_path()
+    assert result == inside_config

@@ -119,13 +119,24 @@ def get_user_claude_config_path() -> Path:
     Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's config dir.
     Use this function to get the user's original .claude.json path.
 
-    Resolution order mirrors get_user_claude_config_dir():
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json
+    Resolution order:
+    1. If $ORIGINAL_CLAUDE_CONFIG_DIR is set, check two locations:
+       a. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json (per-agent / custom CLAUDE_CONFIG_DIR convention)
+       b. Parent dir: e.g. ~/.claude -> ~/.claude.json (default layout where the config
+          file lives *beside* the config dir, not inside it)
+       Returns whichever exists, preferring (a). If neither exists, returns (a).
     2. Falls back to get_claude_config_path()
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
     if original:
-        return Path(original) / ".claude.json"
+        original_path = Path(original)
+        inside = original_path / ".claude.json"
+        if inside.exists():
+            return inside
+        beside = original_path.parent / ".claude.json"
+        if beside.exists():
+            return beside
+        return inside
     return get_claude_config_path()
 
 
