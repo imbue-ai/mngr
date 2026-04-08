@@ -385,11 +385,16 @@ $ mngr plugin disable modal --format json
 
 Interactive wizard to install recommended plugins.
 
-Presents a TUI with recommended plugins and lets you select which
-ones to install. Plugins are installed in a single operation.
+Presents a two-phase TUI for selecting plugins to install.
 
-Pre-selects imbue-mngr-tutor by default. Use Space to toggle selections,
-Enter to confirm, and q or Ctrl+C to cancel.
+Phase 1 shows agent types and providers (BASIC tier). Tools detected
+on your system are pre-selected.
+
+Phase 2 shows optional extras, filtered to only include extras related
+to the agent types you selected. Recommended extras are pre-selected.
+
+Use Space to toggle selections, Enter to confirm, and q or Ctrl+C
+to cancel.
 
 **Usage:**
 

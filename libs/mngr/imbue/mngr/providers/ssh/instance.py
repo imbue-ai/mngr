@@ -25,6 +25,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -190,6 +191,7 @@ class SSHProviderInstance(BaseProviderInstance):
                     host_id=self._host_id_for_name(host_name),
                     host_name=HostName(host_name),
                     provider_name=self.name,
+                    host_state=HostState.RUNNING,
                 )
             )
         return host_refs

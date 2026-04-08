@@ -19,7 +19,7 @@ _BUFFER_SIZE: Final[int] = 65536
 
 _SELECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
-_ACCEPT_TIMEOUT_SECONDS: Final[float] = 1.0
+_SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
 
 _SOCKET_POLL_SECONDS: Final[float] = 0.01
 
@@ -234,7 +234,7 @@ def _tunnel_accept_loop(
         server.bind(str(sock_path))
         os.chmod(str(sock_path), 0o600)
         server.listen(8)
-        server.settimeout(_ACCEPT_TIMEOUT_SECONDS)
+        server.settimeout(_SHUTDOWN_POLL_SECONDS)
 
         while not shutdown_event.is_set():
             try:

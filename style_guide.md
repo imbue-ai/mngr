@@ -1882,9 +1882,9 @@ There are three levels of ratchet tests:
 
 Every project in the monorepo must have a `test_ratchets.py` file that checks for the standard set of anti-patterns. All `test_ratchets.py` files must define precisely the same set of test functions -- this is enforced by `test_meta_ratchets.py` (see below). The implementations may differ (e.g., different snapshot values, different `allowed_root_init_lines` for `test_prevent_code_in_init_files`), but the function names must match exactly.
 
-When adding a new ratchet to any project's `test_ratchets.py`, you must add the same test function to every other project's `test_ratchets.py` as well (the meta test will fail otherwise).
+When adding a new ratchet, add it to `standard_ratchet_checks.py` and run the sync script to propagate it to all projects.
 
-Ratchet values use `inline_snapshot` so they can be automatically updated with `--inline-snapshot=fix`.
+Ratchet values use `inline_snapshot` so they can be automatically updated with `--inline-snapshot=update`.
 
 **Important:** Ratchet tests do not work correctly with unstaged changes. Always stage or commit your changes before running ratchet tests.
 
@@ -1956,6 +1956,8 @@ Never use `pandas`. Prefer `polars` instead
 Never use `eval` or `exec` unless explicitly instructed to do so
 
 Never use dataclasses or named tuples
+
+Prefer context managers over try/finally blocks. If a resource or state change needs cleanup, make it a context manager rather than relying on callers to write try/finally. Context managers are harder to misuse and make the scope of the state change visually obvious
 
 # Compiling and verifying this style guide
 

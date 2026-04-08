@@ -2,7 +2,7 @@
 
 [![GitHub Stars](https://img.shields.io/github/stars/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr)
 [![PyPI](https://img.shields.io/pypi/v/imbue-mngr?style=flat-square)](https://pypi.org/project/imbue-mngr/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://pypi.org/project/imbue-mngr/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue?style=flat-square)](https://pypi.org/project/imbue-mngr/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![Open Issues](https://img.shields.io/github/issues/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr/issues)
 
@@ -220,12 +220,13 @@ From the repo where you would like a Dockerfile created.
 
 ## Installation
 
-**Quick install** (installs system dependencies + mngr automatically):
+**Quick install:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
+This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies and optional extras. You can [review the script](scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and system deps: `git`, `tmux`, `jq`, `rsync`, `unison`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 

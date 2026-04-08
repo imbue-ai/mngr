@@ -162,7 +162,7 @@ def test_destroy_with_confirmation(
         )
 
         # Stop the tmux session so the agent is not running (lifecycle state: STOPPED)
-        subprocess.run(["tmux", "kill-session", "-t", session_name], check=True)
+        subprocess.run(["tmux", "kill-session", "-t", f"={session_name}"], check=True)
         wait_for(
             lambda: not tmux_session_exists(session_name),
             timeout=5.0,
@@ -609,3 +609,66 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
 
         assert destroy_result.exit_code == 0, f"Destroy failed: {destroy_result.output}"
         assert "Destroyed agent:" in destroy_result.output
+
+
+@pytest.mark.tmux
+def test_destroy_via_stdin(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test destroying multiple agents by piping names via stdin ('-')."""
+    timestamp = int(time.time())
+    agent_name1 = f"test-destroy-stdin1-{timestamp}"
+    agent_name2 = f"test-destroy-stdin2-{timestamp}"
+    session_name1 = f"{mngr_test_prefix}{agent_name1}"
+    session_name2 = f"{mngr_test_prefix}{agent_name2}"
+
+    with ExitStack() as stack:
+        stack.enter_context(tmux_session_cleanup(session_name1))
+        stack.enter_context(tmux_session_cleanup(session_name2))
+
+        for agent_name in [agent_name1, agent_name2]:
+            result = cli_runner.invoke(
+                create,
+                [
+                    "--name",
+                    agent_name,
+                    "--command",
+                    "sleep 892736",
+                    "--source",
+                    str(temp_work_dir),
+                    "--transfer=none",
+                    "--no-connect",
+                    "--no-ensure-clean",
+                ],
+                obj=plugin_manager,
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+
+        wait_for(
+            lambda: tmux_session_exists(session_name1),
+            error_message=f"Expected tmux session {session_name1} to exist",
+        )
+        wait_for(
+            lambda: tmux_session_exists(session_name2),
+            error_message=f"Expected tmux session {session_name2} to exist",
+        )
+
+        stdin_data = f"{agent_name1}\n{agent_name2}\n"
+        destroy_result = cli_runner.invoke(
+            destroy,
+            ["-", "--force"],
+            input=stdin_data,
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+
+        assert destroy_result.exit_code == 0
+
+        wait_for(
+            lambda: not tmux_session_exists(session_name1) and not tmux_session_exists(session_name2),
+            error_message="Expected both tmux sessions to be destroyed",
+        )

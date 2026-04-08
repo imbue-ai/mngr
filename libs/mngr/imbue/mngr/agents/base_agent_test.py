@@ -441,7 +441,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
         assert result is True
     finally:
         test_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '{session_name}' 2>/dev/null",
+            f"tmux kill-session -t '={session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
 
@@ -470,7 +470,7 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
         assert result is False
     finally:
         test_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '{session_name}' 2>/dev/null",
+            f"tmux kill-session -t '={session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
 
