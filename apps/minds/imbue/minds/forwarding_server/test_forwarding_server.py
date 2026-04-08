@@ -221,14 +221,14 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     assert second_response.status_code == 403
 
 
-def test_landing_page_redirects_when_single_agent_known(tmp_path: Path) -> None:
-    """When authenticated and exactly one agent is known, the landing page redirects to it."""
+def test_landing_page_shows_listing_when_single_agent_known(tmp_path: Path) -> None:
+    """When authenticated and exactly one agent is known, the landing page shows a listing."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == "/agents/{}/".format(agent_id)
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
 
 
 # -- Agent default redirect tests --
@@ -681,8 +681,8 @@ def test_mngr_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_pat
     assert "location.reload()" in response.text
 
 
-def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
-    """When a single agent is discovered and authenticated, the landing page redirects to it."""
+def test_mngr_cli_resolver_landing_page_lists_single_discovered_agent(tmp_path: Path) -> None:
+    """When a single agent is discovered and authenticated, the landing page shows a listing."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
@@ -699,8 +699,8 @@ def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_pa
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == "/agents/{}/".format(agent_id)
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
 
 
 def test_mngr_cli_resolver_agent_servers_page_via_mngr_cli(tmp_path: Path) -> None:
