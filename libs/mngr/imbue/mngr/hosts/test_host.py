@@ -1719,8 +1719,8 @@ def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
     commits them.
     """
     # Inline GIT_CONFIG_NOSYSTEM to prevent reading /etc/gitconfig under
-    # parallel execution. This helper commits pre-existing files (unlike
-    # init_git_repo which creates a fresh repo), so we keep it local.
+    # parallel execution. We don't import run_git_command from testing.py
+    # because the type checker cannot resolve that module.
     env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
     subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True, env=env)
     subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True, env=env)
