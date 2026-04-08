@@ -14,6 +14,10 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_list_with_no_agents(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # list all agents
+        mngr list
+    """)
     result = e2e.run("mngr list", comment="List agents in a fresh environment")
     expect(result).to_succeed()
     expect(result.stdout).to_contain("No agents found")
@@ -21,7 +25,15 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
-    result = e2e.run("mngr list --format json", comment="List agents as JSON in a fresh environment")
+    e2e.write_tutorial_block("""
+    # output all objects as one big JSON array when complete  (useful for scripting)
+    mngr list --format json
+    """)
+    result = e2e.run(
+        "mngr list --format json",
+        comment="output all objects as one big JSON array when complete  (useful for scripting)",
+    )
     expect(result).to_succeed()
     parsed = json.loads(result.stdout)
     assert parsed["agents"] == []
+    assert parsed["errors"] == []

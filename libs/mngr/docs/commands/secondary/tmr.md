@@ -40,7 +40,7 @@ Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-agents to limit how many agents run simultaneously (0 = no limit).
 
-Each agent writes its result to $MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
+Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
 tests_passing_before/after booleans, and a markdown summary.
 
@@ -78,6 +78,9 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent-type` | text | Type of agent to launch for each test | `claude` |
+| `--integrator-type` | text | Type of agent for the integrator (defaults to --agent-type) | None |
+| `-t`, `--agent-template` | text | Create template to apply for testing agents [repeatable, stacks in order] | None |
+| `--integrator-template` | text | Create template to apply for the integrator agent (defaults to --agent-template) | None |
 | `--provider` | text | Provider for agent hosts (e.g. local, docker, modal) | `local` |
 | `--integrator-provider` | text | Provider for the integrator agent (defaults to local since there is only one) | `local` |
 | `--env` | text | Environment variable KEY=VALUE to pass to agents [repeatable] | None |
@@ -86,6 +89,7 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | `--use-snapshot` | boolean | Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers) | `False` |
 | `--snapshot` | text | Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior) | None |
 | `--max-parallel` | integer | Maximum number of agents to launch concurrently (launch-time parallelism) | `4` |
+| `--agents-per-host` | integer | Number of agents sharing each remote host (ignored for local provider) | `4` |
 | `--max-agents` | integer | Maximum number of agents running at any one time (0 = no limit). When set, agents are launched incrementally as earlier ones finish. | `0` |
 | `--launch-delay` | float | Seconds to wait between launching each agent (avoids provider rate limits) | `2.0` |
 | `--poll-interval` | float | Seconds between polling cycles when waiting for agents to finish | `10.0` |

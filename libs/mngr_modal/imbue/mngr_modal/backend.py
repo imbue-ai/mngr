@@ -448,7 +448,7 @@ Supported build arguments for the modal provider:
             logger.warning(
                 "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
             )
-            environment_name = environment_name[:MODAL_NAME_MAX_LENGTH]
+            environment_name = environment_name[:MODAL_NAME_MAX_LENGTH].rstrip("-_")
 
         app_name = config.app_name if config.app_name is not None else default_app_name
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
@@ -457,7 +457,7 @@ Supported build arguments for the modal provider:
         max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
         if len(app_name) > max_app_name_length:
             logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-            app_name = app_name[:max_app_name_length]
+            app_name = app_name[:max_app_name_length].rstrip("-_")
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:

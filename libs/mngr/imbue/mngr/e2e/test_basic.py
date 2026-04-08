@@ -174,10 +174,11 @@ def test_create_with_label(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list --format json", comment="Verify label appears in JSON output")
+    list_result = e2e.run("mngr list --format json", comment="Verify labels appear in JSON output")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
     matching_agents = [a for a in agents if a["name"] == "my-task"]
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"
+    assert matching_agents[0]["host"]["tags"]["env"] == "staging"

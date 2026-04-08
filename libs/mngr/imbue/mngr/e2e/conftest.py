@@ -218,6 +218,13 @@ def _setup_test_profile(host_dir: Path) -> str:
     # cleanup_old_modal_test_environments).
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
     identifier = os.environ.get("MNGR_AGENT_NAME") or uuid4().hex[:8]
+    # The Modal environment name is "{prefix}{timestamp}-{identifier}" where prefix
+    # is "mngr_test-" (10 chars). Modal caps names at 64 characters, so cap the
+    # identifier to avoid truncation that breaks deployments.
+    modal_env_overhead = len("mngr_test-") + len(timestamp) + 1  # +1 for the hyphen
+    max_identifier_length = 64 - modal_env_overhead
+    if len(identifier) > max_identifier_length:
+        identifier = identifier[:max_identifier_length].rstrip("-")
     user_id = f"{timestamp}-{identifier}"
     # Write without trailing newline (matching the format used by get_or_create_user_id)
     user_id_path = profile_dir / USER_ID_FILENAME
@@ -229,9 +236,15 @@ def _setup_test_profile(host_dir: Path) -> str:
     return user_id
 
 
+_MODAL_NAME_MAX_LENGTH = 64
+
+
 def _delete_modal_environment(prefix: str, user_id: str) -> None:
     """Delete the Modal environment for this test."""
     environment_name = f"{prefix}{user_id}"
+    # Apply the same truncation that the Modal backend uses when creating
+    # environments, so that we delete the right one.
+    environment_name = environment_name[:_MODAL_NAME_MAX_LENGTH]
     logger.info("Deleting Modal environment: {}", environment_name)
     try:
         result = subprocess.run(
@@ -318,6 +331,9 @@ def e2e(
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
+    # e2e tests create fresh Modal environments, so they must deploy the
+    # snapshot_and_shutdown function rather than looking up an existing one.
+    env.pop("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", None)
 
     # Use a short fixed prefix so that derived names (e.g. Modal environment
     # names, which are {prefix}{user_id}) stay well under provider length

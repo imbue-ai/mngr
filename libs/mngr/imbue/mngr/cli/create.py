@@ -63,6 +63,7 @@ from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NamedCommand
@@ -401,6 +402,11 @@ class _CreateCommand(click.Command):
     "--edit-message",
     is_flag=True,
     help="Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content.",
+)
+@optgroup.option(
+    "--ready-timeout",
+    default=None,
+    help="Max time to wait for agent readiness before sending initial message (e.g., 30s, 2m) [default: 10s]",
 )
 @optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries")
 @optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries (e.g., 5s, 1m)")
@@ -1115,8 +1121,12 @@ def _resolve_transfer_mode(
     elif is_same_path:
         # Target path is the same as source path: must be none
         transfer_mode = TransferMode.NONE
-    elif is_git_repo and not is_remote:
+    elif is_git_repo and not is_remote and not (opts.depth or opts.shallow_since):
         transfer_mode = TransferMode.GIT_WORKTREE
+    elif is_git_repo and not is_remote:
+        # Shallow clone options (--depth, --shallow-since) require git-mirror;
+        # worktrees share the parent repo's full history.
+        transfer_mode = TransferMode.GIT_MIRROR
     elif is_git_repo and is_remote:
         transfer_mode = TransferMode.GIT_MIRROR
     else:
@@ -1279,6 +1289,9 @@ def _parse_agent_opts(
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
+    # Parse ready timeout if provided
+    parsed_ready_timeout = parse_duration_to_seconds(opts.ready_timeout) if opts.ready_timeout is not None else None
+
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
@@ -1290,6 +1303,9 @@ def _parse_agent_opts(
         worktree_base_folder=parsed_worktree_base_folder,
         transfer_mode=transfer_mode,
         initial_message=initial_message,
+        ready_timeout_seconds=parsed_ready_timeout
+        if parsed_ready_timeout is not None
+        else DEFAULT_AGENT_READY_TIMEOUT_SECONDS,
         data_options=data_options,
         git=git,
         environment=environment,
@@ -1466,25 +1482,25 @@ class ParsedSourceString(FrozenModel):
 def _parse_source_string(source_str: str) -> ParsedSourceString:
     """Parse [AGENT[@[HOST][.PROVIDER]]][:PATH] format into components.
 
-    Without a colon and without '@', the string is treated as a plain path
-    (the common case for --source ./some/dir). When '@' is present, the string
-    is parsed as an agent address regardless of whether a colon follows. With a
-    colon, the part before the colon is the address and the part after is the path.
+    Strings starting with /, ./, ~/, or ../ are treated as filesystem paths.
+    Otherwise, the string is parsed as an agent address (optionally with host
+    and path components). With a colon, the part before is the address and
+    the part after is the path.
 
     The host_name field may include a .PROVIDER suffix (e.g. "myhost.modal").
     """
     if ":" not in source_str:
-        if "@" in source_str:
-            # Agent address without a path (e.g. "my-agent@my-host")
-            address = parse_agent_address(source_str)
-            host_str = _host_str_from_address_components(address.host_name, address.provider_name)
-            return ParsedSourceString(
-                path=None,
-                agent_name=str(address.agent_name) if address.agent_name else None,
-                host_name=host_str,
-            )
-        # No colon or @ -- treat as a plain path (most common case: --source ./dir)
-        return ParsedSourceString(path=Path(source_str), agent_name=None, host_name=None)
+        if source_str.startswith(("/", "./", "~/", "../")):
+            # Explicit filesystem path
+            return ParsedSourceString(path=Path(source_str), agent_name=None, host_name=None)
+        # Agent address without a path (e.g. "my-agent" or "my-agent@my-host")
+        address = parse_agent_address(source_str)
+        host_str = _host_str_from_address_components(address.host_name, address.provider_name)
+        return ParsedSourceString(
+            path=None,
+            agent_name=str(address.agent_name) if address.agent_name else None,
+            host_name=host_str,
+        )
 
     prefix, path_str = source_str.split(":", 1)
     path = Path(path_str) if path_str else None

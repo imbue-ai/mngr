@@ -1124,17 +1124,38 @@ class Host(BaseHost, OnlineHostInterface):
         return self.provider_instance.get_host_resources(self)
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
-        """Set tags via the provider."""
+        """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)
+        certified_data = self.get_certified_data()
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, dict(tags)),
+            )
+        )
         logger.trace("Set {} tag(s) on host {}", len(tags), self.id)
 
     def add_tags(self, tags: Mapping[str, str]) -> None:
-        """Add tags via the provider."""
+        """Add tags via the provider and sync to certified data."""
         self.provider_instance.add_tags_to_host(self, tags)
+        certified_data = self.get_certified_data()
+        merged_tags = {**certified_data.user_tags, **tags}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, merged_tags),
+            )
+        )
 
     def remove_tags(self, keys: Sequence[str]) -> None:
-        """Remove tags by key via the provider."""
+        """Remove tags by key via the provider and sync to certified data."""
         self.provider_instance.remove_tags_from_host(self, keys)
+        certified_data = self.get_certified_data()
+        keys_to_remove = set(keys)
+        filtered_tags = {k: v for k, v in certified_data.user_tags.items() if k not in keys_to_remove}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, filtered_tags),
+            )
+        )
 
     # =========================================================================
     # Agent Information
@@ -1404,6 +1425,10 @@ class Host(BaseHost, OnlineHostInterface):
                 origin_result.stdout.strip() if origin_result.success and origin_result.stdout.strip() else None
             )
 
+        is_shallow = options.git is not None and (
+            options.git.depth is not None or options.git.shallow_since is not None
+        )
+
         with info_span(
             "Transferring git repository...",
             source=str(source_path),
@@ -1411,39 +1436,54 @@ class Host(BaseHost, OnlineHostInterface):
             base_branch=base_branch_name,
             new_branch=new_branch_name,
         ):
-            # Ensure the target directory exists, initialize a bare git repo if
-            # needed, and on remote hosts add safe.directory. All in one command
-            # to minimize round trips. git init --bare is idempotent on an
-            # existing bare repo so we skip the existence check.
-            quoted_git_dir = shlex.quote(str(target_path / ".git"))
-            quoted_target = shlex.quote(str(target_path))
-            init_parts = [f"mkdir -p {quoted_target}", f"git init --bare {quoted_git_dir}"]
-            if not self.is_local:
-                init_parts.append(f"git config --global --add safe.directory {quoted_target}")
-            init_cmd = " && ".join(init_parts)
-            with log_span("Ensuring git repo on target"):
-                result = self.execute_idempotent_command(init_cmd)
-                if not result.success:
-                    raise MngrError(f"Failed to initialize git repo on target: {result.stderr}")
+            if is_shallow:
+                self._git_shallow_clone_to_target(
+                    source_host,
+                    source_path,
+                    target_path,
+                    base_branch_name,
+                    options,
+                )
+            else:
+                # Initialize a bare git repo and push --mirror from source.
+                # All in one command to minimize round trips.
+                quoted_git_dir = shlex.quote(str(target_path / ".git"))
+                quoted_target = shlex.quote(str(target_path))
+                init_parts = [f"mkdir -p {quoted_target}", f"git init --bare {quoted_git_dir}"]
+                if not self.is_local:
+                    init_parts.append(f"git config --global --add safe.directory {quoted_target}")
+                init_cmd = " && ".join(init_parts)
+                with log_span("Ensuring git repo on target"):
+                    result = self.execute_idempotent_command(init_cmd)
+                    if not result.success:
+                        raise MngrError(f"Failed to initialize git repo on target: {result.stderr}")
 
-            self._git_push_to_target(source_host, source_path, target_path)
+                self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
-                if new_branch_name:
-                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                config_commands: list[str] = []
+                if is_shallow:
+                    # Shallow clone already creates a non-bare repo with the base
+                    # branch checked out; just create the new branch if requested.
+                    if new_branch_name:
+                        config_commands.append(f"git checkout -b {shlex.quote(new_branch_name)}")
                 else:
-                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
-                config_commands = [
-                    "git config --bool core.bare false",
-                    checkout_cmd,
-                ]
+                    # Mirror path: convert bare repo to non-bare and checkout.
+                    if new_branch_name:
+                        checkout_cmd = (
+                            f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                        )
+                    else:
+                        checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
+                    config_commands.append("git config --bool core.bare false")
+                    config_commands.append(checkout_cmd)
                 if git_author_name:
                     config_commands.append(f"git config user.name {shlex.quote(git_author_name)}")
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from --mirror push),
-                    # otherwise add it.
+                    # Use set-url if origin already exists (e.g. from --mirror push
+                    # or clone), otherwise add it.
                     set_or_add = (
                         f"git remote set-url origin {shlex.quote(origin_url)}"
                         f" 2>/dev/null"
@@ -1452,22 +1492,94 @@ class Host(BaseHost, OnlineHostInterface):
                     config_commands.append(set_or_add)
 
                 # Copy .git/info/exclude from source to target. This file is not
-                # transferred by git push --mirror since it lives outside the git
-                # object store. We read it here and include it in the config command.
+                # transferred by git push --mirror or clone since it lives outside
+                # the git object store.
                 exclude_content = self._read_source_git_info_exclude(source_host, source_path)
                 if exclude_content is not None:
                     escaped = exclude_content.replace("'", "'\"'\"'")
                     target_exclude = ".git/info/exclude"
                     config_commands.append(f"printf '%s' '{escaped}' > {shlex.quote(target_exclude)}")
 
-                result = self.execute_idempotent_command(
-                    " && ".join(config_commands),
-                    cwd=target_path,
-                )
-                if not result.success:
-                    raise MngrError(f"Failed to configure git repo on target: {result.stderr}")
+                if config_commands:
+                    result = self.execute_idempotent_command(
+                        " && ".join(config_commands),
+                        cwd=target_path,
+                    )
+                    if not result.success:
+                        raise MngrError(f"Failed to configure git repo on target: {result.stderr}")
 
         return new_branch_name
+
+    def _git_shallow_clone_to_target(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        branch: str,
+        options: CreateAgentOptions,
+    ) -> None:
+        """Clone a git repo shallowly from source to target using git clone --depth."""
+        self._warn_if_submodules_detected(source_host, source_path)
+
+        git_opts = options.git
+        assert git_opts is not None
+        assert git_opts.depth is not None or git_opts.shallow_since is not None
+
+        depth_args: list[str] = []
+        if git_opts.depth is not None:
+            depth_args.extend(["--depth", str(git_opts.depth)])
+        if git_opts.shallow_since is not None:
+            depth_args.extend(["--shallow-since", git_opts.shallow_since])
+
+        if self.is_local and source_host.is_local:
+            # Local-to-local: use file:// protocol (required for shallow clone from local repos)
+            clone_url = f"file://{source_path}"
+            clone_cmd = [
+                "git",
+                "clone",
+                *depth_args,
+                "--branch",
+                branch,
+                "--no-tags",
+                clone_url,
+                str(target_path),
+            ]
+            with log_span("Shallow cloning git repo locally"):
+                try:
+                    self.mngr_ctx.concurrency_group.run_process_to_completion(clone_cmd)
+                except ProcessError as e:
+                    raise MngrError(f"Failed to shallow clone git repo: {e}") from e
+        elif self.is_local and not source_host.is_local:
+            # Remote source -> local target: clone over SSH
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+            if source_ssh_info is None:
+                raise MngrError("Cannot determine SSH connection info for remote source host")
+            user, hostname, port, key_path = source_ssh_info
+            clone_url = f"ssh://{user}@{hostname}:{port}{source_path}"
+            git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+            clone_cmd = [
+                "git",
+                "clone",
+                *depth_args,
+                "--branch",
+                branch,
+                "--no-tags",
+                clone_url,
+                str(target_path),
+            ]
+            with log_span("Shallow cloning git repo from remote source"):
+                try:
+                    self.mngr_ctx.concurrency_group.run_process_to_completion(
+                        clone_cmd,
+                        env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
+                    )
+                except ProcessError as e:
+                    raise MngrError(f"Failed to shallow clone from remote source: {e}") from e
+        else:
+            raise MngrError(
+                "Shallow clone (--depth/--shallow-since) is not yet supported for remote target hosts. "
+                "Use --transfer=git-mirror without depth options, or use a local agent."
+            )
 
     def _read_source_git_info_exclude(
         self,

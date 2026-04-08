@@ -826,6 +826,7 @@ class CreateCliOptions(CommonCliOptions):
     activity_sources: str | None
     worktree_base_folder: str | None
     start_on_boot: bool | None
+    ready_timeout: str | None
     start_host: bool
     grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]

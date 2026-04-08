@@ -17,8 +17,8 @@ set -euo pipefail
 mngr create
 # the defaults are the following: agent=claude, provider=local, project=current dir
 
-# if you want the default behavior of claude (starting in-place), you can specify that:
-mngr create --in-place
+# you can run the agent in-place (directly in your source directory) without any transfer:
+mngr create my-task --transfer=none
 # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
 # without creating a new worktree for each, they will make conflicting changes with one another.
 
@@ -204,7 +204,7 @@ mngr create my-task --provider modal --pass-host-env MY_VAR
 # you can use templates to quickly apply a set of preconfigured options:
 echo '[create_templates.my_modal_template]' >> .mngr/settings.local.toml
 echo 'provider = "modal"' >> .mngr/settings.local.toml
-echo 'build_args = "cpu=4"' >> .mngr/settings.local.toml
+echo 'build_arg = ["cpu=4"]' >> .mngr/settings.local.toml
 mngr create my-task --template my_modal_template
 # templates are defined in your config (see the CONFIGURATION section for more) and can be stacked: --template modal --template codex
 # templates take exactly the same parameters as the create command
@@ -214,7 +214,7 @@ mngr create my-task --template my_modal_template
 mngr create my-task --plugin my-plugin --disable-plugin other-plugin
 
 # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
-echo "alias mc='mngr create --in-place'" >> ~/.bashrc && source ~/.bashrc
+echo "alias mc='mngr create --transfer=none'" >> ~/.bashrc && source ~/.bashrc
 # or use a more sophisticated tool, like Espanso
 
 ## TIPS AND TRICKS
@@ -926,7 +926,7 @@ mngr config edit --scope project
 # in the editor, add something like:
 #   [create_templates.modal-big]
 #   provider = "modal"
-#   build_args = ["cpu=4", "memory=16"]
+#   build_arg = ["cpu=4", "memory=16"]
 #   idle_timeout = "120"
 #   agent_args = ["--dangerously-skip-permissions"]
 # then use the template when creating agents:

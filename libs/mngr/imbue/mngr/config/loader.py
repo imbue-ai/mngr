@@ -35,6 +35,7 @@ from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -460,8 +461,9 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
     for name in disabled_names:
         if is_strict:
             if not pm.has_plugin(name) and not pm.is_blocked(name):
-                raise Exception(
-                    f"Cannot disable plugin '{name}' because it is not registered. Possibly was not installed, or was disabled via a config file? Registered plugins: {pm.list_name_plugin()}"
+                registered = [n for n, _ in pm.list_name_plugin()]
+                raise UserInputError(
+                    f"Cannot disable plugin '{name}' because it is not registered. Registered plugins: {registered}"
                 )
         if not pm.is_blocked(name):
             pm.set_blocked(name)

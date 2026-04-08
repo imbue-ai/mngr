@@ -2697,3 +2697,46 @@ def test_apply_work_dir_extra_paths_share_same_host_replaces_stale_symlink(
     target = work_dir / ".venv"
     assert target.is_symlink()
     assert target.resolve() == (source_dir / ".venv").resolve()
+
+
+def test_add_tags_syncs_to_certified_data(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """add_tags should persist tags to certified data so get_tags returns them."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    host.add_tags({"env": "staging", "team": "backend"})
+
+    tags = host.get_tags()
+    assert tags["env"] == "staging"
+    assert tags["team"] == "backend"
+
+
+def test_set_tags_syncs_to_certified_data(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """set_tags should replace all tags in certified data."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    host.add_tags({"old": "value"})
+    host.set_tags({"new": "value"})
+
+    tags = host.get_tags()
+    assert tags == {"new": "value"}
+
+
+def test_remove_tags_syncs_to_certified_data(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """remove_tags should remove keys from certified data."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    host.add_tags({"env": "staging", "team": "backend"})
+    host.remove_tags(["env"])
+
+    tags = host.get_tags()
+    assert "env" not in tags
+    assert tags["team"] == "backend"

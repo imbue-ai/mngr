@@ -12,7 +12,12 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # destroy without confirmation prompt
+    mngr destroy my-task --force
+    """)
     expect(
         e2e.run(
             "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
@@ -20,8 +25,12 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    destroy_result = e2e.run("mngr destroy my-task --force", comment="Destroy the agent")
+    destroy_result = e2e.run(
+        "mngr destroy my-task --force",
+        comment="destroy without confirmation prompt",
+    )
     expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
 
     list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
