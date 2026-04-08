@@ -6,6 +6,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_notifications.notifier import ALERTER_SYSTEM_CLICK_RESPONSES
 from imbue.mngr_notifications.notifier import LinuxNotifier
 from imbue.mngr_notifications.notifier import MacOSNotifier
 from imbue.mngr_notifications.notifier import Notifier
@@ -14,7 +15,8 @@ DEFAULT_VERIFY_TIMEOUT: Final[float] = 15.0
 _TEST_TITLE: Final[str] = "mngr notify test"
 _TEST_MESSAGE_CLICK: Final[str] = "Click this notification to verify delivery"
 _TEST_MESSAGE_BASIC: Final[str] = "Test notification from mngr notify"
-_ALERTER_CLICKED_RESPONSES: Final[frozenset[str]] = frozenset({"@CONTENTCLICKED", "@ACTIONCLICKED", "OK"})
+_VERIFY_ACTION_LABEL: Final[str] = "OK"
+_ALERTER_VERIFY_CLICKED_RESPONSES: Final[frozenset[str]] = ALERTER_SYSTEM_CLICK_RESPONSES | {_VERIFY_ACTION_LABEL}
 
 
 class VerifyNotificationResult(FrozenModel):
@@ -78,7 +80,7 @@ def _run_alerter_verification(
         "--message",
         _TEST_MESSAGE_CLICK,
         "--actions",
-        "OK",
+        _VERIFY_ACTION_LABEL,
         "--timeout",
         str(int(verify_timeout)),
     ]
@@ -90,5 +92,5 @@ def _run_alerter_verification(
             error_message="alerter not found; install with: brew install vjeantet/tap/alerter",
         )
 
-    is_clicked = result.stdout.strip() in _ALERTER_CLICKED_RESPONSES
+    is_clicked = result.stdout.strip() in _ALERTER_VERIFY_CLICKED_RESPONSES
     return VerifyNotificationResult(is_sent=True, is_clicked=is_clicked)

@@ -12,9 +12,8 @@ from imbue.mngr_notifications.terminals import get_terminal_app
 
 _ALERTER_TIMEOUT: Final[int] = 30
 _ALERTER_ACTION_LABEL: Final[str] = "Connect"
-_ALERTER_CLICKED_RESPONSES: Final[frozenset[str]] = frozenset(
-    {"@CONTENTCLICKED", "@ACTIONCLICKED", _ALERTER_ACTION_LABEL}
-)
+ALERTER_SYSTEM_CLICK_RESPONSES: Final[frozenset[str]] = frozenset({"@CONTENTCLICKED", "@ACTIONCLICKED"})
+_ALERTER_CLICKED_RESPONSES: Final[frozenset[str]] = ALERTER_SYSTEM_CLICK_RESPONSES | {_ALERTER_ACTION_LABEL}
 
 
 class Notifier(ABC):

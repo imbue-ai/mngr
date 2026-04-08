@@ -62,7 +62,7 @@ def watch_for_waiting_agents(
                 )
             last_size = current_size
 
-        stop_event.wait(timeout=5.0)
+        stop_event.wait(timeout=1.0)
 
 
 def _get_file_size(path: Path) -> int:
