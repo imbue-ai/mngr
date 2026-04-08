@@ -290,6 +290,8 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
     # installs mngr into a temp location instead of clobbering the host's install.
     uv_tool_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-tool-")
     uv_tool_bin_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-bin-")
+    orig_uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    orig_uv_tool_bin_dir = os.environ.get("UV_TOOL_BIN_DIR")
     os.environ["UV_TOOL_DIR"] = uv_tool_dir
     os.environ["UV_TOOL_BIN_DIR"] = uv_tool_bin_dir
 
@@ -343,3 +345,11 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
         server.stop()
         shutil.rmtree(uv_tool_dir, ignore_errors=True)
         shutil.rmtree(uv_tool_bin_dir, ignore_errors=True)
+        if orig_uv_tool_dir is None:
+            os.environ.pop("UV_TOOL_DIR", None)
+        else:
+            os.environ["UV_TOOL_DIR"] = orig_uv_tool_dir
+        if orig_uv_tool_bin_dir is None:
+            os.environ.pop("UV_TOOL_BIN_DIR", None)
+        else:
+            os.environ["UV_TOOL_BIN_DIR"] = orig_uv_tool_bin_dir
