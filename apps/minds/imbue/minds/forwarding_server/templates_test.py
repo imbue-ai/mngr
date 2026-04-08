@@ -81,6 +81,25 @@ def test_render_agent_servers_page_has_back_link() -> None:
     assert "Back to all minds" in html
 
 
+def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
+    server_names = (ServerName("web"), ServerName("terminal"))
+    cf_services = {"web": "web--agent-123--josh.forward.example.com"}
+    html = render_agent_servers_page(
+        agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services
+    )
+    assert "Global" in html
+    assert "web--agent-123--josh.forward.example.com" in html
+    assert "Disable global" in html
+    assert "Enable global" in html
+
+
+def test_render_agent_servers_page_without_cf_services_shows_enable_buttons() -> None:
+    server_names = (ServerName("web"),)
+    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
+    assert "Enable global" in html
+    assert "Global" not in html or "Enable global" in html
+
+
 def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     assert "selene" in html

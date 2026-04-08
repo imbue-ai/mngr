@@ -13,6 +13,7 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+@pytest.mark.modal
 def test_list_with_no_agents(e2e: E2eSession) -> None:
     result = e2e.run("mngr list", comment="List agents in a fresh environment")
     expect(result).to_succeed()
@@ -20,6 +21,7 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.modal
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     result = e2e.run("mngr list --format json", comment="List agents as JSON in a fresh environment")
     expect(result).to_succeed()

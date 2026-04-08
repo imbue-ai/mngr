@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -256,6 +257,21 @@ def test_assemble_command_prepends_cd_role(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert str(result).startswith('cd "$ROLE" && ')
     assert str(base_cmd) in str(result)
+
+
+def test_assemble_command_is_posix_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ClaudeMindAgent wraps the base command with cd + subshell -- verify the wrapping is POSIX.
+
+    The base ClaudeAgent command is tested separately in plugin_test.py. This test verifies
+    that ClaudeMindAgent's own contribution (cd "$ROLE" && ( ... )) stays POSIX-compatible.
+    """
+    base_cmd = CommandString("echo hello || echo fallback")
+    monkeypatch.setattr(ClaudeAgent, "assemble_command", lambda self, host, args, override: base_cmd)
+
+    agent = ClaudeMindAgent.model_construct(agent_config=ClaudeMindConfig())
+    command = agent.assemble_command(cast(Any, None), (), None)
+
+    assert_posix_compatible(str(command))
 
 
 # -- _get_role_from_env tests --

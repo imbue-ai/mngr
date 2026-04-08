@@ -4,7 +4,9 @@ max_parallel = 50
 test_timeout_secs = 60
 stream_output = true
 sandbox_project_root = "/code/mngr"
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
+# git add -A syncs the index after git apply, which only updates the working
+# tree. Without it, git ls-files would still list files deleted by the patch.
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
 
 [provider]
 type = "modal"

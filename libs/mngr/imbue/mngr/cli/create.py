@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -258,6 +259,12 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Reuse existing agent with the same name if it exists (idempotent create)",
 )
+@optgroup.option(
+    "--update/--no-update",
+    default=False,
+    show_default=True,
+    help="When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse",
+)
 @optgroup.option("--connect/--no-connect", default=True, help="Connect to the agent after creation [default: connect]")
 @optgroup.option(
     "--auto-start/--no-auto-start",
@@ -429,44 +436,62 @@ def create(ctx: click.Context, **kwargs) -> None:
     )
     logging_config: LoggingConfig = ctx.meta["logging_config"]
 
-    # Parse agent address from the positional argument or --name flag.
-    # Both accept agent addresses; they are equivalent but mutually exclusive.
-    if opts.positional_name and opts.name:
-        raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
-    address = parse_agent_address(opts.positional_name or opts.name or "")
+    # Start capturing output early when --edit-message is set so that logs from
+    # address parsing, provider merging, and other pre-editor work are included
+    # in the replay after the editor closes (which clears the screen).
+    # On the happy path, suppression is disabled by _on_editor_exit or
+    # _finish_create (with clear_screen=True). This context manager is the
+    # safety net: if something raises before those run, it restores
+    # stdout/stderr so error messages are not swallowed (clear_screen=False
+    # because on an error path we don't want to hide prior output).
+    suppressor = (
+        LoggingSuppressor.suppressed(logging_config.console_level, clear_screen=False)
+        if opts.edit_message
+        else nullcontext()
+    )
+    with suppressor:
+        # Parse agent address from the positional argument or --name flag.
+        # Both accept agent addresses; they are equivalent but mutually exclusive.
+        if opts.positional_name and opts.name:
+            raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
+        address = parse_agent_address(opts.positional_name or opts.name or "")
 
-    # Merge --provider flag into the address (alternative to .PROVIDER in the address).
-    if opts.provider:
-        flag_provider = ProviderInstanceName(opts.provider)
-        if address.provider_name is not None and address.provider_name != flag_provider:
-            raise UserInputError(
-                f"Conflicting providers: address has '{address.provider_name}' "
-                f"but --provider is '{flag_provider}'. Use one or the other."
+        # Merge --provider flag into the address (alternative to .PROVIDER in the address).
+        if opts.provider:
+            flag_provider = ProviderInstanceName(opts.provider)
+            if address.provider_name is not None and address.provider_name != flag_provider:
+                raise UserInputError(
+                    f"Conflicting providers: address has '{address.provider_name}' "
+                    f"but --provider is '{flag_provider}'. Use one or the other."
+                )
+            if address.provider_name is None:
+                address = address.model_copy_update(
+                    to_update(address.field_ref().provider_name, flag_provider),
+                )
+
+        # Apply --yes flag to auto-approve prompts (e.g., skill installation)
+        if opts.yes:
+            mngr_ctx = mngr_ctx.model_copy_update(
+                to_update(mngr_ctx.field_ref().is_auto_approve, True),
             )
-        if address.provider_name is None:
-            address = address.model_copy_update(
-                to_update(address.field_ref().provider_name, flag_provider),
-            )
 
-    # Apply --yes flag to auto-approve prompts (e.g., skill installation)
-    if opts.yes:
-        mngr_ctx = mngr_ctx.model_copy_update(
-            to_update(mngr_ctx.field_ref().is_auto_approve, True),
-        )
+        # Validate --update requires --reuse
+        if opts.update and not opts.reuse:
+            raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
-    # Collect plugin-registered CLI params so they can be merged into plugin_data.
-    # Filter None (unset single options) and empty tuples (unset multiple options).
-    plugin_cli_params: dict[str, Any] = {
-        k: v for k, v in ctx.meta.get("plugin_cli_params", {}).items() if v is not None and v != ()
-    }
+        # Collect plugin-registered CLI params so they can be merged into plugin_data.
+        # Filter None (unset single options) and empty tuples (unset multiple options).
+        plugin_cli_params: dict[str, Any] = {
+            k: v for k, v in ctx.meta.get("plugin_cli_params", {}).items() if v is not None and v != ()
+        }
 
-    # Setup (validation, editor session, source resolution, etc.)
-    setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params)
+        # Setup (validation, editor session, source resolution, etc.)
+        setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params)
 
-    # Create agent
-    create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
-    _post_create(create_result, connection_opts, opts, mngr_ctx)
-    _finish_create(create_result, setup, output_opts)
+        # Create agent
+        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
+        _post_create(create_result, connection_opts, opts, mngr_ctx)
+        _finish_create(create_result, setup, output_opts)
 
 
 class _AutoLabels(FrozenModel):
@@ -527,9 +552,6 @@ def _setup_create(
     editor_session: EditorSession | None = None
     if opts.edit_message:
         editor_session = EditorSession.create(initial_content=initial_message_content)
-        # Enable logging suppression before starting the editor so that
-        # log messages don't interfere with the editor's terminal output
-        LoggingSuppressor.enable(logging_config.console_level)
         # Start editor with callback that restores logging when it exits
         editor_session.start(on_exit=_on_editor_exit)
         # When using editor, don't pass message to api_create (we'll send it after editor finishes)
@@ -582,6 +604,17 @@ def _create_agent(
         lifecycle=setup.host_lifecycle,
     )
 
+    # Reject lifecycle options on the local provider (idle timeout, idle mode).
+    # The local host cannot be stopped by mngr, so idle detection is meaningless.
+    _is_local = target_host is None or (
+        isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
+    )
+    if _is_local and setup.host_lifecycle != HostLifecycleOptions():
+        raise UserInputError(
+            "Idle timeout and idle mode are not supported for the local provider. "
+            "Use a remote provider (e.g. --provider modal) for idle detection."
+        )
+
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None
     if setup.resolved_source.agent is not None:
@@ -617,6 +650,7 @@ def _create_agent(
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
+    update_host: OnlineHostInterface | None = None
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
@@ -626,28 +660,47 @@ def _create_agent(
             agent_and_host_loader=setup.agent_and_host_loader,
         )
         if reuse_result is not None:
-            agent, host = reuse_result
-            logger.info("Reusing existing agent: {}", agent.name)
+            if opts.update:
+                # --reuse --update: stop the existing agent, then re-create in place
+                existing_agent, existing_host = reuse_result
+                logger.info("Updating existing agent: {}", existing_agent.name)
+                existing_host.stop_agents([existing_agent.id])
+                # If the user didn't explicitly set --target-path, default to
+                # the existing agent's work_dir so we update in place.
+                # If they did set one, honor it (the agent moves to the new path).
+                resolved_target = (
+                    agent_opts.target_path if agent_opts.target_path is not None else existing_agent.work_dir
+                )
+                agent_opts = agent_opts.model_copy_update(
+                    to_update(agent_opts.field_ref().agent_id, existing_agent.id),
+                    to_update(agent_opts.field_ref().target_path, resolved_target),
+                    to_update(agent_opts.field_ref().is_update, True),
+                )
+                update_host = existing_host
+                # Fall through to the normal create path below
+            else:
+                agent, host = reuse_result
+                logger.info("Reusing existing agent: {}", agent.name)
 
-            # Handle --edit-message if editor session was started,
-            # or send initial message directly if --message/--message-file was provided
-            with _editor_cleanup_scope(setup.editor_session):
-                if setup.editor_session is not None:
-                    # Hold the host lock while waiting for the editor to prevent
-                    # idle shutdown during long editing sessions
-                    with host.lock_cooperatively():
-                        _handle_editor_message(
-                            editor_session=setup.editor_session,
-                            agent=agent,
-                        )
-                elif setup.initial_message is not None:
-                    # Send initial message directly (from --message or --message-file)
-                    logger.info("Sending message to agent")
-                    agent.send_message(setup.initial_message)
-                else:
-                    pass
+                # Handle --edit-message if editor session was started,
+                # or send initial message directly if --message/--message-file was provided
+                with _editor_cleanup_scope(setup.editor_session):
+                    if setup.editor_session is not None:
+                        # Hold the host lock while waiting for the editor to prevent
+                        # idle shutdown during long editing sessions
+                        with host.lock_cooperatively():
+                            _handle_editor_message(
+                                editor_session=setup.editor_session,
+                                agent=agent,
+                            )
+                    elif setup.initial_message is not None:
+                        # Send initial message directly (from --message or --message-file)
+                        logger.info("Sending message to agent")
+                        agent.send_message(setup.initial_message)
+                    else:
+                        pass
 
-            return CreateAgentResult(agent=agent, host=host), connection_opts
+                return CreateAgentResult(agent=agent, host=host), connection_opts
 
     # If ensure-clean is set, verify the source work_dir is clean.
     # Skip the check when using an explicit base branch, since the agent will be
@@ -658,7 +711,11 @@ def _create_agent(
         _ensure_clean_work_dir(setup.resolved_source.location)
 
     # figure out the target host (if we just have a reference)
-    resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    # In update mode, use the host from the existing agent directly
+    if update_host is not None:
+        resolved_target_host: OnlineHostInterface | NewHostOptions = update_host
+    else:
+        resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
 
     # Set host labels on existing hosts (for new hosts, labels are passed via NewHostOptions).
     # This ensures local hosts get any --host-label values.
@@ -945,6 +1002,24 @@ def _try_reuse_existing_agent(
     return agent, online_host
 
 
+def _check_source_does_not_contain_state_dir(source_path: Path, mngr_ctx: MngrContext) -> None:
+    """Raise if the source directory contains the mngr state directory.
+
+    Agent work directories are created inside the state dir (e.g. ~/.mngr/copies/).
+    If the source directory contains the state dir, rsync would copy the source
+    into a subdirectory of itself, creating an infinite recursive copy.
+    """
+    state_dir = mngr_ctx.config.default_host_dir.expanduser().resolve()
+    resolved_source = source_path.resolve()
+    if state_dir == resolved_source or state_dir.is_relative_to(resolved_source):
+        raise UserInputError(
+            f"Source directory '{source_path}' contains the mngr state directory "
+            f"('{state_dir}'). Copying this directory would recursively copy agent "
+            f"data (including the copy destination itself). "
+            f"Use --source-path to specify a more specific directory."
+        )
+
+
 def _resolve_source_location(
     opts: CreateCliOptions,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
@@ -959,7 +1034,14 @@ def _resolve_source_location(
         source_path = opts.source_path
         if source_path is None:
             git_root = find_git_worktree_root(None, mngr_ctx.concurrency_group)
-            source_path = str(git_root) if git_root is not None else os.getcwd()
+            if git_root is not None:
+                source_path = str(git_root)
+            else:
+                raise UserInputError(
+                    "Not inside a git repository. Either run from within a git repo, "
+                    "or specify --source-path to set the source directory explicitly."
+                )
+        _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
@@ -984,6 +1066,7 @@ def _resolve_source_location(
             source_path = opts.source_path
         else:
             source_path = os.getcwd()
+        _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)

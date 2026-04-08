@@ -33,6 +33,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 
@@ -138,6 +139,7 @@ def discovered_host_from_agent_details(agent_details: AgentDetails) -> Discovere
         host_id=agent_details.host.id,
         host_name=HostName(agent_details.host.name),
         provider_name=agent_details.host.provider_name,
+        host_state=agent_details.host.state,
     )
 
 
@@ -167,6 +169,7 @@ def discovered_host_from_online_host(
         host_id=host.id,
         host_name=HostName(certified.host_name),
         provider_name=provider_name,
+        host_state=HostState.RUNNING,
     )
 
 

@@ -31,6 +31,7 @@ dev = [
     "semver>=3.0",
     "tomlkit>=0.12.0",
     "imbue-common[dev]",
+    "shellcheck-py>=0.10.0",
 ]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
@@ -71,17 +72,16 @@ addopts = [
   "--cov=imbue.mngr_llm",
   "--cov=imbue.mngr_mind",
   "--cov=imbue.mngr_claude_mind",
-  "--cov=imbue.mngr_elena_code",
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_recursive",
   "--cov=imbue.mngr_notifications",
   "--cov=imbue.mngr_mind_chat",
-  "--cov=imbue.mngr_test_coder",
   "--cov=imbue.mngr_file",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
+  "--cov=imbue.cloudflare_forwarding",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
@@ -135,7 +135,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "scripts/generate_verify_skills.py", "contrib/"]
+exclude = ["scripts/style_guide.py", "contrib/", "apps/minds/scripts/"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]

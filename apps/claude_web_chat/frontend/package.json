@@ -1,0 +1,35 @@
+{
+  "name": "llm-webchat-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit && eslint src/",
+    "format": "prettier --write 'src/**/*.{ts,css,html}' '*.{ts,html}'",
+    "format:check": "prettier --check 'src/**/*.{ts,css,html}' '*.{ts,html}'",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dompurify": "^3.3.3",
+    "marked": "^17.0.4",
+    "mithril": "^2.2.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/dompurify": "^3.0.5",
+    "@types/mithril": "^2.2.7",
+    "@types/node": "^25.4.0",
+    "eslint": "^10.0.3",
+    "prettier": "^3.8.1",
+    "prettier-plugin-tailwindcss": "^0.7.2",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.57.0",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.0"
+  }
+}

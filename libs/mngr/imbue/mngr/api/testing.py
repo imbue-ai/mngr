@@ -1,6 +1,7 @@
 """Shared test fixtures for API tests."""
 
 import shlex
+import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -93,6 +94,22 @@ class FakeHost(MutableModel):
         """Write a binary file to the local filesystem."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+    def copy_directory(
+        self,
+        source_host: object,
+        source_path: Path,
+        target_path: Path,
+        extra_args: str | None = None,
+        exclude_git: bool = False,
+    ) -> None:
+        """Copy a directory using local filesystem operations.
+
+        FakeHost always operates on the local filesystem, so this uses
+        shutil.copytree regardless of the is_local flag.
+        """
+        target_path.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_path, target_path, dirs_exist_ok=True)
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Return configured SSH connection info, or None for local hosts."""

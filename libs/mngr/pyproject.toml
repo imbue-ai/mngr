@@ -1,8 +1,8 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.0"
+version = "0.2.2"
 description = "Library for managing AI coding agents across different hosts"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 readme = "README.md"
 authors = [
@@ -14,15 +14,15 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "imbue-common==0.1.9",
+    "imbue-common==0.1.11",
     "resource-guards==0.1.2",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.9",
+    "concurrency-group==0.1.11",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker because the guard registration module
@@ -133,5 +133,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]

@@ -1214,3 +1214,58 @@ def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
     result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx)
 
     assert result == TransferMode.GIT_MIRROR
+
+
+def test_create_with_invalid_provider_name(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """mngr create with an unknown provider name should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-invalid-provider",
+            "--provider",
+            "nonexistent",
+            "--source",
+            str(temp_work_dir),
+            "--transfer=none",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "unknown provider" in result.output.lower()
+    assert "nonexistent" in result.output
+
+
+def test_create_with_idle_timeout_rejected_on_local_provider(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """mngr create with --idle-timeout on local provider should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-idle-local",
+            "--command",
+            "sleep 99999",
+            "--idle-timeout",
+            "60",
+            "--source",
+            str(temp_work_dir),
+            "--transfer=none",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "not supported" in result.output.lower() or "remote provider" in result.output.lower()

@@ -153,6 +153,11 @@ class AgentTypeConfig(FrozenModel):
         default=None,
         description="Base type to inherit from (must be a plugin-provided or command type, not another custom type)",
     )
+    plugin: str | None = Field(
+        default=None,
+        description="Plugin that provides this agent type. Defaults to parent_type (if set) or the type name. "
+        "Used to skip parsing when the plugin is disabled.",
+    )
     command: CommandString | None = Field(
         default=None,
         description="Command to run for this agent type",
@@ -180,7 +185,7 @@ class AgentTypeConfig(FrozenModel):
 
         Uses model_fields_set to determine which fields were explicitly set in
         the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        trust_working_directory) are correctly preserved during merges.
+        auto_dismiss_dialogs) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
         Tuples (cli_args): concatenate
@@ -755,6 +760,7 @@ class CommonCliOptions(FrozenModel):
     project_context_path: str | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
+    setting: tuple[str, ...] = ()
 
 
 class CreateCliOptions(CommonCliOptions):
@@ -832,4 +838,5 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]
+    update: bool
     yes: bool

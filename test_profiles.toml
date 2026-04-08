@@ -28,8 +28,6 @@ testpaths = [
     "libs/mngr_kanpan",
     "libs/mngr_mind_chat",
     "libs/mngr_claude_mind",
-    "libs/mngr_elena_code",
-    "libs/mngr_test_coder",
     "libs/mngr_schedule",
     "libs/mngr_recursive",
     "libs/mngr_ttyd",
