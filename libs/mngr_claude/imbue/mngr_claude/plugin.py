@@ -222,7 +222,7 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
         "before startup. When False, the interactive flow prompts.",
     )
-    auto_allow_all_permissions: bool = Field(
+    is_permission_dialog_fully_disabled: bool = Field(
         default=False,
         description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
         "This means Claude Code will never pause for permission approval.",
@@ -1390,7 +1390,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         The hooks signal when Claude is actively processing by creating/removing an
         'active' file in the agent's state directory.
 
-        When auto_allow_all_permissions is True, also adds a hook that
+        When is_permission_dialog_fully_disabled is True, also adds a hook that
         auto-allows all permission dialogs so Claude never pauses for approval.
 
         Skips if hooks already exist.
@@ -1425,7 +1425,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             is_changed = True
 
         # Merge permission auto-allow hooks if configured
-        if self.agent_config.auto_allow_all_permissions:
+        if self.agent_config.is_permission_dialog_fully_disabled:
             permission_hooks = build_permission_auto_allow_hooks_config()
             merged_with_permissions = merge_hooks_config(merged, permission_hooks)
             if merged_with_permissions is not None:

@@ -944,7 +944,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
 def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should add permission auto-allow hook when auto_allow_all_permissions is True."""
+    """_configure_readiness_hooks should add permission auto-allow hook when is_permission_dialog_fully_disabled is True."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -958,7 +958,7 @@ def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
         mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, auto_allow_all_permissions=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, is_permission_dialog_fully_disabled=True),
         host=host,
     )
 
@@ -984,7 +984,7 @@ def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
 def test_configure_readiness_hooks_does_not_add_permission_auto_allow_by_default(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should not add permission auto-allow hook when auto_allow_all_permissions is False."""
+    """_configure_readiness_hooks should not add permission auto-allow hook when is_permission_dialog_fully_disabled is False."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
