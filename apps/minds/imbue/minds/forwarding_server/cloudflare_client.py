@@ -107,6 +107,7 @@ class CloudflareForwardingClient(FrozenModel):
                 timeout=10.0,
             )
             if response.status_code != 200:
+                logger.warning("Failed to list services for {}: {} {}", tunnel_name, response.status_code, response.text)
                 return None
             services = response.json().get("services", [])
             return {
@@ -114,7 +115,8 @@ class CloudflareForwardingClient(FrozenModel):
                 for s in services
                 if "service_name" in s and "hostname" in s
             }
-        except (httpx.HTTPError, KeyError):
+        except (httpx.HTTPError, KeyError) as e:
+            logger.warning("Failed to list services for {}: {}", tunnel_name, e)
             return None
 
     def add_service(self, agent_id: AgentId, service_name: str, service_url: str) -> bool:
@@ -127,8 +129,14 @@ class CloudflareForwardingClient(FrozenModel):
                 json={"service_name": service_name, "service_url": service_url},
                 timeout=15.0,
             )
-            return response.status_code in (200, 201)
-        except httpx.HTTPError:
+            if response.status_code not in (200, 201):
+                logger.warning(
+                    "Failed to add service {} to {}: {} {}", service_name, tunnel_name, response.status_code, response.text
+                )
+                return False
+            return True
+        except httpx.HTTPError as e:
+            logger.warning("Failed to add service {} to {}: {}", service_name, tunnel_name, e)
             return False
 
     def remove_service(self, agent_id: AgentId, service_name: str) -> bool:
@@ -140,6 +148,16 @@ class CloudflareForwardingClient(FrozenModel):
                 headers={"Authorization": self._auth_header()},
                 timeout=15.0,
             )
-            return response.status_code in (200, 204)
-        except httpx.HTTPError:
+            if response.status_code not in (200, 204):
+                logger.warning(
+                    "Failed to remove service {} from {}: {} {}",
+                    service_name,
+                    tunnel_name,
+                    response.status_code,
+                    response.text,
+                )
+                return False
+            return True
+        except httpx.HTTPError as e:
+            logger.warning("Failed to remove service {} from {}: {}", service_name, tunnel_name, e)
             return False
