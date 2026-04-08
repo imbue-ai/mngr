@@ -427,6 +427,9 @@ sudo poweroff
                 build_log="",
             )
             raise LimaHostCreationError(failure_reason) from e
+        finally:
+            # Clean up the temporary YAML config file
+            yaml_path.unlink(missing_ok=True)
 
         # Build lifecycle config
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
