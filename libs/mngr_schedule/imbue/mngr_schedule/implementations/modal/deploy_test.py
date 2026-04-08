@@ -335,7 +335,8 @@ def test_stage_deploy_files_creates_subdirs_with_claude_defaults(
 
     project_dir = staging_dir / "project"
     assert project_dir.exists()
-    assert not any(project_dir.iterdir())
+    # project/ should only contain the .keep placeholder (no user files staged)
+    assert sorted(p.name for p in project_dir.iterdir()) == [".keep"]
 
 
 def test_stage_deploy_files_stages_project_files(
