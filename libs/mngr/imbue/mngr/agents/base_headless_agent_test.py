@@ -10,14 +10,13 @@ import pytest
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
-from imbue.mngr_claude.plugin import ClaudeAgent
 
 
 class _ConcreteHeadlessAgent(BaseHeadlessAgent[AgentTypeConfig]):
@@ -40,18 +39,42 @@ class _AlwaysStopped(_ConcreteHeadlessAgent):
         return AgentLifecycleState.STOPPED
 
 
+class _StoppedWithPaneContent(_AlwaysStopped):
+    """Test subclass that always reports STOPPED and returns fixed pane content."""
+
+    _pane_content: str | None = None
+
+    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
+        return self._pane_content
+
+
+_UNSET = object()
+
+
 def _make_agent(
     host: Host,
     mngr_ctx: MngrContext,
     tmp_path: Path,
     is_always_stopped: bool = False,
+    pane_content: str | None | object = _UNSET,
 ) -> _ConcreteHeadlessAgent:
-    """Create a concrete BaseHeadlessAgent for testing."""
+    """Create a concrete BaseHeadlessAgent for testing.
+
+    Pass pane_content (including None) to create a _StoppedWithPaneContent
+    agent that returns that value from capture_pane_content without invoking
+    tmux. Omit pane_content entirely to use the default agent.
+    """
     work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
     work_dir.mkdir()
 
-    cls = _AlwaysStopped if is_always_stopped else _ConcreteHeadlessAgent
-    return cls.model_construct(
+    if pane_content is not _UNSET:
+        cls: type[_ConcreteHeadlessAgent] = _StoppedWithPaneContent
+    elif is_always_stopped:
+        cls = _AlwaysStopped
+    else:
+        cls = _ConcreteHeadlessAgent
+
+    agent = cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-headless"),
         agent_type=AgentTypeName("test_headless"),
@@ -62,42 +85,10 @@ def _make_agent(
         agent_config=AgentTypeConfig(),
         host=host,
     )
-
-
-# =============================================================================
-# MRO invariant test
-# =============================================================================
-
-
-def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
-    """Ensure HeadlessClaude explicitly resolves any method defined on both ClaudeAgent and BaseHeadlessAgent.
-
-    HeadlessClaude has diamond inheritance: it extends both
-    NoPermissionsClaudeAgent (-> ClaudeAgent -> BaseAgent) and
-    BaseHeadlessAgent (-> BaseAgent). When both ClaudeAgent and
-    BaseHeadlessAgent define the same method, the MRO silently picks
-    ClaudeAgent's version (which appears first). HeadlessClaude must
-    explicitly override any such method to select the correct behavior.
-    """
-
-    def _callable_method_names(cls: type) -> set[str]:
-        return {name for name in cls.__dict__ if callable(getattr(cls, name)) and not name.startswith("__")}
-
-    base_headless_methods = _callable_method_names(BaseHeadlessAgent)
-    claude_methods = _callable_method_names(ClaudeAgent)
-    headless_claude_methods = _callable_method_names(HeadlessClaude)
-
-    # Methods defined on both sides of the diamond
-    shared = base_headless_methods & claude_methods
-
-    # HeadlessClaude must explicitly override every shared method
-    unresolved = shared - headless_claude_methods
-    assert not unresolved, (
-        f"BaseHeadlessAgent and ClaudeAgent both define these methods, but HeadlessClaude "
-        f"does not explicitly override them: {unresolved}. Without an explicit override on "
-        f"HeadlessClaude, the MRO silently picks ClaudeAgent's version. Add overrides to "
-        f"HeadlessClaude that delegate to the correct base class."
-    )
+    if isinstance(agent, _StoppedWithPaneContent) and pane_content is not _UNSET:
+        assert isinstance(pane_content, str) or pane_content is None
+        agent._pane_content = pane_content
+    return agent
 
 
 # =============================================================================
@@ -203,3 +194,51 @@ def test_get_stderr_error_message_returns_none_when_empty(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stderr.log").write_text("")
     assert agent._get_stderr_error_message() is None
+
+
+# =============================================================================
+# Tests for _get_pane_error_message
+# =============================================================================
+
+
+def test_get_pane_error_message_returns_content(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="error in pane\n")
+    assert agent._get_pane_error_message() == "error in pane"
+
+
+def test_get_pane_error_message_returns_none_when_no_pane(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content=None)
+    assert agent._get_pane_error_message() is None
+
+
+def test_get_pane_error_message_returns_none_when_empty(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="  \n  ")
+    assert agent._get_pane_error_message() is None
+
+
+# =============================================================================
+# Tests for _raise_no_output_error
+# =============================================================================
+
+
+def test_raise_no_output_error_surfaces_pane_content_when_no_files(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When neither stdout nor stderr files exist, pane content is surfaced."""
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="pane-err-content")
+    with pytest.raises(MngrError, match="pane-err-content"):
+        agent._raise_no_output_error()

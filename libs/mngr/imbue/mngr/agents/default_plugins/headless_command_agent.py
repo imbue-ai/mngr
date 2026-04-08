@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from typing import Never
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import hookimpl
@@ -12,7 +11,6 @@ from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
@@ -95,33 +93,6 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
 
     def _get_stderr_path(self) -> Path:
         return self._get_agent_dir() / "stderr.log"
-
-    def _raise_no_output_error(self) -> Never:
-        """Raise MngrError collecting all available error detail.
-
-        Checks stderr, then falls back to tmux pane capture if neither
-        redirect file exists (the shell never ran).
-        """
-        parts: list[str] = []
-
-        # Check stderr for error content
-        stderr_error = self._get_stderr_error_message()
-        if stderr_error:
-            parts.append(stderr_error)
-
-        # Fall back to pane capture if neither file exists
-        if not parts:
-            is_stderr_exists = self._file_exists_on_host(self._get_stderr_path())
-            is_stdout_exists = self._file_exists_on_host(self._get_stdout_path())
-            if not is_stderr_exists and not is_stdout_exists:
-                pane_error = self._get_pane_error_message()
-                if pane_error:
-                    parts.append(pane_error)
-
-        if parts:
-            detail = "\n".join(parts)
-            raise MngrError(f"Command exited without producing output:\n{detail}")
-        raise MngrError("Command exited without producing output (no details available)")
 
     def stream_output(self) -> Iterator[str]:
         """Stream raw text output as it becomes available.

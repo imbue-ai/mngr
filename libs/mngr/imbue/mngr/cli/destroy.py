@@ -413,10 +413,11 @@ def _destroy_single_online_agent(
     branches_to_remove: list[tuple[str, Path]],
 ) -> None:
     """Destroy a single agent on an online host. Thread-safe."""
+    agent_display = f"{agent.name}@{host.get_name()}"
     try:
         if agent.is_running() and not opts.force:
             _output(
-                f"Agent {agent.name} is running. Use --force to destroy running agents.",
+                f"Agent {agent_display} is running. Use --force to destroy running agents.",
                 output_opts,
             )
             return
@@ -438,14 +439,14 @@ def _destroy_single_online_agent(
         mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
         with results_lock:
             destroyed_agents.append(agent.name)
-        _output(f"Destroyed agent: {agent.name}", output_opts)
+        _output(f"Destroyed agent: {agent_display}", output_opts)
 
         # Emit agent_destroyed event, then re-emit remaining host state
         emit_agent_destroyed(mngr_ctx.config, agent.id, host.id)
         emit_discovery_events_for_host(mngr_ctx.config, host)
 
     except MngrError as e:
-        _output(f"Error destroying agent {agent.name}: {e}", output_opts)
+        _output(f"Error destroying agent {agent_display}: {e}", output_opts)
 
 
 def _destroy_single_offline_host(
@@ -456,20 +457,21 @@ def _destroy_single_offline_host(
     destroyed_agents: list[AgentName],
 ) -> None:
     """Destroy a single offline host and all its agents. Thread-safe."""
+    host_name = offline.host.get_name()
     try:
-        _output(f"Destroying offline host with {len(offline.agent_names)} agent(s)...", output_opts)
+        _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
         mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host)
         offline.provider.destroy_host(offline.host)
         mngr_ctx.pm.hook.on_host_destroyed(host=offline.host)
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
         for name in offline.agent_names:
-            _output(f"Destroyed agent: {name} (via host destruction)", output_opts)
+            _output(f"Destroyed agent: {name}@{host_name} (via host destruction)", output_opts)
 
         # Emit host_destroyed event with all agent IDs
         emit_host_destroyed(mngr_ctx.config, offline.host.id, offline.agent_ids)
     except MngrError as e:
-        _output(f"Error destroying offline host: {e}", output_opts)
+        _output(f"Error destroying offline host {host_name}: {e}", output_opts)
 
 
 def _check_all_agents_targeted_on_offline_host(
@@ -509,11 +511,12 @@ def _check_all_agents_targeted_on_offline_host(
 def _confirm_destruction(targets: _DestroyTargets) -> None:
     """Prompt user to confirm destruction of agents."""
     write_human_line("\nThe following agents will be destroyed:")
-    for agent, _ in targets.online_agents:
-        write_human_line("  - {}", agent.name)
+    for agent, host in targets.online_agents:
+        write_human_line("  - {}@{}", agent.name, host.get_name())
     for offline in targets.offline_hosts:
+        host_name = offline.host.get_name()
         for name in offline.agent_names:
-            write_human_line("  - {} (on offline host)", name)
+            write_human_line("  - {}@{} (offline)", name, host_name)
 
     write_human_line("\nThis action is irreversible!")
 

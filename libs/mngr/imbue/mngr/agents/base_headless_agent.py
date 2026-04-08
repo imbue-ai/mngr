@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from pathlib import Path
+from typing import Never
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -20,7 +22,13 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
     Provides shared infrastructure for agents that redirect stdout/stderr
     to files and expose output programmatically. Subclasses must implement
     _get_stdout_path, _get_stderr_path, and stream_output.
+
+    Subclasses can customize error reporting by overriding:
+    - _no_output_error_subject: the subject for "X exited without producing output" messages
+    - _get_extra_error_sources(): additional error sources beyond stderr (e.g. stdout JSON errors)
     """
+
+    _no_output_error_subject: str = "Command"
 
     @abstractmethod
     def _get_stdout_path(self) -> Path:
@@ -87,3 +95,41 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
             return None
         stripped = content.strip()
         return stripped if stripped else None
+
+    def _get_extra_error_sources(self) -> list[str]:
+        """Return additional error details beyond stderr.
+
+        Subclasses can override to check additional error sources (e.g.
+        stdout JSON error results). Called by _raise_no_output_error after
+        stderr is checked and before the pane capture fallback.
+        """
+        return []
+
+    def _raise_no_output_error(self) -> Never:
+        """Raise MngrError collecting all available error detail.
+
+        Checks stderr, then subclass-specific extra sources, then falls
+        back to tmux pane capture if neither redirect file exists (the
+        shell never ran).
+        """
+        parts: list[str] = []
+
+        stderr_error = self._get_stderr_error_message()
+        if stderr_error:
+            parts.append(stderr_error)
+
+        parts.extend(self._get_extra_error_sources())
+
+        if not parts:
+            is_stderr_exists = self._file_exists_on_host(self._get_stderr_path())
+            is_stdout_exists = self._file_exists_on_host(self._get_stdout_path())
+            if not is_stderr_exists and not is_stdout_exists:
+                pane_error = self._get_pane_error_message()
+                if pane_error:
+                    parts.append(pane_error)
+
+        subject = self._no_output_error_subject
+        if parts:
+            detail = "\n".join(parts)
+            raise MngrError(f"{subject} exited without producing output:\n{detail}")
+        raise MngrError(f"{subject} exited without producing output (no details available)")

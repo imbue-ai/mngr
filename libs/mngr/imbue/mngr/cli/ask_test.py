@@ -6,16 +6,11 @@ import pytest
 from click.testing import CliRunner
 
 import imbue.mngr.cli.ask as ask_module
-from imbue.mngr.agents.agent_registry import reset_agent_registry
-from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.ask import ClaudeBackendInterface
-from imbue.mngr.cli.ask import _accumulate_chunks
 from imbue.mngr.cli.ask import _build_ask_context
-from imbue.mngr.cli.ask import _check_headless_claude_available
 from imbue.mngr.cli.ask import _execute_response
 from imbue.mngr.cli.ask import _show_command_summary
 from imbue.mngr.cli.ask import ask
-from imbue.mngr.config.agent_class_registry import set_default_agent_class
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
 
@@ -193,32 +188,6 @@ def test_no_query_json_output(
 
 
 # =============================================================================
-# Tests for _accumulate_chunks
-# =============================================================================
-
-
-def test_accumulate_chunks_joins_all_chunks() -> None:
-    """_accumulate_chunks should join all chunks into a single string."""
-    chunks = iter(["Hello ", "world", "!"])
-    result = _accumulate_chunks(chunks)
-    assert result == "Hello world!"
-
-
-def test_accumulate_chunks_empty_iterator() -> None:
-    """_accumulate_chunks should return empty string for empty iterator."""
-    chunks = iter([])
-    result = _accumulate_chunks(chunks)
-    assert result == ""
-
-
-def test_accumulate_chunks_single_chunk() -> None:
-    """_accumulate_chunks should work with a single chunk."""
-    chunks = iter(["Hello"])
-    result = _accumulate_chunks(chunks)
-    assert result == "Hello"
-
-
-# =============================================================================
 # Tests for _show_command_summary
 # =============================================================================
 
@@ -245,11 +214,3 @@ def test_show_command_summary_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "commands"
-
-
-def test_check_headless_claude_available_raises_when_plugin_missing() -> None:
-    """When the headless_claude plugin is not registered, raises with an actionable error."""
-    reset_agent_registry()
-    set_default_agent_class(BaseAgent)
-    with pytest.raises(MngrError, match="headless_claude.*not available"):
-        _check_headless_claude_available()

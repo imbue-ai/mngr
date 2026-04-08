@@ -1,6 +1,7 @@
 import copy
 import fcntl
 import json
+import os
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -70,14 +71,67 @@ class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
         )
 
 
+def get_claude_config_dir() -> Path:
+    """Return the Claude Code config directory.
+
+    Reads $CLAUDE_CONFIG_DIR if set, otherwise defaults to ~/.claude/.
+    This returns the "current" config directory -- inside an mngr agent it
+    points to the per-agent isolated config dir.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".claude"
+
+
+def get_user_claude_config_dir() -> Path:
+    """Return the user-scope Claude Code config directory.
+
+    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's isolated
+    config dir, but code that needs the user's original config (e.g. to copy
+    credentials or settings) should call this function instead.
+
+    Resolution order:
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents)
+    2. Falls back to get_claude_config_dir() ($CLAUDE_CONFIG_DIR or ~/.claude/)
+    """
+    original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
+    if original:
+        return Path(original)
+    return get_claude_config_dir()
+
+
 def get_claude_config_path() -> Path:
-    """Return the path to the global Claude config file (~/.claude.json)."""
+    """Return the path to the Claude config file (.claude.json).
+
+    When $CLAUDE_CONFIG_DIR is set, returns $CLAUDE_CONFIG_DIR/.claude.json.
+    Otherwise returns ~/.claude.json (Claude Code's default location).
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir) / ".claude.json"
     return Path.home() / ".claude.json"
 
 
+def get_user_claude_config_path() -> Path:
+    """Return the path to the user-scope Claude config file (.claude.json).
+
+    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's config dir.
+    Use this function to get the user's original .claude.json path.
+
+    Resolution order mirrors get_user_claude_config_dir():
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json
+    2. Falls back to get_claude_config_path()
+    """
+    original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
+    if original:
+        return Path(original) / ".claude.json"
+    return get_claude_config_path()
+
+
 def get_claude_config_backup_path() -> Path:
-    """Return the path to the global Claude config backup file."""
-    return Path.home() / ".claude.json.bak"
+    """Return the path to the Claude config backup file (.claude.json.bak)."""
+    return get_claude_config_path().with_suffix(".json.bak")
 
 
 # =============================================================================

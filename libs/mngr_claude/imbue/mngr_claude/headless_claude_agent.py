@@ -5,7 +5,6 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from typing import Never
 
 from loguru import logger
 from pydantic import Field
@@ -220,13 +219,15 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     )
 
 
-class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent):
+class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can
     read output programmatically via stream_output(). Does not support
     interactive messages, paste detection, or TUI readiness checking.
     """
+
+    _no_output_error_subject: str = "claude"
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.
@@ -289,35 +290,10 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent):
         """Return the path to the stderr.log file for this agent."""
         return self._get_agent_dir() / "stderr.log"
 
-    def _raise_no_output_error(self) -> Never:
-        """Raise MngrError collecting all available error detail.
-
-        Collects errors from all file-based sources (stderr.log and stdout.jsonl)
-        since they can contain complementary information (e.g. stderr has a stack
-        trace while stdout has the user-facing error message). Falls back to tmux
-        pane capture only when neither redirect file exists (the shell never ran).
-        """
-        parts: list[str] = []
-        # stderr: crashes, stack traces, tool errors
-        stderr_error = self._get_stderr_error_message()
-        if stderr_error:
-            parts.append(stderr_error)
-        # stdout: stream-json result events with is_error=true
+    def _get_extra_error_sources(self) -> list[str]:
+        """Check stdout.jsonl for stream-json error results."""
         stdout_error = self._get_stdout_stream_json_error()
-        if stdout_error:
-            parts.append(stdout_error)
-        # pane capture: only if the shell never created the redirect files
-        if not parts:
-            is_stderr_exists = self._file_exists_on_host(self._get_stderr_path())
-            is_stdout_exists = self._file_exists_on_host(self._get_stdout_path())
-            if not is_stderr_exists and not is_stdout_exists:
-                pane_error = self._get_pane_error_message()
-                if pane_error:
-                    parts.append(pane_error)
-        if parts:
-            detail = "\n".join(parts)
-            raise MngrError(f"claude exited without producing output:\n{detail}")
-        raise MngrError("claude exited without producing output (no details available)")
+        return [stdout_error] if stdout_error else []
 
     def _get_stdout_stream_json_error(self) -> str | None:
         """Extract error message from a stream-json result event in stdout.jsonl."""
