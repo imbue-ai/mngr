@@ -27,13 +27,13 @@ import pytest
 import uvicorn
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
 from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.testing import clean_env
 
