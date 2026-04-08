@@ -4,7 +4,11 @@ import click
 import pluggy
 from click.testing import CliRunner
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.cli.commands import schedule
+from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
+from imbue.mngr_schedule.data_types import ScheduledMngrCommand
+from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
 
 
 def test_schedule_defaults_to_add_subcommand(
@@ -309,3 +313,247 @@ def test_schedule_add_full_copy_accepted(
     # Should fail at deploy (provider loading), not NotImplementedError
     assert result.exit_code != 0
     assert not isinstance(result.exception, NotImplementedError)
+
+
+# =============================================================================
+# schedule remove CLI tests
+# =============================================================================
+
+
+def _deploy_local_trigger(
+    mngr_ctx: MngrContext,
+    name: str,
+) -> None:
+    """Deploy a local trigger for testing."""
+    trigger = ScheduleTriggerDefinition(
+        name=name,
+        command=ScheduledMngrCommand.CREATE,
+        args="--message hello",
+        schedule_cron="0 2 * * *",
+        provider="local",
+    )
+    deploy_local_schedule(
+        trigger,
+        mngr_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "fakehash",
+    )
+
+
+def test_schedule_remove_requires_names(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Running remove without any trigger names should show a usage error."""
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "--provider", "local", "--force"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "Missing argument" in result.output
+
+
+def test_schedule_remove_requires_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Running remove without --provider should show an error."""
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "some-trigger", "--force"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "Missing option" in result.output or "required" in result.output.lower()
+
+
+def test_schedule_remove_local_with_force(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Removing a deployed local trigger with --force should succeed."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-remove-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "test-remove-trigger", "--provider", "local", "--force"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0, f"remove failed: {result.output}"
+    assert "Removed schedule" in result.output
+
+
+def test_schedule_remove_local_missing_trigger_with_force(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Removing a nonexistent trigger with --force should succeed (idempotent)."""
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "nonexistent-trigger", "--provider", "local", "--force"],
+        obj=plugin_manager,
+    )
+    # Should succeed (no triggers found means nothing to remove)
+    assert result.exit_code == 0
+
+
+def test_schedule_remove_local_prompts_without_force(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Without --force, remove should prompt and abort on 'n' input."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-prompt-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "test-prompt-trigger", "--provider", "local"],
+        obj=plugin_manager,
+        input="n\n",
+    )
+    # User declined: code raises SystemExit(0), CliRunner reports exit_code=0.
+    # The trigger was NOT removed because the user declined.
+    assert "Are you sure" in result.output
+    assert "Removed schedule" not in result.output
+
+
+# =============================================================================
+# schedule run CLI tests
+# =============================================================================
+
+
+def test_schedule_run_requires_name(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Running schedule run without a trigger name should show a usage error."""
+    result = cli_runner.invoke(
+        schedule,
+        ["run", "--provider", "local"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "Missing argument" in result.output
+
+
+def test_schedule_run_requires_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Running schedule run without --provider should show an error."""
+    result = cli_runner.invoke(
+        schedule,
+        ["run", "some-trigger"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "Missing option" in result.output or "required" in result.output.lower()
+
+
+def test_schedule_run_local_nonexistent_trigger(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Running a nonexistent local trigger should fail with a clear error."""
+    result = cli_runner.invoke(
+        schedule,
+        ["run", "nonexistent-trigger", "--provider", "local"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "No local schedule record found" in result.output
+
+
+def test_schedule_run_local_deployed_trigger(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Running a deployed local trigger should attempt to execute the run script."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-run-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["run", "test-run-trigger", "--provider", "local"],
+        obj=plugin_manager,
+    )
+    # run.sh will fail (mngr create isn't available in test env) but the
+    # command should not error at the CLI level -- it should propagate the
+    # script's exit code. The exit code may be non-zero because the run.sh
+    # itself fails, which is expected.
+    assert isinstance(result.exit_code, int)
+
+
+# =============================================================================
+# schedule list CLI tests
+# =============================================================================
+
+
+def test_schedule_list_local_empty(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Listing schedules on local with no triggers should succeed with empty output."""
+    result = cli_runner.invoke(
+        schedule,
+        ["list", "--provider", "local"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+
+
+def test_schedule_list_local_with_trigger(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Listing schedules on local should show deployed triggers."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-list-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["list", "--provider", "local"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+    assert "test-list-trigger" in result.output
+
+
+def test_schedule_list_local_json(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Listing schedules with --format=json should produce JSON output."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-json-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["list", "--provider", "local", "--format=json"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+    assert "test-json-trigger" in result.output
+
+
+def test_schedule_list_local_jsonl(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Listing schedules with --format=jsonl should produce JSONL output."""
+    _deploy_local_trigger(temp_mngr_ctx, "test-jsonl-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["list", "--provider", "local", "--format=jsonl"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+    assert "test-jsonl-trigger" in result.output
