@@ -27,6 +27,8 @@ Environment: None required (all paths passed as arguments).
 import sqlite3
 import sys
 
+from loguru import logger
+
 # SYNC: This schema MUST match MIND_CONVERSATIONS_TABLE_SQL in provisioning.py.
 # A test (test_conversation_db_schema_matches_provisioning) verifies they stay in sync.
 _CREATE_TABLE_SQL = (
@@ -43,8 +45,7 @@ def _write_stdout(value: object) -> None:
 
 
 def _warn(message: str) -> None:
-    sys.stderr.write(f"WARNING: {message}\n")
-    sys.stderr.flush()
+    logger.warning(message)
 
 
 def insert(db_path: str, conversation_id: str, tags: str, created_at: str) -> None:
