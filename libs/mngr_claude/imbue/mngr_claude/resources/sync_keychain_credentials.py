@@ -51,11 +51,13 @@ def _write_keychain(label: str, value: str, account: str) -> bool:
         subprocess.run(
             ["security", "delete-generic-password", "-s", label, "-a", account],
             capture_output=True,
+            text=True,
             timeout=5,
         )
         result = subprocess.run(
             ["security", "add-generic-password", "-s", label, "-a", account, "-l", label, "-w", value],
             capture_output=True,
+            text=True,
             timeout=5,
         )
         if result.returncode != 0:
