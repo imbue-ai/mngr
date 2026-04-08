@@ -152,6 +152,14 @@ def checkout_branch(
         )
 
 
+def _make_host_name(agent_name: AgentName) -> str:
+    """Build the host name for a mind agent.
+
+    Uses ``{agent_name}-host`` so it is obvious why the host was created.
+    """
+    return f"{agent_name}-host"
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
@@ -162,14 +170,29 @@ def _build_mngr_create_command(
     DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
     CLOUD mode: not yet supported
+
+    For modes that create a separate host (LOCAL, CLOUD), the agent address
+    uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
+    ``--reuse`` and ``--update`` are passed so re-deploying resets the agent
+    on the same host instead of failing.
     """
+    match launch_mode:
+        case LaunchMode.DEV:
+            address = str(agent_name)
+        case LaunchMode.LOCAL | LaunchMode.CLOUD:
+            address = f"{agent_name}@{_make_host_name(agent_name)}"
+        case _ as unreachable:
+            assert_never(unreachable)
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
-        str(agent_name),
+        address,
         "--id",
         str(agent_id),
         "--no-connect",
+        "--reuse",
+        "--update",
         "--label",
         f"mind={agent_name}",
         "--template",

@@ -941,6 +941,79 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     assert "Notification" in settings["hooks"]
 
 
+def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_readiness_hooks should add permission auto-allow hook when auto_allow_permissions is True."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True),
+        host=host,
+    )
+
+    agent._configure_readiness_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+    assert "UserPromptSubmit" in settings["hooks"]
+
+    # Should have the permission auto-allow hook
+    permission_hooks = settings["hooks"]["PermissionRequest"]
+    auto_allow_hooks = [h for h in permission_hooks if h.get("matcher") == "*"]
+    assert len(auto_allow_hooks) == 1
+    inner = auto_allow_hooks[0]["hooks"][0]
+    assert "allow" in inner["command"]
+    assert inner["timeout"] == 5
+
+
+def test_configure_readiness_hooks_does_not_add_permission_auto_allow_by_default(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_readiness_hooks should not add permission auto-allow hook when auto_allow_permissions is False."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False),
+        host=host,
+    )
+
+    agent._configure_readiness_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # The readiness PermissionRequest hook (no matcher) should exist
+    permission_hooks = settings["hooks"]["PermissionRequest"]
+    # No hook with matcher="*" should exist
+    auto_allow_hooks = [h for h in permission_hooks if h.get("matcher") == "*"]
+    assert len(auto_allow_hooks) == 0
+
+
 def test_provision_configures_readiness_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

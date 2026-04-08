@@ -605,6 +605,35 @@ def build_readiness_hooks_config() -> dict[str, Any]:
 
 
 @pure
+def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
+    """Build hooks configuration that auto-allows all permission dialogs.
+
+    Adds a PermissionRequest hook with a wildcard matcher that outputs a JSON
+    decision to allow every tool use without pausing for user approval.
+    """
+    return {
+        "hooks": {
+            "PermissionRequest": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "echo "
+                                "'{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\","
+                                "\"decision\":{\"behavior\":\"allow\"}}}'"
+                            ),
+                            "timeout": 5,
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+
+@pure
 def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str, Any]) -> bool:
     """Check if a hook with the same command already exists in the list.
 

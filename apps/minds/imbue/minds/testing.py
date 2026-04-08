@@ -86,7 +86,7 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 # ---------------------------------------------------------------------------
 
 
-def _clean_env() -> dict[str, str]:
+def clean_env() -> dict[str, str]:
     """Build an environment dict for subprocesses that strips pytest markers.
 
     mngr refuses to run when PYTEST_CURRENT_TEST is set (safety check to
@@ -105,7 +105,7 @@ def run_mngr(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subp
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=_clean_env(),
+        env=clean_env(),
         cwd=cwd,
     )
 

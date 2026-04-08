@@ -10,6 +10,7 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
@@ -752,3 +753,20 @@ def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
     result = get_user_claude_config_path()
     assert result == custom_dir / ".claude.json"
+
+
+def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() -> None:
+    """build_permission_auto_allow_hooks_config should produce a PermissionRequest hook with wildcard matcher."""
+    config = build_permission_auto_allow_hooks_config()
+    assert "hooks" in config
+    assert "PermissionRequest" in config["hooks"]
+    permission_hooks = config["hooks"]["PermissionRequest"]
+    assert len(permission_hooks) == 1
+    hook_entry = permission_hooks[0]
+    assert hook_entry["matcher"] == "*"
+    assert len(hook_entry["hooks"]) == 1
+    inner_hook = hook_entry["hooks"][0]
+    assert inner_hook["type"] == "command"
+    assert inner_hook["timeout"] == 5
+    assert "allow" in inner_hook["command"]
+    assert "PermissionRequest" in inner_hook["command"]

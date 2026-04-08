@@ -23,6 +23,7 @@ from imbue.minds.forwarding_server.cloudflare_client import OwnerEmail
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
@@ -50,6 +51,7 @@ def start_forwarding_server(
 
     cloudflare_client = _build_cloudflare_client()
     agent_creator = AgentCreator(paths=paths, cloudflare_client=cloudflare_client)
+    telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     # Generate a one-time login URL for the user
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
@@ -76,6 +78,7 @@ def start_forwarding_server(
         tunnel_manager=tunnel_manager,
         agent_creator=agent_creator,
         cloudflare_client=cloudflare_client,
+        telegram_orchestrator=telegram_orchestrator,
     )
 
     if not is_no_browser:

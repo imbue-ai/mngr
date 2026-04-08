@@ -43,7 +43,7 @@ Applications (services with ports) are tracked in `runtime/applications.toml`:
 ```toml
 [[applications]]
 name = "web"
-url = "http://localhost:8080"
+url = "http://localhost:8000"
 global = true
 ```
 

@@ -315,9 +315,12 @@ class MngrStreamManager(MutableModel):
     def start(self) -> None:
         """Start the streaming subprocess for continuous agent discovery."""
         self._cg.__enter__()
+        # Run from $HOME so mngr uses its global config, not any project-specific
+        # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
         self._cg.run_process_in_background(
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
+            cwd=Path.home(),
         )
 
     def stop(self) -> None:
@@ -530,5 +533,6 @@ class MngrStreamManager(MutableModel):
         process = self._cg.run_process_in_background(
             command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
             on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
+            cwd=Path.home(),
         )
         self._events_processes[aid_str] = process

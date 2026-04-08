@@ -17,6 +17,7 @@ dependencies = [
     "imbue-mngr",
     "modal>=1.3.1",
     "paramiko>=3.0",
+    "playwright>=1.40.0",
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "tomlkit>=0.12.0",
@@ -80,6 +81,11 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
+  # External service interaction modules -- tested via acceptance tests.
+  # Pure functions within these modules are tested in the corresponding *_test.py files.
+  "*/telegram/credential_extractor.py",
+  "*/telegram/bot_creator.py",
+  "*/telegram/injector.py",
 ]
 
 [tool.inline-snapshot]

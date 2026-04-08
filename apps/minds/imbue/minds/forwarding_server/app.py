@@ -52,6 +52,8 @@ from imbue.minds.forwarding_server.templates import render_login_redirect_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
+from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -275,7 +277,17 @@ def _handle_landing_page(
         return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
 
     if all_agent_ids:
-        html = render_landing_page(accessible_agent_ids=all_agent_ids)
+        telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+        telegram_status: dict[str, bool] | None = None
+        if telegram_orchestrator is not None:
+            telegram_status = {
+                str(aid): telegram_orchestrator.agent_has_telegram(aid)
+                for aid in all_agent_ids
+            }
+        html = render_landing_page(
+            accessible_agent_ids=all_agent_ids,
+            telegram_status_by_agent_id=telegram_status,
+        )
         return HTMLResponse(content=html)
 
     # No agents exist: show the create form
@@ -959,6 +971,88 @@ async def _handle_creation_logs_sse(
     )
 
 
+# -- Telegram setup route handlers --
+
+
+async def _handle_telegram_setup(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Start Telegram bot setup for an agent (POST /api/agents/{agent_id}/telegram/setup)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    if telegram_orchestrator is None:
+        return Response(
+            status_code=501,
+            content='{"error": "Telegram setup not configured"}',
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+
+    # Use agent_id as the agent name for bot naming (best we have without additional lookups)
+    agent_name = str(parsed_id)[:8]
+    try:
+        body = await request.json()
+        agent_name = str(body.get("agent_name", agent_name)).strip() or agent_name
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
+    return Response(
+        content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS)}),
+        media_type="application/json",
+    )
+
+
+def _handle_telegram_status(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Get Telegram setup status for an agent (GET /api/agents/{agent_id}/telegram/status)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    if telegram_orchestrator is None:
+        return Response(
+            status_code=501,
+            content='{"error": "Telegram setup not configured"}',
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+    info = telegram_orchestrator.get_setup_info(parsed_id)
+
+    if info is None:
+        # No active setup -- check if already set up
+        is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
+        if is_active:
+            return Response(
+                content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.DONE)}),
+                media_type="application/json",
+            )
+        return Response(
+            status_code=404,
+            content='{"error": "No Telegram setup in progress for this agent"}',
+            media_type="application/json",
+        )
+
+    result: dict[str, str | None] = {
+        "agent_id": str(info.agent_id),
+        "status": str(info.status),
+    }
+    if info.error is not None:
+        result["error"] = info.error
+    if info.bot_username is not None:
+        result["bot_username"] = info.bot_username
+    return Response(content=json.dumps(result), media_type="application/json")
+
+
 # -- App factory --
 
 
@@ -969,6 +1063,7 @@ def create_forwarding_server(
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareForwardingClient | None = None,
+    telegram_orchestrator: TelegramSetupOrchestrator | None = None,
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
@@ -980,6 +1075,9 @@ def create_forwarding_server(
 
     When cloudflare_client is provided, the servers page shows global forwarding
     URLs and toggle controls.
+
+    When telegram_orchestrator is provided, the landing page shows Telegram setup
+    buttons and the /api/agents/{agent_id}/telegram/* endpoints are available.
     """
     is_externally_managed_client = http_client is not None
 
@@ -995,6 +1093,7 @@ def create_forwarding_server(
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
+    app.state.telegram_orchestrator = telegram_orchestrator
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -1019,6 +1118,10 @@ def create_forwarding_server(
 
     # Toggle global forwarding for a server
     app.post("/agents/{agent_id}/servers/{server_name}/global")(_handle_toggle_global)
+
+    # Telegram setup routes
+    app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
+    app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
 
     # Proxy routes: /agents/{agent_id}/{server_name}/{path:path}
     app.api_route(

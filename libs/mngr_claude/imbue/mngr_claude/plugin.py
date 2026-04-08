@@ -66,6 +66,7 @@ from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
@@ -220,6 +221,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=False,
         description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
         "before startup. When False, the interactive flow prompts.",
+    )
+    auto_allow_permissions: bool = Field(
+        default=False,
+        description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
+        "This means Claude Code will never pause for permission approval.",
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
@@ -1384,6 +1390,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         The hooks signal when Claude is actively processing by creating/removing an
         'active' file in the agent's state directory.
 
+        When auto_allow_permissions is True, also adds a hook that auto-allows
+        all permission dialogs so Claude never pauses for approval.
+
         Skips if hooks already exist.
         """
         # Future improvement: use `claude --settings <path>` to load hooks from
@@ -1406,10 +1415,24 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         except FileNotFoundError:
             pass
 
-        # Merge hooks, checking for duplicates
+        # Merge readiness hooks, checking for duplicates
+        is_changed = False
         merged = merge_hooks_config(existing_settings, hooks_config)
         if merged is None:
             logger.debug("Readiness hooks already configured in {}", settings_path)
+            merged = existing_settings
+        else:
+            is_changed = True
+
+        # Merge permission auto-allow hooks if configured
+        if self.agent_config.auto_allow_permissions:
+            permission_hooks = build_permission_auto_allow_hooks_config()
+            merged_with_permissions = merge_hooks_config(merged, permission_hooks)
+            if merged_with_permissions is not None:
+                merged = merged_with_permissions
+                is_changed = True
+
+        if not is_changed:
             return
 
         # Write the merged settings
