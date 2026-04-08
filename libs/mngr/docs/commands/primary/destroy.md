@@ -68,6 +68,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Related Documentation

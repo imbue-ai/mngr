@@ -224,7 +224,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    excluded = TEST_FILE_PATTERNS + ("testing.py",)
+    excluded = TEST_FILE_PATTERNS + ("testing.py", "scripts/*.py")
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 

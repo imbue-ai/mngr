@@ -26,3 +26,4 @@ Environment variables are redacted from logs by default for security. Use `--log
 
 - `--headless`: Disable all interactive behavior (prompts, TUI, editor). Also settable via `MNGR_HEADLESS` env var or `headless` config key. When not set, interactive mode is auto-detected from the TTY.
 - `--plugin TEXT / --enable-plugin TEXT / --disable-plugin TEXT`: Enable / disable selected plugins
+- `-S KEY=VALUE / --setting KEY=VALUE`: Override a config setting for this invocation. Uses dot-separated paths for nested keys (e.g., `--setting commands.create.connect=false`). Values are parsed as JSON when possible (booleans, numbers, arrays), otherwise as plain strings. Repeatable.

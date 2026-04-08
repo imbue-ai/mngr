@@ -258,6 +258,12 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Reuse existing agent with the same name if it exists (idempotent create)",
 )
+@optgroup.option(
+    "--update/--no-update",
+    default=False,
+    show_default=True,
+    help="When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse",
+)
 @optgroup.option("--connect/--no-connect", default=True, help="Connect to the agent after creation [default: connect]")
 @optgroup.option(
     "--auto-start/--no-auto-start",
@@ -460,6 +466,10 @@ def create(ctx: click.Context, **kwargs) -> None:
                 to_update(mngr_ctx.field_ref().is_auto_approve, True),
             )
 
+        # Validate --update requires --reuse
+        if opts.update and not opts.reuse:
+            raise UserInputError("--update requires --reuse. Use --reuse --update together.")
+
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
         plugin_cli_params: dict[str, Any] = {
@@ -631,6 +641,7 @@ def _create_agent(
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
+    update_host: OnlineHostInterface | None = None
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
@@ -640,28 +651,47 @@ def _create_agent(
             agent_and_host_loader=setup.agent_and_host_loader,
         )
         if reuse_result is not None:
-            agent, host = reuse_result
-            logger.info("Reusing existing agent: {}", agent.name)
+            if opts.update:
+                # --reuse --update: stop the existing agent, then re-create in place
+                existing_agent, existing_host = reuse_result
+                logger.info("Updating existing agent: {}", existing_agent.name)
+                existing_host.stop_agents([existing_agent.id])
+                # If the user didn't explicitly set --target-path, default to
+                # the existing agent's work_dir so we update in place.
+                # If they did set one, honor it (the agent moves to the new path).
+                resolved_target = (
+                    agent_opts.target_path if agent_opts.target_path is not None else existing_agent.work_dir
+                )
+                agent_opts = agent_opts.model_copy_update(
+                    to_update(agent_opts.field_ref().agent_id, existing_agent.id),
+                    to_update(agent_opts.field_ref().target_path, resolved_target),
+                    to_update(agent_opts.field_ref().is_update, True),
+                )
+                update_host = existing_host
+                # Fall through to the normal create path below
+            else:
+                agent, host = reuse_result
+                logger.info("Reusing existing agent: {}", agent.name)
 
-            # Handle --edit-message if editor session was started,
-            # or send initial message directly if --message/--message-file was provided
-            with _editor_cleanup_scope(setup.editor_session):
-                if setup.editor_session is not None:
-                    # Hold the host lock while waiting for the editor to prevent
-                    # idle shutdown during long editing sessions
-                    with host.lock_cooperatively():
-                        _handle_editor_message(
-                            editor_session=setup.editor_session,
-                            agent=agent,
-                        )
-                elif setup.initial_message is not None:
-                    # Send initial message directly (from --message or --message-file)
-                    logger.info("Sending message to agent")
-                    agent.send_message(setup.initial_message)
-                else:
-                    pass
+                # Handle --edit-message if editor session was started,
+                # or send initial message directly if --message/--message-file was provided
+                with _editor_cleanup_scope(setup.editor_session):
+                    if setup.editor_session is not None:
+                        # Hold the host lock while waiting for the editor to prevent
+                        # idle shutdown during long editing sessions
+                        with host.lock_cooperatively():
+                            _handle_editor_message(
+                                editor_session=setup.editor_session,
+                                agent=agent,
+                            )
+                    elif setup.initial_message is not None:
+                        # Send initial message directly (from --message or --message-file)
+                        logger.info("Sending message to agent")
+                        agent.send_message(setup.initial_message)
+                    else:
+                        pass
 
-            return CreateAgentResult(agent=agent, host=host), connection_opts
+                return CreateAgentResult(agent=agent, host=host), connection_opts
 
     # If ensure-clean is set, verify the source work_dir is clean.
     # Skip the check when using an explicit base branch, since the agent will be
@@ -672,7 +702,11 @@ def _create_agent(
         _ensure_clean_work_dir(setup.resolved_source.location)
 
     # figure out the target host (if we just have a reference)
-    resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    # In update mode, use the host from the existing agent directly
+    if update_host is not None:
+        resolved_target_host: OnlineHostInterface | NewHostOptions = update_host
+    else:
+        resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
 
     # Set host labels on existing hosts (for new hosts, labels are passed via NewHostOptions).
     # This ensures local hosts get any --host-label values.

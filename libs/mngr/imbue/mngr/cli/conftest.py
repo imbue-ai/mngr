@@ -55,6 +55,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         log_env_vars=None,
         plugin=(),
         disable_plugin=(),
+        setting=(),
         positional_name=None,
         positional_agent_type=None,
         agent_args=(),
@@ -112,6 +113,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         grant=(),
         extra_provision_command=(),
         upload_file=(),
+        update=False,
         yes=False,
     )
 
@@ -133,6 +135,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         log_env_vars=None,
         plugin=(),
         disable_plugin=(),
+        setting=(),
         agent=None,
         start=True,
         reconnect=True,

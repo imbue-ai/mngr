@@ -10,13 +10,16 @@ from click.core import ParameterSource
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.cli.common_opts import _parse_setting_value
 from imbue.mngr.cli.common_opts import _process_template_escapes
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
+from imbue.mngr.cli.common_opts import _set_nested_dict_value
 from imbue.mngr.cli.common_opts import _split_known_and_plugin_params
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import apply_config_defaults
 from imbue.mngr.cli.common_opts import apply_create_template
+from imbue.mngr.cli.common_opts import apply_settings_to_config
 from imbue.mngr.cli.common_opts import parse_output_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommandDefaults
@@ -24,6 +27,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
@@ -645,3 +649,240 @@ def test_headless_flag_sets_is_interactive_false_via_setup_command_context(
     )
     assert result.exit_code == 0
     assert captured_is_interactive == [False]
+
+
+# =============================================================================
+# Tests for _parse_setting_value
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("input_str", "expected", "expected_type"),
+    [
+        pytest.param("false", False, bool, id="boolean_false"),
+        pytest.param("true", True, bool, id="boolean_true"),
+        pytest.param("42", 42, int, id="integer"),
+        pytest.param("3.14", 3.14, float, id="float"),
+        pytest.param("hello", "hello", str, id="plain_string"),
+        pytest.param("FOO=bar", "FOO=bar", str, id="string_with_equals"),
+        pytest.param('["a", "b"]', ["a", "b"], list, id="json_array"),
+        pytest.param("", "", str, id="empty_string"),
+    ],
+)
+def test_parse_setting_value(input_str: str, expected: Any, expected_type: type) -> None:
+    """_parse_setting_value should parse values as the appropriate Python type."""
+    result = _parse_setting_value(input_str)
+    assert result == expected
+    assert isinstance(result, expected_type)
+
+
+# =============================================================================
+# Tests for _set_nested_dict_value
+# =============================================================================
+
+
+def test_set_nested_dict_value_single_key() -> None:
+    """_set_nested_dict_value should set a top-level key."""
+    data: dict[str, Any] = {}
+    _set_nested_dict_value(data, "prefix", "my-")
+    assert data == {"prefix": "my-"}
+
+
+def test_set_nested_dict_value_nested_key() -> None:
+    """_set_nested_dict_value should create intermediate dicts for nested keys."""
+    data: dict[str, Any] = {}
+    _set_nested_dict_value(data, "commands.create.connect", False)
+    assert data == {"commands": {"create": {"connect": False}}}
+
+
+def test_set_nested_dict_value_preserves_existing() -> None:
+    """_set_nested_dict_value should preserve existing sibling keys."""
+    data: dict[str, Any] = {"commands": {"create": {"branch": "main"}}}
+    _set_nested_dict_value(data, "commands.create.connect", False)
+    assert data == {"commands": {"create": {"branch": "main", "connect": False}}}
+
+
+def test_set_nested_dict_value_overwrites_non_dict() -> None:
+    """_set_nested_dict_value should overwrite a non-dict intermediate with a dict."""
+    data: dict[str, Any] = {"commands": "not-a-dict"}
+    _set_nested_dict_value(data, "commands.create.connect", False)
+    assert data == {"commands": {"create": {"connect": False}}}
+
+
+# =============================================================================
+# Tests for apply_settings_to_config
+# =============================================================================
+
+
+def test_apply_settings_to_config_empty_settings(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should return config unchanged when settings is empty."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    result = apply_settings_to_config(config, (), frozenset())
+    assert result.prefix == mngr_test_prefix
+
+
+def test_apply_settings_to_config_sets_scalar(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should override a scalar config field."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    result = apply_settings_to_config(config, ("prefix=custom-",), frozenset())
+    assert result.prefix == "custom-"
+
+
+def test_apply_settings_to_config_sets_command_defaults(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should set command defaults via dotted paths."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    result = apply_settings_to_config(
+        config,
+        ("commands.create.connect=false",),
+        frozenset(),
+    )
+    assert result.commands["create"].defaults["connect"] is False
+
+
+def test_apply_settings_to_config_merges_with_existing_command_defaults(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should merge settings with existing command defaults."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
+    )
+    result = apply_settings_to_config(
+        config,
+        ("commands.create.connect=false",),
+        frozenset(),
+    )
+    # Both the existing default and the new setting should be present
+    assert result.commands["create"].defaults["branch"] == "main:agent/*"
+    assert result.commands["create"].defaults["connect"] is False
+
+
+def test_apply_settings_to_config_multiple_settings(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should handle multiple setting strings."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    result = apply_settings_to_config(
+        config,
+        ("prefix=new-", "headless=true"),
+        frozenset(),
+    )
+    assert result.prefix == "new-"
+    assert result.headless is True
+
+
+def test_apply_settings_to_config_sets_logging(mngr_test_prefix: str) -> None:
+    """apply_settings_to_config should set nested logging config."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    result = apply_settings_to_config(
+        config,
+        ("logging.console_level=TRACE",),
+        frozenset(),
+    )
+    assert result.logging.console_level == LogLevel.TRACE
+
+
+def test_apply_settings_to_config_invalid_format_raises() -> None:
+    """apply_settings_to_config should raise UserInputError for missing '=' sign."""
+    config = MngrConfig(prefix="test-")
+    with pytest.raises(UserInputError, match="Invalid --setting format"):
+        apply_settings_to_config(config, ("bad-setting",), frozenset())
+
+
+def test_apply_settings_to_config_empty_key_raises() -> None:
+    """apply_settings_to_config should raise UserInputError for empty key."""
+    config = MngrConfig(prefix="test-")
+    with pytest.raises(UserInputError, match="key cannot be empty"):
+        apply_settings_to_config(config, ("=value",), frozenset())
+
+
+def test_apply_settings_to_config_unknown_field_raises() -> None:
+    """apply_settings_to_config should raise ConfigParseError for unknown top-level keys."""
+    config = MngrConfig(prefix="test-")
+    with pytest.raises(ConfigParseError, match="Unknown configuration fields"):
+        apply_settings_to_config(config, ("totally_bogus_key=value",), frozenset())
+
+
+# =============================================================================
+# Tests for --setting flag integration with setup_command_context
+# =============================================================================
+
+
+def test_setting_flag_overrides_config_via_setup_command_context(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--setting should override config values in the loaded MngrContext."""
+    captured_prefix: list[str] = []
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="test",
+            command_class=CommonCliOptions,
+        )
+        captured_prefix.append(mngr_ctx.config.prefix)
+
+    result = cli_runner.invoke(
+        test_command,
+        ["--setting", "prefix=my-custom-prefix-"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert captured_prefix == ["my-custom-prefix-"]
+
+
+def test_setting_flag_repeatable_via_setup_command_context(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Multiple --setting flags should all be applied."""
+    captured: list[tuple[str, bool]] = []
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="test",
+            command_class=CommonCliOptions,
+        )
+        captured.append((mngr_ctx.config.prefix, mngr_ctx.config.headless))
+
+    result = cli_runner.invoke(
+        test_command,
+        ["-S", "prefix=x-", "-S", "headless=true"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert captured == [("x-", True)]
+
+
+def test_setting_flag_sets_command_defaults_in_config(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--setting for command defaults should appear in the config's commands dict."""
+    captured_config: list[MngrConfig] = []
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="test",
+            command_class=CommonCliOptions,
+        )
+        captured_config.append(mngr_ctx.config)
+
+    result = cli_runner.invoke(
+        test_command,
+        ["--setting", "commands.create.connect=false"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert captured_config[0].commands["create"].defaults["connect"] is False

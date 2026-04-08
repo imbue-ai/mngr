@@ -759,6 +759,7 @@ class CommonCliOptions(FrozenModel):
     log_env_vars: bool | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
+    setting: tuple[str, ...] = ()
 
 
 class CreateCliOptions(CommonCliOptions):
@@ -830,4 +831,5 @@ class CreateCliOptions(CommonCliOptions):
     grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
+    update: bool
     yes: bool

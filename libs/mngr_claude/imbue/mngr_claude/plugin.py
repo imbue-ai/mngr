@@ -38,7 +38,6 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -286,20 +285,36 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
 
     Rebases absolute paths from source_claude_dir onto target_config_dir
     so that Claude Code can find plugin files in the per-agent config dir.
-    Raises ConfigError if any installPath doesn't start with the expected prefix.
+    Paths that don't match the expected prefix are rewritten best-effort.
     """
     data: dict[str, Any] = json.loads(content)
     source_prefix = str(source_claude_dir) + "/"
     for plugin_name, plugin_entries in data.get("plugins", {}).items():
         for entry in plugin_entries:
             install_path = entry.get("installPath", "")
-            if not install_path.startswith(source_prefix):
-                raise ConfigError(
-                    f"installed_plugins.json: plugin {plugin_name!r} has installPath {install_path!r} "
-                    f"which does not start with expected prefix {source_prefix!r}"
-                )
-            relative = install_path[len(source_prefix) :]
-            entry["installPath"] = str(target_config_dir / relative)
+            if install_path.startswith(source_prefix):
+                relative = install_path[len(source_prefix):]
+                entry["installPath"] = str(target_config_dir / relative)
+            else:
+                # FIXME: installPath references a different agent's directory (stale entry).
+                # Ideally we'd clean these up, but for now just rewrite them best-effort
+                # by extracting the relative path after the last "plugins/" segment.
+                plugins_marker = "/plugins/"
+                marker_idx = install_path.rfind(plugins_marker)
+                if marker_idx >= 0:
+                    relative = install_path[marker_idx + len(plugins_marker):]
+                    entry["installPath"] = str(target_config_dir / "plugins" / relative)
+                    logger.warning(
+                        "installed_plugins.json: plugin {} has unexpected installPath {}, "
+                        "rewrote best-effort to {}",
+                        plugin_name, install_path, entry["installPath"],
+                    )
+                else:
+                    logger.warning(
+                        "installed_plugins.json: plugin {} has installPath {} "
+                        "which could not be rebased onto {}; keeping as-is",
+                        plugin_name, install_path, target_config_dir,
+                    )
     return json.dumps(data, indent=2) + "\n"
 
 

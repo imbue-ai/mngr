@@ -1910,6 +1910,10 @@ class Host(BaseHost, OnlineHostInterface):
 
         Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default,
         or at <worktree_base_folder>/<name>-<uuid>/ if worktree_base_folder is set.
+
+        In update mode (options.is_update), the worktree already exists.
+        Instead of creating a new worktree, we update the existing one by
+        checking out the desired branch.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
@@ -1929,6 +1933,28 @@ class Host(BaseHost, OnlineHostInterface):
             raise UserInputError("Worktree mode requires a branch. Use --branch BRANCH or --branch BASE:NEW.")
 
         branch_label = new_branch_name or base_branch
+
+        if options.is_update:
+            # Update existing worktree: checkout the desired branch
+            with log_span("Updating git worktree", path=str(work_dir_path), branch=branch_label):
+                git_wt = f"git -C {shlex.quote(str(work_dir_path))}"
+                if new_branch_name:
+                    checkout_cmd = (
+                        f"{git_wt} checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch or 'HEAD')}"
+                    )
+                else:
+                    checkout_cmd = f"{git_wt} checkout {shlex.quote(base_branch or 'HEAD')}"
+                result = self.execute_idempotent_command(checkout_cmd)
+                if not result.success:
+                    raise MngrError(f"Failed to update git worktree: {result.stderr}")
+
+                created_branch = new_branch_name
+
+                self._apply_work_dir_extra_paths(
+                    host, source_path, work_dir_path, self.mngr_ctx.config.work_dir_extra_paths
+                )
+
+                return CreateWorkDirResult(path=work_dir_path, created_branch_name=created_branch)
 
         with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_label):
             git_c = f"git -C {shlex.quote(str(source_path))}"
@@ -1969,7 +1995,11 @@ class Host(BaseHost, OnlineHostInterface):
         options: CreateAgentOptions,
         created_branch_name: str | None = None,
     ) -> AgentInterface:
-        """Create the agent state directory and return the agent."""
+        """Create the agent state directory and return the agent.
+
+        In update mode (options.is_update), the state directory already exists.
+        We preserve the original create_time and update all other fields.
+        """
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
         agent_type = options.agent_type or AgentTypeName("claude")
@@ -1982,9 +2012,14 @@ class Host(BaseHost, OnlineHostInterface):
             resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
 
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
+            # _mkdirs uses mkdir -p, which is idempotent for existing directories
             self._mkdirs([state_dir, state_dir / "events", state_dir / "activity", state_dir / "commands"])
 
-            create_time = datetime.now(timezone.utc)
+            # In update mode, preserve the original create_time from existing data.json
+            if options.is_update:
+                create_time = self._read_existing_create_time(state_dir)
+            else:
+                create_time = datetime.now(timezone.utc)
 
             agent = resolved.agent_class(
                 id=agent_id,
@@ -2052,6 +2087,17 @@ class Host(BaseHost, OnlineHostInterface):
                     thread.join(60.0)
 
             return agent
+
+    def _read_existing_create_time(self, state_dir: Path) -> datetime:
+        """Read the create_time from an existing agent's data.json, falling back to now."""
+        data_path = state_dir / "data.json"
+        try:
+            content = self.read_text_file(data_path)
+            data = json.loads(content)
+            return datetime.fromisoformat(data["create_time"])
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError) as e:
+            logger.warning("Could not read existing create_time from {}: {}", data_path, e)
+            return datetime.now(timezone.utc)
 
     def _get_agent_state_dir(self, agent: AgentInterface) -> Path:
         """Get the state directory for an agent."""

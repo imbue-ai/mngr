@@ -84,6 +84,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create) | `False` |
+| `--update`, `--no-update` | boolean | When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
 | `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
@@ -194,6 +195,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Agent Limits

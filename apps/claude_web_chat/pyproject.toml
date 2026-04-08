@@ -1,0 +1,93 @@
+[project]
+name = "claude-web-chat"
+version = "0.1.0"
+description = "Web chat interface for mngr-managed Claude agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "imbue-common",
+    "imbue-mngr",
+    "pluggy>=1.5",
+    "pydantic-settings>=2.13.1",
+    "starlette>=0.45",
+    "uvicorn>=0.34",
+    "watchdog>=4.0",
+]
+license = "FCL-1.0-MIT"
+license-files = [
+    "LICENSE",
+]
+
+[dependency-groups]
+dev = [
+    "playwright>=1.40",
+    "pytest-playwright>=0.4",
+]
+
+[project.scripts]
+claude-web-chat = "imbue.claude_web_chat.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+imbue-common = { workspace = true }
+imbue-mngr = { workspace = true }
+
+[tool.hatch.build]
+artifacts = [
+    "imbue/claude_web_chat/static/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+
+# Shared pytest settings (markers, filterwarnings, coverage report config)
+# are centralized in:
+#   libs/imbue_common/imbue/imbue_common/conftest_hooks.py
+# The settings below remain here because they are read from pyproject.toml
+# before any hooks run: addopts, coverage.run, inline-snapshot, timeout_func_only.
+[tool.pytest.ini_options]
+timeout_func_only = true
+junit_family = "xunit1"
+testpaths = ["."]
+addopts = [
+  "-n 4",
+  "--dist=worksteal",
+  "--cov=imbue.claude_web_chat",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+  "--cov-report=xml",
+  "--cov-fail-under=80",
+  "--durations=20",
+  "--timeout=10",
+  "--timeout-method=signal",
+  "--max-worker-restart=0",
+  "-m not acceptance and not release",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+]
+
+[tool.inline-snapshot]
+default-flags=["report"]
+default-flags-tui=["report"]
+default-flags-ide=["report"]
+format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]
