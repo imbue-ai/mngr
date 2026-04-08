@@ -1,3 +1,4 @@
+import json
 import shutil
 from datetime import datetime
 from datetime import timezone
@@ -178,8 +179,6 @@ class LimaProviderInstance(BaseProviderInstance):
 
     def _read_tags(self, host_id: HostId) -> dict[str, str]:
         """Read tags from the per-host JSON file."""
-        import json
-
         path = self._tags_path(host_id)
         if not path.exists():
             return {}
@@ -191,8 +190,6 @@ class LimaProviderInstance(BaseProviderInstance):
 
     def _write_tags(self, host_id: HostId, tags: dict[str, str]) -> None:
         """Write tags to the per-host JSON file."""
-        import json
-
         path = self._tags_path(host_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(tags, indent=2))
