@@ -340,13 +340,15 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
 @pytest.mark.timeout(120)
 def test_create_modal_retry(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can control connection retries and timeouts:
-    mngr create my-task --provider modal --retry 5 --retry-delay 10s
+    # you can control connection retries and timeouts via settings.toml:
+    # [retry]
+    # connect_retry_times = 5
+    # connect_retry_delay = "10s"
     # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
     """)
     result = e2e.run(
-        "mngr create my-task --provider modal --retry 5 --retry-delay 10s --no-connect --no-ensure-clean",
-        comment="you can control connection retries and timeouts",
+        "mngr create my-task --provider modal --no-connect --no-ensure-clean",
+        comment="retry settings are configured via [retry] in settings.toml",
         timeout=_REMOTE_TIMEOUT,
     )
     expect(result).to_succeed()
