@@ -1240,7 +1240,7 @@ def test_on_destroy_removes_trust(
 
 
 def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
-    """Create fake session files in the agent's state directory for testing archival.
+    """Create fake session files in the agent's state directory for testing preservation.
 
     Returns a dict mapping logical names to their paths.
     """
