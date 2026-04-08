@@ -262,6 +262,16 @@ Provider: ssh
     key_file = "~/.ssh/id_ed25519"
   No start arguments are supported for the SSH provider.
 
+Provider: vultr
+  VPS-specific args (--vps- prefix, consumed by provider):
+    --vps-region=REGION  Vultr region (default: ewr)
+    --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
+    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 
 ## See Also
 
