@@ -143,7 +143,8 @@ def test_discover_host_state_crashed_after_container_kill(
     container = docker_provider._find_container_by_host_id(host.id)
     assert container is not None
     container.kill()
-    container.wait()  # Wait for Docker to update container status
+    # Wait for Docker to update container status after kill
+    container.wait()
 
     hosts = docker_provider.discover_hosts(temp_mngr_ctx.concurrency_group)
     state = _find_host_state(hosts, host.id)

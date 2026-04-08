@@ -45,9 +45,9 @@ def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInsta
 def test_gc_completes_when_docker_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
     """GC should complete without error when the Docker daemon is unreachable.
 
-    This validates the fix from PR #1142: before the fix, gc() crashed with an
-    unhandled DockerException. Now _discover_hosts_for_gc catches the
-    ProviderUnavailableError and skips the provider entirely.
+    This validates the fix from the destroy-docker-offline PR: before the fix,
+    gc() crashed with an unhandled DockerException. Now Docker's discover_hosts
+    catches ProviderUnavailableError internally and returns an empty list.
     """
     offline_provider = make_offline_docker_provider(temp_mngr_ctx)
 
@@ -112,13 +112,15 @@ def test_gc_multi_provider_continues_when_one_offline(
     assert ProviderInstanceName("local") in provider_names
     assert offline_docker.name in provider_names
 
-    # The offline docker provider should have empty hosts
+    # Verify each provider's hosts
     for provider, hosts in hosts_by_provider:
         if provider.name == offline_docker.name:
             assert hosts == []
         elif provider.name == ProviderInstanceName("local"):
             # Local provider should have at least one host (localhost)
             assert len(hosts) >= 1
+        else:
+            raise AssertionError(f"Unexpected provider in results: {provider.name}")
 
 
 # =========================================================================
