@@ -579,7 +579,7 @@ def test_get_all_commits_ahead_with_upstream(tmp_path: Path) -> None:
     # Create a repo to act as the remote origin.
     remote_repo = tmp_path / "remote.git"
     remote_repo.mkdir()
-    init_git_repo_with_config(remote_repo)
+    init_git_repo(remote_repo)
 
     # Clone it to create a local repo with upstream tracking.
     local = tmp_path / "local"
