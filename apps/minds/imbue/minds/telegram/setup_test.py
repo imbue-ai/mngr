@@ -96,6 +96,29 @@ def test_orchestrator_get_setup_info_returns_none_for_unknown_agent(tmp_path: Pa
     assert orchestrator.get_setup_info(AgentId()) is None
 
 
+def test_orchestrator_start_setup_skips_when_setup_already_in_progress(tmp_path: Path) -> None:
+    paths = MindPaths(data_dir=tmp_path)
+    orchestrator = TelegramSetupOrchestrator(paths=paths)
+    agent_id = AgentId()
+    aid = str(agent_id)
+
+    # Simulate an in-progress setup by setting the status directly
+    with orchestrator._lock:
+        orchestrator._statuses[aid] = TelegramSetupStatus.CREATING_BOT
+
+    thread_count_before = len(orchestrator._threads)
+    orchestrator.start_setup(agent_id=agent_id, agent_name="test")
+    thread_count_after = len(orchestrator._threads)
+
+    # No new thread should have been started
+    assert thread_count_after == thread_count_before
+
+    # Status should remain unchanged (not reset to CHECKING_CREDENTIALS)
+    info = orchestrator.get_setup_info(agent_id)
+    assert info is not None
+    assert info.status == TelegramSetupStatus.CREATING_BOT
+
+
 def test_orchestrator_wait_for_all_returns_immediately_when_no_threads(tmp_path: Path) -> None:
     paths = MindPaths(data_dir=tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
