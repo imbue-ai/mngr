@@ -112,10 +112,6 @@ mngr create my-task --branch main
 # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
 mngr create my-task --clone
 
-# you can make a shallow clone for faster setup:
-mngr create my-task --depth 1
-# (--shallow-since clones since a specific date instead)
-
 # you can clone from an existing agent's work directory:
 mngr create my-task --from other-agent
 # (--source, --source-agent, and --source-host are alternative forms for more specific control)
@@ -177,7 +173,7 @@ mngr create my-task --provider modal --target-path /workspace
 
 # you can upload files and run custom commands during host provisioning:
 mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
-# (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
+# (--sudo-command runs as root)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mngr create my-task --provider modal --no-start-on-boot
@@ -1212,8 +1208,8 @@ mngr create my-task --provider modal --extra-provision-command "pip install nump
 # run a command as root during provisioning (if your default user is not root, assumes passwordless sudo for that user)
 mngr create my-task --provider modal --extra-provision-command "sudo apt-get update && apt-get install -y vim"
 
-# append content to a file on the host
-mngr create my-task --provider modal --append-to-file /root/.bashrc="export PATH=/opt/bin:\$PATH"
+# append content to a file on the host using a provision command
+mngr create my-task --provider modal --extra-provision-command "echo 'export PATH=/opt/bin:\$PATH' >> /root/.bashrc"
 
 # combine multiple setup steps
 mngr create my-task --provider modal \
