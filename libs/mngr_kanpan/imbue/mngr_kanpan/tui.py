@@ -156,16 +156,21 @@ _COL_DIVIDER_CHARS = 2
 
 
 def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
-    """Wrap each row of canvas content with OSC 8 open/close escape sequences."""
+    """Wrap each row of canvas content with OSC 8 open/close escape sequences.
+
+    Sets the charset to "U" on modified segments so that urwid's Screen skips
+    the UNPRINTABLE_TRANS_TABLE translation (which would replace ESC bytes with
+    '?'). On UTF-8 terminals the "U" charset flag has no other effect.
+    """
     for row in inner_content:
         if not row:
             yield row
             continue
         new_row = [*row]
         first = new_row[0]
-        new_row[0] = (first[0], first[1], osc_open + first[2])
+        new_row[0] = (first[0], "U", osc_open + first[2])
         last = new_row[-1]
-        new_row[-1] = (last[0], last[1], last[2] + osc_close)
+        new_row[-1] = (last[0], "U", last[2] + osc_close)
         yield new_row
 
 
