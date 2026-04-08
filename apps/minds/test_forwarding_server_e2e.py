@@ -172,7 +172,7 @@ def _create_agent_with_retry(client: httpx.Client, max_attempts: int = 2) -> str
                 logger.warning("Creation timed out, retrying...")
                 _destroy_agent(_AGENT_NAME)
                 continue
-            pytest.fail("Agent creation timed out after {max_attempts} attempts")
+            pytest.fail(f"Agent creation timed out after {max_attempts} attempts")
 
     pytest.fail("Unreachable")
 
