@@ -6,7 +6,7 @@ from jinja2 import Environment
 from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.forwarding_server.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName

@@ -19,23 +19,23 @@ Each mind is created from a template repository (or local directory). The repo's
 
 ## Configuration
 
-All configuration lives in the template repository's `.mngr/settings.toml`. The forwarding server passes `--template main` plus a mode-specific template (`--template dev` for DEV mode, `--template docker` for LOCAL mode) when running `mngr create`. The template's settings file defines everything the agent needs.
+All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template dev` for DEV mode, `--template docker` for LOCAL mode) when running `mngr create`. The template's settings file defines everything the agent needs.
 
 ## Data and servers
 
 Minds use space in the host volume (via the agent dir) for persistent data. The structure and format of this data is up to each individual mind. You can optionally configure them to store their memories in git (but that is less secure, as data would leak out if synced).
 
-Minds *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl` -- one line per server -- containing the server name and URL, e.g. `{"server": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different servers (e.g. a "web" UI server and an "api" backend server). Later entries for the same server name override earlier ones. The forwarding server reads this via `mngr events <agent-id> servers/events.jsonl` to discover all backends.
+Minds *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl` -- one line per server -- containing the server name and URL, e.g. `{"server": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different servers (e.g. a "web" UI server and an "api" backend server). Later entries for the same server name override earlier ones. The desktop client reads this via `mngr events <agent-id> servers/events.jsonl` to discover all backends.
 
-# Forwarding server
+# Desktop client
 
-The forwarding server handles routing and authentication so that the URLs being served by the mind are accessible remotely.
+The desktop client handles routing and authentication so that the URLs being served by the mind are accessible remotely.
 
-See [the forwarding server design doc](../imbue/minds/forwarding_server/README.md) for more details on how it is implemented.
+See [the desktop client design doc](../imbue/minds/desktop_client/README.md) for more details on how it is implemented.
 
 ## Agent creation
 
-When a user visits the forwarding server and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The forwarding server:
+When a user visits the desktop client and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The desktop client:
 
 1. Clones the repository to a temp directory (if a URL) or uses the local path directly
 2. Runs `mngr create <name> --id <id> --no-connect --label mind=<name> --template main --template <mode>` to create the agent
@@ -46,19 +46,19 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-When the forwarding server is configured with Cloudflare credentials (via `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, and `OWNER_EMAIL` environment variables), it creates a Cloudflare tunnel for each new agent. The tunnel provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
+When the desktop client is configured with Cloudflare credentials (via `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, and `OWNER_EMAIL` environment variables), it creates a Cloudflare tunnel for each new agent. The tunnel provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
 
 The per-agent servers page shows both local forwarding links and global Cloudflare links, with toggle controls for enabling/disabling global forwarding per service.
 
 # Command line interface
 
-- `mind forward` (starts the local forwarding server for accessing and creating minds)
+- `mind forward` (starts the local desktop client for accessing and creating minds)
 
 # Deferred items
 
 The following are planned but not in the initial implementation:
 
-- [future] Remote forwarding server deployment (e.g. to Modal) for access from anywhere
+- [future] Remote desktop client deployment (e.g. to Modal) for access from anywhere
 - [future] Mobile notifications from minds
 - [future] Desktop client / system tray icon
 - [future] Multi-agent interaction between minds

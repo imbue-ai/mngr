@@ -1,11 +1,11 @@
 from inline_snapshot import snapshot
 
-from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
-from imbue.minds.forwarding_server.proxy import generate_service_worker_js
-from imbue.minds.forwarding_server.proxy import generate_websocket_shim_js
-from imbue.minds.forwarding_server.proxy import rewrite_absolute_paths_in_html
-from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
-from imbue.minds.forwarding_server.proxy import rewrite_proxied_html
+from imbue.minds.desktop_client.proxy import generate_bootstrap_html
+from imbue.minds.desktop_client.proxy import generate_service_worker_js
+from imbue.minds.desktop_client.proxy import generate_websocket_shim_js
+from imbue.minds.desktop_client.proxy import rewrite_absolute_paths_in_html
+from imbue.minds.desktop_client.proxy import rewrite_cookie_path
+from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 

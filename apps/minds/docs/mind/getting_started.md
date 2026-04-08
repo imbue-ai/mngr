@@ -1,12 +1,12 @@
 # Getting started
 
-## Starting the forwarding server
+## Starting the desktop client
 
 ```bash
 mind forward
 ```
 
-This starts the local forwarding server (default: `http://127.0.0.1:8420`). A one-time login URL is printed to the terminal.
+This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-time login URL is printed to the terminal.
 
 ## Creating your first agent
 
@@ -21,7 +21,7 @@ This starts the local forwarding server (default: `http://127.0.0.1:8420`). A on
 
 ## What happens during creation
 
-1. The forwarding server clones the repo (if URL) or uses it directly (if local path)
+1. The desktop client clones the repo (if URL) or uses it directly (if local path)
 2. Runs `mngr create` with templates from the repo's `.mngr/settings.toml`
 3. If Cloudflare is configured, creates a tunnel and injects the token
 4. The agent starts in a tmux session with background services
@@ -35,7 +35,7 @@ After creation, the agent is accessible at:
 
 ## Environment variables
 
-For Cloudflare tunnel support, set these before starting the forwarding server:
+For Cloudflare tunnel support, set these before starting the desktop client:
 
 ```bash
 export CLOUDFLARE_FORWARDING_URL=https://your-modal-endpoint.modal.run

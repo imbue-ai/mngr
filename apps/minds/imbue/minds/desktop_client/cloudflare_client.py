@@ -2,7 +2,7 @@
 
 Encapsulates authentication, URL construction, and HTTP calls to the
 Modal-hosted cloudflare_forwarding service. Created once in runner.py
-and passed as a dependency to AgentCreator and the forwarding server app.
+and passed as a dependency to AgentCreator and the desktop client app.
 """
 
 import base64

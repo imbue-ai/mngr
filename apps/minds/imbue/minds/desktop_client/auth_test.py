@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.errors import SigningKeyError
-from imbue.minds.forwarding_server.auth import FileAuthStore
+from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.primitives import OneTimeCode
 
 

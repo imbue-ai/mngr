@@ -6,7 +6,7 @@ Run persistent, autonomous AI agents with web access and global forwarding.
 
 The minds app creates and manages persistent Claude agents running in Docker containers. Each agent gets:
 
-- A local web interface accessible through the forwarding server
+- A local web interface accessible through the desktop client
 - Optional global access via Cloudflare tunnels (with Google OAuth protection)
 - Background services (web server, terminal, telegram bot, etc.) managed by a bootstrap service manager
 - The ability to expose application ports via both local and global URLs
@@ -17,7 +17,7 @@ The minds app creates and manages persistent Claude agents running in Docker con
 # Install
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install.sh | bash
 
-# Start the forwarding server
+# Start the desktop client
 mind forward
 
 # Visit the URL printed in the terminal to create your first agent
@@ -25,7 +25,7 @@ mind forward
 
 ## How it works
 
-1. The **forwarding server** (`mind forward`) runs locally and provides:
+1. The **desktop client** (`mind forward`) runs locally and provides:
    - Authentication via one-time login codes
    - A web UI for creating agents from template repositories
    - Reverse proxying to agent web servers (HTTP + WebSocket)
@@ -43,6 +43,6 @@ mind forward
 ## Learn more
 
 - [Architecture and design](./docs/design.md)
-- [Forwarding server internals](./imbue/minds/forwarding_server/README.md)
+- [Desktop client internals](./imbue/minds/desktop_client/README.md)
 - [Glossary of key concepts](./docs/mind/glossary.md)
 - [Desktop app](./docs/desktop-app.md)

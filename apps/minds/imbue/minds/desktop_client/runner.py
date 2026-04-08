@@ -10,17 +10,17 @@ import uvicorn
 from loguru import logger
 
 from imbue.minds.config.data_types import MindPaths
-from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.app import create_forwarding_server
-from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareSecret
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareUsername
-from imbue.minds.forwarding_server.cloudflare_client import OwnerEmail
-from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
+from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
+from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -29,14 +29,14 @@ from imbue.minds.utils.output import emit_event
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
 
 
-def start_forwarding_server(
+def start_desktop_client(
     data_directory: Path,
     host: str,
     port: int,
     output_format: OutputFormat,
     is_no_browser: bool = False,
 ) -> None:
-    """Start the forwarding server using uvicorn.
+    """Start the desktop client using uvicorn.
 
     Generates a one-time login URL for authentication. The URL is always
     logged to stderr. It is also emitted to stdout in the active output
@@ -71,7 +71,7 @@ def start_forwarding_server(
 
     stream_manager.start()
 
-    app = create_forwarding_server(
+    app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,

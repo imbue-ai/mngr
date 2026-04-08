@@ -50,7 +50,7 @@ global = true
 
 ### runtime/secrets
 
-Contains environment variable exports injected by the forwarding server:
+Contains environment variable exports injected by the desktop client:
 
 ```bash
 export CLOUDFLARE_TUNNEL_TOKEN=eyJ...
@@ -67,5 +67,5 @@ python3 scripts/forward_port.py --remove --name old-service
 ```
 
 The app watcher service monitors `applications.toml` and:
-1. Writes server events to `events/servers/events.jsonl` for the forwarding server to discover
+1. Writes server events to `events/servers/events.jsonl` for the desktop client to discover
 2. Reconciles with the Cloudflare forwarding API (adds missing services, removes stale ones)

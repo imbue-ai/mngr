@@ -1,12 +1,12 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.forwarding_server.templates import render_agent_servers_page
-from imbue.minds.forwarding_server.templates import render_auth_error_page
-from imbue.minds.forwarding_server.templates import render_create_form
-from imbue.minds.forwarding_server.templates import render_landing_page
-from imbue.minds.forwarding_server.templates import render_login_page
-from imbue.minds.forwarding_server.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_agent_servers_page
+from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_landing_page
+from imbue.minds.desktop_client.templates import render_login_page
+from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName

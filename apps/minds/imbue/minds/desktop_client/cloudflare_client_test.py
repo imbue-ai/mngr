@@ -1,8 +1,8 @@
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareSecret
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareUsername
-from imbue.minds.forwarding_server.cloudflare_client import OwnerEmail
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
+from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
+from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.mngr.primitives import AgentId
 
 

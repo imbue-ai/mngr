@@ -1,16 +1,16 @@
-"""End-to-end test for the minds forwarding server.
+"""End-to-end test for the minds desktop client.
 
 Creates an agent from the forever-claude-template repo via the forwarding
 server API, verifies it starts and its web server is accessible through
-the forwarding server proxy.
+the desktop client proxy.
 
 Set MINDS_TEMPLATE_REPO to a local checkout of the forever-claude-template
 repo for faster iteration (avoids cloning). If unset, the tests clone
 from the GitHub repo into a temporary directory.
 
 Run from the repo root:
-    just test apps/minds/test_forwarding_server_e2e.py::test_create_agent_e2e
-    just test apps/minds/test_forwarding_server_e2e.py::test_create_agent_dev_mode_e2e
+    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_e2e
+    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_dev_mode_e2e
 
 The Docker E2E test waits for /tmp/minds-e2e-done before tearing down:
     touch /tmp/minds-e2e-done
@@ -33,11 +33,11 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.minds.config.data_types import MindPaths
-from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.app import create_forwarding_server
-from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
+from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.testing import clean_env
 
@@ -137,7 +137,7 @@ class ForwardingServerFixture:
         self._stream_manager = MngrStreamManager(resolver=backend_resolver)
         agent_creator = AgentCreator(paths=paths)
 
-        app = create_forwarding_server(
+        app = create_desktop_client(
             auth_store=auth_store,
             backend_resolver=backend_resolver,
             http_client=None,
@@ -155,12 +155,12 @@ class ForwardingServerFixture:
         for _ in range(50):
             try:
                 with socket.create_connection((self.host, self.port), timeout=0.1):
-                    logger.info("Forwarding server started on {}:{}", self.host, self.port)
+                    logger.info("Desktop client started on {}:{}", self.host, self.port)
                     return
             except (ConnectionRefusedError, OSError):
                 threading.Event().wait(0.1)
 
-        pytest.fail("Forwarding server did not start within 5 seconds")
+        pytest.fail("Desktop client did not start within 5 seconds")
 
     def stop(self) -> None:
         if self._stream_manager is not None:
@@ -223,7 +223,7 @@ def _create_agent_with_retry(
 
 
 def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: int) -> None:
-    """Poll the forwarding server until the agent's web server is discovered, then verify the proxy."""
+    """Poll the desktop client until the agent's web server is discovered, then verify the proxy."""
     logger.info("Waiting for server discovery (up to {}s)...", timeout_seconds)
     for i in range(timeout_seconds):
         resp = client.get(f"/agents/{agent_id}/servers/")
@@ -246,7 +246,7 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
 @pytest.mark.release
 @pytest.mark.timeout(600)
 def test_create_agent_e2e(tmp_path: Path) -> None:
-    """Create an agent and verify its web server is accessible through the forwarding server."""
+    """Create an agent and verify its web server is accessible through the desktop client."""
     _configure_logging()
     _load_env()
     os.environ["MIND_NAME"] = _AGENT_NAME
@@ -269,7 +269,7 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
         agent_id = _create_agent_with_retry(client, max_attempts=2)
         logger.info("Agent ready: {}", agent_id)
 
-        # Wait for the forwarding server to discover the agent's web server
+        # Wait for the desktop client to discover the agent's web server
         # and verify it is accessible through the proxy.
         _wait_for_web_server(client, agent_id, timeout_seconds=120)
 
@@ -336,7 +336,7 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
         )
         logger.info("Agent ready: {}", agent_id)
 
-        # Wait for the forwarding server to discover the agent's web server
+        # Wait for the desktop client to discover the agent's web server
         # and verify it is accessible through the proxy.
         _wait_for_web_server(client, agent_id, timeout_seconds=60)
 

@@ -7,15 +7,15 @@ import paramiko
 import pytest
 from pydantic import ValidationError
 
-from imbue.minds.forwarding_server.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelError
-from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
-from imbue.minds.forwarding_server.ssh_tunnel import _relay_data
-from imbue.minds.forwarding_server.ssh_tunnel import _ssh_connection_is_active
-from imbue.minds.forwarding_server.ssh_tunnel import _ssh_connection_transport
-from imbue.minds.forwarding_server.ssh_tunnel import _tunnel_accept_loop
-from imbue.minds.forwarding_server.ssh_tunnel import _wait_for_socket
-from imbue.minds.forwarding_server.ssh_tunnel import parse_url_host_port
+from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.ssh_tunnel import _relay_data
+from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
+from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
+from imbue.minds.desktop_client.ssh_tunnel import _tunnel_accept_loop
+from imbue.minds.desktop_client.ssh_tunnel import _wait_for_socket
+from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 
 
 def _connect_with_retry(sock_path: Path, timeout: float = 10.0) -> socket.socket:

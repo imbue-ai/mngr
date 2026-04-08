@@ -10,9 +10,9 @@ from imbue.mngr.primitives import AgentId
 
 DEFAULT_DATA_DIR_NAME: Final[str] = ".minds"
 
-DEFAULT_FORWARDING_SERVER_HOST: Final[str] = "127.0.0.1"
+DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
-DEFAULT_FORWARDING_SERVER_PORT: Final[int] = 8420
+DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
 MNGR_BINARY: Final[str] = "mngr"
 

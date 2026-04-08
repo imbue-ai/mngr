@@ -25,30 +25,30 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
-from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.agent_creator import LOG_SENTINEL
-from imbue.minds.forwarding_server.auth import AuthStoreInterface
-from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
-from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
-from imbue.minds.forwarding_server.proxy import generate_backend_loading_html
-from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
-from imbue.minds.forwarding_server.proxy import generate_service_worker_js
-from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
-from imbue.minds.forwarding_server.proxy import rewrite_proxied_html
-from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelError
-from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
-from imbue.minds.forwarding_server.ssh_tunnel import parse_url_host_port
-from imbue.minds.forwarding_server.templates import render_agent_servers_page
-from imbue.minds.forwarding_server.templates import render_auth_error_page
-from imbue.minds.forwarding_server.templates import render_create_form
-from imbue.minds.forwarding_server.templates import render_creating_page
-from imbue.minds.forwarding_server.templates import render_landing_page
-from imbue.minds.forwarding_server.templates import render_login_page
-from imbue.minds.forwarding_server.templates import render_login_redirect_page
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.proxy import generate_backend_loading_html
+from imbue.minds.desktop_client.proxy import generate_bootstrap_html
+from imbue.minds.desktop_client.proxy import generate_service_worker_js
+from imbue.minds.desktop_client.proxy import rewrite_cookie_path
+from imbue.minds.desktop_client.proxy import rewrite_proxied_html
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
+from imbue.minds.desktop_client.templates import render_agent_servers_page
+from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_landing_page
+from imbue.minds.desktop_client.templates import render_login_page
+from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -195,7 +195,7 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client and SSH tunnel lifecycles for the forwarding server."""
+    """Manage the httpx client and SSH tunnel lifecycles for the desktop client."""
     if not is_externally_managed_client:
         inner_app.state.http_client = httpx.AsyncClient(
             follow_redirects=False,
@@ -1061,7 +1061,7 @@ def _handle_telegram_status(
 # -- App factory --
 
 
-def create_forwarding_server(
+def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
@@ -1070,7 +1070,7 @@ def create_forwarding_server(
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
 ) -> FastAPI:
-    """Create the forwarding server FastAPI application.
+    """Create the desktop client FastAPI application.
 
     When tunnel_manager is provided, the server can proxy traffic to remote agents
     by tunneling through SSH. Without it, only local agents are reachable.

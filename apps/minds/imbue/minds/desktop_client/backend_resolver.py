@@ -15,7 +15,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.forwarding_server.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServerName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -37,7 +37,7 @@ class ServerLogRecord(FrozenModel):
     """A record of a server started by an agent, as written to servers/events.jsonl.
 
     Each line of servers/events.jsonl is a JSON object with these fields.
-    Agents write these records on startup so the forwarding server can discover them.
+    Agents write these records on startup so the desktop client can discover them.
     """
 
     server: ServerName = Field(description="Name of the server (e.g., 'web')")

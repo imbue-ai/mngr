@@ -11,7 +11,7 @@ The Electron shell is deliberately thin. It handles four things:
 3. **Auth handshake**: Parses the login URL from stdout and navigates to it
 4. **Window management**: Displays the backend's web UI in a native window
 
-Everything else -- agent creation, discovery, proxying, authentication, the web UI -- remains in the Python backend, unchanged. See [overview.md](./overview.md) for details on the forwarding server architecture.
+Everything else -- agent creation, discovery, proxying, authentication, the web UI -- remains in the Python backend, unchanged. See [overview.md](./overview.md) for details on the desktop client architecture.
 
 ### Startup sequence
 

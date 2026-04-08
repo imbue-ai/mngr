@@ -6,9 +6,9 @@ Each mind is a persistent `mngr` agent running in a Docker container, created fr
 
 The system has two main components:
 
-### Forwarding server (runs on your machine)
+### Desktop client (runs on your machine)
 
-The forwarding server (`mind forward`) provides:
+The desktop client (`mind forward`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible minds (or a creation form if none exist)
 - Agent creation from git repositories or local paths via a web form or API
@@ -16,7 +16,7 @@ The forwarding server (`mind forward`) provides:
 - A per-agent servers page showing local and global (Cloudflare) URLs with toggle controls
 - Service Worker-based path rewriting for transparent URL multiplexing
 
-Each mind may run multiple web servers on separate ports. The forwarding server multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{server_name}/`).
+Each mind may run multiple web servers on separate ports. The desktop client multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{server_name}/`).
 
 ### Agent container (runs in Docker)
 
@@ -32,7 +32,7 @@ Inside each agent's Docker container:
 
 Agents can be created in two ways:
 
-1. **Via the web UI**: Visit the forwarding server. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (DEV or LOCAL). The forwarding server clones the repo (if URL), runs `mngr create` with the appropriate templates, creates a Cloudflare tunnel, and injects the tunnel token.
+1. **Via the web UI**: Visit the desktop client. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (DEV or LOCAL). The desktop client clones the repo (if URL), runs `mngr create` with the appropriate templates, creates a Cloudflare tunnel, and injects the tunnel token.
 
 2. **Via the API**: POST to `/api/create-agent` with a JSON body containing `git_url`, `agent_name`, and `launch_mode`. Poll `/api/create-agent/{agent_id}/status` for progress.
 
@@ -48,14 +48,14 @@ global = true
 ```
 
 Each application gets two URLs:
-1. **Local**: `http://localhost:8420/agents/{agent_id}/{server_name}/` (via forwarding server)
+1. **Local**: `http://localhost:8420/agents/{agent_id}/{server_name}/` (via desktop client)
 2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
 
-The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The forwarding server's toggle controls are authoritative for the actual state.
+The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The desktop client's toggle controls are authoritative for the actual state.
 
 ## Cloudflare tunnel integration
 
-When the forwarding server has Cloudflare credentials configured (env vars `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`):
+When the desktop client has Cloudflare credentials configured (env vars `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`):
 
 1. A tunnel is created automatically after each agent is created
 2. The tunnel token is injected into the agent's `runtime/secrets`

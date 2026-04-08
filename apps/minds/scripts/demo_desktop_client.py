@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Demo script that starts test backend servers and the forwarding server.
+"""Demo script that starts test backend servers and the desktop client.
 
 This demonstrates the full flow with two real backends:
 1. file-browser: serves files from a directory using a simple web UI with navigation
 2. ws-echo: a WebSocket echo server with a chat-like UI
 
 Usage:
-    uv run python apps/minds/scripts/demo_forwarding_server.py
+    uv run python apps/minds/scripts/demo_desktop_client.py
 """
 
 import os
@@ -25,9 +25,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import PlainTextResponse
 from fastapi.responses import Response
 
-from imbue.minds.forwarding_server.app import create_forwarding_server
-from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -44,7 +44,7 @@ def _render_directory_listing(dir_path: str, url_path: str) -> HTMLResponse:
     except OSError:
         items = []
 
-    # Use absolute links -- the forwarding server rewrites them transparently
+    # Use absolute links -- the desktop client rewrites them transparently
     if url_path != "/":
         parent = "/".join(url_path.rstrip("/").split("/")[:-1])
         parent_href = parent if parent else "/"
@@ -71,7 +71,7 @@ def _render_directory_listing(dir_path: str, url_path: str) -> HTMLResponse:
   </ul>
   <hr>
   <p style="color: gray; font-size: 12px;">
-    Served via minds forwarding server. Path shown by browser:
+    Served via minds desktop client. Path shown by browser:
     <code id="path"></code>
   </p>
   <script>document.getElementById('path').textContent = window.location.pathname;</script>
@@ -101,7 +101,7 @@ def _file_browser_browse(path: str, request: Request) -> Response:
             content = open(full_path).read()
         except (OSError, UnicodeDecodeError):
             return PlainTextResponse("Cannot read file", status_code=500)
-        # Absolute back link -- the forwarding server rewrites it
+        # Absolute back link -- the desktop client rewrites it
         parent_path = "/" + "/".join(path.split("/")[:-1])
         back_href = parent_path if parent_path != "/" else "/"
         return HTMLResponse(f"""<!DOCTYPE html>
@@ -258,7 +258,7 @@ def main() -> None:
 
     _write_line("")
     _write_line("=" * 60)
-    _write_line("Minds Forwarding Server Demo")
+    _write_line("Minds Desktop Client Demo")
     _write_line("=" * 60)
     _write_line("")
     _write_line(f"Data directory: {data_dir}")
@@ -284,8 +284,8 @@ def main() -> None:
     _write_line("=" * 60)
     _write_line("")
 
-    # Start forwarding server
-    app = create_forwarding_server(
+    # Start desktop client
+    app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,

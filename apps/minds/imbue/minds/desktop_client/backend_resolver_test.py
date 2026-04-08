@@ -4,19 +4,19 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
-from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
-from imbue.minds.forwarding_server.backend_resolver import ServerLogParseError
-from imbue.minds.forwarding_server.backend_resolver import ServerLogRecord
-from imbue.minds.forwarding_server.backend_resolver import StaticBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import parse_agent_ids_from_json
-from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
-from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
-from imbue.minds.forwarding_server.conftest import make_agents_json
-from imbue.minds.forwarding_server.conftest import make_resolver_with_data
-from imbue.minds.forwarding_server.conftest import make_server_log
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.backend_resolver import ServerLogParseError
+from imbue.minds.desktop_client.backend_resolver import ServerLogRecord
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backend_resolver import parse_agent_ids_from_json
+from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
+from imbue.minds.desktop_client.backend_resolver import parse_server_log_records
+from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
@@ -832,7 +832,7 @@ def test_stream_manager_agent_destroyed_for_unknown_agent_is_harmless() -> None:
 def test_stream_manager_full_snapshot_then_destroy_removes_agent() -> None:
     """Replaying a stale DISCOVERY_FULL followed by AGENT_DESTROYED correctly removes the agent.
 
-    This is the exact scenario that causes the forwarding server to get stuck
+    This is the exact scenario that causes the desktop client to get stuck
     on a destroyed agent: the events file contains a stale DISCOVERY_FULL snapshot
     (still listing the agent) followed by an AGENT_DESTROYED event. Both events
     must be processed in order.

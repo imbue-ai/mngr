@@ -1,4 +1,4 @@
-"""Integration tests for the Telegram setup endpoints in the forwarding server."""
+"""Integration tests for the Telegram setup endpoints in the desktop client."""
 
 from pathlib import Path
 
@@ -6,11 +6,11 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from imbue.minds.config.data_types import MindPaths
-from imbue.minds.forwarding_server.app import create_forwarding_server
-from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.conftest import make_agents_json
-from imbue.minds.forwarding_server.conftest import make_resolver_with_data
-from imbue.minds.forwarding_server.conftest import make_server_log
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.telegram.credential_store import save_agent_bot_credentials
 from imbue.minds.telegram.data_types import TelegramBotCredentials
@@ -21,7 +21,7 @@ from imbue.mngr.primitives import AgentId
 def _create_test_server_with_telegram(
     tmp_path: Path,
 ) -> tuple[TestClient, FileAuthStore, TelegramSetupOrchestrator, AgentId]:
-    """Create a forwarding server with telegram support and a test agent."""
+    """Create a desktop client with telegram support and a test agent."""
     agent_id = AgentId()
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -36,7 +36,7 @@ def _create_test_server_with_telegram(
     paths = MindPaths(data_dir=tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
-    app = create_forwarding_server(
+    app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
@@ -126,7 +126,7 @@ def test_telegram_setup_returns_done_immediately_when_already_configured(tmp_pat
 def _create_test_server_with_two_agents(
     tmp_path: Path,
 ) -> tuple[TestClient, FileAuthStore, TelegramSetupOrchestrator, AgentId, AgentId]:
-    """Create a forwarding server with two agents so the landing page shows a list."""
+    """Create a desktop client with two agents so the landing page shows a list."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     auth_dir = tmp_path / "auth"
@@ -144,7 +144,7 @@ def _create_test_server_with_two_agents(
     paths = MindPaths(data_dir=tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
-    app = create_forwarding_server(
+    app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,

@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
-from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
-from imbue.minds.forwarding_server.backend_resolver import ServerLogRecord
-from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
+from imbue.minds.desktop_client.backend_resolver import ServerLogRecord
+from imbue.minds.desktop_client.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName

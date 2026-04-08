@@ -1,4 +1,4 @@
-"""Agent creation for the forwarding server.
+"""Agent creation for the desktop client.
 
 Creates mngr agents from git repositories or local directories. The repo's
 own ``.mngr/settings.toml`` drives all configuration -- no minds.toml,
@@ -35,7 +35,7 @@ from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
-from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -301,7 +301,7 @@ def _inject_tunnel_token(
 class AgentCreator(MutableModel):
     """Creates mngr agents in the background from git repositories or local paths.
 
-    Tracks creation status so the forwarding server can show progress
+    Tracks creation status so the desktop client can show progress
     and redirect users to agents when creation is complete.
 
     Thread-safe: all status reads/writes are guarded by an internal lock.
