@@ -111,9 +111,10 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Isolate git and provide user config for tests that run git commands.
 
-    Sets GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT, and GIT_CONFIG_GLOBAL
-    via the shared isolate_git() helper. Tests that need git should request
-    this fixture (or temp_git_repo, which depends on it).
+    Sets GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT, and writes a
+    .gitconfig to the fake HOME via the shared isolate_git() helper.
+    Tests that need git should request this fixture (or temp_git_repo,
+    which depends on it).
     """
     with isolate_git(monkeypatch):
         yield
