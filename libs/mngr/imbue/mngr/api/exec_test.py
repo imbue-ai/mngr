@@ -192,7 +192,7 @@ def test_exec_command_on_agent_sources_agent_env(
     agent = running_test_agent.agent
 
     # Write an env var to the agent's env file
-    agent_env_path = host.host_dir / "agents" / str(agent.id) / "env"
+    agent_env_path = host.get_agent_env_path(agent)
     agent_env_path.write_text("MNGR_TEST_EXEC_VAR=hello_from_env\n")
 
     result = exec_command_on_agent(
