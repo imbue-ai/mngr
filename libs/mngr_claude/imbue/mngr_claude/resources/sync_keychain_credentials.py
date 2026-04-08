@@ -23,7 +23,8 @@ def _compute_keychain_label_suffix(config_dir: str) -> str:
     Claude Code appends -<sha256(config_dir)[:8]> to keychain labels when
     CLAUDE_CONFIG_DIR is set, to avoid collisions between config dirs.
     """
-    return "-" + hashlib.sha256(config_dir.encode()).hexdigest()[:8]
+    normalized = os.path.normpath(config_dir)
+    return "-" + hashlib.sha256(normalized.encode()).hexdigest()[:8]
 
 
 def _read_keychain(label: str) -> str | None:
