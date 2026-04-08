@@ -148,10 +148,13 @@ class FakeForwardingCtx(ForwardingCtx):
     fake: FakeCloudflareOps
 
 
-def make_fake_forwarding_ctx(domain: str = "example.com") -> FakeForwardingCtx:
+def make_fake_forwarding_ctx(
+    domain: str = "example.com",
+    allowed_idps: list[str] | None = None,
+) -> FakeForwardingCtx:
     """Create a FakeForwardingCtx for testing."""
     fake = FakeCloudflareOps()
-    ctx = FakeForwardingCtx(ops=fake, domain=domain)
+    ctx = FakeForwardingCtx(ops=fake, domain=domain, allowed_idps=allowed_idps)
     ctx.fake = fake
     return ctx
 

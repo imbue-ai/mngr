@@ -19,8 +19,6 @@ from imbue.cloudflare_forwarding.app import extract_username_from_tunnel_name
 from imbue.cloudflare_forwarding.app import make_hostname
 from imbue.cloudflare_forwarding.app import make_tunnel_name
 from imbue.cloudflare_forwarding.app import web_app
-from imbue.cloudflare_forwarding.testing import FakeCloudflareOps
-from imbue.cloudflare_forwarding.testing import FakeForwardingCtx
 from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
 from imbue.cloudflare_forwarding.testing import make_fake_tunnel_token
 
@@ -187,9 +185,7 @@ def test_add_service_applies_default_access_policy() -> None:
 
 def test_add_service_passes_allowed_idps_to_access_app() -> None:
     """When ForwardingCtx has allowed_idps configured, they are passed to created Access Applications."""
-    fake = FakeCloudflareOps()
-    ctx = FakeForwardingCtx(ops=fake, domain="example.com", allowed_idps=["google-idp-uuid-123"])
-    ctx.fake = fake
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123"])
     ctx.create_tunnel("alice", "agent1")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_tunnel_auth("alice--agent1", policy)
@@ -211,9 +207,7 @@ def test_add_service_no_allowed_idps_when_not_configured() -> None:
 
 def test_set_service_auth_passes_allowed_idps() -> None:
     """set_service_auth creates Access Applications with allowed_idps when configured."""
-    fake = FakeCloudflareOps()
-    ctx = FakeForwardingCtx(ops=fake, domain="example.com", allowed_idps=["google-idp-uuid-123", "otp-idp-uuid-456"])
-    ctx.fake = fake
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123", "otp-idp-uuid-456"])
     ctx.create_tunnel("alice", "agent1")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_service_auth("alice--agent1", "alice", "web", policy)
