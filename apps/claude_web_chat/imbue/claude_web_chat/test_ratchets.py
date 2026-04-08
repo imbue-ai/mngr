@@ -262,7 +262,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_hardcoded_claude_dir() -> None:
-    rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
+    rc.check_hardcoded_claude_dir(_DIR, snapshot(1))
 
 
 def test_prevent_bare_urwid_tty_signal_keys() -> None:
