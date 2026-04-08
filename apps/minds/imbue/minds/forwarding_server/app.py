@@ -53,6 +53,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -1002,7 +1003,7 @@ async def _handle_telegram_setup(
 
     telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
     return Response(
-        content=json.dumps({"agent_id": str(parsed_id), "status": "CHECKING_CREDENTIALS"}),
+        content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS)}),
         media_type="application/json",
     )
 
@@ -1032,7 +1033,7 @@ def _handle_telegram_status(
         is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
         if is_active:
             return Response(
-                content=json.dumps({"agent_id": str(parsed_id), "status": "DONE"}),
+                content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.DONE)}),
                 media_type="application/json",
             )
         return Response(
