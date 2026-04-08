@@ -20,7 +20,7 @@
 **/sdist/
 **/var/
 **/wheels/
-/share/python-wheels/
+**/share/python-wheels/
 **/*.egg-info/
 **/.installed.cfg
 **/*.egg
@@ -69,7 +69,7 @@
 **/.scrapy
 
 # Sphinx documentation
-/docs/_build/
+**/docs/_build/
 
 # PyBuilder
 **/.pybuilder/
@@ -153,7 +153,7 @@
 **/.ropeproject
 
 # mkdocs documentation
-/site
+**/site
 
 # mypy
 **/.mypy_cache/
@@ -218,20 +218,20 @@
 **/frontend-dist/
 
 # Claude Code local settings (session-specific permissions)
-/.claude/settings.local.json
+**/.claude/settings.local.json
 
 # PR status and URL files written by main_claude_stop_hook.sh for status line display
-/.claude/pr_url
-/.claude/pr_status
+**/.claude/pr_url
+**/.claude/pr_status
 
 # Local Claude settings backup files
-/.claude/*.bak
+**/.claude/*.bak
 
 # Local mngr settings (not committed)
-/.mngr/settings.local.toml
+**/.mngr/settings.local.toml
 
 # so the user can make their own notification script
-/scripts/notify_user.local.sh
+**/scripts/notify_user.local.sh
 
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
@@ -240,30 +240,30 @@
 **/tmr_*/
 
 # Active session marker file (used to detect interrupted sessions)
-/.claude/active
+**/.claude/active
 
 # we stick the image build artifacts here
-/.mngr/dev/build/
-/.mngr/dev/secrets/
+**/.mngr/dev/build/
+**/.mngr/dev/secrets/
 
 # Offload caches and local files
-/.offload/**
-/.offload-cache-key
-/test-results
-/current.tar.gz
+**/.offload/**
+**/.offload-cache-key
+**/test-results
+**/current.tar.gz
 
 # Minds deploy-time build artifacts
 **/.minds/
 
 # Autofix session artifacts
 **/.autofix/
-/.reviewer/outputs/
-/.reviewer/settings.local.json
+**/.reviewer/outputs/
+**/.reviewer/settings.local.json
 **/.reviewer/.stop_hook_consecutive_blocks
 **/.reviews/
 
 # Stuck agent tracking (stop hook escape valve)
-/.claude/blocked_stop_commits
+**/.claude/blocked_stop_commits
 
 # Demo recordings (asciinema .cast, .txt, and scripts)
 **/.demos/

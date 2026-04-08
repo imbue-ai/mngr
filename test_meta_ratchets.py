@@ -251,17 +251,15 @@ def test_no_gitignored_files_are_tracked() -> None:
     )
 
 
-def test_gitignore_patterns_are_depth_qualified() -> None:
-    """Ensure every active .gitignore pattern is depth-qualified.
+def test_gitignore_patterns_use_double_star() -> None:
+    """Ensure every active .gitignore pattern starts with **/ or contains a path separator.
 
-    Each pattern must either:
-    - Start with **/ (matches at any depth -- dockerignore-compatible)
-    - Start with / (root-only in gitignore)
-    - Contain a / before the final character (already path-qualified, e.g. docs/_build/)
+    All patterns must use **/ so they are directly compatible with .dockerignore
+    syntax (where bare names only match at root). Patterns with an interior /
+    (like */*/_tasks/) are already path-qualified and are allowed.
 
-    Bare names like 'foo' silently differ between gitignore (any depth) and
-    dockerignore (root only). Requiring explicit depth qualification prevents
-    this class of bugs and keeps .dockerignore generation trivial.
+    The offload justfile copies .gitignore to .dockerignore at build time,
+    so keeping the formats compatible avoids a separate generation step.
     """
     gitignore = (_REPO_ROOT / ".gitignore").read_text()
     violations: list[str] = []
@@ -269,19 +267,17 @@ def test_gitignore_patterns_are_depth_qualified() -> None:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Remove negation prefix for analysis.
         pattern = stripped.lstrip("!")
-        # Already depth-qualified: starts with **/ or /
-        if pattern.startswith("**/") or pattern.startswith("/"):
+        if pattern.startswith("**/"):
             continue
-        # Contains a / before the last char (e.g. docs/_build/, */*/_tasks/)
+        # Contains a / before the last char (e.g. */*/_tasks/)
         core = pattern.rstrip("/")
         if "/" in core:
             continue
         violations.append(f"  line {lineno}: {stripped}")
     assert len(violations) == 0, (
-        "The following .gitignore patterns are bare names without depth qualification.\n"
-        "Prefix with **/ (any depth) or / (root only):\n" + "\n".join(violations)
+        "The following .gitignore patterns need a **/ prefix.\n"
+        "This keeps .gitignore directly compatible with .dockerignore:\n" + "\n".join(violations)
     )
 
 
