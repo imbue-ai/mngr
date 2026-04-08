@@ -307,6 +307,8 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the remote provider's SSH connection, and concurrent sends from different
         machines are rare enough to not warrant cross-host locking.
         """
+        # FIXME: you CAN lock remotely, it's just a little more difficult.
+        #  We should fix this both here, and for lock_cooperatively
         if not self.host.is_local:
             yield
             return
