@@ -84,6 +84,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create) | `False` |
+| `--update`, `--no-update` | boolean | When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
 | `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
@@ -203,6 +204,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Agent Limits
@@ -259,6 +261,16 @@ Provider: ssh
     user = "root"
     key_file = "~/.ssh/id_ed25519"
   No start arguments are supported for the SSH provider.
+
+Provider: vultr
+  VPS-specific args (--vps- prefix, consumed by provider):
+    --vps-region=REGION  Vultr region (default: ewr)
+    --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
+    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 
 ## See Also

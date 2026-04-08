@@ -1,4 +1,5 @@
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -10,10 +11,16 @@ from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+import tomlkit
+from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.skitwright.runner import run_command
@@ -190,6 +197,59 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
+def _setup_test_profile(host_dir: Path) -> str:
+    """Create a mngr profile in the test's host directory.
+
+    Sets up config.toml, profile directory, user_id, and tmux_onboarding_shown
+    so that the subprocess mngr uses a predictable profile with a user_id that
+    follows the mngr_test-YYYY-MM-DD-HH-MM-SS convention (parseable by the
+    Modal environment cleanup script).
+
+    Returns the user_id that was written.
+    """
+    profile_id = uuid4().hex
+    profile_dir = host_dir / PROFILES_DIRNAME / profile_id
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write config.toml pointing to this profile
+    config_path = host_dir / ROOT_CONFIG_FILENAME
+    config_path.write_text(f'profile = "{profile_id}"\n')
+
+    # Build a user_id that produces a Modal environment name matching the
+    # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
+    # cleanup_old_modal_test_environments).
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
+    identifier = os.environ.get("MNGR_AGENT_NAME") or uuid4().hex[:8]
+    user_id = f"{timestamp}-{identifier}"
+    # Write without trailing newline (matching the format used by get_or_create_user_id)
+    user_id_path = profile_dir / USER_ID_FILENAME
+    user_id_path.write_text(user_id)
+
+    # Suppress tmux onboarding screen in test transcripts
+    (profile_dir / "tmux_onboarding_shown").write_text("")
+
+    return user_id
+
+
+def _delete_modal_environment(prefix: str, user_id: str, env: dict[str, str], cwd: Path) -> None:
+    """Delete the Modal environment for this test."""
+    environment_name = f"{prefix}{user_id}"
+    logger.info("Deleting Modal environment: {}", environment_name)
+    try:
+        result = run_command(
+            f"uv run modal environment delete {shlex.quote(environment_name)} --yes",
+            env=env,
+            cwd=cwd,
+            timeout=30.0,
+        )
+        if result.exit_code != 0:
+            logger.warning("Failed to delete Modal environment {}: {}", environment_name, result.stderr.strip())
+        else:
+            logger.info("Deleted Modal environment: {}", environment_name)
+    except (FileNotFoundError, OSError) as exc:
+        logger.warning("Error deleting Modal environment {}: {}", environment_name, exc)
+
+
 def _write_destroy_script(
     test_output_dir: Path,
     env: dict[str, str],
@@ -218,6 +278,28 @@ def _write_destroy_script(
         'echo "Environment destroyed."\n'
     )
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+# Resolve the real home directory at import time, before any test fixture
+# monkeypatches HOME to an isolated temp directory.
+_REAL_HOME = Path.home()
+
+
+def _load_modal_credentials(env: dict[str, str]) -> None:
+    """Load Modal credentials from ~/.modal.toml into the env dict.
+
+    Mirrors the logic in mngr_modal's conftest, which uses monkeypatch for
+    in-process tests. E2e subprocesses need the vars set explicitly since
+    monkeypatch doesn't propagate to child processes.
+    """
+    modal_toml_path = _REAL_HOME / ".modal.toml"
+    if not modal_toml_path.exists():
+        return
+    for value in tomlkit.loads(modal_toml_path.read_text()).values():
+        if isinstance(value, dict) and value.get("active", ""):
+            env["MODAL_TOKEN_ID"] = value.get("token_id", "")
+            env["MODAL_TOKEN_SECRET"] = value.get("token_secret", "")
+            break
 
 
 @pytest.fixture
@@ -256,23 +338,36 @@ def e2e(
     # are already set by the parent autouse fixture and inherited via
     # os.environ.copy().
     env = os.environ.copy()
+
+    # Load Modal credentials from ~/.modal.toml if present and not already in
+    # env vars. The Modal conftest does this via monkeypatch for in-process
+    # tests, but e2e subprocesses need the vars set explicitly.
+    if "MODAL_TOKEN_ID" not in env:
+        _load_modal_credentials(env)
+
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
 
-    # Transform the inherited prefix from mngr_{uuid}- to mngr_test-{uuid}-
-    # so that Modal environment names (which are {prefix}{user_id}) pass the
-    # mngr_test- guard in the Modal backend. This only affects subprocess
-    # commands; the in-process prefix remains unchanged for tmux cleanup.
-    inherited_prefix = env.get("MNGR_PREFIX", "mngr_")
-    env["MNGR_PREFIX"] = inherited_prefix.replace("mngr_", "mngr_test-", 1)
+    # Use a short fixed prefix so that derived names (e.g. Modal environment
+    # names, which are {prefix}{user_id}) stay well under provider length
+    # limits. Test isolation comes from MNGR_HOST_DIR, not the prefix.
+    # The mngr_test- prefix is required by the Modal backend guard.
+    env["MNGR_PREFIX"] = "mngr_test-"
+
+    # Create the mngr profile proactively so that:
+    # 1. The user_id follows the timestamp convention for Modal cleanup
+    # 2. The tmux onboarding screen is suppressed in test transcripts
+    test_user_id = _setup_test_profile(temp_host_dir)
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start
-    # Remote providers (Modal, Docker) are left enabled so that e2e tests exercise them
+    # Configure connect_command for create/start.
+    # Remote providers (Modal, Docker) are left enabled so that e2e tests
+    # exercise the full discovery path. Tests that trigger Modal (via
+    # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -330,6 +425,9 @@ def e2e(
         cwd=temp_git_repo,
         timeout=30.0,
     )
+
+    # Delete the Modal environment (if one was created)
+    _delete_modal_environment("mngr_test-", test_user_id, env=env, cwd=temp_git_repo)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)

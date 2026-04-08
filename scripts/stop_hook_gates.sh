@@ -115,15 +115,29 @@ else
     AUTOFIX_CMD="/autofix"
 fi
 
+CONVO_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "verify_conversation.append_to_prompt" "")
+if [[ -n "$CONVO_EXTRA_ARGS" ]]; then
+    CONVO_CMD="/verify-conversation ${CONVO_EXTRA_ARGS}"
+else
+    CONVO_CMD="/verify-conversation"
+fi
+
+ARCH_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "verify_architecture.append_to_prompt" "")
+if [[ -n "$ARCH_EXTRA_ARGS" ]]; then
+    ARCH_CMD="/verify-architecture ${ARCH_EXTRA_ARGS}"
+else
+    ARCH_CMD="/verify-architecture"
+fi
+
 MISSING=()
 if [[ "$ARCH_NEEDED" == "true" ]]; then
-    MISSING+=("architecture verification (/verify-architecture)")
+    MISSING+=("architecture verification (${ARCH_CMD})")
 fi
 if [[ "$AUTOFIX_NEEDED" == "true" ]]; then
     MISSING+=("autofix (${AUTOFIX_CMD})")
 fi
 if [[ "$CONVO_NEEDED" == "true" ]]; then
-    MISSING+=("conversation review (/verify-conversation)")
+    MISSING+=("conversation review (${CONVO_CMD})")
 fi
 
 if [[ ${#MISSING[@]} -eq 0 ]]; then

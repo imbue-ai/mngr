@@ -1,3 +1,4 @@
+import contextlib
 import io
 import logging
 import os
@@ -6,6 +7,7 @@ import sys
 import threading
 import traceback
 from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -523,7 +525,12 @@ class LoggingSuppressor:
     including those from Python's warnings module, third-party libraries, and
     any other code that writes directly to the streams.
 
-    Use as a context manager or call enable/disable explicitly.
+    Can be used as a context manager or via enable/disable_and_replay directly::
+
+        with LoggingSuppressor.suppressed(console_level=LogLevel.INFO):
+            # logging is suppressed here
+            ...
+        # logging is restored and buffered messages are replayed
     """
 
     # Class-level state for the singleton suppressor
@@ -534,6 +541,21 @@ class LoggingSuppressor:
     # Original streams for restoration
     _original_stdout: TextIO | None = None
     _original_stderr: TextIO | None = None
+
+    @classmethod
+    @contextlib.contextmanager
+    def suppressed(
+        cls,
+        console_level: LogLevel,
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
+        clear_screen: bool = True,
+    ) -> Iterator[None]:
+        """Context manager that enables suppression and restores on exit."""
+        cls.enable(console_level, buffer_size)
+        try:
+            yield
+        finally:
+            cls.disable_and_replay(clear_screen=clear_screen)
 
     @classmethod
     def is_suppressed(cls) -> bool:

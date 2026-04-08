@@ -100,7 +100,7 @@ def _make_pyproject(old_name: str, new_name: str, tombstone_version: str, new_ve
         version = "{tombstone_version}"
         description = "Renamed to {new_name}. Install {new_name} instead."
         readme = "README.md"
-        requires-python = ">=3.11"
+        requires-python = ">=3.12"
         license = "MIT"
         dependencies = ["{new_name}=={new_version}"]
     """)

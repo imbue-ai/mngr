@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -258,6 +259,12 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Reuse existing agent with the same name if it exists (idempotent create)",
 )
+@optgroup.option(
+    "--update/--no-update",
+    default=False,
+    show_default=True,
+    help="When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse",
+)
 @optgroup.option("--connect/--no-connect", default=True, help="Connect to the agent after creation [default: connect]")
 @optgroup.option(
     "--auto-start/--no-auto-start",
@@ -432,10 +439,17 @@ def create(ctx: click.Context, **kwargs) -> None:
     # Start capturing output early when --edit-message is set so that logs from
     # address parsing, provider merging, and other pre-editor work are included
     # in the replay after the editor closes (which clears the screen).
-    if opts.edit_message:
-        LoggingSuppressor.enable(logging_config.console_level)
-
-    try:
+    # On the happy path, suppression is disabled by _on_editor_exit or
+    # _finish_create (with clear_screen=True). This context manager is the
+    # safety net: if something raises before those run, it restores
+    # stdout/stderr so error messages are not swallowed (clear_screen=False
+    # because on an error path we don't want to hide prior output).
+    suppressor = (
+        LoggingSuppressor.suppressed(logging_config.console_level, clear_screen=False)
+        if opts.edit_message
+        else nullcontext()
+    )
+    with suppressor:
         # Parse agent address from the positional argument or --name flag.
         # Both accept agent addresses; they are equivalent but mutually exclusive.
         if opts.positional_name and opts.name:
@@ -461,6 +475,10 @@ def create(ctx: click.Context, **kwargs) -> None:
                 to_update(mngr_ctx.field_ref().is_auto_approve, True),
             )
 
+        # Validate --update requires --reuse
+        if opts.update and not opts.reuse:
+            raise UserInputError("--update requires --reuse. Use --reuse --update together.")
+
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
         plugin_cli_params: dict[str, Any] = {
@@ -474,11 +492,6 @@ def create(ctx: click.Context, **kwargs) -> None:
         create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
         _post_create(create_result, connection_opts, opts, mngr_ctx)
         _finish_create(create_result, setup, output_opts)
-    finally:
-        # Restore stdout/stderr if suppression is still active so that error
-        # messages from Click (or the user's shell) are not swallowed.
-        if LoggingSuppressor.is_suppressed():
-            LoggingSuppressor.disable_and_replay(clear_screen=False)
 
 
 class _AutoLabels(FrozenModel):
@@ -591,6 +604,17 @@ def _create_agent(
         lifecycle=setup.host_lifecycle,
     )
 
+    # Reject lifecycle options on the local provider (idle timeout, idle mode).
+    # The local host cannot be stopped by mngr, so idle detection is meaningless.
+    _is_local = target_host is None or (
+        isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
+    )
+    if _is_local and setup.host_lifecycle != HostLifecycleOptions():
+        raise UserInputError(
+            "Idle timeout and idle mode are not supported for the local provider. "
+            "Use a remote provider (e.g. --provider modal) for idle detection."
+        )
+
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None
     if setup.resolved_source.agent is not None:
@@ -626,6 +650,7 @@ def _create_agent(
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
+    update_host: OnlineHostInterface | None = None
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
@@ -635,28 +660,47 @@ def _create_agent(
             agent_and_host_loader=setup.agent_and_host_loader,
         )
         if reuse_result is not None:
-            agent, host = reuse_result
-            logger.info("Reusing existing agent: {}", agent.name)
+            if opts.update:
+                # --reuse --update: stop the existing agent, then re-create in place
+                existing_agent, existing_host = reuse_result
+                logger.info("Updating existing agent: {}", existing_agent.name)
+                existing_host.stop_agents([existing_agent.id])
+                # If the user didn't explicitly set --target-path, default to
+                # the existing agent's work_dir so we update in place.
+                # If they did set one, honor it (the agent moves to the new path).
+                resolved_target = (
+                    agent_opts.target_path if agent_opts.target_path is not None else existing_agent.work_dir
+                )
+                agent_opts = agent_opts.model_copy_update(
+                    to_update(agent_opts.field_ref().agent_id, existing_agent.id),
+                    to_update(agent_opts.field_ref().target_path, resolved_target),
+                    to_update(agent_opts.field_ref().is_update, True),
+                )
+                update_host = existing_host
+                # Fall through to the normal create path below
+            else:
+                agent, host = reuse_result
+                logger.info("Reusing existing agent: {}", agent.name)
 
-            # Handle --edit-message if editor session was started,
-            # or send initial message directly if --message/--message-file was provided
-            with _editor_cleanup_scope(setup.editor_session):
-                if setup.editor_session is not None:
-                    # Hold the host lock while waiting for the editor to prevent
-                    # idle shutdown during long editing sessions
-                    with host.lock_cooperatively():
-                        _handle_editor_message(
-                            editor_session=setup.editor_session,
-                            agent=agent,
-                        )
-                elif setup.initial_message is not None:
-                    # Send initial message directly (from --message or --message-file)
-                    logger.info("Sending message to agent")
-                    agent.send_message(setup.initial_message)
-                else:
-                    pass
+                # Handle --edit-message if editor session was started,
+                # or send initial message directly if --message/--message-file was provided
+                with _editor_cleanup_scope(setup.editor_session):
+                    if setup.editor_session is not None:
+                        # Hold the host lock while waiting for the editor to prevent
+                        # idle shutdown during long editing sessions
+                        with host.lock_cooperatively():
+                            _handle_editor_message(
+                                editor_session=setup.editor_session,
+                                agent=agent,
+                            )
+                    elif setup.initial_message is not None:
+                        # Send initial message directly (from --message or --message-file)
+                        logger.info("Sending message to agent")
+                        agent.send_message(setup.initial_message)
+                    else:
+                        pass
 
-            return CreateAgentResult(agent=agent, host=host), connection_opts
+                return CreateAgentResult(agent=agent, host=host), connection_opts
 
     # If ensure-clean is set, verify the source work_dir is clean.
     # Skip the check when using an explicit base branch, since the agent will be
@@ -667,7 +711,11 @@ def _create_agent(
         _ensure_clean_work_dir(setup.resolved_source.location)
 
     # figure out the target host (if we just have a reference)
-    resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    # In update mode, use the host from the existing agent directly
+    if update_host is not None:
+        resolved_target_host: OnlineHostInterface | NewHostOptions = update_host
+    else:
+        resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
 
     # Set host labels on existing hosts (for new hosts, labels are passed via NewHostOptions).
     # This ensures local hosts get any --host-label values.
@@ -1132,11 +1180,8 @@ def _resolve_transfer_mode(
     is_git_repo = (
         _is_git_repo(source_location.path, mngr_ctx.concurrency_group) if source_location.host.is_local else True
     )
-    is_creating_new_host = _is_creating_new_host(address, opts.new_host)
     is_remote = (
-        is_creating_new_host
-        and address.provider_name is not None
-        and address.provider_name.lower() != LOCAL_PROVIDER_NAME
+        address.provider_name is not None and address.provider_name.lower() != LOCAL_PROVIDER_NAME
     ) or not source_location.host.is_local
 
     # Check if target path points to the same location as source
@@ -1379,6 +1424,11 @@ def _parse_target_host(
                 "--new-host requires a provider in the agent address. "
                 "Use NAME@HOST.PROVIDER --new-host or NAME@.PROVIDER."
             )
+
+        # The local provider has a single fixed host; skip the new-host path
+        # and use the existing localhost instead.
+        if address.provider_name.lower() == LOCAL_PROVIDER_NAME:
+            return None
 
         # Parse host-level labels
         host_labels_dict: dict[str, str] = {}

@@ -36,7 +36,7 @@ def build_post_attach_resize_script(session_name: str) -> str:
     than "claude").
     """
     return (
-        f"tmux list-windows -t '{session_name}' -F '#I' | "
+        f"tmux list-windows -t '={session_name}' -F '#I' | "
         f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
         f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
         f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
@@ -75,7 +75,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         # Force a terminal resize after attaching to trigger SIGWINCH delivery.
         f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
         # actually attach
-        f"tmux attach -t '{session_name}'; "
+        f"tmux attach -t '={session_name}'; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -198,7 +198,7 @@ def connect_to_agent(
 ) -> None:
     """Connect to an agent via tmux attach (local) or SSH + tmux attach (remote).
 
-    For local agents, replaces the current process with: tmux attach -t <session_name>
+    For local agents, replaces the current process with: tmux attach -t =<session_name>
 
     For remote agents, runs SSH interactively and then checks the exit code to
     determine if a post-disconnect action (destroy/stop) was requested via the
@@ -222,7 +222,7 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        os.execvpe("tmux", ["tmux", "attach", "-t", session_name], env)
+        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 

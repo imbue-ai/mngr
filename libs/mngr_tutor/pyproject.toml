@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-tutor"
-version = "0.2.1"
+version = "0.2.2"
 description = "Interactive tutorial plugin for mngr"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.1",
+    "imbue-mngr==0.2.2",
     "click>=8.0",
     "click-option-group>=0.5.6",
 ]
@@ -69,5 +69,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]

@@ -812,6 +812,11 @@ class CreateAgentOptions(FrozenModel):
         description="Agent state directory of the source agent, used to transfer "
         "per-agent data during clone operations (set when cloning via --from-agent)",
     )
+    is_update: bool = Field(
+        default=False,
+        description="Whether this is an update of an existing agent (idempotent create). "
+        "When True, existing work_dir and state are updated rather than created from scratch.",
+    )
 
 
 # =========================================================================
