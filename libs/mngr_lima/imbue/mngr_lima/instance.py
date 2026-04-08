@@ -853,6 +853,8 @@ sudo poweroff
 
     def delete_volume(self, volume_id: VolumeId) -> None:
         """Delete a volume directory."""
+        if not self._volumes_dir.exists():
+            raise MngrError(f"Volume not found: {volume_id}")
         for volume_path in self._volumes_dir.iterdir():
             if volume_path.is_dir():
                 host_id = HostId(volume_path.name)
