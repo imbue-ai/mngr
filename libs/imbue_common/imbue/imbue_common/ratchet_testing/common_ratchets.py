@@ -441,3 +441,32 @@ PREVENT_IMPORTLIB_IMPORT_MODULE = RegexRatchetRule(
     rule_description="Always use normal top-level imports instead of importlib.import_module",
     pattern_string=r"\bimport_module\b",
 )
+
+
+PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
+    rule_name="hardcoded Path.home() / '.claude' path references",
+    rule_description=(
+        "Use the accessor functions from claude_config.py instead of hardcoding "
+        "Path.home() / '.claude' or Path.home() / '.claude.json'. "
+        "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
+        "For the config file: get_claude_config_path() / get_user_claude_config_path(). "
+        "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
+        "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
+    ),
+    pattern_string=r"""Path\.home\(\)\s*/\s*["']\.claude(\.json(\.bak)?)?["']""",
+)
+
+
+# --- Terminal management ---
+
+PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
+    rule_name="bare urwid tty_signal_keys call",
+    rule_description=(
+        "Do not call tty_signal_keys() directly. "
+        "Use create_urwid_screen_preserving_terminal() from imbue.mngr.cli.urwid_utils instead. "
+        "Calling tty_signal_keys(intr='undefined') disables Ctrl-C at the terminal level, "
+        "and urwid does not reliably restore it on exit. The context manager saves and restores "
+        "terminal settings in a finally block."
+    ),
+    pattern_string=r"\.tty_signal_keys\(",
+)

@@ -22,97 +22,91 @@ Common use cases:
 - Broad exception handling (bare except, except Exception)
 - Any other code pattern you want to gradually eliminate
 
-## Instructions
+## Architecture
 
-When asked to create a ratchet test, follow these steps:
+The ratchet system has three layers:
 
-### 1. Understand the Pattern
+1. **Rule definitions** in `libs/imbue_common/imbue/imbue_common/ratchet_testing/common_ratchets.py` -- `RegexRatchetRule` and `RatchetRuleInfo` objects
+2. **Wrapper functions** in `libs/imbue_common/imbue/imbue_common/ratchet_testing/standard_ratchet_checks.py` -- one function per ratchet rule
+3. **Test functions** in each project's `test_ratchets.py` -- call the wrapper with a snapshot count
 
-First, clarify what pattern needs to be tracked by answering these questions for yourself:
-- What specific code pattern should be prevented?
-- Why is this pattern problematic?
-- What regex or detection method will identify it?
-- Does the regex need multiline support?
+All projects must have the same set of test functions (enforced by `test_meta_ratchets.py`).
 
-### 2. Locate or Create test_ratchets.py
+## Adding a New Common Ratchet
 
-Check if the project has a `test_ratchets.py` file in the source package (e.g., `libs/<project>/imbue/<project>/utils/test_ratchets.py`):
-- If it exists, add the new test to the existing file
-- If it doesn't exist, create it in an appropriate location within the source package (commonly in a `utils/` folder)
+### Step 1: Define the Rule
 
-The file should import:
+Add a `RegexRatchetRule` to `common_ratchets.py`:
+
+```python
+PREVENT_MY_PATTERN = RegexRatchetRule(
+    rule_name="my pattern usages",
+    rule_description="Explain why this pattern is problematic and what to do instead",
+    pattern_string=r"my_regex_pattern",
+    is_multiline=False,  # set True if using ^ or $ anchors
+)
+```
+
+Or a `RatchetRuleInfo` for AST-based checks (add the detection function to `ratchets.py`).
+
+### Step 2: Add a Wrapper Function
+
+Add to `standard_ratchet_checks.py` (the single source of truth for which ratchets exist):
+
+```python
+def check_my_pattern(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_MY_PATTERN, source_dir, max_count)
+```
+
+Remember to import the rule at the top of the file. The function name determines the test name: `check_foo` becomes `test_prevent_foo`.
+
+### Step 3: Sync and Set Counts
+
+```bash
+uv run python scripts/sync_common_ratchets.py
+uv run pytest --inline-snapshot=update -k test_ratchets
+```
+
+The sync script reads `standard_ratchet_checks.py`, generates `test_prevent_my_pattern` in all 26 `test_ratchets.py` files with `snapshot(0)`, then the pytest command sets the actual violation counts per project.
+
+## Adding a Project-Specific Ratchet
+
+Not all ratchets belong in every project. If a ratchet only applies to one project (e.g., a project-specific API convention), add it to a separate file -- NOT to `test_ratchets.py` (which must define the same test function names across all projects, enforced by `test_meta_ratchets.py`).
+
+Create a project-specific ratchet test file (e.g., `test_project_ratchets.py`) using the core API directly:
 
 ```python
 from pathlib import Path
 
 from inline_snapshot import snapshot
 
-from imbue.imbue_common.ratchet_testing.core import check_regex_ratchet
-from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
-```
+from imbue.imbue_common.ratchet_testing.core import check_regex_ratchet
+from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
 
-### 3. Create Helper Function (if needed)
+_DIR = Path(__file__).parent.parent.parent
 
-If this is the first ratchet test in the file, create a helper to get the source directory:
-```python
-def _get_<project>_source_dir() -> Path:
-    return Path(__file__).parent.parent
-```
 
-This assumes the test file is in a subfolder (like `utils/`) of the main source package. Adjust the path navigation as needed based on where your test file is located. Replace `<project>` with the actual project name (e.g., "mngr").
-
-### 4. Write the Test Function
-
-Create a test function following this pattern:
-```python
-def test_prevent_<pattern_name>() -> None:
-    pattern = RegexPattern(r"<regex_pattern>", multiline=<True|False>)
-    chunks = check_regex_ratchet(_get_<project>_source_dir(), FileExtension(".py"), pattern)
-
+def test_prevent_my_project_pattern() -> None:
+    pattern = RegexPattern(r"my_regex_pattern", multiline=False)
+    chunks = check_regex_ratchet(_DIR, FileExtension(".py"), pattern)
     assert len(chunks) <= snapshot(), format_ratchet_failure_message(
-        rule_name="<pattern name>",
-        rule_description="<why this pattern is problematic>",
+        rule_name="my project pattern",
+        rule_description="Why this is problematic and what to do instead",
         chunks=chunks,
     )
 ```
 
-Key points:
-- Function name: `test_prevent_<descriptive_name>`
-- No docstring needed (keep it concise)
-- Use `multiline=True` if the regex needs to match at line starts (uses `^` anchor)
-- Leave `snapshot()` empty initially - it will be filled when the test runs
-- Provide clear, actionable rule_name and rule_description
+Run with `--inline-snapshot=create` to set the initial count, then verify it passes normally.
 
-### 5. Run the Test to Create Snapshot
+## Important Rules
 
-Run the test with inline-snapshot create mode (use the actual path to your test file):
-```bash
-uv run pytest libs/<project>/imbue/<project>/utils/test_ratchets.py::test_prevent_<name> --inline-snapshot=create -v
-```
-
-This will:
-- Find all current violations in the codebase
-- Create a snapshot with the current count
-- Establish the ratchet baseline
-
-### 6. Verify the Test
-
-Run the test normally to ensure it passes:
-```bash
-uv run pytest libs/<project>/imbue/<project>/utils/test_ratchets.py -v
-```
-
-## Best Practices
-
-- Keep ratchet test functions concise with no docstrings
-- Use clear, descriptive test names: `test_prevent_<anti_pattern>`
-- Provide helpful rule descriptions that explain WHY the pattern is problematic
-- Start with `snapshot()` empty - let the test fill it in
-- Use `multiline=True` when your regex uses `^` to match line starts
-- Group related ratchets in the same file
-- Run all ratchet tests together: `uv run pytest libs/<project>/imbue/<project>/utils/test_ratchets.py -v`
+- **Never add per-project code quality ratchets to `test_meta_ratchets.py`**. Meta ratchets are for repo-wide structural checks only.
+- If a ratchet applies to all projects, use the common ratchet workflow (sync script). If it only applies to one project, use a separate test file with the core API.
+- Keep test function names descriptive: `test_prevent_<anti_pattern>`
+- Provide clear `rule_description` that explains WHY the pattern is bad and WHAT to do instead
+- Never blindly update snapshots -- investigate why a count increased
 
 ## Troubleshooting
 

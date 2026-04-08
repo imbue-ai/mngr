@@ -381,6 +381,9 @@ class DiscoveredHost(FrozenModel):
     host_id: HostId = Field(description="Unique identifier for the host")
     host_name: HostName = Field(description="Human-readable name of the host")
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
+    host_state: "HostState | None" = Field(
+        default=None, description="Host lifecycle state, if known at discovery time"
+    )
 
 
 class DiscoveredAgent(FrozenModel):

@@ -6,6 +6,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNCIO_I
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_EXCEPT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_GENERIC_TYPES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_URWID_TTY_SIGNAL_KEYS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BASE_EXCEPTION_CATCH
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BROAD_EXCEPTION_CATCH
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BUILTIN_EXCEPTION_RAISES
@@ -19,6 +20,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_FSTRING_L
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_FUNCTOOLS_PARTIAL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GETATTR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GLOBAL_KEYWORD
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_CLAUDE_DIR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IF_ELIF_WITHOUT_ELSE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORTLIB_IMPORT_MODULE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORT_DATETIME
@@ -172,6 +174,22 @@ def check_functools_partial(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_FUNCTOOLS_PARTIAL, source_dir, max_count)
 
 
+# --- Hardcoded paths ---
+
+
+def check_hardcoded_claude_dir(source_dir: Path, max_count: int) -> None:
+    excluded = _SELF_EXCLUSION + (
+        "*_test.py",
+        "test_*.py",
+        "conftest.py",
+        "testing.py",
+        "claude_config.py",
+        "common_ratchets.py",
+    )
+    chunks = check_ratchet_rule(PREVENT_HARDCODED_CLAUDE_DIR, source_dir, excluded)
+    assert len(chunks) <= max_count, PREVENT_HARDCODED_CLAUDE_DIR.format_failure(chunks)
+
+
 # --- Naming conventions ---
 
 
@@ -261,6 +279,11 @@ def check_pytest_mark_integration(source_dir: Path, max_count: int) -> None:
 
 def check_os_fork(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_OS_FORK, source_dir, max_count)
+
+
+def check_bare_urwid_tty_signal_keys(source_dir: Path, max_count: int) -> None:
+    chunks = check_ratchet_rule(PREVENT_BARE_URWID_TTY_SIGNAL_KEYS, source_dir, _SELF_EXCLUSION + ("urwid_utils.py",))
+    assert len(chunks) <= max_count, PREVENT_BARE_URWID_TTY_SIGNAL_KEYS.format_failure(chunks)
 
 
 def check_direct_subprocess(
