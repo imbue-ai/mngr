@@ -1015,7 +1015,7 @@ def _check_settings_local_gitignored(
     )
     if not result.success:
         raise PluginMngrError(
-            f".claude/settings.local.json is not gitignored in {repo_path}.\n"
+            f"'{settings_relative}' is not gitignored in {repo_path}.\n"
             "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
             f"Add '{settings_relative}' to your .gitignore and try again. (original error: {result.stderr})"
         )
