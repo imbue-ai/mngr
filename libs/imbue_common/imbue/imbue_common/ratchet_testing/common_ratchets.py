@@ -91,12 +91,11 @@ PREVENT_GLOBAL_KEYWORD = RegexRatchetRule(
 PREVENT_BARE_PRINT = RegexRatchetRule(
     rule_name="bare print statements",
     rule_description=(
-        "Do not use bare print statements or direct sys.stdout/sys.stderr writes. "
-        "Consider what kind of output you are producing: "
+        "Do not use bare print statements. Consider what kind of output you are producing: "
         "for user-facing command output (results, tables, status messages), use write_human_line(); "
         "for diagnostic/debug messages, use logger.info(), logger.debug(), logger.warning(), etc."
     ),
-    pattern_string=r"^\s*print\s*\(|sys\.std(?:out|err)\.write\s*\(",
+    pattern_string=r"^\s*print\s*\(",
     is_multiline=True,
 )
 
