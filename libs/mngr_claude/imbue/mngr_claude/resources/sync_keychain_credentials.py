@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 
 
 def _compute_keychain_label_suffix(config_dir: str) -> str:
@@ -41,21 +42,29 @@ def _read_keychain(label: str) -> str | None:
     return result.stdout.strip()
 
 
-def _write_keychain(label: str, value: str, account: str) -> None:
-    """Write a credential to the macOS keychain, replacing any existing entry."""
+def _write_keychain(label: str, value: str, account: str) -> bool:
+    """Write a credential to the macOS keychain, replacing any existing entry.
+
+    Returns True on success, False on failure.
+    """
     try:
         subprocess.run(
             ["security", "delete-generic-password", "-s", label, "-a", account],
             capture_output=True,
             timeout=5,
         )
-        subprocess.run(
+        result = subprocess.run(
             ["security", "add-generic-password", "-s", label, "-a", account, "-l", label, "-w", value],
             capture_output=True,
             timeout=5,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        if result.returncode != 0:
+            print(f"sync_keychain_credentials: failed to write {label!r}: {result.stderr}", file=sys.stderr)
+            return False
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"sync_keychain_credentials: error writing {label!r}: {e}", file=sys.stderr)
+        return False
 
 
 def _find_per_agent_labels(prefix: str) -> list[str]:
@@ -79,7 +88,8 @@ def _find_per_agent_labels(prefix: str) -> list[str]:
         pattern = r'"Claude Code-credentials-[a-f0-9]{8}"'
     else:
         pattern = r'"Claude Code-[a-f0-9]{8}"'
-    return [m.strip('"') for m in re.findall(pattern, result.stdout)]
+    # Deduplicate: each entry appears twice in the dump (hex attr + named attr)
+    return list({m.strip('"') for m in re.findall(pattern, result.stdout)})
 
 
 def _sync_entries(prefix: str, suffix: str, account: str) -> None:
