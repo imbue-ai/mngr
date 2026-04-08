@@ -12,7 +12,6 @@ import click
 from loguru import logger
 
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import CommonCliOptions
 from imbue.mngr.cli.common_opts import add_common_options
@@ -32,7 +31,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
@@ -176,11 +174,10 @@ def _run_reintegrate(
     write_human_line("Reintegrating run: {}", run_name)
 
     # Discover agents from the previous run by label
-    list_result = list_agents(
-        mngr_ctx=mngr_ctx,
-        is_streaming=False,
-        error_behavior=ErrorBehavior.CONTINUE,
-    )
+    list_result = try_list_agents(mngr_ctx)
+    if list_result is None:
+        write_human_line("Failed to list agents. Nothing to reintegrate.")
+        return
     matching_agents = [
         detail
         for detail in list_result.agents
