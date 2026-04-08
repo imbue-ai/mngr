@@ -39,6 +39,7 @@ mngr plugin [OPTIONS] COMMAND [ARGS]...
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## mngr plugin list
@@ -74,6 +75,7 @@ mngr plugin list [OPTIONS]
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -149,6 +151,7 @@ mngr plugin add [OPTIONS] [NAMES]...
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -228,6 +231,7 @@ mngr plugin remove [OPTIONS] [NAMES]...
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -293,6 +297,7 @@ mngr plugin enable [OPTIONS] NAME
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -352,6 +357,7 @@ mngr plugin disable [OPTIONS] NAME
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -385,11 +391,16 @@ $ mngr plugin disable modal --format json
 
 Interactive wizard to install recommended plugins.
 
-Presents a TUI with recommended plugins and lets you select which
-ones to install. Plugins are installed in a single operation.
+Presents a two-phase TUI for selecting plugins to install.
 
-Pre-selects imbue-mngr-tutor by default. Use Space to toggle selections,
-Enter to confirm, and q or Ctrl+C to cancel.
+Phase 1 shows agent types and providers (BASIC tier). Tools detected
+on your system are pre-selected.
+
+Phase 2 shows optional extras, filtered to only include extras related
+to the agent types you selected. Recommended extras are pre-selected.
+
+Use Space to toggle selections, Enter to confirm, and q or Ctrl+C
+to cancel.
 
 **Usage:**
 
@@ -414,6 +425,7 @@ mngr plugin install-wizard [OPTIONS]
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 

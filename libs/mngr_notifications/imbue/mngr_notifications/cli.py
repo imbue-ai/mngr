@@ -1,10 +1,12 @@
-import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Iterator
 
 import click
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
@@ -18,12 +20,17 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_notifications.config import NotificationsPluginConfig
+from imbue.mngr_notifications.notification_verifier import DEFAULT_VERIFY_TIMEOUT
+from imbue.mngr_notifications.notification_verifier import VerifyNotificationResult
+from imbue.mngr_notifications.notification_verifier import check_notifier_binary
+from imbue.mngr_notifications.notification_verifier import run_test_notification
+from imbue.mngr_notifications.notifier import Notifier
 from imbue.mngr_notifications.notifier import get_notifier
 from imbue.mngr_notifications.watcher import watch_for_waiting_agents
 
 
 class NotifyCliOptions(CommonCliOptions):
-    pass
+    verify: bool = True
 
 
 def _get_plugin_config(mngr_ctx: MngrContext) -> NotificationsPluginConfig:
@@ -44,24 +51,81 @@ def _is_observe_running(mngr_ctx: MngrContext) -> bool:
 
 
 @contextmanager
-def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[None]:
-    """Start mngr observe in the background if not already running. Stop it on exit."""
+def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[RunningProcess | None]:
+    """Start mngr observe in the background if not already running.
+
+    Yields the background process handle (or None if observe was already running).
+    The watcher can use this to detect if observe dies unexpectedly.
+    """
     if _is_observe_running(mngr_ctx):
         write_human_line("Using existing mngr observe process")
-        yield
+        yield None
         return
 
     write_human_line("Starting mngr observe in background...")
     process = mngr_ctx.concurrency_group.run_process_in_background(
-        [sys.executable, "-m", "imbue.mngr.main", "observe", "--quiet"],
+        ["mngr", "observe", "--quiet"],
     )
     try:
-        yield
+        yield process
     finally:
         process.terminate()
 
 
+def _default_confirm(prompt: str) -> bool:
+    return click.confirm(prompt, default=False)
+
+
+def _run_verification(
+    notifier: Notifier,
+    cg: ConcurrencyGroup,
+    binary_checker: Callable[[Notifier], str | None] = check_notifier_binary,
+    verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
+    confirm_fn: Callable[[str], bool] = _default_confirm,
+    override_result: VerifyNotificationResult | None = None,
+) -> bool:
+    """Send a test notification and verify delivery. Returns True if verified."""
+    write_human_line("Sending a test notification -- you should see it now. Please click it to confirm.")
+    write_human_line("(use --no-verify to skip this check)")
+
+    if override_result is not None:
+        result = override_result
+    else:
+        result = run_test_notification(notifier, cg, verify_timeout=verify_timeout, binary_checker=binary_checker)
+
+    if not result.is_sent:
+        write_human_line("FAILED: {}", result.error_message)
+        return False
+
+    if result.is_clicked is True:
+        write_human_line("Notification delivery verified.")
+        return True
+
+    if result.is_clicked is False:
+        write_human_line(
+            "Test notification was sent but not clicked within {} seconds.",
+            int(verify_timeout),
+        )
+        write_human_line("If you did not see the notification, check your notification")
+        write_human_line("permissions in System Settings > Notifications.")
+        return False
+
+    # is_clicked is None: click detection not supported (e.g. Linux)
+    is_confirmed = confirm_fn("Did you see the test notification?")
+    if is_confirmed:
+        write_human_line("Notification delivery verified.")
+        return True
+
+    write_human_line("If notifications are not appearing, check your notification settings.")
+    return False
+
+
 @click.command()
+@click.option(
+    "--verify/--no-verify",
+    default=True,
+    help="Verify notification delivery on startup by sending a test notification.",
+)
 @add_common_options
 @click.pass_context
 def notify(ctx: click.Context, **kwargs: object) -> None:
@@ -89,14 +153,19 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
     if notifier is None:
         return
 
+    if opts.verify:
+        if not _run_verification(notifier, mngr_ctx.concurrency_group):
+            return
+
     write_human_line("Watching for agents transitioning to WAITING... (Ctrl+C to stop)")
 
-    with _ensure_observe(mngr_ctx):
+    with _ensure_observe(mngr_ctx) as observe_process:
         try:
             watch_for_waiting_agents(
                 mngr_ctx=mngr_ctx,
                 plugin_config=plugin_config,
                 notifier=notifier,
+                observe_process=observe_process,
             )
         except KeyboardInterrupt:
             logger.debug("Received keyboard interrupt")
@@ -107,13 +176,18 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
 CommandHelpMetadata(
     key="notify",
     one_line_description="Notify when agents transition to WAITING",
-    synopsis="mngr notify",
+    synopsis="mngr notify [--no-verify]",
     description="""Sends a desktop notification when any agent transitions from RUNNING to WAITING.
+
+On startup, sends a test notification to verify delivery is working.
+On macOS, you will be asked to click the notification to confirm;
+on Linux, you will be prompted to confirm you saw it. Use --no-verify
+to skip this check.
 
 Automatically starts `mngr observe` in the background if it is not already running.
 
-On macOS, notifications are sent via terminal-notifier (install with:
-brew install terminal-notifier). On Linux, via notify-send (libnotify).
+On macOS, notifications are sent via alerter (install with:
+brew install vjeantet/tap/alerter). On Linux, via notify-send (libnotify).
 
 To enable click-to-connect (opens a terminal tab running mngr connect),
 configure the plugin in settings.toml:
@@ -127,7 +201,10 @@ Or use a custom command (MNGR_AGENT_NAME is set in the environment):
     custom_terminal_command = "my-terminal -e mngr connect $MNGR_AGENT_NAME"
 
 Press Ctrl+C to stop.""",
-    examples=(("Notify on all agents", "mngr notify"),),
+    examples=(
+        ("Notify on all agents", "mngr notify"),
+        ("Skip notification verification", "mngr notify --no-verify"),
+    ),
     see_also=(
         ("observe", "Stream agent state changes to local event files"),
         ("list", "List agents to see their current state"),

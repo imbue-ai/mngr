@@ -84,6 +84,20 @@ def make_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker") -> Do
     )
 
 
+def make_offline_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker-offline") -> DockerProviderInstance:
+    """Create a Docker provider that points to a non-existent Docker socket.
+
+    Useful for testing graceful degradation when the Docker daemon is unavailable.
+    """
+    config = DockerProviderConfig(host="unix:///nonexistent/docker.sock")
+    return DockerProviderInstance(
+        name=ProviderInstanceName(name),
+        host_dir=Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        config=config,
+    )
+
+
 def make_docker_provider_with_local_volume(
     mngr_ctx: MngrContext,
     volume_root: Path,

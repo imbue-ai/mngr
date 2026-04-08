@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.config import ModalProviderConfig
@@ -456,6 +457,7 @@ def test_discover_hosts_includes_running_sandboxes_without_host_records(
     mock_host = MagicMock()
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
+    mock_host.get_state.return_value = HostState.RUNNING
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),
@@ -482,6 +484,7 @@ def test_discover_hosts_returns_stopped_hosts_with_snapshots(
     mock_host = MagicMock()
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
+    mock_host.get_state.return_value = HostState.STOPPED
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[]),
@@ -522,6 +525,7 @@ def test_discover_hosts_includes_destroyed_hosts_when_requested(
     mock_host = MagicMock()
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
+    mock_host.get_state.return_value = HostState.DESTROYED
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[]),
@@ -552,6 +556,7 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
     mock_host = MagicMock()
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
+    mock_host.get_state.return_value = HostState.RUNNING
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),

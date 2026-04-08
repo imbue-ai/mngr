@@ -142,6 +142,10 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    # Clear Claude config dir env vars so tests resolve config paths relative
+    # to the temp HOME, not an inherited agent config dir.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
 
 
 @contextmanager
@@ -199,6 +203,49 @@ def assert_home_is_temp_directory() -> None:
             "Tests may be operating on real home directory! "
             "Ensure setup_test_mngr_env autouse fixture has run before this call."
         )
+
+
+def setup_mngr_test_environment(
+    home_dir: Path,
+    host_dir: Path,
+    prefix: str,
+    root_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Core environment setup shared by all setup_test_mngr_env fixtures.
+
+    This is the single source of truth for mngr test environment isolation.
+    All setup_test_mngr_env fixture definitions (in mngr/conftest.py,
+    plugin_testing.py, and plugin-specific overrides like mngr_modal/conftest.py)
+    should delegate to this function rather than duplicating the setup logic.
+
+    Callers that need additional env vars (e.g. Modal tokens) should set them
+    before calling this function, since isolate_home() overrides HOME.
+    """
+    isolate_home(home_dir, monkeypatch)
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", prefix)
+    monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
+    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+
+    # Unison derives its config directory from $HOME. Since we override HOME
+    # above, unison tries to create its config dir inside the temp home, which
+    # fails because the expected parent directories don't exist. The UNISON
+    # env var overrides this to a path we control.
+    unison_dir = home_dir / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
+
+    # Prevent uv from hitting the network or doing unnecessary work during
+    # tests. UV_OFFLINE stops network requests (uv tool run was checking for
+    # updates, causing ~10s delays on Modal). UV_FROZEN prevents uv.lock
+    # updates and the filesystem scan that goes with them.
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("UV_FROZEN", "1")
+
+    # Safety check: verify Path.home() is in a temp directory.
+    # If this fails, tests could accidentally modify the real home directory.
+    assert_home_is_temp_directory()
 
 
 def get_subprocess_test_env(
@@ -709,6 +756,11 @@ def get_stash_count(path: Path) -> int:
         return 0
     lines = result.stdout.strip().split("\n")
     return len([line for line in lines if line])
+
+
+def is_claude_installed() -> bool:
+    """Check if the Claude Code CLI is installed and available on PATH."""
+    return shutil.which("claude") is not None
 
 
 def setup_claude_trust_config_for_subprocess(

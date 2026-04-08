@@ -3,7 +3,7 @@ name = "imbue-mngr-notifications"
 version = "0.2.1"
 description = "Notification plugin for mngr - alerts when agents transition to WAITING state"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.2.1",
     "click-option-group>=0.5.6",
@@ -25,7 +25,7 @@ imbue-mngr = { workspace = true }
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.pytest.ini_options]

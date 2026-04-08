@@ -6,6 +6,9 @@ and easy to edit manually.
 
 PLUGIN_NAME = "test-map-reduce"
 
+TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
+INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
+
 
 def build_test_agent_prompt(
     test_node_id: str,
@@ -58,6 +61,31 @@ Consider whether the test can be improved:
 If you make improvements, record a change under the key "IMPROVE_TEST". If you
 identify an improvement that needs a larger-scale intervention, use status
 "BLOCKED". If no improvements are needed, leave the changes object empty.
+
+# Guidelines for test quality
+
+When writing or improving tests, follow these principles:
+
+**Run the actual commands from the script block.** The test must run commands that
+match the script block as closely as possible. For example, if the script block
+demonstrates `mngr create --foo`, the test must run `mngr create --foo` (with
+optional extra flags) -- it must NOT simply run `mngr create --help` and verify
+that `--foo` is a supported flag. The test fixture already sets up an isolated
+environment, so using hardcoded agent names is fine.
+
+**Verify the actual behavior, not just surface-level output.** The script blocks
+usually don't contain verification code, but the test must verify the exact
+desired behavior as thoroughly as possible. For example, if a script block creates
+an agent in a specific directory, it is not sufficient to only verify that the
+agent appears in the result of `mngr list` -- you must also verify that the agent
+is running in that directory, e.g. by running `mngr exec $agent_name pwd` and
+checking its output. Think about what the command is supposed to accomplish and
+assert on the concrete effects.
+
+**Add comments to transcript commands.** The `e2e.run()` method accepts an
+optional `comment` parameter that is recorded in the transcript above the command
+(as `# ...` lines). Use this to annotate each command with a brief description of
+what it does. Reuse comments from the tutorial script block where available.
 
 # Examining the CLI transcript
 
@@ -114,8 +142,8 @@ or something like "after fixing assertion timeout" for subsequent runs.
 # Writing the result
 
 Write the result atomically to avoid races with the orchestrator reading it:
-1. First write to $MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json.draft
-2. Then rename (mv) the .draft file to result.json
+1. First write to .test_output/{TESTING_AGENT_OUTCOME_FILENAME}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{TESTING_AGENT_OUTCOME_FILENAME}
 
 The schema is:
 
@@ -140,6 +168,14 @@ Fields:
 - test_runs: list of objects, one per test run, in order. Each has run_name
   (matching the --mngr-e2e-run-name used) and description_markdown (brief
   description of what this run was for).
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If something is unclear or you are blocked, produce a result
+with the appropriate change status set to "BLOCKED" and explain in the
+summary_markdown. If the user sends follow-up messages later, you may ask them
+questions at that point.
 """
     if prompt_suffix:
         prompt += f"\n{prompt_suffix}\n"
@@ -183,7 +219,11 @@ branch with a flat list of commits that is easy to review.
 5. After cherry-picking, record the commit hashes using `git rev-parse HEAD` after
    each step (the squashed commit and each impl commit).
 
-6. Write the result to $MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
+6. Write the result atomically to avoid races with the orchestrator reading it:
+   a. First write to .test_output/{INTEGRATOR_OUTCOME_FILENAME}.draft (relative to the git repo root)
+   b. Then rename (mv) the .draft file to .test_output/{INTEGRATOR_OUTCOME_FILENAME}
+
+   The schema is:
 {{"squashed_branches": ["branch1", "branch2"], "squashed_commit_hash": "abc1234", "impl_priority": ["branch3"], "impl_commit_hashes": {{"branch3": "def5678"}}, "failed": ["branch4"]}}
 
 - squashed_branches: list of branch names whose test/doc commits were squashed
@@ -191,4 +231,11 @@ branch with a flat list of commits that is easy to review.
 - impl_priority: list of impl branch names in priority order (highest first)
 - impl_commit_hashes: mapping of each impl branch name to its commit hash on the integrated branch
 - failed: list of branch names that could not be integrated
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If a cherry-pick has conflicts you cannot resolve, skip that
+branch and record it as failed. If the user sends follow-up messages later, you
+may ask them questions at that point.
 """

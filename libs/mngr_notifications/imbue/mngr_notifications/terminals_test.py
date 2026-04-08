@@ -5,10 +5,11 @@ from imbue.mngr_notifications.terminals import WezTermApp
 from imbue.mngr_notifications.terminals import get_terminal_app
 
 
-def test_iterm_searches_tmux_clients() -> None:
+def test_iterm_searches_iterm_tabs_for_tmux_session() -> None:
     result = ITermApp().build_connect_command("mngr connect my-agent", "my-agent")
     assert "tmux list-sessions" in result
-    assert "tmux list-clients" in result
+    assert "ps -t" in result
+    assert "tmux attach -t =$SESSION" in result
     assert "my-agent" in result
 
 

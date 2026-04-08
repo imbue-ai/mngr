@@ -14,6 +14,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 from typing import Mapping
+from typing import NoReturn
 from typing import ParamSpec
 from typing import Sequence
 from typing import TypeVar
@@ -55,6 +56,13 @@ from imbue.modal_proxy.interface import VolumeInterface
 # ---------------------------------------------------------------------------
 # Exception translation
 # ---------------------------------------------------------------------------
+
+
+def _translate_modal_cli_not_found(e: FileNotFoundError) -> NoReturn:
+    """Translate a FileNotFoundError into ModalProxyError when the modal CLI binary is missing, otherwise re-raise."""
+    if e.filename == "modal":
+        raise ModalProxyError("The 'modal' CLI command was not found. Install it with: uv tool install modal") from e
+    raise e
 
 
 def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
@@ -384,13 +392,16 @@ class DirectModalInterface(ModalInterface):
     # =====================================================================
 
     def environment_create(self, name: str) -> None:
-        result = subprocess.run(
-            ["modal", "environment", "create", name],
-            timeout=30,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["modal", "environment", "create", name],
+                timeout=30,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            _translate_modal_cli_not_found(e)
         if result.returncode != 0:
             raise ModalProxyError(f"Failed to create Modal environment '{name}': {result.stderr or result.stdout}")
 
@@ -556,18 +567,21 @@ class DirectModalInterface(ModalInterface):
         cmd.append(str(script_path))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = subprocess.run(
-                cmd,
-                timeout=180,
-                check=False,
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "MNGR_MODAL_APP_NAME": app_name,
-                    "MNGR_MODAL_APP_BUILD_PATH": tmpdir,
-                },
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    timeout=180,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "MNGR_MODAL_APP_NAME": app_name,
+                        "MNGR_MODAL_APP_BUILD_PATH": tmpdir,
+                    },
+                )
+            except FileNotFoundError as e:
+                _translate_modal_cli_not_found(e)
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")

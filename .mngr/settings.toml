@@ -2,6 +2,9 @@ is_allowed_in_pytest = false
 #default_destroyed_host_persisted_seconds = 36000
 default_destroyed_host_persisted_seconds = 10
 
+[work_dir_extra_paths]
+test-results = "COPY"
+
 [pre_command_scripts]
 create = ["""bash -c './scripts/make_tar_of_repo.sh `cat .mngr/image_commit_hash` .mngr/dev/build'"""]
 

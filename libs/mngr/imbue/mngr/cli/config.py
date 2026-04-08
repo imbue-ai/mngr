@@ -32,10 +32,12 @@ from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
 from imbue.mngr.errors import ConfigParseError
-from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
+from imbue.mngr.utils.toml_config import set_nested_value
 
 
 class ConfigScope(UpperCaseStrEnum):
@@ -90,19 +92,6 @@ def _load_config_file(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def load_config_file_tomlkit(path: Path) -> tomlkit.TOMLDocument:
-    """Load a TOML config file using tomlkit for preservation of formatting."""
-    if not path.exists():
-        return tomlkit.document()
-    with open(path) as f:
-        return tomlkit.load(f)
-
-
-def save_config_file(path: Path, doc: tomlkit.TOMLDocument) -> None:
-    """Save a TOML config file atomically."""
-    atomic_write(path, tomlkit.dumps(doc))
-
-
 def _get_nested_value(data: dict[str, Any], key_path: str) -> Any:
     """Get a value from nested dict using dot-separated key path."""
     keys = key_path.split(".")
@@ -112,26 +101,6 @@ def _get_nested_value(data: dict[str, Any], key_path: str) -> Any:
             raise ConfigKeyNotFoundError(key_path)
         current = current[key]
     return current
-
-
-def set_nested_value(doc: tomlkit.TOMLDocument, key_path: str, value: Any) -> None:
-    """Set a value in nested tomlkit document using dot-separated key path.
-
-    Works with tomlkit's TOMLDocument and Table types, which both behave like
-    MutableMapping at runtime even though their type stubs don't perfectly reflect this.
-    """
-    keys = key_path.split(".")
-    # tomlkit's TOMLDocument and Table are dict subclasses at runtime
-    current: MutableMapping[str, Any] = doc
-    for key in keys[:-1]:
-        if key not in current:
-            current[key] = tomlkit.table()
-        next_val = current[key]
-        if not isinstance(next_val, dict):
-            raise ConfigStructureError(f"Cannot set nested key: {key} is not a table")
-        # Cast is needed because tomlkit stubs don't reflect that Table is a dict
-        current = cast(MutableMapping[str, Any], next_val)
-    current[keys[-1]] = value
 
 
 def _unset_nested_value(doc: tomlkit.TOMLDocument, key_path: str) -> bool:
