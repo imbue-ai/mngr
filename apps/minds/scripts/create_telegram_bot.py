@@ -102,8 +102,7 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
     except (urllib.error.URLError, OSError, ValueError) as exc:
         sys.stderr.write(
-            f"Warning: could not extract api credentials from Telegram Web "
-            f"bundle ({exc}), using known defaults\n"
+            f"Warning: could not extract api credentials from Telegram Web bundle ({exc}), using known defaults\n"
         )
         return 2496, "8da85b0d5bfe62527e5b244c209159c3"
 
@@ -120,13 +119,9 @@ def _auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
     try:
         auth_key_bytes = bytes.fromhex(auth_key_hex)
     except ValueError as exc:
-        raise TelegramCredentialError(
-            f"auth_key is not valid hex: {exc}"
-        ) from exc
+        raise TelegramCredentialError(f"auth_key is not valid hex: {exc}") from exc
     if len(auth_key_bytes) != 256:
-        raise TelegramCredentialError(
-            f"auth_key must be 256 bytes, got {len(auth_key_bytes)}"
-        )
+        raise TelegramCredentialError(f"auth_key must be 256 bytes, got {len(auth_key_bytes)}")
     fmt = f">B{len(ip_packed)}sH256s"
     packed = struct.pack(fmt, dc_id, ip_packed, 443, auth_key_bytes)
     return "1" + base64.urlsafe_b64encode(packed).decode("ascii")
@@ -158,10 +153,7 @@ def _try_latchkey_auth_get() -> str | None:
 
         dc_id = creds["dcId"]
         auth_key_hex = creds["authKeyHex"]
-        sys.stderr.write(
-            f"Read credentials from latchkey (user={creds.get('firstName', '?')}, "
-            f"DC={dc_id})\n"
-        )
+        sys.stderr.write(f"Read credentials from latchkey (user={creds.get('firstName', '?')}, DC={dc_id})\n")
         return _auth_key_to_string_session(dc_id, auth_key_hex)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return None
@@ -187,9 +179,7 @@ def _get_string_session() -> str:
         try:
             dc_id = int(dc_id_str)
         except ValueError as exc:
-            raise TelegramCredentialError(
-                f"TELEGRAM_DC_ID must be an integer, got {dc_id_str!r}"
-            ) from exc
+            raise TelegramCredentialError(f"TELEGRAM_DC_ID must be an integer, got {dc_id_str!r}") from exc
         return _auth_key_to_string_session(dc_id, auth_key_hex)
 
     # Option 3: latchkey auth get
@@ -205,9 +195,7 @@ def _get_string_session() -> str:
         dc_str = ls.get("dc")
         user_auth_str = ls.get("user_auth")
         if not dc_str or not user_auth_str:
-            raise TelegramCredentialError(
-                f"{LATCHKEY_DUMP_PATH} does not contain valid auth data"
-            )
+            raise TelegramCredentialError(f"{LATCHKEY_DUMP_PATH} does not contain valid auth data")
         try:
             dc_id = int(dc_str)
         except ValueError as exc:
@@ -226,9 +214,7 @@ def _get_string_session() -> str:
         else:
             auth_key_hex = auth_key_raw
         if not auth_key_hex:
-            raise TelegramCredentialError(
-                f"No auth_key for DC {dc_id} in dump"
-            )
+            raise TelegramCredentialError(f"No auth_key for DC {dc_id} in dump")
         return _auth_key_to_string_session(dc_id, auth_key_hex)
 
     raise TelegramCredentialError(
@@ -272,17 +258,13 @@ def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str]:
             conv.send_message("/newbot")
             resp = conv.get_response()
             if "choose a name" not in resp.text.lower():
-                raise BotCreationError(
-                    f"Unexpected BotFather response to /newbot:\n{resp.text}"
-                )
+                raise BotCreationError(f"Unexpected BotFather response to /newbot:\n{resp.text}")
 
             # Step 2: Send the display name and wait for username prompt
             conv.send_message(bot_display_name)
             resp = conv.get_response()
             if "username" not in resp.text.lower():
-                raise BotCreationError(
-                    f"Unexpected BotFather response to bot name:\n{resp.text}"
-                )
+                raise BotCreationError(f"Unexpected BotFather response to bot name:\n{resp.text}")
 
             # Step 3: Send the username and wait for confirmation
             conv.send_message(bot_username)
@@ -290,17 +272,13 @@ def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str]:
             response_text = resp.text
 
             if "sorry" in response_text.lower() or "error" in response_text.lower():
-                raise BotCreationError(
-                    f"BotFather rejected the username:\n{response_text}"
-                )
+                raise BotCreationError(f"BotFather rejected the username:\n{response_text}")
 
             # Parse the bot token from the response
             # BotFather sends: "Use this token to access the HTTP API:\n<id>:<hash>"
             token_match = re.search(r"(\d+:[A-Za-z0-9_-]+)", response_text)
             if not token_match:
-                raise BotCreationError(
-                    f"Could not extract bot token from BotFather response:\n{response_text}"
-                )
+                raise BotCreationError(f"Could not extract bot token from BotFather response:\n{response_text}")
 
             bot_token = token_match.group(1)
 

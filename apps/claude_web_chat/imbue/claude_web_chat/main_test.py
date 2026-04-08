@@ -40,7 +40,18 @@ def test_main_passes_filters() -> None:
         patch("imbue.claude_web_chat.main.load_config") as mock_load_config,
         patch("imbue.claude_web_chat.main.create_application") as mock_create_app,
         patch("imbue.claude_web_chat.main.uvicorn"),
-        patch("sys.argv", ["claude-web-chat", "--provider", "local", "--include", 'state == "RUNNING"', "--exclude", 'name == "test"']),
+        patch(
+            "sys.argv",
+            [
+                "claude-web-chat",
+                "--provider",
+                "local",
+                "--include",
+                'state == "RUNNING"',
+                "--exclude",
+                'name == "test"',
+            ],
+        ),
     ):
         mock_load_config.return_value = Config()
         mock_create_app.return_value = "fake_app"

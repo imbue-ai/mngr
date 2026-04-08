@@ -16,13 +16,13 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_vps_docker.errors import ContainerSetupError
+from imbue.mngr_vps_docker.errors import VpsConnectionError
+from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
-from imbue.mngr_vps_docker.errors import VpsConnectionError
-from imbue.mngr_vps_docker.errors import ContainerSetupError
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
 
 VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
 

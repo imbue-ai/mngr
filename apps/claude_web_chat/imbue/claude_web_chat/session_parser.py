@@ -100,7 +100,9 @@ def parse_session_lines(
             continue
 
         if event_type == "assistant":
-            _parse_assistant_message(raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, session_id)
+            _parse_assistant_message(
+                raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, session_id
+            )
         elif event_type == "user":
             _parse_user_message(raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, session_id)
         # Skip: progress, file-history-snapshot, system, result, etc.
@@ -149,11 +151,13 @@ def _parse_assistant_message(
             if call_id and tool_name:
                 tool_name_by_call_id[call_id] = tool_name
 
-            tool_calls.append({
-                "tool_call_id": call_id,
-                "tool_name": tool_name,
-                "input_preview": input_preview,
-            })
+            tool_calls.append(
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": tool_name,
+                    "input_preview": input_preview,
+                }
+            )
 
     usage: dict[str, Any] | None = None
     if usage_raw:

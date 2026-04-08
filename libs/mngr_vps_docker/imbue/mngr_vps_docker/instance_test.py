@@ -89,10 +89,7 @@ def test_parse_build_args_rejects_unknown_vps_arg() -> None:
 
 def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text(
-        "192.168.1.100 ssh-ed25519 AAAA key1\n"
-        "192.168.1.101 ssh-ed25519 BBBB key2\n"
-    )
+    known_hosts.write_text("192.168.1.100 ssh-ed25519 AAAA key1\n192.168.1.101 ssh-ed25519 BBBB key2\n")
     _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
     result = known_hosts.read_text()
     assert "192.168.1.100" not in result
@@ -101,10 +98,7 @@ def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:
 
 def test_remove_host_from_known_hosts_nonstandard_port(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text(
-        "[192.168.1.100]:2222 ssh-ed25519 AAAA key1\n"
-        "192.168.1.100 ssh-ed25519 BBBB key2\n"
-    )
+    known_hosts.write_text("[192.168.1.100]:2222 ssh-ed25519 AAAA key1\n192.168.1.100 ssh-ed25519 BBBB key2\n")
     _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 2222)
     result = known_hosts.read_text()
     assert "[192.168.1.100]:2222" not in result

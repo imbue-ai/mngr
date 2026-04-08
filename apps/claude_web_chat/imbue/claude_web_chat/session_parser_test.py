@@ -7,12 +7,14 @@ from imbue.claude_web_chat.session_parser import parse_session_lines
 
 
 def _make_user_line(uuid: str, timestamp: str, content: str) -> str:
-    return json.dumps({
-        "type": "user",
-        "uuid": uuid,
-        "timestamp": timestamp,
-        "message": {"role": "user", "content": content},
-    })
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "message": {"role": "user", "content": content},
+        }
+    )
 
 
 def _make_assistant_line(
@@ -25,38 +27,44 @@ def _make_assistant_line(
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if tool_calls:
         for tc in tool_calls:
-            content.append({
-                "type": "tool_use",
-                "id": tc["id"],
-                "name": tc["name"],
-                "input": tc.get("input", {}),
-            })
-    return json.dumps({
-        "type": "assistant",
-        "uuid": uuid,
-        "timestamp": timestamp,
-        "message": {
-            "role": "assistant",
-            "model": model,
-            "content": content,
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 100, "output_tokens": 50},
-        },
-    })
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": tc.get("input", {}),
+                }
+            )
+    return json.dumps(
+        {
+            "type": "assistant",
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "message": {
+                "role": "assistant",
+                "model": model,
+                "content": content,
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        }
+    )
 
 
 def _make_tool_result_line(uuid: str, timestamp: str, tool_use_id: str, output: str) -> str:
-    return json.dumps({
-        "type": "user",
-        "uuid": uuid,
-        "timestamp": timestamp,
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": tool_use_id, "content": output, "is_error": False},
-            ],
-        },
-    })
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": tool_use_id, "content": output, "is_error": False},
+                ],
+            },
+        }
+    )
 
 
 def test_parse_user_message() -> None:
@@ -187,18 +195,20 @@ def test_tool_output_truncation() -> None:
 
 
 def test_user_message_with_array_content() -> None:
-    line = json.dumps({
-        "type": "user",
-        "uuid": "uuid-1",
-        "timestamp": "2026-01-01T00:00:00Z",
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Part one"},
-                {"type": "text", "text": "Part two"},
-            ],
-        },
-    })
+    line = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Part one"},
+                    {"type": "text", "text": "Part two"},
+                ],
+            },
+        }
+    )
     events = parse_session_lines([line])
     assert len(events) == 1
     assert events[0]["content"] == "Part one\nPart two"

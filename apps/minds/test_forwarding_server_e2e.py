@@ -78,7 +78,6 @@ def _destroy_agent(agent_name: str) -> None:
 
 
 class ForwardingServerFixture:
-
     def __init__(self, tmp_dir: Path) -> None:
         self.host = "127.0.0.1"
         self.port = _find_free_port()

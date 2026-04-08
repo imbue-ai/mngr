@@ -38,9 +38,7 @@ class VpsHostConfig(HostConfig):
 class VpsDockerHostRecord(FrozenModel):
     """Host metadata stored on the VPS state volume."""
 
-    certified_host_data: CertifiedHostData = Field(
-        frozen=True, description="The certified host data"
-    )
+    certified_host_data: CertifiedHostData = Field(frozen=True, description="The certified host data")
     vps_ip: str | None = Field(default=None, description="Current IP address of the VPS")
     ssh_host_public_key: str | None = Field(default=None, description="VPS SSH host public key")
     container_ssh_host_public_key: str | None = Field(default=None, description="Container SSH host public key")
@@ -112,9 +110,7 @@ class VpsDockerHostStore:
         return f"{STATE_VOLUME_MOUNT_PATH}/host_state/{host_id}/{agent_id}.json"
 
     def _exec(self, command: str, timeout_seconds: float = 30.0) -> str:
-        return self._docker_ssh.exec_in_container(
-            self._state_container_name, command, timeout_seconds=timeout_seconds
-        )
+        return self._docker_ssh.exec_in_container(self._state_container_name, command, timeout_seconds=timeout_seconds)
 
     def write_host_record(self, host_record: VpsDockerHostRecord) -> None:
         """Write a host record to the state volume."""

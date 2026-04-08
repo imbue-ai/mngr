@@ -111,14 +111,12 @@ class CloudflareForwardingClient(FrozenModel):
                 timeout=10.0,
             )
             if response.status_code != 200:
-                logger.warning("Failed to list services for {}: {} {}", tunnel_name, response.status_code, response.text)
+                logger.warning(
+                    "Failed to list services for {}: {} {}", tunnel_name, response.status_code, response.text
+                )
                 return None
             services = response.json().get("services", [])
-            return {
-                s["service_name"]: s["hostname"]
-                for s in services
-                if "service_name" in s and "hostname" in s
-            }
+            return {s["service_name"]: s["hostname"] for s in services if "service_name" in s and "hostname" in s}
         except (httpx.HTTPError, KeyError) as e:
             logger.warning("Failed to list services for {}: {}", tunnel_name, e)
             return None
@@ -135,7 +133,11 @@ class CloudflareForwardingClient(FrozenModel):
             )
             if response.status_code not in (200, 201):
                 logger.warning(
-                    "Failed to add service {} to {}: {} {}", service_name, tunnel_name, response.status_code, response.text
+                    "Failed to add service {} to {}: {} {}",
+                    service_name,
+                    tunnel_name,
+                    response.status_code,
+                    response.text,
                 )
                 return False
             return True

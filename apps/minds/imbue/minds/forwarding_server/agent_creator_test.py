@@ -1,6 +1,7 @@
 import queue as queue_mod
 import threading
 from pathlib import Path
+
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -10,22 +11,22 @@ from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.agent_creator import checkout_branch
-from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import _build_mngr_create_command
 from imbue.minds.forwarding_server.agent_creator import _is_local_path
+from imbue.minds.forwarding_server.agent_creator import checkout_branch
+from imbue.minds.forwarding_server.agent_creator import clone_git_repo
+from imbue.minds.forwarding_server.agent_creator import extract_repo_name
+from imbue.minds.forwarding_server.agent_creator import make_log_callback
+from imbue.minds.forwarding_server.agent_creator import run_mngr_create
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingUrl
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareSecret
 from imbue.minds.forwarding_server.cloudflare_client import CloudflareUsername
 from imbue.minds.forwarding_server.cloudflare_client import OwnerEmail
-from imbue.minds.forwarding_server.agent_creator import extract_repo_name
-from imbue.minds.forwarding_server.agent_creator import make_log_callback
-from imbue.minds.forwarding_server.agent_creator import run_mngr_create
 from imbue.minds.primitives import AgentName
-from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mngr.primitives import AgentId

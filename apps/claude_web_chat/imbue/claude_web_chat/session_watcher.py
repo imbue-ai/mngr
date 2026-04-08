@@ -8,8 +8,6 @@ in mngr_recursive.
 from __future__ import annotations
 
 import json
-
-from loguru import logger as _loguru_logger
 import os
 import threading
 import time
@@ -17,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
+from loguru import logger as _loguru_logger
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -140,7 +139,9 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(all_events)
         return all_events
 
-    def get_backfill_events(self, before_event_id: str, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+    def get_backfill_events(
+        self, before_event_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get events before a given event_id for backfill pagination."""
         all_events = self.get_all_events(session_id=session_id)
 
@@ -287,9 +288,7 @@ class AgentSessionWatcher:
 
             if self._observer is not None:
                 try:
-                    self._observer.schedule(
-                        _ChangeHandler(self._wake_event), str(subagents_dir), recursive=False
-                    )
+                    self._observer.schedule(_ChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
                 except OSError:
                     pass
 

@@ -371,9 +371,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.CREATING
 
                 parsed_name = AgentName(agent_name)
-                log_queue.put(
-                    "[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value)
-                )
+                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
                 run_mngr_create(
                     launch_mode=launch_mode,
                     mind_dir=mind_dir,

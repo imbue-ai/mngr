@@ -107,25 +107,29 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     session_id = "test-session-id"
     session_file = projects_dir / f"{session_id}.jsonl"
     session_file.write_text(
-        json.dumps({
-            "type": "user",
-            "uuid": "uuid-1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": "Hello"},
-        })
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "Hello"},
+            }
+        )
         + "\n"
-        + json.dumps({
-            "type": "assistant",
-            "uuid": "uuid-2",
-            "timestamp": "2026-01-01T00:00:01Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "content": [{"type": "text", "text": "Hi!"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10, "output_tokens": 5},
-            },
-        })
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{"type": "text", "text": "Hi!"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
         + "\n"
     )
 

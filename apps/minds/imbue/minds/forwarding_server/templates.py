@@ -12,7 +12,6 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
-
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
 
 _COMMON_STYLES: Final[str] = """

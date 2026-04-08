@@ -46,10 +46,13 @@ class TestVultrProviderLifecycle:
 
         # Create
         result = _run_mngr(
-            "create", agent_name,
-            "--provider", "vultr",
+            "create",
+            agent_name,
+            "--provider",
+            "vultr",
             "--no-connect",
-            "--message", "just say hello",
+            "--message",
+            "just say hello",
         )
         assert result.returncode == 0, f"Create failed: {result.stderr}"
         assert "Done" in result.stdout or "created successfully" in result.stderr
@@ -88,10 +91,13 @@ class TestVultrProviderLifecycle:
         agent_name = f"test-vultr-ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
-            "create", agent_name,
-            "--provider", "vultr",
+            "create",
+            agent_name,
+            "--provider",
+            "vultr",
             "--no-connect",
-            "--message", "just say hello",
+            "--message",
+            "just say hello",
         )
         assert result.returncode == 0, f"Create failed: {result.stderr}"
 
@@ -129,10 +135,13 @@ class TestVultrProviderLifecycle:
         agent_name = f"test-vultr-ssh-{int(time.time()) % 100000}"
 
         result = _run_mngr(
-            "create", agent_name,
-            "--provider", "vultr",
+            "create",
+            agent_name,
+            "--provider",
+            "vultr",
             "--no-connect",
-            "--message", "just say hello",
+            "--message",
+            "just say hello",
         )
         assert result.returncode == 0, f"Create failed: {result.stderr}"
 

@@ -339,8 +339,6 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
     # Wait for initial content
     expect(page.locator(".message-user").first).to_be_visible(timeout=5000)
 
-
-
     # Append a new event to the session file
     new_event = {
         "type": "user",

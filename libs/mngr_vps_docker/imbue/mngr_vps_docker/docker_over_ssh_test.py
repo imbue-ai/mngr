@@ -59,45 +59,35 @@ def test_run_ssh_os_error_raises_connection_error(docker_ssh: DockerOverSsh) -> 
 
 
 def test_run_ssh_connection_refused_raises_connection_error(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=255, stdout="", stderr="Connection refused"
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=255, stdout="", stderr="Connection refused")
     with patch("subprocess.run", return_value=mock_result):
         with pytest.raises(VpsConnectionError, match="Cannot reach VPS"):
             docker_ssh.run_ssh("echo hello")
 
 
 def test_run_ssh_no_route_raises_connection_error(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=255, stdout="", stderr="No route to host"
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=255, stdout="", stderr="No route to host")
     with patch("subprocess.run", return_value=mock_result):
         with pytest.raises(VpsConnectionError, match="Cannot reach VPS"):
             docker_ssh.run_ssh("echo hello")
 
 
 def test_run_ssh_nonzero_exit_raises_container_setup_error(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=1, stdout="", stderr="command not found"
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=1, stdout="", stderr="command not found")
     with patch("subprocess.run", return_value=mock_result):
         with pytest.raises(ContainerSetupError, match="Remote command failed"):
             docker_ssh.run_ssh("bad-command")
 
 
 def test_run_ssh_success_returns_stdout(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="hello world\n", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="hello world\n", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         result = docker_ssh.run_ssh("echo hello world")
         assert result == "hello world\n"
 
 
 def test_run_docker_builds_correct_command(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="container_id\n", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="container_id\n", stderr="")
     with patch("subprocess.run", return_value=mock_result) as mock_run:
         docker_ssh.run_docker(["ps", "-a"])
         call_args = mock_run.call_args[0][0]
@@ -107,9 +97,7 @@ def test_run_docker_builds_correct_command(docker_ssh: DockerOverSsh) -> None:
 
 
 def test_run_docker_quotes_special_args(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result) as mock_run:
         docker_ssh.run_docker(["exec", "container", "sh", "-c", "echo hello world"])
         call_args = mock_run.call_args[0][0]
@@ -119,25 +107,19 @@ def test_run_docker_quotes_special_args(docker_ssh: DockerOverSsh) -> None:
 
 
 def test_check_file_exists_returns_true_on_success(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.check_file_exists("/var/run/mngr-ready") is True
 
 
 def test_check_file_exists_returns_false_on_failure(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=1, stdout="", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=1, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.check_file_exists("/nonexistent") is False
 
 
 def test_check_docker_ready_returns_true_on_success(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.check_docker_ready() is True
 
@@ -168,25 +150,19 @@ def test_inspect_container_returns_dict_when_not_list(docker_ssh: DockerOverSsh)
 
 
 def test_container_is_running_true(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="true\n", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="true\n", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.container_is_running("test-container") is True
 
 
 def test_container_is_running_false(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=0, stdout="false\n", stderr=""
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="false\n", stderr="")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.container_is_running("test-container") is False
 
 
 def test_container_is_running_error_returns_false(docker_ssh: DockerOverSsh) -> None:
-    mock_result = subprocess.CompletedProcess(
-        args=["ssh"], returncode=1, stdout="", stderr="No such container"
-    )
+    mock_result = subprocess.CompletedProcess(args=["ssh"], returncode=1, stdout="", stderr="No such container")
     with patch("subprocess.run", return_value=mock_result):
         assert docker_ssh.container_is_running("nonexistent") is False
 

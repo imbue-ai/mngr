@@ -1,5 +1,4 @@
 import json
-from loguru import logger as _loguru_logger
 import queue
 import signal
 import threading
@@ -17,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger as _loguru_logger
 
 from imbue.claude_web_chat.agent_discovery import AgentInfo
 from imbue.claude_web_chat.agent_discovery import discover_agents
@@ -36,8 +36,7 @@ logger = _loguru_logger
 STATIC_DIRECTORY = Path(__file__).parent / "static"
 
 _FRONTEND_NOT_BUILT_HTML = (
-    "<html><body><p>Frontend not built."
-    " Run <code>npm run build</code> in <code>frontend/</code>.</p></body></html>"
+    "<html><body><p>Frontend not built. Run <code>npm run build</code> in <code>frontend/</code>.</p></body></html>"
 )
 
 # Default number of events for tail-first loading
@@ -148,10 +147,7 @@ def _discover_with_filters(request: Request) -> list[AgentInfo]:
 def _list_agents_endpoint(request: Request) -> JSONResponse:
     """List all mngr-managed agents."""
     agents = _discover_with_filters(request)
-    items = [
-        AgentListItem(id=agent.id, name=agent.name, state=agent.state)
-        for agent in agents
-    ]
+    items = [AgentListItem(id=agent.id, name=agent.name, state=agent.state) for agent in agents]
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
