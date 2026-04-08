@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ['**']
 
+env:
+  UV_HTTP_TIMEOUT: 120
+
 jobs:
   # Integration tests with coverage - runs on non-release branches
   test-integration:
