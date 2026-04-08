@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from collections.abc import Generator
 from pathlib import Path
 
@@ -17,6 +18,17 @@ def _reset_loguru() -> Generator[None, None, None]:
     logger.remove()
     yield
     logger.remove()
+
+
+@pytest.fixture
+def loguru_stderr_sink() -> None:
+    """Add a stderr sink so that capfd can capture loguru output.
+
+    The autouse _reset_loguru fixture removes all handlers before each test,
+    so tests that need to verify log output via capfd must re-add a stderr sink.
+    Cleanup is handled by _reset_loguru's teardown.
+    """
+    logger.add(sys.stderr)
 
 
 LLM_RESPONSES_SCHEMA = """

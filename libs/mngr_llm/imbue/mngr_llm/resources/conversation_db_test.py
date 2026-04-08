@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from loguru import logger
 
 from imbue.mngr_llm.conftest import LLM_RESPONSES_SCHEMA
 from imbue.mngr_llm.conftest import create_mind_conversations_table_in_test_db
@@ -40,8 +39,7 @@ def test_write_stdout_with_int(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == "42\n"
 
 
-def test_warn(capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_warn(capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     _warn("something broke")
     captured = capfd.readouterr()
     assert "WARNING" in captured.err
@@ -117,8 +115,7 @@ def test_lookup_model_not_found(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert captured.out == ""
 
 
-def test_lookup_model_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_lookup_model_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     db_path = tmp_path / "missing.db"
     lookup_model(str(db_path), "conv-1")
     captured = capfd.readouterr()
@@ -147,8 +144,7 @@ def test_count_empty_table(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert captured.out == "0\n"
 
 
-def test_count_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_count_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     db_path = tmp_path / "missing.db"
     count(str(db_path))
     captured = capfd.readouterr()
@@ -179,8 +175,7 @@ def test_max_rowid_empty_table(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert captured.out == "0\n"
 
 
-def test_max_rowid_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_max_rowid_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     db_path = tmp_path / "missing.db"
     max_rowid(str(db_path))
     captured = capfd.readouterr()
@@ -214,8 +209,7 @@ def test_poll_new_no_new_conversations(tmp_path: Path, capsys: pytest.CaptureFix
     assert captured.out == ""
 
 
-def test_poll_new_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_poll_new_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     db_path = tmp_path / "missing.db"
     poll_new(str(db_path), "0")
     captured = capfd.readouterr()
@@ -254,8 +248,9 @@ def test_lookup_by_name_returns_most_recent(tmp_path: Path, capsys: pytest.Captu
     assert captured.out == "conv-new\n"
 
 
-def test_lookup_by_name_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_lookup_by_name_missing_db(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None
+) -> None:
     db_path = tmp_path / "missing.db"
     lookup_by_name(str(db_path), "anything")
     captured = capfd.readouterr()
@@ -304,8 +299,9 @@ def test_last_response_id_not_found(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert captured.out == ""
 
 
-def test_last_response_id_missing_db(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_last_response_id_missing_db(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None
+) -> None:
     db_path = tmp_path / "missing.db"
     last_response_id(str(db_path), "conv-1")
     captured = capfd.readouterr()
@@ -380,8 +376,7 @@ def test_main_last_response_id(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert captured.out == "resp-main\n"
 
 
-def test_main_unknown_subcommand(capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_main_unknown_subcommand(capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     with _override_argv(["conversation_db", "bogus", "/tmp/x.db"]):
         with pytest.raises(SystemExit, match="1"):
             main()
@@ -390,8 +385,7 @@ def test_main_unknown_subcommand(capfd: pytest.CaptureFixture[str]) -> None:
     assert "Unknown subcommand: bogus" in captured.err
 
 
-def test_main_too_few_args(capfd: pytest.CaptureFixture[str]) -> None:
-    logger.add(sys.stderr)
+def test_main_too_few_args(capfd: pytest.CaptureFixture[str], loguru_stderr_sink: None) -> None:
     with _override_argv(["conversation_db", "count"]):
         with pytest.raises(SystemExit, match="1"):
             main()
