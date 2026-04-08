@@ -544,7 +544,7 @@ def _build_command_with_defaults(
         session_name=f"mngr-{agent.name}",
         command="sleep 1000",
         additional_commands=additional_commands if additional_commands is not None else [],
-        env_shell_cmd="bash -c 'exec \"${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-bash}\"'",
+        env_shell_cmd="bash -c 'exec \"${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-${SHELL:-bash}}\"'",
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
@@ -702,8 +702,8 @@ def test_build_start_agent_shell_command_default_command_uses_user_shell(
     # Should save the user's shell via tmux set-environment
     assert "MNGR_SAVED_DEFAULT_TMUX_COMMAND" in result
 
-    # The default-command should exec into the saved user shell, not hardcoded bash
-    assert "MNGR_SAVED_DEFAULT_TMUX_COMMAND:-bash" in result
+    # The default-command should exec into the saved user shell, falling back to $SHELL
+    assert "MNGR_SAVED_DEFAULT_TMUX_COMMAND:-${SHELL:-bash}" in result
 
 
 def test_build_start_agent_shell_command_includes_onboarding_hook(

@@ -12,7 +12,6 @@ from typing import Final
 import click
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -33,6 +32,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -167,16 +167,14 @@ def _run_selection_screen(
 
     input_filter = _WizardInputFilter(state=state)
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
-
-    loop = MainLoop(
-        frame,
-        palette=palette,
-        input_filter=input_filter,
-        screen=screen,
-    )
-    loop.run()
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=palette,
+            input_filter=input_filter,
+            screen=screen,
+        )
+        loop.run()
 
     if not state.is_confirmed:
         return None
