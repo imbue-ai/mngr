@@ -9,10 +9,12 @@
 mngr run AGENT_TYPE [-c COMMAND] [-- AGENT_ARGS...]
 ```
 
-Run a headless agent and stream its output.
+Run an agent and stream its output.
 
-Run a headless agent of any type that supports streaming output,
-stream the output to stdout, and destroy the agent when done.
+Run an output-producing agent, stream its output to stdout, and
+clean up when done. Unlike 'create', which launches a persistent
+interactive agent, 'run' is for non-interactive agent types that
+produce output and exit.
 
 Use --command (-c) to specify the shell command for headless_command agents.
 Use -- to pass additional arguments directly to the agent.
@@ -24,7 +26,7 @@ mngr run [OPTIONS] AGENT_TYPE [AGENT_ARGS]...
 ```
 ## Arguments
 
-AGENT_TYPE is the headless agent type to run (e.g. headless_command, headless_claude).
+AGENT_TYPE is the agent type to run (e.g. headless_command, headless_claude).
 AGENT_ARGS are additional arguments passed through to the agent after --.
 
 **Options:**
@@ -55,8 +57,8 @@ AGENT_ARGS are additional arguments passed through to the agent after --.
 
 ## See Also
 
-- [mngr ask](./ask.md) - Ask mngr for help (headless_claude with built-in system prompt)
-- [mngr create](../primary/create.md) - Create a persistent agent
+- [mngr ask](./ask.md) - Ask mngr for help (uses headless_claude with built-in system prompt)
+- [mngr create](../primary/create.md) - Create a persistent interactive agent
 - [mngr exec](../primary/exec.md) - Execute a command on existing agents
 
 ## Examples
@@ -67,7 +69,7 @@ AGENT_ARGS are additional arguments passed through to the agent after --.
 $ mngr run headless_command -c "echo hello world"
 ```
 
-**Run headless claude**
+**Run claude non-interactively**
 
 ```bash
 $ mngr run headless_claude -- "what is 2+2"
