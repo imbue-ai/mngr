@@ -1,11 +1,11 @@
-"""Release tests for the claude agent provisioning on Modal.
+"""Release tests for Claude agent lifecycle on Modal.
 
 These tests require Modal credentials, network access, and Claude credentials
 to run. They are marked with @pytest.mark.release and only run when pushing
 to main. To run them locally:
 
     PYTEST_MAX_DURATION_SECONDS=600 uv run pytest --no-cov --cov-fail-under=0 -n 0 -m release \\
-        libs/mngr_claude/imbue/mngr_claude/test_claude_agent_modal.py::test_claude_agent_provisioning_on_modal
+        libs/mngr_claude/imbue/mngr_claude/test_claude_agent_modal.py
 """
 
 import json
