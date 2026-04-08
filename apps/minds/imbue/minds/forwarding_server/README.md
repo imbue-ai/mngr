@@ -30,8 +30,7 @@ Authentication is global (one session grants access to all agents). The forwardi
 `/` route is special:
     if you don't have a valid session cookie, shows a login prompt
     if you are authenticated:
-        if exactly 1 agent is known, redirects directly to that agent
-        if 2+ agents are known, shows links to each agent
+        if 1 or more agents are known, shows links to each agent
         if no agents exist, shows the agent creation form
 
 `/create` route (requires auth):
