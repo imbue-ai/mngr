@@ -2,7 +2,7 @@
 
 Verifies that:
 - GC completes cleanly when the Docker daemon is unavailable
-- _discover_hosts_for_gc skips offline providers entirely (not with empty host list)
+- _discover_hosts_for_gc includes offline Docker providers with empty host lists
 - GC correctly destroys running Docker hosts with no agents
 - GC continues processing other providers when one is offline
 """
