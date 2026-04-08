@@ -1401,13 +1401,16 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         return transfers
 
     def _configure_readiness_hooks(self, host: OnlineHostInterface) -> None:
-        """Configure Claude hooks for readiness signaling in the agent's work_dir.
+        """Configure Claude hooks in the agent's work_dir.
 
-        This writes hooks to .claude/settings.local.json in the agent's work_dir.
-        The hooks signal when Claude is actively processing by creating/removing an
-        'active' file in the agent's state directory.
+        Writes hooks to .claude/settings.local.json in the agent's work_dir:
+        - Readiness hooks that signal when Claude is actively processing by
+          creating/removing an 'active' file in the agent's state directory.
+        - On macOS with sync_credentials_on_login enabled, a
+          Notification:auth_success hook that propagates keychain credentials
+          to all per-agent entries after login.
 
-        Skips if hooks already exist.
+        Skips if all hooks already exist.
         """
         # Future improvement: use `claude --settings <path>` to load hooks from
         # outside the worktree (e.g. the agent state dir), eliminating the need
@@ -1440,11 +1443,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 merged = merged_with_creds
 
         if merged is None:
-            logger.debug("Readiness hooks already configured in {}", settings_path)
+            logger.debug("Agent hooks already configured in {}", settings_path)
             return
 
         # Write the merged settings
-        with log_span("Configuring readiness hooks in {}", settings_path):
+        with log_span("Configuring agent hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
