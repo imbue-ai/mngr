@@ -13,6 +13,19 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import PluginTier
 
+# Packages not yet published on PyPI. Excluded from the install wizard.
+# Remove entries from here as they get published.
+_UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
+    {
+        "imbue-mngr-claude-mind",
+        "imbue-mngr-llm",
+        "imbue-mngr-mind",
+        "imbue-mngr-mind-chat",
+        "imbue-mngr-schedule",
+        "imbue-mngr-tmr",
+    }
+)
+
 
 class SignalCheck(FrozenModel):
     """A heuristic to detect if the user likely wants a plugin enabled.
@@ -262,11 +275,13 @@ def get_installable_packages() -> tuple[CatalogEntry, ...]:
 
     Used by the install wizard to show per-package choices. Returns the
     first catalog entry for each package (typically the INDEPENDENT-tier entry
-    if one exists).
+    if one exists). Excludes packages not yet published on PyPI.
     """
     seen: set[str] = set()
     result: list[CatalogEntry] = []
     for entry in PLUGIN_CATALOG:
+        if entry.package_name in _UNPUBLISHED_PACKAGES:
+            continue
         if entry.package_name not in seen:
             seen.add(entry.package_name)
             result.append(entry)
