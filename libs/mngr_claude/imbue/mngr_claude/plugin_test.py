@@ -957,6 +957,79 @@ def test_configure_agent_hooks_merges_with_existing_settings(
     assert "Notification" in settings["hooks"]
 
 
+def test_configure_agent_hooks_adds_credential_sync_on_macos(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should add credential sync hooks on macOS when sync_credentials_on_login is True."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should have credential sync hook under Notification with auth_success matcher
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 1
+    assert "sync_keychain_credentials.py" in auth_hooks[0]["hooks"][0]["command"]
+
+
+def test_configure_agent_hooks_skips_credential_sync_when_disabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should not add credential sync hooks when sync_credentials_on_login is False."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should NOT have credential sync hook
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 0
+
+
 def test_provision_configures_agent_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
