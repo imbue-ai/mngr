@@ -205,7 +205,7 @@ def _build_mngr_create_command(
         case LaunchMode.DEV:
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
-            mngr_command.extend(["--template", "docker"])
+            mngr_command.extend(["--new-host", "--template", "docker"])
         case LaunchMode.CLOUD:
             raise NotImplementedError("Cloud launch mode is not yet supported")
         case _ as unreachable:
