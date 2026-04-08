@@ -158,6 +158,9 @@ _COL_DIVIDER_CHARS = 2
 def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
     """Wrap each row of canvas content with OSC 8 open/close escape sequences.
 
+    Only wraps the visible text, not trailing whitespace padding, so the
+    terminal hyperlink underline doesn't extend across the full column width.
+
     Sets the charset to "U" on modified segments so that urwid's Screen skips
     the UNPRINTABLE_TRANS_TABLE translation (which would replace ESC bytes with
     '?'). On UTF-8 terminals the "U" charset flag has no other effect.
@@ -167,10 +170,15 @@ def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) ->
             yield row
             continue
         new_row = [*row]
+        # Insert osc_close before trailing padding in the last segment
+        last = new_row[-1]
+        last_text: Any = last[2]
+        stripped = last_text.rstrip(b" ")
+        padding = last_text[len(stripped) :]
+        new_row[-1] = (last[0], "U", stripped + osc_close + padding)
+        # Prepend osc_open to the first segment
         first = new_row[0]
         new_row[0] = (first[0], "U", osc_open + first[2])
-        last = new_row[-1]
-        new_row[-1] = (last[0], "U", last[2] + osc_close)
         yield new_row
 
 
