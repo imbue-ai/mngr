@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -27,6 +26,11 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+
+# Grace period before trusting lifecycle state. Claude can take several seconds
+# to start (especially on first run or via nvm), during which the tmux pane shows
+# bash as the current command, making the agent look DONE/STOPPED.
+_STARTUP_GRACE_SECONDS: float = 10.0
 
 
 @pure
@@ -92,17 +96,6 @@ def _extract_result_error(line: str) -> str | None:
     if parsed.get("type") == "result" and parsed.get("is_error"):
         return parsed.get("result", "unknown error")
     return None
-
-
-def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
-    """Yield text deltas parsed from stream-json lines, skipping blanks and non-delta events."""
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        text = extract_text_delta(stripped)
-        if text is not None:
-            yield text
 
 
 class _StreamTailState(MutableModel):
@@ -228,6 +221,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     """
 
     _no_output_error_subject: str = "claude"
+    _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.
@@ -303,16 +297,12 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         except FileNotFoundError:
             return None
         for line in content.split("\n"):
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if not stripped:
                 continue
-            try:
-                parsed = json.loads(line)
-                if parsed.get("type") == "result" and parsed.get("is_error"):
-                    return parsed.get("result", "unknown error")
-            except (json.JSONDecodeError, ValueError):
-                logger.debug("Non-JSON line in stdout.jsonl during error recovery: {}", line)
-                continue
+            error = _extract_result_error(stripped)
+            if error is not None:
+                return error
         return None
 
     def stream_output(self) -> Iterator[str]:
