@@ -5,7 +5,7 @@
 # Orchestrator for stop hook scripts. Performs shared setup (precondition
 # checks, fetch/merge/push, informational detection, stuck-agent tracking),
 # then gates on autofix verification and launches stop_hook_pr_and_ci.sh
-# to handle PR creation and CI checks.
+# to poll CI checks on the agent-created PR.
 
 set -euo pipefail
 
