@@ -4,10 +4,10 @@ This test requires Modal credentials and network access. It is marked
 with @pytest.mark.release and @pytest.mark.timeout(900).
 
 End-to-end flow:
-1. Deploy a trigger that runs echo inside the container
+1. Deploy a trigger that runs a headless echo command
 2. List triggers and verify the deployed trigger appears
 3. Run the trigger via schedule run
-4. Verify the echo output is returned (proves the command actually ran)
+4. Verify the echo output is returned (proves end-to-end execution)
 5. Remove the trigger via schedule remove
 6. Verify the trigger is gone from the list
 """
@@ -37,17 +37,15 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
 
     try:
-        # Step 1: Deploy a trigger that creates an echo agent.
-        # The echo agent runs /bin/echo with the passthrough args, producing
-        # output that run_scheduled_trigger captures and returns via fn.remote().
-        # --verify none because the schedule run call IS the test (different
-        # code path from --verify quick which uses `modal run` CLI).
+        # Step 1: Deploy a trigger that runs mngr run headless_command.
+        # mngr run executes the command synchronously and captures its output,
+        # which run_scheduled_trigger() returns via fn.remote().
         add_result = deploy_test_trigger(
             trigger_name,
             env,
             _ENABLED_PLUGINS,
-            command="create",
-            args="test-agent echo --no-connect --no-ensure-clean --context /tmp --branch :run-{DATE} -- hello-from-schedule-run",
+            command="run",
+            args="headless_command -c 'echo hello-from-schedule-run' --context /tmp",
         )
         assert add_result.returncode == 0, (
             f"schedule add failed\nstdout: {add_result.stdout}\nstderr: {add_result.stderr}"
@@ -70,10 +68,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"Deployed trigger '{trigger_name}' not found in schedule list: {trigger_names}"
         )
 
-        # Step 3: Run the trigger immediately via schedule run.
-        # run_scheduled_trigger() returns the full command output, which
-        # invoke_modal_trigger_function() returns via fn.remote(), and the
-        # CLI prints to stdout.
+        # Step 3: Run the trigger immediately via schedule run
         run_result = subprocess.run(
             ["uv", "run", "mngr", "schedule", "run", trigger_name, "--provider", "modal", *disable_args],
             capture_output=True,
@@ -85,14 +80,13 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
             f"schedule run failed\nstdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 
-        # Step 4: Verify the agent's command output proves the trigger ran.
-        # run_scheduled_trigger() creates the agent, then captures its tmux
-        # pane content via mngr capture. The echo agent runs /bin/echo with
-        # the passthrough args, so "hello-from-schedule-run" appears in the
-        # captured pane content returned via fn.remote().
+        # Step 4: Verify the echo output proves the command ran end-to-end.
+        # mngr run headless_command captures the command's stdout synchronously.
+        # run_scheduled_trigger() returns it via fn.remote(), and schedule run
+        # prints it to stdout.
         assert "hello-from-schedule-run" in run_result.stdout, (
             f"Expected 'hello-from-schedule-run' in output (proves the "
-            f"agent command actually executed inside the container).\n"
+            f"headless command executed inside the container).\n"
             f"stdout: {run_result.stdout}\nstderr: {run_result.stderr}"
         )
 

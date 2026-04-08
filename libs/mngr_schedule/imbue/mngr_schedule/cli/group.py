@@ -148,7 +148,7 @@ def add_trigger_options(command: Any) -> Any:
     command = optgroup.option(
         "--command",
         "command",
-        type=click.Choice(["create", "start", "message", "exec"], case_sensitive=False),
+        type=click.Choice(["create", "start", "message", "exec", "run"], case_sensitive=False),
         default=None,
         help="Which mngr command to run when triggered.",
     )(command)
