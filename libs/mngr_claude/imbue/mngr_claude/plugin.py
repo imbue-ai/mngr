@@ -73,6 +73,7 @@ from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
+from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_path
 from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
@@ -115,22 +116,22 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
             raise UserInputError(f"Session file not found: {session_file}")
         return session_file.stem, session_file.parent
 
-    # Search by session ID in $CLAUDE_CONFIG_DIR first, then fall back to ~/.claude/.
-    # We check both because when running inside an mngr agent, CLAUDE_CONFIG_DIR
-    # points to the agent's isolated config dir, but the user's sessions are
-    # in ~/.claude/. In non-agent contexts, CLAUDE_CONFIG_DIR may point to a
-    # custom config dir that also has sessions.
-    default_config_dir = get_user_claude_config_dir()
+    # Search the current config dir first, then fall back to the user-scope dir.
+    # Inside an mngr agent CLAUDE_CONFIG_DIR points to the agent's isolated
+    # config dir while the user's sessions live in the user-scope dir.
+    current_config_dir = get_claude_config_dir()
+    user_config_dir = get_user_claude_config_dir()
+
     search_dirs: list[Path] = []
     resolved_dirs: list[Path] = []
-    env_config_dir_str = os.environ.get("CLAUDE_CONFIG_DIR")
-    if env_config_dir_str:
-        env_projects_dir = Path(env_config_dir_str) / "projects"
-        search_dirs.append(env_projects_dir)
-        resolved_dirs.append(env_projects_dir.resolve())
-    default_projects_dir = default_config_dir / "projects"
-    if default_projects_dir.resolve() not in resolved_dirs:
-        search_dirs.append(default_projects_dir)
+
+    current_projects_dir = current_config_dir / "projects"
+    search_dirs.append(current_projects_dir)
+    resolved_dirs.append(current_projects_dir.resolve())
+
+    user_projects_dir = user_config_dir / "projects"
+    if user_projects_dir.resolve() not in resolved_dirs:
+        search_dirs.append(user_projects_dir)
 
     matches: list[Path] = []
     searched: list[Path] = []

@@ -553,16 +553,20 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 2
+    assert len(hooks) == 3
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
     assert "touch" in hooks[0]["command"]
     assert "session_started" in hooks[0]["command"]
 
-    # Second hook: tracks current session ID for session replacement detection
-    session_id_hook = hooks[1]["command"]
+    # Second hook: echoes the base branch for the agent's context
     assert hooks[1]["type"] == "command"
+    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+
+    # Third hook: tracks current session ID for session replacement detection
+    session_id_hook = hooks[2]["command"]
+    assert hooks[2]["type"] == "command"
     assert "claude_session_id" in session_id_hook
     assert "session_id" in session_id_hook
     assert "MNGR_AGENT_STATE_DIR" in session_id_hook
@@ -2521,7 +2525,10 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
         plugin_data={"adopt_session": (target_session_id,)},
     )
 
-    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir)}):
+    home_claude = str(Path.home() / ".claude")
+    with patch.dict(
+        "os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir), "ORIGINAL_CLAUDE_CONFIG_DIR": home_claude}
+    ):
         agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
         agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
