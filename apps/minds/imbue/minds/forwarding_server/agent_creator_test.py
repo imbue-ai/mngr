@@ -1,4 +1,5 @@
 import queue as queue_mod
+import threading
 from pathlib import Path
 import pytest
 
@@ -247,14 +248,21 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
 
 
 def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
-    """Verify start_creation works with a local path that doesn't exist (fails but tracks status)."""
+    """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
     creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
     )
     agent_id = creator.start_creation("/nonexistent/local/path", agent_name="local-test")
+    # The background thread runs immediately and fails because the path doesn't exist.
+    # Wait for it to finish.
+    for _ in range(50):
+        info = creator.get_creation_info(agent_id)
+        if info is not None and info.status == AgentCreationStatus.FAILED:
+            break
+        threading.Event().wait(0.1)
     info = creator.get_creation_info(agent_id)
     assert info is not None
-    assert info.status == AgentCreationStatus.CLONING
+    assert info.status == AgentCreationStatus.FAILED
 
 
 def test_setup_cloudflare_tunnel_skips_when_no_client(tmp_path: Path) -> None:
