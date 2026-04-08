@@ -56,6 +56,7 @@ from imbue.mngr_claude.plugin import _archive_session_files
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
+from imbue.mngr_claude.plugin import _compute_persistent_plugin_path
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _get_session_archive_dir
@@ -2949,6 +2950,50 @@ def test_rewrite_installed_plugins_paths_raises_on_similar_prefix() -> None:
 
     with pytest.raises(ConfigError, match="does not start with expected prefix"):
         _rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir)
+
+
+def test_rewrite_installed_plugins_paths_raises_actionable_error_for_mngr_agent_path() -> None:
+    """installPath from a previous mngr agent raises ConfigError with the expected persistent path."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    stale_path = (
+        "/Users/testuser/.mngr/agents/agent-abc123/plugin/claude/anthropic/plugins/cache/my-org/my-plugin/1.0.0"
+    )
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "my-plugin@my-org": [
+                    {
+                        "installPath": stale_path,
+                        "version": "1.0.0",
+                    }
+                ]
+            },
+        }
+    )
+
+    with pytest.raises(ConfigError, match="previous mngr agent") as exc_info:
+        _rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir)
+
+    error_msg = str(exc_info.value)
+    # Error should show the stale path and the expected persistent path
+    assert stale_path in error_msg
+    assert "/Users/testuser/.claude/plugins/cache/my-org/my-plugin/1.0.0" in error_msg
+
+
+def test_compute_persistent_plugin_path_extracts_relative_path() -> None:
+    """Extracts relative path using the /plugin/claude/anthropic/ marker."""
+    stale = "/home/user/.mngr/agents/agent-abc/plugin/claude/anthropic/plugins/cache/org/name/1.0.0"
+    source_dir = Path("/home/user/.claude")
+    assert _compute_persistent_plugin_path(stale, source_dir) == "/home/user/.claude/plugins/cache/org/name/1.0.0"
+
+
+def test_compute_persistent_plugin_path_returns_none_without_marker() -> None:
+    """Returns None if the path has no recognizable agent config dir marker."""
+    stale = "/some/random/path/plugins/cache/org/name/1.0.0"
+    source_dir = Path("/home/user/.claude")
+    assert _compute_persistent_plugin_path(stale, source_dir) is None
 
 
 # =============================================================================
