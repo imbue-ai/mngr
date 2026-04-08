@@ -672,7 +672,7 @@ def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *,
             )
         else:
             host.execute_idempotent_command(
-                f"cp {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
+                f"rm -f {shlex.quote(str(credentials_dest))} && cp {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
                 timeout_seconds=5.0,
             )
     else:
