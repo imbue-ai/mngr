@@ -285,8 +285,8 @@ def main() -> None:
     args = parser.parse_args()
 
     server = HTTPServer(("127.0.0.1", args.port), _Handler)
-    logger.info(f"Serving e2e test output at http://127.0.0.1:{args.port}")
-    logger.info(f"Test output dir: {_TEST_OUTPUT_DIR}")
+    logger.info("Serving e2e test output at http://127.0.0.1:{}", args.port)
+    logger.info("Test output dir: {}", _TEST_OUTPUT_DIR)
     server.serve_forever()
 
 

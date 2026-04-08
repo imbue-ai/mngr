@@ -815,14 +815,14 @@ def test_procps_ps_command_available() -> None:
     """
     result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
     if result.returncode != 0:
-        logger.warning(f"PROCPS TEST FAILED: 'ps aux' returned {result.returncode}")
-        logger.warning(f"stderr: {result.stderr}")
+        logger.warning("PROCPS TEST FAILED: 'ps aux' returned {}", result.returncode)
+        logger.warning("stderr: {}", result.stderr)
         logger.warning("The procps package is likely not installed. Install with: apt-get install procps")
         raise AssertionError(f"ps aux failed: {result.stderr}")
 
     # Verify we get reasonable output (should include at least our own process)
     if "PID" not in result.stdout and len(result.stdout.strip().split("\n")) <= 1:
-        logger.warning(f"PROCPS TEST FAILED: 'ps aux' output looks wrong, stdout: {result.stdout}")
+        logger.warning("PROCPS TEST FAILED: 'ps aux' output looks wrong, stdout: {}", result.stdout)
         raise AssertionError("ps aux output invalid")
 
 

@@ -187,8 +187,10 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
     if not all_exited:
         still_alive = [pid for pid in pids if _is_pid_alive(pid)]
         logger.warning(
-            f"{len(still_alive)} asciinema process(es) did not terminate "
-            f"within {_ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS}s: {still_alive}"
+            "{} asciinema process(es) did not terminate within {}s: {}",
+            len(still_alive),
+            _ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS,
+            still_alive,
         )
 
     # Clean up pid files -- they are only useful while asciinema is running
@@ -403,15 +405,15 @@ def e2e(
         shutil.rmtree(test_output_dir, ignore_errors=True)
 
     if test_failed:
-        logger.warning(f"Test output: {test_output_dir}")
-        logger.warning(f"Debugging tips: {_DEBUGGING_DOC} (relative to git root)")
+        logger.warning("Test output: {}", test_output_dir)
+        logger.warning("Debugging tips: {} (relative to git root)", _DEBUGGING_DOC)
 
     if keep_env:
         _write_destroy_script(test_output_dir, env, temp_git_repo, tmux_tmpdir)
-        logger.info(f"Environment kept alive. To clean up: {test_output_dir}/destroy-env")
-        logger.info(f"MNGR_HOST_DIR={temp_host_dir}")
-        logger.info(f"TMUX_TMPDIR={tmux_tmpdir}")
-        logger.info(f"CWD={temp_git_repo}")
+        logger.info("Environment kept alive. To clean up: {}/destroy-env", test_output_dir)
+        logger.info("MNGR_HOST_DIR={}", temp_host_dir)
+        logger.info("TMUX_TMPDIR={}", tmux_tmpdir)
+        logger.info("CWD={}", temp_git_repo)
         return
 
     # Interrupt asciinema recording processes so they flush and exit
