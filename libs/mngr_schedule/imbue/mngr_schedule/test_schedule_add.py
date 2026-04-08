@@ -15,9 +15,8 @@ from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
 
-# These tests exercise the full deploy flow including claude plugin hooks,
-# so claude must be enabled (and ANTHROPIC_API_KEY must be set).
-_ENABLED_PLUGINS = frozenset({"schedule", "modal", "claude"})
+# Only schedule and modal plugins are needed for the deploy flow.
+_ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 
 
 @pytest.mark.release

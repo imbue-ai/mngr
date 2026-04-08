@@ -1,5 +1,5 @@
 import subprocess
-from collections.abc import Callable
+import sys
 from typing import Any
 from typing import assert_never
 
@@ -16,22 +16,10 @@ from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_schedule.cli.group import schedule
 from imbue.mngr_schedule.cli.options import ScheduleRunCliOptions
 from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
-from imbue.mngr_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_schedule_creation_record
 from imbue.mngr_schedule.implementations.modal.deploy import invoke_modal_trigger_function
-
-# Callable type aliases for dependency injection in tests.
-ScriptRunner = Callable[[str], int]
-RecordLookup = Callable[[ModalProviderInstance, str], ModalScheduleCreationRecord | None]
-TriggerInvoker = Callable[[ModalScheduleCreationRecord], None]
-
-
-def _default_script_runner(script_path: str) -> int:
-    """Run a shell script with inherited stdio, returning the exit code."""
-    result = subprocess.run([script_path])
-    return result.returncode
 
 
 @schedule.command(name="run")
@@ -78,18 +66,11 @@ def schedule_run(ctx: click.Context, **kwargs: Any) -> None:
     ctx.exit(exit_code)
 
 
-def run_local_trigger(
-    mngr_ctx: MngrContext,
-    trigger_name: str,
-    script_runner: ScriptRunner = _default_script_runner,
-) -> int:
+def run_local_trigger(mngr_ctx: MngrContext, trigger_name: str) -> int:
     """Run a local trigger by executing its run.sh wrapper script.
 
     This is the exact same code path as cron: execute the run.sh script
     that was created by schedule add.
-
-    The script_runner parameter allows tests to inject a fake runner
-    without monkey-patching subprocess.
     """
     record = get_local_schedule_creation_record(mngr_ctx, trigger_name)
     if record is None:
@@ -109,24 +90,17 @@ def run_local_trigger(
         )
 
     logger.info("Executing local trigger '{}' via {}", trigger_name, run_script)
-    return script_runner(str(run_script))
+    result = subprocess.run([str(run_script)])
+    return result.returncode
 
 
-def run_modal_trigger(
-    provider: ModalProviderInstance,
-    trigger_name: str,
-    record_lookup: RecordLookup = get_modal_schedule_creation_record,
-    trigger_invoker: TriggerInvoker = invoke_modal_trigger_function,
-) -> int:
+def run_modal_trigger(provider: ModalProviderInstance, trigger_name: str) -> int:
     """Run a modal trigger by invoking the deployed function on Modal.
 
     This is the exact same code path as Modal cron: invoke the
     run_scheduled_trigger() function that was deployed by schedule add.
-
-    The record_lookup and trigger_invoker parameters allow tests to inject
-    fakes without monkey-patching modal.
     """
-    record = record_lookup(provider, trigger_name)
+    record = get_modal_schedule_creation_record(provider, trigger_name)
     if record is None:
         raise click.ClickException(
             f"No modal schedule record found for trigger '{trigger_name}'. "
@@ -144,11 +118,11 @@ def run_modal_trigger(
     )
 
     try:
-        output = trigger_invoker(record)
+        output = invoke_modal_trigger_function(record)
     except MngrError as exc:
         raise click.ClickException(f"Modal invocation failed for trigger '{trigger_name}': {exc}") from None
 
     if output:
-        click.echo(output)
+        sys.stdout.write(output)
 
     return 0
