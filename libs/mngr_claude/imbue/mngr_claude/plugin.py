@@ -968,8 +968,12 @@ def _check_settings_local_gitignored(
 ) -> None:
     """Verify .claude/settings.local.json is gitignored in the given repo path.
 
+    When .claude is a symlink, resolves it and checks the resolved path against
+    .gitignore instead (e.g. .agents/settings.local.json if .claude -> .agents).
+
     Raises PluginMngrError if the file is not gitignored. Silently returns
-    if the path is not a git repository.
+    if the path is not a git repository or if the .claude symlink target is
+    outside the repo (since git won't track it).
 
     When require_repo_rule is True, also verifies that the ignore rule comes
     from the repository itself (not the user's global gitignore). This is
