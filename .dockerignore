@@ -10,3 +10,5 @@ node_modules
 test-results
 .offload-image-cache
 *.egg-info
+.coverage
+.coverage.*
