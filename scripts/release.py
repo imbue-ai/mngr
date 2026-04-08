@@ -93,10 +93,25 @@ def _detect_changed_packages(since_tag: str) -> set[str]:
     return changed
 
 
-def _detect_new_packages(since_tag: str) -> set[str]:
-    """Return the set of pypi names for packages that didn't exist at the given tag.
+def _is_published_on_pypi(pypi_name: str) -> bool:
+    """Check whether a package has ever been published on PyPI."""
+    import httpx
 
-    A package is considered new if its pyproject.toml didn't exist at the tag.
+    try:
+        response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
+        return response.status_code == 200
+    except Exception:
+        # If we can't reach PyPI, assume published to avoid accidentally
+        # treating existing packages as new.
+        return True
+
+
+def _detect_new_packages(since_tag: str) -> set[str]:
+    """Return the set of pypi names for packages that have never been released.
+
+    A package is considered new if either:
+    - Its pyproject.toml didn't exist at the given tag, OR
+    - It has never been published on PyPI
     """
     new: set[str] = set()
     for pkg in PACKAGES:
@@ -106,6 +121,9 @@ def _detect_new_packages(since_tag: str) -> set[str]:
             capture_output=True,
         )
         if result.returncode != 0:
+            new.add(pkg.pypi_name)
+        elif not _is_published_on_pypi(pkg.pypi_name):
+            print(f"  {pkg.pypi_name}: exists in repo but not on PyPI, treating as new")
             new.add(pkg.pypi_name)
     return new
 
