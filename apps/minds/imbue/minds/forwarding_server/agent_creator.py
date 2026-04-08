@@ -97,6 +97,17 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
+def _is_git_worktree(repo_dir: Path) -> bool:
+    """Check if a directory is a git worktree (not the main repo).
+
+    In a worktree, ``.git`` is a file containing ``gitdir: <path>`` rather
+    than a directory. Docker copies this file as-is, but the target path
+    doesn't exist inside the container, breaking git operations.
+    """
+    dot_git = repo_dir / ".git"
+    return dot_git.is_file()
+
+
 def clone_git_repo(
     git_url: GitUrl,
     clone_dir: Path,
@@ -379,8 +390,19 @@ class AgentCreator(MutableModel):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
                         raise MngrCommandError(f"Local path does not exist: {resolved_path}")
-                    mind_dir = resolved_path
-                    log_queue.put(f"[minds] Using local directory: {mind_dir}")
+
+                    if _is_git_worktree(resolved_path):
+                        # Worktrees have a .git file pointing to the parent repo's
+                        # .git/worktrees/ dir, which breaks when copied into Docker.
+                        # Clone locally to get a standalone repo.
+                        log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
+                        temp_clone_dir = Path(tempfile.mkdtemp(prefix="minds-clone-"))
+                        clone_target = temp_clone_dir / extract_repo_name(repo_source)
+                        clone_git_repo(GitUrl(str(resolved_path)), clone_target, on_output=emit_log)
+                        mind_dir = clone_target
+                    else:
+                        mind_dir = resolved_path
+                        log_queue.put(f"[minds] Using local directory: {mind_dir}")
                 else:
                     temp_clone_dir = Path(tempfile.mkdtemp(prefix="minds-clone-"))
                     clone_target = temp_clone_dir / extract_repo_name(repo_source)
