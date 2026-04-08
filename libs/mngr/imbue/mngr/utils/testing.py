@@ -236,6 +236,13 @@ def setup_mngr_test_environment(
     unison_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("UNISON", str(unison_dir))
 
+    # Prevent uv from hitting the network or doing unnecessary work during
+    # tests. UV_OFFLINE stops network requests (uv tool run was checking for
+    # updates, causing ~10s delays on Modal). UV_FROZEN prevents uv.lock
+    # updates and the filesystem scan that goes with them.
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("UV_FROZEN", "1")
+
     # Safety check: verify Path.home() is in a temp directory.
     # If this fails, tests could accidentally modify the real home directory.
     assert_home_is_temp_directory()

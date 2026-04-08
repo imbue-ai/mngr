@@ -984,7 +984,7 @@ def test_dispatch_markable_custom_command_toggles_off() -> None:
 
 def test_dispatch_immediate_custom_command_does_not_mark() -> None:
     entry = _make_entry()
-    cmd = CustomCommand(name="connect", command="mngr connect $MNGR_AGENT_NAME")
+    cmd = CustomCommand(name="connect", command="true")
     commands = {"c": cmd}
     state = _make_state_with_focus(entries=(entry,), commands=commands)
     _dispatch_command(state, "c", cmd)

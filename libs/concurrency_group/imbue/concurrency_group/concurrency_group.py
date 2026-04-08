@@ -34,8 +34,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 P = ParamSpec("P")
 T = TypeVar("T")
 
-DEFAULT_EXIT_TIMEOUT_SECONDS: Final[float] = 4.0
-DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 4.0
+DEFAULT_EXIT_TIMEOUT_SECONDS: Final[float] = 10.0
+DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Increase this if cleanup becomes a performance bottleneck.
 CLEANUP_INTERVAL_TICKS: Final[int] = 1

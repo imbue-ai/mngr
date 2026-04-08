@@ -16,6 +16,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_DATACLASS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_DIRECT_SUBPROCESS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_EVAL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_EXEC
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_EXIT_STACK
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_FSTRING_LOGGING
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_FUNCTOOLS_PARTIAL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GETATTR
@@ -172,6 +173,10 @@ def check_yaml_usage(source_dir: Path, max_count: int) -> None:
 
 def check_functools_partial(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_FUNCTOOLS_PARTIAL, source_dir, max_count)
+
+
+def check_exit_stack(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_EXIT_STACK, source_dir, max_count)
 
 
 # --- Hardcoded paths ---
