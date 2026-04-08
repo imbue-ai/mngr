@@ -26,8 +26,11 @@ class _AlwaysStoppedHeadlessCommand(HeadlessCommand):
 
     Uses inheritance to override get_lifecycle_state, ensuring
     stream_output terminates immediately when reading pre-written
-    test files.
+    test files. Uses a short grace period so tests that exercise
+    error paths (missing/empty stdout) don't wait the default 2s.
     """
+
+    _startup_grace_seconds: float = 0.1
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         return AgentLifecycleState.STOPPED
