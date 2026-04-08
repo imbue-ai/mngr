@@ -203,6 +203,27 @@ def _create_agent_with_retry(
     pytest.fail("Unreachable")
 
 
+def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: int) -> None:
+    """Poll the forwarding server until the agent's web server is discovered, then verify the proxy."""
+    logger.info("Waiting for server discovery (up to {}s)...", timeout_seconds)
+    for i in range(timeout_seconds):
+        resp = client.get(f"/agents/{agent_id}/servers/")
+        if resp.status_code == 200 and "web" in resp.text:
+            logger.info("Web server discovered after {} seconds", i)
+            break
+        if i % 10 == 0 and i > 0:
+            logger.debug("Still waiting for discovery ({} seconds)...", i)
+        threading.Event().wait(1)
+    else:
+        resp = client.get(f"/agents/{agent_id}/servers/")
+        logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
+        pytest.fail(f"Web server not discovered within {timeout_seconds} seconds")
+
+    resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
+    assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
+    logger.info("Web server accessible via proxy (status {})", resp.status_code)
+
+
 @pytest.mark.release
 @pytest.mark.timeout(600)
 def test_create_agent_e2e(tmp_path: Path) -> None:
@@ -229,29 +250,9 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
         agent_id = _create_agent_with_retry(client, max_attempts=2)
         logger.info("Agent ready: {}", agent_id)
 
-        # Wait for the forwarding server to discover the agent's servers.
-        # The MngrStreamManager needs to: discover the agent via `mngr observe`,
-        # then start `mngr events` to stream server events from the Docker container.
-        # This can take 30-90 seconds depending on SSH key exchange and event polling.
-        logger.info("Waiting for server discovery (up to 120s)...")
-        for i in range(120):
-            resp = client.get(f"/agents/{agent_id}/servers/")
-            if resp.status_code == 200 and "web" in resp.text:
-                logger.info("Web server discovered after {} seconds", i)
-                break
-            if i % 10 == 0 and i > 0:
-                logger.debug("Still waiting for discovery ({} seconds)...", i)
-            threading.Event().wait(1)
-        else:
-            # Dump diagnostic info before failing
-            resp = client.get(f"/agents/{agent_id}/servers/")
-            logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
-            pytest.fail("Web server not discovered within 120 seconds")
-
-        # Verify the web server is accessible through the proxy
-        resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
-        assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
-        logger.info("Web server accessible via proxy")
+        # Wait for the forwarding server to discover the agent's web server
+        # and verify it is accessible through the proxy.
+        _wait_for_web_server(client, agent_id, timeout_seconds=120)
 
         logger.info("Server: {}", server.base_url)
         logger.info("Agent servers: {}/agents/{}/servers/", server.base_url, agent_id)
@@ -315,28 +316,9 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
         )
         logger.info("Agent ready: {}", agent_id)
 
-        # DEV mode is fast but the MngrStreamManager still needs time to:
-        # 1. Discover the new agent via mngr observe (~10s polling interval)
-        # 2. Start an events stream for the new mind agent
-        # 3. Read the server events from the local filesystem
-        logger.info("Waiting for server discovery (up to 60s)...")
-        for i in range(60):
-            resp = client.get(f"/agents/{agent_id}/servers/")
-            if resp.status_code == 200 and "web" in resp.text:
-                logger.info("Web server discovered after {} seconds", i)
-                break
-            if i % 10 == 0 and i > 0:
-                logger.debug("Still waiting for discovery ({} seconds)...", i)
-            threading.Event().wait(1)
-        else:
-            resp = client.get(f"/agents/{agent_id}/servers/")
-            logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
-            pytest.fail("Web server not discovered within 60 seconds")
-
-        # Verify the web server is accessible through the proxy
-        resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
-        assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
-        logger.info("Web server accessible via proxy (status {})", resp.status_code)
+        # Wait for the forwarding server to discover the agent's web server
+        # and verify it is accessible through the proxy.
+        _wait_for_web_server(client, agent_id, timeout_seconds=60)
 
     finally:
         client.close()
