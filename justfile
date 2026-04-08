@@ -104,14 +104,19 @@ test-offload-release args="":
         echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
     fi
 
+    # Generate .dockerignore from .gitignore: remove the current.tar.gz line
+    # (needed in the Docker build context) and add .git/ (not in .gitignore).
+    grep -v 'current\.tar\.gz' .gitignore > .dockerignore
+    echo '.git/' >> .dockerignore
+
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
     mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
+    trap "rm -f .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     ./scripts/generate_patch_for_offload.sh $BASE_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
     cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
+    trap "rm -f current.tar.gz .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
