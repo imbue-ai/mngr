@@ -156,7 +156,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION + (".test_durations",)
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 

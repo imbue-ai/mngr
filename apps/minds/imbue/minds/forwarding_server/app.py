@@ -270,10 +270,6 @@ def _handle_landing_page(
 
     all_agent_ids = backend_resolver.list_known_mind_ids()
 
-    # If exactly one agent, redirect directly to it
-    if len(all_agent_ids) == 1:
-        return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
-
     if all_agent_ids:
         html = render_landing_page(accessible_agent_ids=all_agent_ids)
         return HTMLResponse(content=html)

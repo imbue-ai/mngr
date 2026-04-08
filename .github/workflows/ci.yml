@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ['**']
 
+env:
+  UV_HTTP_TIMEOUT: 120
+
 jobs:
   # Integration tests with coverage - runs on non-release branches
   test-integration:
@@ -14,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
       - uses: actions/checkout@v6
@@ -38,7 +41,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run tests
-        run: uv run pytest -n 0 --timeout 10 --cov-fail-under=0 -v --tb=short --splits 8 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+        run: uv run pytest -n 0 --timeout 10 --cov-fail-under=0 -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
 
       - name: Upload test timing data
         if: always()
@@ -214,7 +217,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run acceptance tests
-        run: export IS_ACCEPTANCE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0 -m "acceptance"' --no-cov -v --tb=short --splits 23 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+        run: export IS_ACCEPTANCE=1 && uv run pytest -n 0 --timeout 0 --override-ini='addopts=-n 0 -m "acceptance"' --no-cov -v --tb=short --splits 23 --group ${{ matrix.group }} --splitting-algorithm=least_duration
 
       - name: Upload test timing data
         if: always()

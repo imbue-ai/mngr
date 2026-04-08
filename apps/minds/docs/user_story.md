@@ -10,8 +10,7 @@ This is the primary flow for how a user would create a mind for the first time:
 8. When creation completes, the user is redirected to their mind's web interface at `/agents/<agent-id>/web/`
 
 For subsequent visits:
-- If the user has exactly one known agent, they are automatically redirected to it
-- If they have multiple agents, they see a listing page with links to each
+- The user sees a listing page with links to each of their agents
 
 Creating additional agents:
 - Users can visit `/create` to create another mind
