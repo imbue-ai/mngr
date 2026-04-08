@@ -585,7 +585,7 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     """Invoke the deployed modal function for a trigger.
 
     Calls modal.Function.from_name() to look up the deployed function and
-    invokes it remotely. Returns the last lines of the command's output
+    invokes it remotely. Returns the full captured output of the command
     (from run_scheduled_trigger's return value).
 
     Raises MngrError if the function is not found or the invocation fails.

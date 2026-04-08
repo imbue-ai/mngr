@@ -232,8 +232,8 @@ def run_scheduled_trigger() -> str:
     print(f"Currently in {os.getcwd()}")
 
     print(f"Running: {' '.join(cmd)}")
-    exit_code, output_tail = _run_and_stream(cmd, is_checked=False)
+    exit_code, full_output = _run_and_stream(cmd, is_checked=False)
     if exit_code != 0:
-        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nLast output:\n{output_tail}")
+        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nOutput:\n{full_output}")
 
-    return output_tail
+    return full_output
