@@ -276,7 +276,7 @@ def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -
     return ctx.is_unattended or config.auto_dismiss_dialogs
 
 
-_MNGR_AGENT_CONFIG_DIR_SEGMENT: Final[str] = "/plugin/claude/"
+_MNGR_AGENT_CONFIG_DIR_MARKER: Final[str] = "/plugin/claude/anthropic/"
 """Path segment that identifies an mngr agent's Claude config directory.
 
 Agent config dirs follow the pattern: <agent_state_dir>/plugin/claude/anthropic/.
@@ -292,13 +292,10 @@ def _compute_persistent_plugin_path(stale_path: str, source_claude_dir: Path) ->
     Returns the expected persistent path under source_claude_dir, or None if the
     relative path cannot be determined (the marker segment is not found).
     """
-    # Agent config dirs use: <agent_state_dir>/plugin/claude/anthropic/<relative_path>
-    # Try the full pattern first, then fall back to the shorter marker.
-    for marker in ("/plugin/claude/anthropic/", _MNGR_AGENT_CONFIG_DIR_SEGMENT):
-        idx = stale_path.find(marker)
-        if idx != -1:
-            relative = stale_path[idx + len(marker) :]
-            return str(source_claude_dir / relative)
+    idx = stale_path.find(_MNGR_AGENT_CONFIG_DIR_MARKER)
+    if idx != -1:
+        relative = stale_path[idx + len(_MNGR_AGENT_CONFIG_DIR_MARKER) :]
+        return str(source_claude_dir / relative)
     return None
 
 
@@ -319,7 +316,7 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
             if install_path.startswith(source_prefix):
                 relative = install_path[len(source_prefix) :]
                 entry["installPath"] = str(target_config_dir / relative)
-            elif _MNGR_AGENT_CONFIG_DIR_SEGMENT in install_path:
+            elif _MNGR_AGENT_CONFIG_DIR_MARKER in install_path:
                 persistent_path = _compute_persistent_plugin_path(install_path, source_claude_dir)
                 raise ConfigError(
                     f"Plugin {plugin_name!r} in {installed_plugins_path} has an installPath "

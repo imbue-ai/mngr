@@ -2806,16 +2806,9 @@ def test_rewrite_installed_plugins_paths_raises_actionable_error_for_mngr_agent_
     assert "/Users/testuser/.claude/plugins/cache/my-org/my-plugin/1.0.0" in error_msg
 
 
-def test_compute_persistent_plugin_path_with_full_agent_marker() -> None:
+def test_compute_persistent_plugin_path_extracts_relative_path() -> None:
     """Extracts relative path using the /plugin/claude/anthropic/ marker."""
     stale = "/home/user/.mngr/agents/agent-abc/plugin/claude/anthropic/plugins/cache/org/name/1.0.0"
-    source_dir = Path("/home/user/.claude")
-    assert _compute_persistent_plugin_path(stale, source_dir) == "/home/user/.claude/plugins/cache/org/name/1.0.0"
-
-
-def test_compute_persistent_plugin_path_with_short_marker() -> None:
-    """Falls back to /plugin/claude/ if /anthropic/ segment is missing."""
-    stale = "/home/user/.mngr/agents/agent-abc/plugin/claude/plugins/cache/org/name/1.0.0"
     source_dir = Path("/home/user/.claude")
     assert _compute_persistent_plugin_path(stale, source_dir) == "/home/user/.claude/plugins/cache/org/name/1.0.0"
 
