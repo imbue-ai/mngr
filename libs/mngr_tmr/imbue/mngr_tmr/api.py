@@ -9,7 +9,6 @@ Sub-modules:
 - pulling: result/artifact pulling and branch management
 """
 
-import threading
 import time
 from pathlib import Path
 
@@ -17,15 +16,11 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.list import ListResult
-from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostError
-from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -40,6 +35,8 @@ from imbue.mngr_tmr.launching import launch_all_test_agents as launch_all_test_a
 from imbue.mngr_tmr.launching import launch_integrator_agent as launch_integrator_agent
 from imbue.mngr_tmr.launching import launch_test_agent as launch_test_agent
 from imbue.mngr_tmr.launching import stop_agent_on_host
+from imbue.mngr_tmr.mngr_cli import CliError
+from imbue.mngr_tmr.mngr_cli import list_agents as cli_list_agents
 from imbue.mngr_tmr.pulling import finalize_agent
 from imbue.mngr_tmr.pulling import pull_agent_branch as pull_agent_branch
 from imbue.mngr_tmr.pulling import pull_agent_outputs as pull_agent_outputs
@@ -63,38 +60,13 @@ _TERMINAL_STATES = frozenset(
 _MISSING_AGENT_MAX_ROUNDS = 30
 
 
-_LIST_AGENTS_TIMEOUT_SECONDS = 60.0
-
-
-def _list_agents_thread_target(
-    mngr_ctx: MngrContext,
-    result_holder: list[ListResult | None],
-) -> None:
-    """Target function for threaded list_agents call."""
-    try:
-        result_holder[0] = list_agents(
-            mngr_ctx=mngr_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.CONTINUE,
-        )
-    except (MngrError, HostError, OSError):
-        result_holder[0] = None
-
-
 def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
-    """List agents with a timeout to prevent hanging on unresponsive providers."""
-    result_holder: list[ListResult | None] = [None]
-    thread = threading.Thread(
-        target=_list_agents_thread_target,
-        args=(mngr_ctx, result_holder),
-        daemon=True,
-    )
-    thread.start()
-    thread.join(timeout=_LIST_AGENTS_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        logger.warning("list_agents timed out after {}s", _LIST_AGENTS_TIMEOUT_SECONDS)
+    """List agents via the ``mngr list`` CLI, returning None on failure or timeout."""
+    try:
+        return cli_list_agents(mngr_ctx.concurrency_group)
+    except (CliError, OSError) as exc:
+        logger.warning("mngr list failed: {}", exc)
         return None
-    return result_holder[0]
 
 
 def _should_pull(
