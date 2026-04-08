@@ -1,8 +1,8 @@
 """Unit tests for credential_extractor constants and module-level attributes."""
 
 from imbue.minds.telegram.credential_extractor import _AUTH_KEY_HEX_LENGTH
-from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 from imbue.minds.telegram.credential_extractor import _DEFAULT_LOGIN_TIMEOUT_SECONDS
+from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 
 
 def test_telegram_web_url_points_to_web_a() -> None:
