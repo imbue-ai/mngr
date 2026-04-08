@@ -420,8 +420,8 @@ sudo poweroff
             # Clean up the Lima instance
             try:
                 limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-            except (LimaCommandError, OSError):
-                pass
+            except (LimaCommandError, OSError) as cleanup_err:
+                logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
             self._save_failed_host_record(
                 host_id=host_id,
                 host_name=name,
