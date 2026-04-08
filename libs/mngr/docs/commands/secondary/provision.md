@@ -63,9 +63,6 @@ mngr provision [OPTIONS] [AGENT]
 | ---- | ---- | ----------- | ------- |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
-| `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
-| `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |
-| `--create-directory` | text | Create directory on remote [repeatable] | None |
 
 ## Agent Environment Variables
 
@@ -88,7 +85,6 @@ mngr provision [OPTIONS] [AGENT]
 | `--log-env-vars`, `--no-log-env-vars` | boolean | Log environment variables (security risk) | None |
 | `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
-| `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |

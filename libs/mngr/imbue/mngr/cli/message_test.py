@@ -33,7 +33,6 @@ _DEFAULT_OPTS = MessageCliOptions(
     log_commands=None,
     log_command_output=None,
     log_env_vars=None,
-    project_context_path=None,
     plugin=(),
     disable_plugin=(),
 )
@@ -56,7 +55,6 @@ def test_message_cli_options_has_expected_fields() -> None:
         log_commands=None,
         log_command_output=None,
         log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )

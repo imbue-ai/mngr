@@ -98,13 +98,11 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--source-path` | text | Source path | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
-| `--include-git`, `--no-include-git` | boolean | Include .git directory | `True` |
 
 ## Target (where to put the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | text | Target [HOST][:PATH]. Defaults to current dir if no other target args are given | None |
 | `--target-path` | text | Directory to mount source inside agent host. Incompatible with --transfer=none | None |
 | `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: transfer via git push --mirror (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
 
@@ -113,8 +111,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--branch` | text | Branch spec as [BASE][:NEW]. BASE defaults to current branch. NEW creates a fresh branch (* is replaced by agent name). Omit :NEW to use BASE directly without creating a branch. Empty NEW (e.g. 'main:') defaults to mngr/*. | `:mngr/*` |
-| `--depth` | integer | Shallow clone depth [default: full] | None |
-| `--shallow-since` | text | Shallow clone since date | None |
 | `--ensure-clean`, `--no-ensure-clean` | boolean | Abort if working tree is dirty | `True` |
 | `--include-unclean`, `--exclude-unclean` | boolean | Include uncommitted files [default: include if --no-ensure-clean] | None |
 | `--include-gitignored`, `--no-include-gitignored` | boolean | Include gitignored files | `False` |
@@ -135,8 +131,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--grant` | text | Grant a permission to the agent [repeatable] | None |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
-| `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
-| `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |
 
 ## New Host Environment Variables
 
@@ -198,7 +192,6 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--log-env-vars`, `--no-log-env-vars` | boolean | Log environment variables (security risk) | None |
 | `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
-| `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |

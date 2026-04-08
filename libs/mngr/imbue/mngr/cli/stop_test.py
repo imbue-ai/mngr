@@ -32,7 +32,6 @@ def test_stop_cli_options_fields() -> None:
         log_commands=None,
         log_command_output=None,
         log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )
@@ -111,7 +110,6 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         log_commands=None,
         log_command_output=None,
         log_env_vars=None,
-        project_context_path=None,
         plugin=("my-plugin",),
         disable_plugin=("other-plugin",),
     )

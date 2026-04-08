@@ -518,10 +518,6 @@ class CreateWorkDirResult(FrozenModel):
 class AgentGitOptions(FrozenModel):
     """Git-related options for the agent work_dir."""
 
-    is_git_synced: bool = Field(
-        default=True,
-        description="Whether to sync git data from the source repository",
-    )
     base_branch: str | None = Field(
         default=None,
         description="Starting branch for the agent (default: current branch)",

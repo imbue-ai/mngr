@@ -1303,8 +1303,7 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work dir in a thread to reduce latency
             track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
-            # Exclude .git if git options are present (the user is making an explicit
-            # choice about git handling, e.g. is_git_synced=False means "skip .git").
+            # Exclude .git if git options are present (git transfer handles it separately).
             exclude_git = options.git is not None
 
             self._rsync_files(
@@ -1334,12 +1333,8 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work dir in a thread to reduce latency
             track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
-            created_branch_name: str | None = None
-
-            is_git_synced = options.git is not None and options.git.is_git_synced
-            if is_git_synced:
-                created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
-                self._transfer_extra_files(source_host, source_path, target_path, options)
+            created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
+            self._transfer_extra_files(source_host, source_path, target_path, options)
 
             # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
             # not for full directory sync. By default, rsync does NOT use --delete, so existing files

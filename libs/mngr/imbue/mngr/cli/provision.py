@@ -20,7 +20,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.primitives import OutputFormat
 
@@ -38,9 +37,6 @@ class ProvisionCliOptions(CommonCliOptions):
     # Provisioning options
     extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
-    append_to_file: tuple[str, ...]
-    prepend_to_file: tuple[str, ...]
-    create_directory: tuple[str, ...]
     # Environment options
     env: tuple[str, ...]
     env_file: tuple[str, ...]
@@ -104,24 +100,6 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
     "upload_file",
     multiple=True,
     help="Upload LOCAL:REMOTE file pair [repeatable]",
-)
-@optgroup.option(
-    "--append-to-file",
-    "append_to_file",
-    multiple=True,
-    help="Append REMOTE:TEXT to file [repeatable]",
-)
-@optgroup.option(
-    "--prepend-to-file",
-    "prepend_to_file",
-    multiple=True,
-    help="Prepend REMOTE:TEXT to file [repeatable]",
-)
-@optgroup.option(
-    "--create-directory",
-    "create_directory",
-    multiple=True,
-    help="Create directory on remote [repeatable]",
 )
 @optgroup.group("Agent Environment Variables")
 @optgroup.option(
@@ -188,9 +166,6 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     provisioning = AgentProvisioningOptions(
         extra_provision_commands=opts.extra_provision_command,
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
-        append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
-        prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
-        create_directories=tuple(Path(d) for d in opts.create_directory),
     )
 
     # Parse environment options

@@ -562,7 +562,6 @@ def test_split_known_and_plugin_params_separates_known_from_extra() -> None:
         "log_commands": None,
         "log_command_output": None,
         "log_env_vars": None,
-        "project_context_path": None,
         "plugin": (),
         "disable_plugin": (),
         "test_plugin_option": "hello",
@@ -593,7 +592,6 @@ def test_split_known_and_plugin_params_all_known() -> None:
         "log_commands": None,
         "log_command_output": None,
         "log_env_vars": None,
-        "project_context_path": None,
         "plugin": (),
         "disable_plugin": (),
     }

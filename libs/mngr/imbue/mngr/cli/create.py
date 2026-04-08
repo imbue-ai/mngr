@@ -64,7 +64,6 @@ from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
@@ -283,9 +282,7 @@ class _CreateCommand(click.Command):
     help="Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled]",
 )
 @optgroup.option("--rsync-args", help="Additional arguments to pass to rsync")
-@optgroup.option("--include-git/--no-include-git", default=True, show_default=True, help="Include .git directory")
 @optgroup.group("Target (where to put the new agent)")
-@optgroup.option("--target", help="Target [HOST][:PATH]. Defaults to current dir if no other target args are given")
 @optgroup.option(
     "--target-path", help="Directory to mount source inside agent host. Incompatible with --transfer=none"
 )
@@ -311,8 +308,6 @@ class _CreateCommand(click.Command):
     "Omit :NEW to use BASE directly without creating a branch. "
     f"Empty NEW (e.g. 'main:') defaults to {_DEFAULT_NEW_BRANCH_PATTERN}.",
 )
-@optgroup.option("--depth", type=int, help="Shallow clone depth [default: full]")
-@optgroup.option("--shallow-since", help="Shallow clone since date")
 @optgroup.option(
     "--ensure-clean/--no-ensure-clean", default=True, show_default=True, help="Abort if working tree is dirty"
 )
@@ -352,10 +347,6 @@ class _CreateCommand(click.Command):
     help="Run custom shell command during provisioning [repeatable]",
 )
 @optgroup.option("--upload-file", "upload_file", multiple=True, help="Upload LOCAL:REMOTE file pair [repeatable]")
-@optgroup.option("--append-to-file", "append_to_file", multiple=True, help="Append REMOTE:TEXT to file [repeatable]")
-@optgroup.option(
-    "--prepend-to-file", "prepend_to_file", multiple=True, help="Prepend REMOTE:TEXT to file [repeatable]"
-)
 @optgroup.group("New Host Environment Variables")
 @optgroup.option("--host-env", multiple=True, help="Set environment variable KEY=VALUE for host [repeatable]")
 @optgroup.option(
@@ -1249,9 +1240,6 @@ def _parse_agent_opts(
         git = AgentGitOptions(
             base_branch=base_branch or _get_current_git_branch(source_location, mngr_ctx),
             new_branch_name=new_branch_name,
-            depth=opts.depth,
-            shallow_since=opts.shallow_since,
-            is_git_synced=opts.include_git,
             is_include_unclean=is_include_unclean,
             is_include_gitignored=opts.include_gitignored,
         )
@@ -1290,8 +1278,6 @@ def _parse_agent_opts(
     provisioning = AgentProvisioningOptions(
         extra_provision_commands=opts.extra_provision_command,
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
-        append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
-        prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
     )
 
     # Parse target_path if provided

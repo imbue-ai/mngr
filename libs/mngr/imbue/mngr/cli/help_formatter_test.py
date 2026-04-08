@@ -520,7 +520,6 @@ def test_create_command_common_group_contains_expected_options() -> None:
     assert "--quiet" in common_section, "--quiet should be in Common section"
     assert "--verbose" in common_section, "--verbose should be in Common section"
     assert "--log-commands" in common_section, "--log-commands should be in Common section"
-    assert "--context" in common_section, "--context should be in Common section"
     assert "--plugin" in common_section, "--plugin should be in Common section"
 
 

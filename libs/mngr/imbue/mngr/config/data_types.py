@@ -678,7 +678,7 @@ class MngrContext(FrozenModel):
     )
     project_root: Path | None = Field(
         default=None,
-        description="Project root directory (--context or git worktree root)",
+        description="Project root directory (git worktree root)",
     )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
@@ -757,7 +757,6 @@ class CommonCliOptions(FrozenModel):
     log_commands: bool | None
     log_command_output: bool | None
     log_env_vars: bool | None
-    project_context_path: str | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
 
@@ -792,17 +791,13 @@ class CreateCliOptions(CommonCliOptions):
     source_agent: str | None
     source_host: str | None
     source_path: str | None
-    target: str | None
     target_path: str | None
     transfer: str | None
     rsync: bool | None
     rsync_args: str | None
-    include_git: bool
     include_unclean: bool | None
     include_gitignored: bool
     branch: str
-    depth: int | None
-    shallow_since: str | None
     env: tuple[str, ...]
     env_file: tuple[str, ...]
     pass_env: tuple[str, ...]
@@ -835,6 +830,4 @@ class CreateCliOptions(CommonCliOptions):
     grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
-    append_to_file: tuple[str, ...]
-    prepend_to_file: tuple[str, ...]
     yes: bool

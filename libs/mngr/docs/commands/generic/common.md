@@ -25,5 +25,4 @@ Environment variables are redacted from logs by default for security. Use `--log
 ### Other Options
 
 - `--headless`: Disable all interactive behavior (prompts, TUI, editor). Also settable via `MNGR_HEADLESS` env var or `headless` config key. When not set, interactive mode is auto-detected from the TTY.
-- `--context PATH`: Project context directory (used for build context and loading project-specific config) [default: local .git root]
 - `--plugin TEXT / --enable-plugin TEXT / --disable-plugin TEXT`: Enable / disable selected plugins

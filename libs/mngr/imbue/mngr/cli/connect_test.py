@@ -29,7 +29,6 @@ def _make_connect_opts(
     log_commands: bool | None = None,
     log_command_output: bool | None = None,
     log_env_vars: bool | None = None,
-    project_context_path: str | None = None,
     plugin: tuple[str, ...] = (),
     disable_plugin: tuple[str, ...] = (),
 ) -> ConnectCliOptions:
@@ -49,7 +48,6 @@ def _make_connect_opts(
         log_commands=log_commands,
         log_command_output=log_command_output,
         log_env_vars=log_env_vars,
-        project_context_path=project_context_path,
         plugin=plugin,
         disable_plugin=disable_plugin,
     )

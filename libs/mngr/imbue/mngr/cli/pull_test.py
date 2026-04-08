@@ -70,7 +70,6 @@ def test_pull_cli_options_can_be_instantiated() -> None:
         log_commands=None,
         log_command_output=None,
         log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )

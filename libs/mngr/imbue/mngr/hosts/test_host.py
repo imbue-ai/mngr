@@ -1879,7 +1879,7 @@ def test_create_work_dir_copy_excludes_git_when_disabled(host_with_temp_dir: tup
         command=CommandString("sleep 1"),
         target_path=target_path,
         transfer_mode=TransferMode.RSYNC,
-        git=AgentGitOptions(is_git_synced=False),
+        git=AgentGitOptions(),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -2580,7 +2580,7 @@ def test_transfer_extra_files_with_many_files(
         command=CommandString("sleep 1"),
         target_path=target_path,
         transfer_mode=TransferMode.GIT_MIRROR,
-        git=AgentGitOptions(is_git_synced=True, is_include_unclean=True),
+        git=AgentGitOptions(is_include_unclean=True),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path

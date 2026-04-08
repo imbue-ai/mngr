@@ -28,9 +28,6 @@ def test_provision_cli_options_can_be_instantiated() -> None:
         restart=True,
         extra_provision_command=(),
         upload_file=(),
-        append_to_file=(),
-        prepend_to_file=(),
-        create_directory=(),
         env=(),
         env_file=(),
         pass_env=(),
@@ -41,7 +38,6 @@ def test_provision_cli_options_can_be_instantiated() -> None:
         log_commands=None,
         log_command_output=None,
         log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )

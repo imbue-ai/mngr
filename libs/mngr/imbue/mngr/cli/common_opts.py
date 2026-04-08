@@ -57,7 +57,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --log-command-output: Log command output
     - --log-env-vars: Log environment variables
     - --headless: Disable all interactive behavior
-    - --context: Project context directory
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
     """
@@ -67,12 +66,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
     command = optgroup.option("--plugin", "--enable-plugin", multiple=True, help="Enable a plugin [repeatable]")(
         command
     )
-    command = optgroup.option(
-        "--context",
-        "project_context_path",
-        type=click.Path(exists=True),
-        help="Project context directory (for build context and loading project-specific config) [default: local .git root]",
-    )(command)
     command = optgroup.option(
         "--safe",
         is_flag=True,
@@ -155,12 +148,10 @@ def setup_command_context(
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
     # Load config (is_interactive will be resolved below)
-    context_dir = Path(initial_opts.project_context_path) if initial_opts.project_context_path else None
     pm = ctx.obj
     mngr_ctx = load_config(
         pm,
         cg,
-        context_dir=context_dir,
         enabled_plugins=initial_opts.plugin,
         disabled_plugins=initial_opts.disable_plugin,
         is_interactive=False,
