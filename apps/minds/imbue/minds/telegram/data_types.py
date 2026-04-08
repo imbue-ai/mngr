@@ -1,7 +1,11 @@
+from typing import Final
+
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+
+TELEGRAM_WEB_URL: Final[str] = "https://web.telegram.org/a/"
 
 
 class TelegramUserCredentials(FrozenModel):

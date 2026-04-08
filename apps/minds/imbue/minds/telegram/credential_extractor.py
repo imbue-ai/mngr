@@ -15,9 +15,8 @@ from playwright.sync_api import sync_playwright
 
 from imbue.imbue_common.logging import log_span
 from imbue.minds.errors import TelegramCredentialExtractionError
+from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 from imbue.minds.telegram.data_types import TelegramUserCredentials
-
-TELEGRAM_WEB_URL: Final[str] = "https://web.telegram.org/a/"
 
 _AUTH_KEY_HEX_LENGTH: Final[int] = 512
 

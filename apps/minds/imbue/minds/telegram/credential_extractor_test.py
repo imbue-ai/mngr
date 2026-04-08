@@ -1,7 +1,7 @@
 """Unit tests for credential_extractor constants and module-level attributes."""
 
-from imbue.minds.telegram.credential_extractor import TELEGRAM_WEB_URL
 from imbue.minds.telegram.credential_extractor import _AUTH_KEY_HEX_LENGTH
+from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 from imbue.minds.telegram.credential_extractor import _DEFAULT_LOGIN_TIMEOUT_SECONDS
 
 

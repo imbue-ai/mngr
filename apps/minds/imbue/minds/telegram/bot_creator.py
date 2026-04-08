@@ -22,6 +22,7 @@ from telethon.sync import TelegramClient
 from imbue.imbue_common.logging import log_span
 from imbue.minds.errors import TelegramBotCreationError
 from imbue.minds.errors import TelegramCredentialError
+from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 from imbue.minds.telegram.data_types import TelegramBotCredentials
 from imbue.minds.telegram.data_types import TelegramUserCredentials
 
@@ -32,8 +33,6 @@ DC_IPS: Final[dict[int, str]] = {
     4: "149.154.167.91",
     5: "91.108.56.130",
 }
-
-TELEGRAM_WEB_URL: Final[str] = "https://web.telegram.org/a/"
 
 _FALLBACK_API_ID: Final[int] = 2496
 
