@@ -82,14 +82,16 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
     JavaScript. Falls back to known defaults if extraction fails.
     """
     try:
-        html = urllib.request.urlopen(TELEGRAM_WEB_URL, timeout=_HTTP_TIMEOUT_SECONDS).read().decode()
+        with urllib.request.urlopen(TELEGRAM_WEB_URL, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
+            html = resp.read().decode()
 
         main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
         if not main_match:
             raise ValueError("Could not find main bundle in Telegram Web HTML")
 
         main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
-        main_js = urllib.request.urlopen(main_js_url, timeout=_HTTP_TIMEOUT_SECONDS).read().decode()
+        with urllib.request.urlopen(main_js_url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
+            main_js = resp.read().decode()
 
         cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', main_js)
         if cred_match:
@@ -100,7 +102,8 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
         for chunk_id, chunk_hash in chunk_entries:
             chunk_url = f"{TELEGRAM_WEB_URL}{chunk_id}.{chunk_hash}.js"
             try:
-                chunk_js = urllib.request.urlopen(chunk_url, timeout=_HTTP_TIMEOUT_SECONDS).read().decode()
+                with urllib.request.urlopen(chunk_url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
+                    chunk_js = resp.read().decode()
             except (urllib.error.URLError, urllib.error.HTTPError):
                 continue
             cred_match = re.search(r'Number\("(\d+)"\),"([a-f0-9]{32})"', chunk_js)
