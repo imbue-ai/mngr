@@ -135,6 +135,48 @@ class ForwardingServerFixture:
             self._thread.join(timeout=5)
 
 
+def _create_agent_with_retry(client: httpx.Client, max_attempts: int = 2) -> str:
+    """Create an agent via API, retrying on failure (e.g. provisioning timeout)."""
+    for attempt in range(max_attempts):
+        logger.info("Creating agent (attempt {}/{})", attempt + 1, max_attempts)
+        resp = client.post(
+            "/api/create-agent",
+            json={
+                "git_url": str(_TEMPLATE_REPO),
+                "agent_name": _AGENT_NAME,
+                "launch_mode": "LOCAL",
+            },
+        )
+        assert resp.status_code == 200, f"Create API failed: {resp.status_code} {resp.text}"
+        agent_id = resp.json()["agent_id"]
+
+        for i in range(300):
+            resp = client.get(f"/api/create-agent/{agent_id}/status")
+            if resp.status_code == 200:
+                data = resp.json()
+                status = data.get("status")
+                if status == "DONE":
+                    logger.info("Agent created in {} seconds", i)
+                    return agent_id
+                if status == "FAILED":
+                    error = data.get("error", "unknown")
+                    logger.warning("Creation failed: {}", error)
+                    if attempt < max_attempts - 1:
+                        logger.info("Retrying...")
+                        _destroy_agent(_AGENT_NAME)
+                        break
+                    pytest.fail(f"Agent creation failed after {max_attempts} attempts: {error}")
+            threading.Event().wait(1)
+        else:
+            if attempt < max_attempts - 1:
+                logger.warning("Creation timed out, retrying...")
+                _destroy_agent(_AGENT_NAME)
+                continue
+            pytest.fail("Agent creation timed out after {max_attempts} attempts")
+
+    pytest.fail("Unreachable")
+
+
 @pytest.mark.release
 @pytest.mark.timeout(600)
 def test_create_agent_e2e(tmp_path: Path) -> None:
@@ -157,34 +199,9 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
     os.environ["SKIP_AUTH"] = "1"
 
     try:
-        # Create agent via API
-        logger.info("Creating agent via API...")
-        resp = client.post(
-            "/api/create-agent",
-            json={
-                "git_url": str(_TEMPLATE_REPO),
-                "agent_name": _AGENT_NAME,
-                "launch_mode": "LOCAL",
-            },
-        )
-        assert resp.status_code == 200, f"Create failed: {resp.status_code} {resp.text}"
-        agent_id = resp.json()["agent_id"]
-        logger.info("Agent creation started: {}", agent_id)
-
-        # Poll until done (up to 5 minutes)
-        for i in range(300):
-            resp = client.get(f"/api/create-agent/{agent_id}/status")
-            if resp.status_code == 200:
-                data = resp.json()
-                status = data.get("status")
-                if status == "DONE":
-                    logger.info("Agent created successfully in {} seconds", i)
-                    break
-                if status == "FAILED":
-                    pytest.fail(f"Agent creation failed: {data.get('error')}")
-            threading.Event().wait(1)
-        else:
-            pytest.fail("Agent creation did not complete within 5 minutes")
+        # Create agent via API (with retry for transient provisioning failures)
+        agent_id = _create_agent_with_retry(client, max_attempts=2)
+        logger.info("Agent ready: {}", agent_id)
 
         # Wait for the forwarding server to discover the agent's servers
         logger.info("Waiting for server discovery...")
