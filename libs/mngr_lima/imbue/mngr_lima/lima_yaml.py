@@ -11,12 +11,19 @@ from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 
 
-def _get_default_image_url() -> str:
-    """Get the default image URL for the current architecture."""
+def _get_default_image_url(
+    config_image_url_aarch64: str | None = None,
+    config_image_url_x86_64: str | None = None,
+) -> str:
+    """Get the default image URL for the current architecture.
+
+    Prefers config-level overrides when set, otherwise falls back to the
+    hardcoded constants.
+    """
     machine = platform.machine().lower()
     if machine in ("aarch64", "arm64"):
-        return DEFAULT_IMAGE_URL_AARCH64
-    return DEFAULT_IMAGE_URL_X86_64
+        return config_image_url_aarch64 or DEFAULT_IMAGE_URL_AARCH64
+    return config_image_url_x86_64 or DEFAULT_IMAGE_URL_X86_64
 
 
 def _get_arch_string() -> str:
@@ -31,15 +38,19 @@ def generate_default_lima_yaml(
     volume_host_path: Path,
     host_dir: str,
     custom_image_url: str | None = None,
+    config_image_url_aarch64: str | None = None,
+    config_image_url_x86_64: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
     Args:
         volume_host_path: Path on the host machine for the persistent volume.
         host_dir: Mount point inside the VM (e.g. /mngr).
-        custom_image_url: Optional override for the image URL.
+        custom_image_url: Optional override for the image URL (takes highest priority).
+        config_image_url_aarch64: Config-level override for aarch64 image URL.
+        config_image_url_x86_64: Config-level override for x86_64 image URL.
     """
-    image_url = custom_image_url or _get_default_image_url()
+    image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
 
     config: dict = {

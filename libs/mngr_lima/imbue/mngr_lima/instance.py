@@ -374,6 +374,8 @@ sudo poweroff
             base_config = generate_default_lima_yaml(
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),
+                config_image_url_aarch64=self.config.default_image_url_aarch64,
+                config_image_url_x86_64=self.config.default_image_url_x86_64,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -382,6 +384,8 @@ sudo poweroff
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),
                 custom_image_url=image_url,
+                config_image_url_aarch64=self.config.default_image_url_aarch64,
+                config_image_url_x86_64=self.config.default_image_url_x86_64,
             )
 
         # Write the YAML config to a temp file
