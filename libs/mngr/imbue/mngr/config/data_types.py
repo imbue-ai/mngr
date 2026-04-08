@@ -760,6 +760,7 @@ class CommonCliOptions(FrozenModel):
     project_context_path: str | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
+    setting: tuple[str, ...] = ()
 
 
 class CreateCliOptions(CommonCliOptions):
@@ -837,4 +838,5 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]
+    update: bool
     yes: bool

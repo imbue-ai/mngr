@@ -176,28 +176,47 @@ def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
     return parse_agents_from_json(json_output).agent_ids
 
 
-def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord:
-    """Parse a single JSON dict into a ServerLogRecord.
+class ServerDeregisteredRecord(FrozenModel):
+    """A record of a server being deregistered by an agent.
 
-    Extracts only the 'server' and 'url' fields, ignoring any extra
-    envelope fields (timestamp, event_id, source, type) that may be present.
+    Written to servers/events.jsonl when an application is removed.
+    """
+
+    server: ServerName = Field(description="Name of the server being deregistered")
+
+
+def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord | ServerDeregisteredRecord:
+    """Parse a single JSON dict into a ServerLogRecord or ServerDeregisteredRecord.
+
+    Extracts the 'server' field and checks the 'type' field.
+    For 'server_deregistered' events, returns a ServerDeregisteredRecord.
+    For all other events, returns a ServerLogRecord with 'server' and 'url'.
     Raises ValueError if required fields are missing.
     """
+    event_type = raw.get("type", "server_registered")
     server = raw.get("server")
+
+    if not server:
+        raise ServerLogParseError("Server log record missing 'server' field")
+
+    if event_type == "server_deregistered":
+        return ServerDeregisteredRecord(server=ServerName(str(server)))
+
     url = raw.get("url")
-    if not server or not url:
+    if not url:
         raise ServerLogParseError(f"Server log record missing required fields (server={server!r}, url={url!r})")
     return ServerLogRecord(server=ServerName(str(server)), url=str(url))
 
 
-def parse_server_log_records(text: str) -> list[ServerLogRecord]:
-    """Parse JSONL text into server log records.
+def parse_server_log_records(text: str) -> list[ServerLogRecord | ServerDeregisteredRecord]:
+    """Parse JSONL text into server log records (registered or deregistered).
 
-    Extracts only the 'server' and 'url' fields, ignoring any extra
-    envelope fields (timestamp, event_id, source, type) that may be present.
+    Uses the 'type' field to distinguish registered from deregistered events.
+    Registered events require 'server' and 'url'; deregistered events require
+    only 'server'. Other envelope fields (timestamp, event_id, source) are ignored.
     Raises on malformed lines rather than silently skipping them.
     """
-    records: list[ServerLogRecord] = []
+    records: list[ServerLogRecord | ServerDeregisteredRecord] = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
@@ -486,7 +505,10 @@ class MngrStreamManager(MutableModel):
             servers = self._events_servers.get(aid_str)
             if servers is None:
                 return
-            servers[str(record.server)] = record.url
+            if isinstance(record, ServerDeregisteredRecord):
+                servers.pop(str(record.server), None)
+            else:
+                servers[str(record.server)] = record.url
             self.resolver.update_servers(agent_id, dict(servers))
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])

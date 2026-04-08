@@ -38,7 +38,6 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -89,6 +88,10 @@ _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 # Paths within ~/.claude/ to sync to the per-agent config dir.
 # Used by both get_files_for_deploy() and provision() to ensure consistency.
 _CLAUDE_HOME_SYNC_DIRS: Final[tuple[str, ...]] = ("skills", "agents", "commands", "plugins")
+
+# Individual files from ~/.claude/ to sync (not generated/transformed).
+# settings.json is handled separately by _build_settings_json.
+_CLAUDE_HOME_SYNC_FILES: Final[tuple[str, ...]] = ("keybindings.json",)
 
 _INSTALLED_PLUGINS_RELATIVE_PATH: Final[Path] = Path("plugins") / "installed_plugins.json"
 
@@ -296,20 +299,36 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
 
     Rebases absolute paths from source_claude_dir onto target_config_dir
     so that Claude Code can find plugin files in the per-agent config dir.
-    Raises ConfigError if any installPath doesn't start with the expected prefix.
+    Paths that don't match the expected prefix are rewritten best-effort.
     """
     data: dict[str, Any] = json.loads(content)
     source_prefix = str(source_claude_dir) + "/"
     for plugin_name, plugin_entries in data.get("plugins", {}).items():
         for entry in plugin_entries:
             install_path = entry.get("installPath", "")
-            if not install_path.startswith(source_prefix):
-                raise ConfigError(
-                    f"installed_plugins.json: plugin {plugin_name!r} has installPath {install_path!r} "
-                    f"which does not start with expected prefix {source_prefix!r}"
-                )
-            relative = install_path[len(source_prefix) :]
-            entry["installPath"] = str(target_config_dir / relative)
+            if install_path.startswith(source_prefix):
+                relative = install_path[len(source_prefix):]
+                entry["installPath"] = str(target_config_dir / relative)
+            else:
+                # FIXME: installPath references a different agent's directory (stale entry).
+                # Ideally we'd clean these up, but for now just rewrite them best-effort
+                # by extracting the relative path after the last "plugins/" segment.
+                plugins_marker = "/plugins/"
+                marker_idx = install_path.rfind(plugins_marker)
+                if marker_idx >= 0:
+                    relative = install_path[marker_idx + len(plugins_marker):]
+                    entry["installPath"] = str(target_config_dir / "plugins" / relative)
+                    logger.warning(
+                        "installed_plugins.json: plugin {} has unexpected installPath {}, "
+                        "rewrote best-effort to {}",
+                        plugin_name, install_path, entry["installPath"],
+                    )
+                else:
+                    logger.warning(
+                        "installed_plugins.json: plugin {} has installPath {} "
+                        "which could not be rebased onto {}; keeping as-is",
+                        plugin_name, install_path, target_config_dir,
+                    )
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -762,13 +781,13 @@ def _write_generated_files(
 
 
 def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
-    """Sync user resource directories from the claude home dir into the per-agent config dir.
+    """Sync user resource directories and files from the claude home dir into the per-agent config dir.
 
-    Symlinks or copies skills/, agents/, commands/, plugins/ depending on the
-    ``symlink`` flag. In symlink mode, plugins/ uses child-level symlinks
-    (not a dir-level symlink) so that installed_plugins.json can be rewritten
-    in place without modifying the source. settings.json is handled separately
-    by _build_settings_json.
+    Syncs directories (skills/, agents/, commands/, plugins/) and individual
+    files (keybindings.json) depending on the ``symlink`` flag. In symlink mode,
+    plugins/ uses child-level symlinks (not a dir-level symlink) so that
+    installed_plugins.json can be rewritten in place without modifying the source.
+    settings.json is handled separately by _build_settings_json.
     """
     home_claude = get_user_claude_config_dir()
     for dir_name in _CLAUDE_HOME_SYNC_DIRS:
@@ -792,6 +811,20 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
             host.execute_idempotent_command(
                 f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
+    # Sync individual files (e.g. keybindings.json)
+    for file_name in _CLAUDE_HOME_SYNC_FILES:
+        source = home_claude / file_name
+        if not source.exists():
+            continue
+        dest = config_dir / file_name
+        if symlink:
+            host.execute_idempotent_command(
+                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
+        else:
+            host.execute_idempotent_command(
+                f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
 
 
 def _rsync_claude_home_directories(
@@ -800,18 +833,22 @@ def _rsync_claude_home_directories(
     local_claude_dir: Path,
     config_dir: Path,
 ) -> None:
-    """Transfer directory items from ~/.claude/ to a remote config dir using rsync.
+    """Transfer directories and individual files from ~/.claude/ to a remote config dir using rsync.
 
     Uses a single host.copy_directory (rsync) call with include/exclude filters
-    to transfer all directories (skills/, agents/, commands/, plugins/) at once.
-    Individual files like settings.json are handled separately by the caller
-    since they require generation/merging.
+    to transfer all directories (skills/, agents/, commands/, plugins/) and
+    individual files (keybindings.json) at once. Generated files like
+    settings.json are handled separately by the caller.
     """
     include_args: list[str] = []
     for dir_name in _CLAUDE_HOME_SYNC_DIRS:
         if not (local_claude_dir / dir_name).exists():
             continue
         include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
+    for file_name in _CLAUDE_HOME_SYNC_FILES:
+        if not (local_claude_dir / file_name).exists():
+            continue
+        include_args.append(f"--include={file_name}")
     if not include_args:
         return
     include_args.append("--exclude=*")
@@ -2052,8 +2089,8 @@ def get_files_for_deploy(
 
     Always includes settings.json and .claude.json (using generated defaults
     when local files are unavailable or user settings are excluded).
-    When include_user_settings is True, also includes skills/, agents/,
-    commands/, and credentials.
+    When include_user_settings is True, also includes keybindings.json,
+    skills/, agents/, commands/, plugins/, and credentials.
     """
     files: dict[Path, Path | str] = {}
 
@@ -2082,6 +2119,12 @@ def get_files_for_deploy(
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
     if include_user_settings:
+        # Collect individual sync files (e.g. keybindings.json)
+        for file_name in _CLAUDE_HOME_SYNC_FILES:
+            file_path = local_claude_dir / file_name
+            if file_path.exists():
+                files[Path("~/.claude") / file_name] = file_path
+
         # Collect directory contents (skills, agents, commands, plugins)
         for dir_name in _CLAUDE_HOME_SYNC_DIRS:
             dir_path = local_claude_dir / dir_name

@@ -1,0 +1,20 @@
+{
+  "name": "minds",
+  "version": "0.1.0",
+  "description": "Minds - Self-improving, persistent AI agents",
+  "homepage": "https://github.com/imbue-ai/mngr",
+  "author": "Imbue <dev@imbue.com>",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "node scripts/build.js",
+    "dist": "pnpm build && pnpm exec todesktop build"
+  },
+  "dependencies": {
+    "@todesktop/runtime": "^1.6.0"
+  },
+  "devDependencies": {
+    "electron": "35.7.5",
+    "@todesktop/cli": "^1.8.0"
+  }
+}

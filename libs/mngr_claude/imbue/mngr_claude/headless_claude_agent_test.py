@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -30,8 +31,9 @@ def _make_headless_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: HeadlessClaudeAgentConfig | AgentTypeConfig | None = None,
+    agent_cls: type[HeadlessClaude] = HeadlessClaude,
 ) -> tuple[HeadlessClaude, Host]:
-    """Create a HeadlessClaude agent with a real local host for testing."""
+    """Create a HeadlessClaude (or subclass) agent with a real local host for testing."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
@@ -41,7 +43,7 @@ def _make_headless_agent(
         agent_config = HeadlessClaudeAgentConfig(check_installation=False)
 
     mngr_ctx = local_provider.mngr_ctx
-    agent = HeadlessClaude.model_construct(
+    agent = agent_cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-headless"),
         agent_type=AgentTypeName("headless_claude"),
@@ -75,6 +77,42 @@ def _write_fake_agent_output(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stdout.jsonl").write_text(stdout)
     (agent_dir / "stderr.log").write_text(stderr)
+
+
+class _AlwaysFinishedHeadlessClaude(HeadlessClaude):
+    """HeadlessClaude subclass with fast timeouts that always reports as finished.
+
+    Used to test _wait_for_stdout_file's two-phase grace period logic.
+    Overrides _is_agent_finished to always return True (simulating the race
+    condition where tmux reports the agent as DONE during startup) and uses
+    short timeouts to keep tests fast.
+    """
+
+    _startup_grace_seconds: float = 0.3
+    _stdout_poll_timeout: float = 1.5
+
+    def _is_agent_finished(self) -> bool:
+        return True
+
+
+class _CreatesFileOnSecondPollAgent(_AlwaysFinishedHeadlessClaude):
+    """Simulates a file appearing mid-poll during the grace period.
+
+    On the first _file_exists_on_host call for the stdout path, returns
+    False (file doesn't exist yet). On the second call, creates the file
+    then returns the real result. This proves the poller checked at least
+    once without finding the file, then found it on a subsequent check.
+    """
+
+    _stdout_poll_count: int = 0
+
+    def _file_exists_on_host(self, path: Path) -> bool:
+        if path == self._get_stdout_path():
+            self._stdout_poll_count += 1
+            if self._stdout_poll_count >= 2:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+        return super()._file_exists_on_host(path)
 
 
 # =============================================================================
@@ -401,6 +439,10 @@ def test_stream_output_falls_back_to_pane_capture(
     """
     _patch_agent_as_stopped(monkeypatch)
     agent, _host = _make_headless_agent(local_provider, tmp_path)
+    # Use a short grace period so the test doesn't wait 10s before
+    # checking lifecycle state (the default grace period exceeds the
+    # pytest timeout).
+    agent._startup_grace_seconds = 0.5
     session = agent.session_name
 
     # Start a session that immediately prints error text and exits.
@@ -426,6 +468,75 @@ def test_stream_output_falls_back_to_pane_capture(
             list(agent.stream_output())
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], check=False)
+
+
+# =============================================================================
+# Tests for _wait_for_stdout_file grace period
+# =============================================================================
+
+
+def test_grace_period_ignores_lifecycle_state(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """During the grace period, _wait_for_stdout_file should ignore lifecycle state.
+
+    Even though _is_agent_finished returns True immediately, phase 1 should
+    keep polling for the file. We verify this by wrapping _file_exists_on_host
+    to create the file on the second poll -- proving the poller checked at
+    least once without finding it, then found it on a subsequent check.
+    """
+    agent, _host = _make_headless_agent(local_provider, tmp_path, agent_cls=_CreatesFileOnSecondPollAgent)
+    stdout_path = agent._get_stdout_path()
+
+    result = agent._wait_for_stdout_file(stdout_path)
+
+    assert result is True
+
+
+def test_phase2_trusts_lifecycle_after_grace_period(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """After the grace period, _wait_for_stdout_file should trust lifecycle state.
+
+    When the agent reports finished and the file never appears, phase 2
+    should detect the agent is done and return False.
+    """
+    agent, _host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
+    stdout_path = agent._get_stdout_path()
+
+    # Do NOT create the stdout file -- agent is "finished" and file never appeared
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+
+    start = time.monotonic()
+    result = agent._wait_for_stdout_file(stdout_path)
+    elapsed = time.monotonic() - start
+
+    assert result is False
+    # Should have waited at least the grace period before trusting lifecycle state
+    assert elapsed >= agent._startup_grace_seconds * 0.9
+
+
+def test_file_during_grace_period_returns_true_immediately(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """If the stdout file already exists, _wait_for_stdout_file should return True immediately."""
+    agent, _host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
+    stdout_path = agent._get_stdout_path()
+
+    # Pre-create the file
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text("")
+
+    start = time.monotonic()
+    result = agent._wait_for_stdout_file(stdout_path)
+    elapsed = time.monotonic() - start
+
+    assert result is True
+    # Should return almost immediately, well before the grace period expires
+    assert elapsed < agent._startup_grace_seconds * 0.5
 
 
 # =============================================================================
