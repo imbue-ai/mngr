@@ -330,6 +330,9 @@ class MngrStreamManager(MutableModel):
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
         """Handle a line of output from mngr observe --discovery-only."""
         if not is_stdout:
+            stripped = line.strip()
+            if stripped:
+                logger.debug("mngr observe stderr: {}", stripped)
             return
         stripped = line.strip()
         if not stripped:
@@ -506,6 +509,9 @@ class MngrStreamManager(MutableModel):
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
         """Handle a line of output from mngr events --follow for a specific agent."""
         if not is_stdout:
+            stripped = line.strip()
+            if stripped:
+                logger.debug("mngr events stderr for {}: {}", agent_id, stripped)
             return
         stripped = line.strip()
         if not stripped:
