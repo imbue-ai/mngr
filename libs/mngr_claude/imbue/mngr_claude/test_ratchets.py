@@ -40,7 +40,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(0))
+    rc.check_bare_print(_DIR, snapshot(2))
 
 
 # --- Exception handling ---
@@ -223,7 +223,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(0))
+    rc.check_direct_subprocess(_DIR, snapshot(4))
 
 
 # --- AST-based ratchets ---

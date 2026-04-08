@@ -45,6 +45,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -637,6 +638,21 @@ def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> No
                 assert hook["command"].startswith(guard), (
                     f"{event_name} hook command does not start with session guard: {hook['command'][:80]}"
                 )
+
+
+def test_build_credential_sync_hooks_config_structure() -> None:
+    """build_credential_sync_hooks_config should return a Notification:auth_success hook."""
+    config = build_credential_sync_hooks_config()
+
+    assert "hooks" in config
+    assert "Notification" in config["hooks"]
+    assert len(config["hooks"]["Notification"]) == 1
+    hook_group = config["hooks"]["Notification"][0]
+    assert hook_group["matcher"] == "auth_success"
+    hook = hook_group["hooks"][0]
+    assert hook["type"] == "command"
+    assert "sync_keychain_credentials.py" in hook["command"]
+    assert "MNGR_AGENT_STATE_DIR" in hook["command"]
 
 
 def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(

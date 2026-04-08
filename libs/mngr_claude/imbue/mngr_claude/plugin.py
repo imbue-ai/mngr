@@ -67,6 +67,7 @@ from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
+from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
@@ -196,6 +197,12 @@ class ClaudeAgentConfig(AgentTypeConfig):
     convert_macos_credentials: bool = Field(
         default=True,
         description="Whether to convert macOS keychain credentials to flat files for remote hosts",
+    )
+    sync_credentials_on_login: bool = Field(
+        default=True,
+        description="Whether credential changes should propagate across sessions. "
+        "On macOS, installs a hook to sync keychain entries after login. "
+        "On Linux, symlinks (True) or copies (False) .credentials.json.",
     )
     check_installation: bool = Field(
         default=True,
@@ -656,17 +663,27 @@ def _provision_keychain_credentials(config_dir: Path, concurrency_group: Concurr
             logger.debug("Copied OAuth credentials to per-agent keychain label {!r}", target)
 
 
-def _symlink_credentials(host: OnlineHostInterface, config_dir: Path) -> None:
-    """Linux/fallback: symlink .credentials.json to the per-agent config dir."""
+def _provision_local_credentials(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
+    """Set up .credentials.json in the per-agent config dir (symlink or copy).
+
+    When ``symlink`` is True, creates a symlink so credential updates propagate
+    across sessions. When False, copies the file for full isolation.
+    """
     credentials_source = get_user_claude_config_dir() / ".credentials.json"
     credentials_dest = config_dir / ".credentials.json"
     if credentials_source.exists():
-        host.execute_idempotent_command(
-            f"ln -sf {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
-            timeout_seconds=5.0,
-        )
+        if symlink:
+            host.execute_idempotent_command(
+                f"ln -sf {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
+                timeout_seconds=5.0,
+            )
+        else:
+            host.execute_idempotent_command(
+                f"rm -f {shlex.quote(str(credentials_dest))} && cp {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
+                timeout_seconds=5.0,
+            )
     else:
-        logger.debug("No .credentials.json found to symlink")
+        logger.debug("No .credentials.json found to provision")
 
 
 def _read_credentials_content(
@@ -836,8 +853,8 @@ def _provision_background_scripts(
     """Write the background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
 
     Provisions stream_transcript.sh, claude_background_tasks.sh,
-    common_transcript.sh, and wait_for_stop_hook.sh so they can be
-    launched by the agent's assemble_command or hooks at runtime.
+    common_transcript.sh, wait_for_stop_hook.sh, and sync_keychain_credentials.py
+    so they can be launched by the agent's assemble_command or hooks at runtime.
 
     Note: mngr_log.sh (shared logging library) is provisioned by
     Host.provision_agent() to both host-level and agent-level commands
@@ -853,6 +870,7 @@ def _provision_background_scripts(
         "claude_background_tasks.sh",
         "common_transcript.sh",
         "wait_for_stop_hook.sh",
+        "sync_keychain_credentials.py",
     ):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
@@ -1437,6 +1455,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # Merge hooks, checking for duplicates
         merged = merge_hooks_config(existing_settings, hooks_config)
+
+        # Conditionally add credential sync hooks (macOS only)
+        if self.agent_config.sync_credentials_on_login and is_macos():
+            credential_hooks = build_credential_sync_hooks_config()
+            merged_with_creds = merge_hooks_config(merged or existing_settings, credential_hooks)
+            if merged_with_creds is not None:
+                merged = merged_with_creds
+
         if merged is None:
             logger.debug("Readiness hooks already configured in {}", settings_path)
             return
@@ -1587,7 +1613,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             if config.convert_macos_credentials and is_macos():
                 _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
             else:
-                _symlink_credentials(host, config_dir)
+                _provision_local_credentials(host, config_dir, symlink=config.sync_credentials_on_login)
 
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files, mngr_ctx)
