@@ -468,8 +468,9 @@ def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Pa
 
     Pushing remote-tracking refs (refs/remotes/*) causes "inconsistent aliased
     update" errors on git 2.45+ when the source has symbolic refs like
-    refs/remotes/origin/HEAD. The fix uses explicit refspecs for branches and
-    tags only, ensuring remote-tracking refs are never pushed.
+    refs/remotes/origin/HEAD. GIT_MIRROR_PUSH_REFSPECS provides explicit
+    refspecs for branches and tags only, ensuring remote-tracking refs are
+    never pushed.
     """
     # Set up the source repo with remote-tracking refs including the symbolic
     # refs/remotes/origin/HEAD that triggers the bug over SSH.
@@ -526,9 +527,9 @@ def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Pa
     assert "main" in branch_result.stdout, "Branch 'main' should be pushed to the target"
 
     # Verify NO remote-tracking refs were pushed -- this is the key assertion.
-    # On main (before the fix), git push --mirror pushes refs/remotes/* to the
-    # target, which causes "inconsistent aliased update" errors over SSH on
-    # git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
+    # Without explicit refspecs, git push --mirror pushes refs/remotes/* to
+    # the target, which causes "inconsistent aliased update" errors over SSH
+    # on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
     target_refs = subprocess.run(
         ["git", "-C", str(target), "for-each-ref", "--format=%(refname)", "refs/remotes/"],
         capture_output=True,
