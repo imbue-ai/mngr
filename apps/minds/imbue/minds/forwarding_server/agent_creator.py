@@ -241,6 +241,9 @@ def run_mngr_create(
                     str(mind_dir),
                     "-s",
                     "-v={}:{}".format(remote_data_dir, "/data/remote"),
+                    # stick the source into some canonical location
+                    "--target-path",
+                    "/code/",
                 ]
             )
             # If the source directory contains a Dockerfile, use it for the build
