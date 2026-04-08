@@ -7,6 +7,7 @@ import click
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
@@ -51,11 +52,15 @@ def _is_observe_running(mngr_ctx: MngrContext) -> bool:
 
 
 @contextmanager
-def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[None]:
-    """Start mngr observe in the background if not already running. Stop it on exit."""
+def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[RunningProcess | None]:
+    """Start mngr observe in the background if not already running.
+
+    Yields the background process handle (or None if observe was already running).
+    The watcher can use this to detect if observe dies unexpectedly.
+    """
     if _is_observe_running(mngr_ctx):
         write_human_line("Using existing mngr observe process")
-        yield
+        yield None
         return
 
     write_human_line("Starting mngr observe in background...")
@@ -63,7 +68,7 @@ def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[None]:
         [sys.executable, "-m", "imbue.mngr.main", "observe", "--quiet"],
     )
     try:
-        yield
+        yield process
     finally:
         process.terminate()
 
@@ -155,12 +160,13 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
 
     write_human_line("Watching for agents transitioning to WAITING... (Ctrl+C to stop)")
 
-    with _ensure_observe(mngr_ctx):
+    with _ensure_observe(mngr_ctx) as observe_process:
         try:
             watch_for_waiting_agents(
                 mngr_ctx=mngr_ctx,
                 plugin_config=plugin_config,
                 notifier=notifier,
+                observe_process=observe_process,
             )
         except KeyboardInterrupt:
             logger.debug("Received keyboard interrupt")
