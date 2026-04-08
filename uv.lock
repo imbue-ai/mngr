@@ -1728,7 +1728,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-notifications"
-version = "0.2.2"
+version = "0.1.0"
 source = { editable = "libs/mngr_notifications" }
 dependencies = [
     { name = "click-option-group" },

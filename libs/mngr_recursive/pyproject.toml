@@ -5,7 +5,7 @@ description = "Recursive mngr plugin: injects mngr config and dependencies into 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.1.4",
+    "imbue-mngr==0.2.2",
     "watchdog>=4.0",
 ]
 

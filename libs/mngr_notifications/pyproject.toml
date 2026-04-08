@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-notifications"
-version = "0.2.2"
+version = "0.1.0"
 description = "Notification plugin for mngr - alerts when agents transition to WAITING state"
 readme = "README.md"
 requires-python = ">=3.12"
