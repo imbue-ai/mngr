@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -166,14 +168,13 @@ def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, 
     return instances
 
 
-class LimaSshConfig:
+class LimaSshConfig(FrozenModel):
     """Parsed SSH connection info from limactl show-ssh."""
 
-    def __init__(self, hostname: str, port: int, user: str, identity_file: Path) -> None:
-        self.hostname = hostname
-        self.port = port
-        self.user = user
-        self.identity_file = identity_file
+    hostname: str = Field(description="SSH hostname (usually 127.0.0.1)")
+    port: int = Field(description="SSH port number")
+    user: str = Field(description="SSH username")
+    identity_file: Path = Field(description="Path to SSH identity file")
 
 
 def _strip_ssh_config_quotes(value: str) -> str:
