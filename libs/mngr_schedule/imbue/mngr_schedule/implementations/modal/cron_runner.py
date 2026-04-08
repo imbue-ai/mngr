@@ -184,7 +184,7 @@ def run_scheduled_trigger() -> str:
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        return
+        return ""
 
     # Load consolidated env vars into the process environment so that the
     # mngr CLI and any subprocesses it spawns have access to them.
