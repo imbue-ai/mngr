@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 
@@ -115,7 +116,7 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
     content = yaml_path.read_text()
     config = yaml.safe_load(content)
     if not isinstance(config, dict):
-        raise ValueError(f"Lima YAML config must be a mapping, got {type(config).__name__}")
+        raise MngrError(f"Lima YAML config must be a mapping, got {type(config).__name__}")
     return config
 
 
