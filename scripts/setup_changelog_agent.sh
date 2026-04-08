@@ -32,6 +32,11 @@ SCHEDULE="0 8 * * *"
 PROVIDER="${CHANGELOG_PROVIDER:-modal}"
 VERIFY="${CHANGELOG_VERIFY:-full}"
 
+# The container's checked-in settings.toml references the modal provider, but
+# the modal plugin isn't installed in the container. MNGR_ALLOW_UNKNOWN_CONFIG
+# makes mngr warn instead of error on unknown backends.
+export MNGR_ALLOW_UNKNOWN_CONFIG=1
+
 # Validate that required env vars are set so the agent can function.
 for var in GH_TOKEN ANTHROPIC_API_KEY; do
     if [ -z "${!var:-}" ]; then
@@ -62,13 +67,15 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --schedule "$SCHEDULE" \
     --provider "$PROVIDER" \
     --verify "$VERIFY" \
-    --auto-merge-branch main \
+    --full-copy \
+    --no-auto-merge \
     --exclude-user-settings \
     --exclude-project-settings \
     --upload "$SCRIPT_DIR/changelog_agent_settings.toml:.mngr/settings.local.toml" \
     --pass-env GH_TOKEN \
     --pass-env ANTHROPIC_API_KEY \
-    --args '--type claude --branch :mngr/changelog-consolidation-{DATE} --message "Step 1: Run uv run python scripts/consolidate_changelog.py to consolidate changelog entries into UNABRIDGED_CHANGELOG.md. If it reports no entries, exit without changes. Step 2: Read the new section that was just added to UNABRIDGED_CHANGELOG.md (the topmost ## section). Then update CHANGELOG.md by adding a concise, human-friendly summary of these changes under the same date heading, inserted after the header text. Group related changes, use natural language, and keep it brief. Step 3: Commit all changed files. Step 4: Open a PR targeting main with a title like Changelog consolidation YYYY-MM-DD."'
+    --pass-env MNGR_ALLOW_UNKNOWN_CONFIG \
+    --args '--type claude --no-ensure-clean --branch :mngr/changelog-consolidation-{DATE} --message "Step 1: Run uv run python scripts/consolidate_changelog.py to consolidate changelog entries into UNABRIDGED_CHANGELOG.md. If it reports no entries, exit without changes. Step 2: Read the new section that was just added to UNABRIDGED_CHANGELOG.md (the topmost ## section). Then update CHANGELOG.md by adding a concise, human-friendly summary of these changes under the same date heading, inserted after the header text. Group related changes, use natural language, and keep it brief. Step 3: Commit all changed files. Step 4: Open a PR targeting main with a title like Changelog consolidation YYYY-MM-DD."'
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
