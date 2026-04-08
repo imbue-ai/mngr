@@ -11,7 +11,6 @@ from typing import Any
 
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -28,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -1556,24 +1556,22 @@ def run_kanpan(
 
     input_handler = _KanpanInputHandler(state=state)
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=PALETTE + mark_palette_entries + col_palette_entries,
+            unhandled_input=input_handler,
+            screen=screen,
+        )
+        state.loop = loop
 
-    loop = MainLoop(
-        frame,
-        palette=PALETTE + mark_palette_entries + col_palette_entries,
-        unhandled_input=input_handler,
-        screen=screen,
-    )
-    state.loop = loop
+        # Initial data load with spinner
+        _start_refresh(loop, state)
 
-    # Initial data load with spinner
-    _start_refresh(loop, state)
-
-    logger.disable("imbue")
-    try:
-        loop.run()
-    finally:
-        logger.enable("imbue")
-        if state.executor is not None:
-            state.executor.shutdown(wait=False)
+        logger.disable("imbue")
+        try:
+            loop.run()
+        finally:
+            logger.enable("imbue")
+            if state.executor is not None:
+                state.executor.shutdown(wait=False)

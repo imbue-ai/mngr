@@ -442,6 +442,7 @@ PREVENT_IMPORTLIB_IMPORT_MODULE = RegexRatchetRule(
     pattern_string=r"\bimport_module\b",
 )
 
+
 PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
     rule_name="hardcoded Path.home() / '.claude' path references",
     rule_description=(
@@ -453,4 +454,19 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
         "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
     ),
     pattern_string=r"""Path\.home\(\)\s*/\s*["']\.claude(\.json(\.bak)?)?["']""",
+)
+
+
+# --- Terminal management ---
+
+PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
+    rule_name="bare urwid tty_signal_keys call",
+    rule_description=(
+        "Do not call tty_signal_keys() directly. "
+        "Use create_urwid_screen_preserving_terminal() from imbue.mngr.cli.urwid_utils instead. "
+        "Calling tty_signal_keys(intr='undefined') disables Ctrl-C at the terminal level, "
+        "and urwid does not reliably restore it on exit. The context manager saves and restores "
+        "terminal settings in a finally block."
+    ),
+    pattern_string=r"\.tty_signal_keys\(",
 )

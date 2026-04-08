@@ -3,7 +3,6 @@ from typing import Any
 
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -17,6 +16,7 @@ from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_tutor.checks import run_check
 from imbue.mngr_tutor.data_types import Lesson
@@ -110,11 +110,9 @@ def run_lesson_selector(lessons: tuple[Lesson, ...]) -> Lesson | None:  # pragma
 
     input_handler = _LessonSelectorInputHandler(state=state)
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
-
-    loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
-    loop.run()
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
+        loop.run()
 
     if state.result_index is not None:
         return lessons[state.result_index]
@@ -269,17 +267,15 @@ def run_lesson_runner(lesson: Lesson, mngr_ctx: MngrContext) -> None:  # pragma:
 
     input_handler = _LessonRunnerInputHandler()
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
 
-    loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
+        # Schedule the first check
+        _schedule_next_check(loop, state)
 
-    # Schedule the first check
-    _schedule_next_check(loop, state)
-
-    # Suppress logging while the TUI is running to avoid display corruption
-    logger.disable("imbue")
-    try:
-        loop.run()
-    finally:
-        logger.enable("imbue")
+        # Suppress logging while the TUI is running to avoid display corruption
+        logger.disable("imbue")
+        try:
+            loop.run()
+        finally:
+            logger.enable("imbue")
