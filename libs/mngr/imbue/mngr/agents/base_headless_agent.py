@@ -92,7 +92,7 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         # Phase 2: file didn't appear during grace period, now also check lifecycle
         poll_until(
             lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
-            timeout=TAIL_POLL_TIMEOUT - self._startup_grace_seconds,
+            timeout=max(0.0, TAIL_POLL_TIMEOUT - self._startup_grace_seconds),
             poll_interval=TAIL_POLL_INTERVAL,
         )
         return self._file_exists_on_host(stdout_path)
