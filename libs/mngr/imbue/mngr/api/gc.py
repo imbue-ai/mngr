@@ -25,6 +25,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
@@ -167,7 +168,11 @@ def _discover_hosts_for_gc(
             )
         except MngrError as e:
             logger.warning("Failed to discover hosts for provider {}: {}", provider.name, e)
-            hosts = []
+            # Skip the provider entirely when discovery fails.  This is
+            # critical for gc_volumes: if we recorded (provider, []) instead,
+            # gc_volumes would call list_volumes() and treat *every* volume as
+            # orphaned (no known hosts -> no active volumes -> delete all).
+            continue
         result.append((provider, hosts))
     return result
 
@@ -186,6 +191,8 @@ def gc_work_dirs(
     ) as executor:
         for provider_instance, host_refs in hosts_by_provider:
             for host_ref in host_refs:
+                if host_ref.host_state == HostState.DESTROYED:
+                    continue
                 futures.append(
                     executor.submit(
                         _gc_single_host_work_dir, host_ref, provider_instance, error_behavior, dry_run, result
@@ -440,6 +447,10 @@ def gc_volumes(
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
 
+        except ProviderUnavailableError as e:
+            # Provider is offline -- discover_hosts already warned the user.
+            logger.debug("Skipped volume GC for provider {} (unavailable): {}", provider.name, e)
+            continue
         except MngrError as e:
             error_msg = f"Failed to process volumes for provider {provider.name}: {e}"
             result.errors.append(error_msg)

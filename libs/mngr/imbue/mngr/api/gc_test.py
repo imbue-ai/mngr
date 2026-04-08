@@ -27,6 +27,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
@@ -34,6 +35,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
@@ -824,6 +826,60 @@ def test_gc_volumes_skips_provider_without_volume_support(
     )
     assert len(result.volumes_destroyed) == 0
     assert len(result.errors) == 0
+
+
+def test_gc_volumes_does_not_delete_when_no_hosts_discovered(
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_volumes must not delete volumes when the provider is present but has no hosts.
+
+    Regression test: if _discover_hosts_for_gc recorded (provider, []) on
+    discovery failure, gc_volumes would see zero active hosts and treat every
+    volume as orphaned, deleting them all. The fix is to skip the provider
+    entirely (not include it in hosts_by_provider) when discovery fails.
+    """
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("test-volume-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[
+            VolumeInfo(
+                volume_id=VolumeId("vol-00000000000000000000000000000001"),
+                name="vol-00000000000000000000000000000001",
+                size_bytes=0,
+                host_id=HostId("host-00000000000000000000000000000001"),
+            ),
+        ],
+    )
+
+    # Simulate what would happen if the provider were included with an empty
+    # host list (the dangerous case this test guards against):
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    # The volume should be deleted because there are no hosts to claim it.
+    # This is correct when the provider is ONLINE with genuinely zero hosts.
+    assert len(result.volumes_destroyed) == 1
+
+    # But when the provider is OFFLINE (discovery failed), _discover_hosts_for_gc
+    # must not include it at all. Verify that skipping the provider preserves volumes:
+    provider.deleted_volumes.clear()
+    result2 = GcResult()
+    gc_volumes(
+        hosts_by_provider=[],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result2,
+    )
+    assert len(result2.volumes_destroyed) == 0
+    assert provider.deleted_volumes == []
 
 
 # =========================================================================

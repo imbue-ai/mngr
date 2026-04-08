@@ -47,6 +47,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -2345,6 +2346,9 @@ log "=== Shutdown script completed ==="
         """
 
         hosts: list[HostInterface] = []
+        # Track the host state determined during discovery so we don't need to
+        # call h.get_state() (which would SSH into the host) at the end.
+        discovery_state: dict[HostId, HostState] = {}
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
@@ -2372,7 +2376,7 @@ log "=== Shutdown script completed ==="
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
 
-        host_futures_with_records: list[Future[HostInterface | None]] = []
+        host_futures_with_records: list[Future[tuple[HostInterface | None, HostState | None]]] = []
         with ConcurrencyGroupExecutor(
             parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
         ) as executor:
@@ -2391,9 +2395,11 @@ log "=== Shutdown script completed ==="
                 )
 
         for future in host_futures_with_records:
-            host_obj = future.result()
+            host_obj, state = future.result()
             if host_obj is not None:
                 hosts.append(host_obj)
+                if state is not None:
+                    discovery_state[host_obj.id] = state
 
         # Second, include any running sandboxes that don't have host records yet
         # (handles eventual consistency of volume or legacy sandboxes)
@@ -2411,6 +2417,7 @@ log "=== Shutdown script completed ==="
                 host_obj = future.result()
                 if host_obj is not None:
                     hosts.append(host_obj)
+                    discovery_state[host_obj.id] = HostState.RUNNING
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     self.on_connection_error(future_host_id)
@@ -2422,7 +2429,12 @@ log "=== Shutdown script completed ==="
             self._host_by_id_cache[host.id] = host
 
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=h.get_state())
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=h.get_name(),
+                provider_name=self.name,
+                host_state=discovery_state.get(h.id),
+            )
             for h in hosts
         ]
 
@@ -2432,7 +2444,13 @@ log "=== Shutdown script completed ==="
         host_record: HostRecord,
         running_sandbox_by_host_id: dict[HostId, SandboxInterface],
         include_destroyed: bool,
-    ) -> HostInterface | None:
+    ) -> tuple[HostInterface | None, HostState | None]:
+        """Build a host from a record, returning (host, discovery_state).
+
+        The discovery_state is the host's lifecycle state as determined from
+        the discovery information (sandbox presence, snapshots, failure_reason)
+        without needing to connect to the host.
+        """
         host_obj: HostInterface | None = None
         if host_id in running_sandbox_by_host_id:
             # Host has a running sandbox - create from sandbox
@@ -2440,43 +2458,31 @@ log "=== Shutdown script completed ==="
             try:
                 host_obj = self._create_host_from_sandbox(sandbox, host_record=host_record)
                 if host_obj is not None:
-                    return host_obj
+                    return host_obj, HostState.RUNNING
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     # must call on_connection_error when there is a connection error (to properly clear the cache)
                     self.on_connection_error(host_id)
                 logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
-                return None
+                return None, None
         if host_id not in running_sandbox_by_host_id or host_obj is None:
-            # Host has no running sandbox - it's stopped, failed, destroyed, or we couldn't connect
-            has_snapshots = len(host_record.certified_host_data.snapshots) > 0
-            is_failed = host_record.certified_host_data.failure_reason is not None
+            # Host has no running sandbox - derive state from certified data
+            state = derive_offline_host_state(
+                certified_data=host_record.certified_host_data,
+                supports_shutdown_hosts=self.supports_shutdown_hosts,
+                supports_snapshots=self.supports_snapshots,
+                has_snapshots=len(host_record.certified_host_data.snapshots) > 0,
+            )
 
-            if is_failed:
-                # Failed host - always include so users can warning() build failures
-                try:
-                    return self._create_host_from_host_record(host_record)
-                except (OSError, IOError, ValueError, KeyError) as e:
-                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                    return None
-            elif has_snapshots:
-                # Stopped host (can be restarted)
-                try:
-                    return self._create_host_from_host_record(host_record)
-                except (OSError, IOError, ValueError, KeyError) as e:
-                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                    return None
-            elif include_destroyed:
-                # Destroyed host (no snapshots, can't be restarted)
-                try:
-                    return self._create_host_from_host_record(host_record)
-                except (OSError, IOError, ValueError, KeyError) as e:
-                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                    return None
-            else:
-                # Skip destroyed hosts when include_destroyed=False
-                return None
-        return None
+            if state == HostState.DESTROYED and not include_destroyed:
+                return None, None
+
+            try:
+                return self._create_host_from_host_record(host_record), state
+            except (OSError, IOError, ValueError, KeyError) as e:
+                logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                return None, None
+        return None, None
 
     def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.
@@ -2568,10 +2574,21 @@ log "=== Shutdown script completed ==="
             if not is_running and not is_failed and not has_snapshots and not include_destroyed:
                 continue
 
+            if is_running:
+                host_state: HostState = HostState.RUNNING
+            else:
+                host_state = derive_offline_host_state(
+                    certified_data=host_record.certified_host_data,
+                    supports_shutdown_hosts=self.supports_shutdown_hosts,
+                    supports_snapshots=self.supports_snapshots,
+                    has_snapshots=has_snapshots,
+                )
+
             host_ref = DiscoveredHost(
                 host_id=host_id,
                 host_name=host_name,
                 provider_name=self.name,
+                host_state=host_state,
             )
 
             agent_refs: list[DiscoveredAgent] = []

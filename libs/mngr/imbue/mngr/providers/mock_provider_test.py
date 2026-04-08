@@ -32,13 +32,16 @@ class MockProviderInstance(BaseProviderInstance):
 
     mock_supports_snapshots: bool = Field(default=True)
     mock_supports_shutdown_hosts: bool = Field(default=True)
+    mock_supports_volumes: bool = Field(default=False)
     mock_snapshots: list[SnapshotInfo] = Field(default_factory=list)
+    mock_volumes: list[VolumeInfo] = Field(default_factory=list)
     mock_tags: dict[str, str] = Field(default_factory=dict)
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
     mock_offline_hosts: dict[str, HostInterface] = Field(default_factory=dict)
     deleted_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
+    deleted_volumes: list[VolumeId] = Field(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -50,7 +53,7 @@ class MockProviderInstance(BaseProviderInstance):
 
     @property
     def supports_volumes(self) -> bool:
-        return False
+        return self.mock_supports_volumes
 
     @property
     def supports_mutable_tags(self) -> bool:
@@ -117,10 +120,10 @@ class MockProviderInstance(BaseProviderInstance):
         self.deleted_snapshots.append((host_id, snapshot_id))
 
     def list_volumes(self) -> list[VolumeInfo]:
-        return []
+        return self.mock_volumes
 
     def delete_volume(self, volume_id: VolumeId) -> None:
-        raise NotImplementedError()
+        self.deleted_volumes.append(volume_id)
 
     def set_host_tags(self, host: HostInterface | HostId, tags: Mapping[str, str]) -> None:
         self.mock_tags = dict(tags)
