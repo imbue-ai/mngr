@@ -87,7 +87,7 @@ function startBackend(onProgress) {
         uvBin = 'uv';
         args = [
           'run', '--package', 'minds',
-          'mind', '--format', 'jsonl',
+          'mind', '-vv', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
