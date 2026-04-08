@@ -1416,13 +1416,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             pass
 
         # Merge readiness hooks, checking for duplicates
-        any_changes = False
+        is_changed = False
         merged = merge_hooks_config(existing_settings, hooks_config)
         if merged is None:
             logger.debug("Readiness hooks already configured in {}", settings_path)
             merged = existing_settings
         else:
-            any_changes = True
+            is_changed = True
 
         # Merge permission auto-allow hooks if configured
         if self.agent_config.is_permission_dialog_fully_disabled:
@@ -1430,9 +1430,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             merged_with_permissions = merge_hooks_config(merged, permission_hooks)
             if merged_with_permissions is not None:
                 merged = merged_with_permissions
-                any_changes = True
+                is_changed = True
 
-        if not any_changes:
+        if not is_changed:
             return
 
         # Write the merged settings
