@@ -330,7 +330,11 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
             else:
                 raise ConfigError(
                     f"installed_plugins.json: plugin {plugin_name!r} has installPath {install_path!r} "
-                    f"which does not start with expected prefix {source_prefix!r}"
+                    f"which does not start with expected prefix {source_prefix!r}.\n"
+                    f"Plugins installed from local paths are not yet supported for remote agents. "
+                    f"As a workaround, create a symlink under {source_claude_dir}/plugins/cache/ "
+                    f"pointing to the local plugin directory, then update the installPath in "
+                    f"{installed_plugins_path} to use the symlink path."
                 )
     return json.dumps(data, indent=2) + "\n"
 
