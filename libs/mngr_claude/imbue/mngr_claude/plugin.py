@@ -38,7 +38,6 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -282,7 +281,7 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
 
     Rebases absolute paths from source_claude_dir onto target_config_dir
     so that Claude Code can find plugin files in the per-agent config dir.
-    Raises ConfigError if any installPath doesn't start with the expected prefix.
+    Paths that don't match the expected prefix are rewritten best-effort.
     """
     data: dict[str, Any] = json.loads(content)
     source_prefix = str(source_claude_dir) + "/"
