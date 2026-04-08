@@ -28,6 +28,11 @@ from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
+# Grace period before trusting lifecycle state. Claude can take several seconds
+# to start (especially on first run or via nvm), during which the tmux pane shows
+# bash as the current command, making the agent look DONE/STOPPED.
+_STARTUP_GRACE_SECONDS: float = 10.0
+
 
 @pure
 def extract_text_delta(line: str) -> str | None:
@@ -228,6 +233,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     """
 
     _no_output_error_subject: str = "claude"
+    _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.

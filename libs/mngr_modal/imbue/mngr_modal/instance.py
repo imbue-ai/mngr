@@ -1012,7 +1012,7 @@ class ModalProviderInstance(BaseProviderInstance):
         Each instruction is applied separately, so if a build fails at step N,
         steps 1 through N-1 are cached and don't need to be re-run.
 
-        Elif base_image is provided (e.g., "python:3.11-slim"), uses that as the
+        Elif base_image is provided (e.g., "python:3.12-slim"), uses that as the
         base. Otherwise uses debian:bookworm-slim.
 
         The context_dir specifies the directory for Dockerfile COPY/ADD instructions.
