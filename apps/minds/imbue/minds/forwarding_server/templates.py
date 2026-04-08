@@ -70,11 +70,13 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     {% for agent_id in agent_ids %}
     <li>
       <a href="/agents/{{ agent_id }}/">{{ agent_id }}</a>
-      {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
+      {% if telegram_enabled %}
+        {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
       <span class="telegram-btn active">Telegram active</span>
-      {% else %}
+        {% else %}
       <button class="telegram-btn" id="tg-btn-{{ agent_id }}"
               onclick="setupTelegram('{{ agent_id }}')">Setup Telegram</button>
+        {% endif %}
       {% endif %}
     </li>
     {% endfor %}
@@ -352,6 +354,7 @@ def render_landing_page(
     template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
     return template.render(
         agent_ids=accessible_agent_ids,
+        telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
     )
 
