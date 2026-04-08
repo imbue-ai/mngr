@@ -76,6 +76,17 @@ def _destroy_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subpro
     )
 
 
+def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subprocess.CompletedProcess[str]:
+    """Stop a Modal agent and return the completed process."""
+    return subprocess.run(
+        ["uv", "run", "mngr", "stop", agent_name],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env.env,
+    )
+
+
 @pytest.mark.release
 @pytest.mark.timeout(600)
 def test_claude_agent_provisioning_on_modal(
@@ -162,5 +173,65 @@ def test_destroy_modal_agent_preserves_sessions_locally(
     session_files = list(preserved_projects.rglob("*.jsonl"))
     assert len(session_files) >= 1, f"Expected at least one session .jsonl file in {preserved_projects}"
     # Each session file should have content (Claude responded to the prompt)
+    for session_file in session_files:
+        assert session_file.stat().st_size > 0, f"Session file {session_file} is empty"
+
+
+@pytest.mark.release
+@pytest.mark.timeout(600)
+def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
+    temp_source_dir: Path,
+    modal_subprocess_env: ModalSubprocessTestEnv,
+) -> None:
+    """Test that destroying a stopped (offline) Modal agent preserves sessions via the volume.
+
+    When a Modal host goes offline (via stop), agent.on_destroy() cannot run
+    because the sandbox is gone. Instead, the on_before_host_destroy hook reads
+    session files directly from the host volume before it is deleted.
+
+    Flow:
+    1. Create a Claude agent on Modal with a prompt
+    2. Stop the agent (sandbox terminates, data flushed to volume, host offline)
+    3. Destroy the agent with --force (offline path, triggers on_before_host_destroy)
+    4. Verify session files were preserved locally
+    """
+    agent_name = f"test-claude-vol-preserve-{get_short_random_string()}"
+    _setup_claude_gitignore(temp_source_dir)
+
+    # Create the agent
+    create_result = _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
+    assert create_result.returncode == 0, (
+        f"Create failed with stderr: {create_result.stderr}\nstdout: {create_result.stdout}"
+    )
+
+    # Stop the agent (makes the host go offline, data flushed to volume)
+    stop_result = _stop_modal_agent(agent_name, modal_subprocess_env)
+    assert stop_result.returncode == 0, f"Stop failed with stderr: {stop_result.stderr}\nstdout: {stop_result.stdout}"
+
+    # Destroy the agent (offline path -- on_before_host_destroy reads from volume)
+    destroy_result = _destroy_modal_agent(agent_name, modal_subprocess_env)
+    assert destroy_result.returncode == 0, (
+        f"Destroy failed with stderr: {destroy_result.stderr}\nstdout: {destroy_result.stdout}"
+    )
+
+    # Verify that session files were preserved under the local host_dir
+    preserved_sessions_dir = modal_subprocess_env.host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
+    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
+
+    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
+    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    assert len(agent_dirs) == 1, (
+        f"Expected exactly one preserved dir for {agent_name}, "
+        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+    )
+    agent_preserved_dir = agent_dirs[0]
+
+    # At minimum, session JSONL files should be preserved (the projects/ directory)
+    preserved_projects = agent_preserved_dir / "projects"
+    assert preserved_projects.exists(), (
+        f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
+    )
+    session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"Expected at least one session .jsonl file in {preserved_projects}"
     for session_file in session_files:
         assert session_file.stat().st_size > 0, f"Session file {session_file} is empty"

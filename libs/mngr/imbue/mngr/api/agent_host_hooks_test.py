@@ -85,11 +85,11 @@ class _AgentHostHookTracker:
         self.hook_log.append("on_agent_destroyed")
 
     @hookimpl
-    def on_before_host_destroy(self, host: Any) -> None:
+    def on_before_host_destroy(self, host: Any, mngr_ctx: Any) -> None:
         self.hook_log.append("on_before_host_destroy")
 
     @hookimpl
-    def on_host_destroyed(self, host: Any) -> None:
+    def on_host_destroyed(self, host: Any, mngr_ctx: Any) -> None:
         self.hook_log.append("on_host_destroyed")
 
 
@@ -326,8 +326,8 @@ def test_host_destroy_hooks_fire_in_order(
     host = _get_local_host(ctx)
 
     # Call hooks directly (local hosts raise on destroy, so we just test the hooks)
-    ctx.pm.hook.on_before_host_destroy(host=host)
-    ctx.pm.hook.on_host_destroyed(host=host)
+    ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=ctx)
+    ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=ctx)
 
     assert tracker.hook_log == [
         "on_before_host_destroy",

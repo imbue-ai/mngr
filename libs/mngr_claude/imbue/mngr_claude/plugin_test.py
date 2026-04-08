@@ -35,11 +35,14 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -57,12 +60,15 @@ from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
+from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _preserve_session_files
+from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
+from imbue.mngr_claude.plugin import _should_preserve_sessions
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
@@ -3095,3 +3101,173 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
+
+
+# =============================================================================
+# Volume-based session preservation tests
+# =============================================================================
+
+
+def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict[str, Path]:
+    """Create fake session files on a volume-backed directory for testing volume-based preservation.
+
+    Mirrors the structure that a real agent would create on the host volume.
+    Returns a dict mapping logical names to their on-volume paths.
+    """
+    agent_dir = volume_root / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Session JSONL files in the per-agent Claude config dir
+    projects_dir = agent_dir / "plugin" / "claude" / "anthropic" / "projects" / "encoded-project-name"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    session_file = projects_dir / "abc123.jsonl"
+    session_file.write_text('{"type":"assistant","uuid":"u1"}\n')
+
+    # Raw transcript
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    raw_transcript_file = raw_transcript_dir / "events.jsonl"
+    raw_transcript_file.write_text('{"type":"message"}\n')
+
+    # Common transcript
+    common_transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
+    common_transcript_dir.mkdir(parents=True, exist_ok=True)
+    common_transcript_file = common_transcript_dir / "events.jsonl"
+    common_transcript_file.write_text('{"type":"user_message","text":"hello"}\n')
+
+    # Session history
+    history_file = agent_dir / "claude_session_id_history"
+    history_file.write_text("abc123 create\n")
+
+    return {
+        "session_file": session_file,
+        "raw_transcript_file": raw_transcript_file,
+        "common_transcript_file": common_transcript_file,
+        "history_file": history_file,
+    }
+
+
+def test_preserve_session_files_from_volume_all_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """All 4 categories of session data are preserved from the volume."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-agent")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+
+    files = _populate_volume_session_files(volume_root, agent_id)
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert dest_dir.exists()
+
+    # Session JSONL files
+    preserved_projects = dest_dir / "projects"
+    assert preserved_projects.exists()
+    preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(preserved_session_files) == 1
+    assert preserved_session_files[0].read_text() == files["session_file"].read_text()
+
+    # Raw transcript
+    preserved_raw = dest_dir / "raw_transcript" / "events.jsonl"
+    assert preserved_raw.exists()
+    assert preserved_raw.read_text() == '{"type":"message"}\n'
+
+    # Common transcript
+    preserved_common = dest_dir / "common_transcript" / "events.jsonl"
+    assert preserved_common.exists()
+    assert preserved_common.read_text() == '{"type":"user_message","text":"hello"}\n'
+
+    # Session history
+    preserved_history = dest_dir / "claude_session_id_history"
+    assert preserved_history.exists()
+    assert preserved_history.read_text() == "abc123 create\n"
+
+
+def test_preserve_session_files_from_volume_partial_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Preservation works when only some session data exists on the volume."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-partial")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+
+    # Only create the raw transcript
+    agent_dir = volume_root / "agents" / str(agent_id)
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    (raw_transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
+
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "projects").exists()
+    assert not (dest_dir / "common_transcript").exists()
+    # History file was not created, so _copy_volume_file_to_local logs a warning
+    # but does not create the dest file
+    assert not (dest_dir / "claude_session_id_history").exists()
+
+
+def test_preserve_session_files_from_volume_no_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Empty volume produces no errors and no preserved dir."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-empty")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+    # Create the agent dir but leave it empty
+    (volume_root / "agents" / str(agent_id)).mkdir(parents=True, exist_ok=True)
+
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert not dest_dir.exists()
+
+
+def test_should_preserve_sessions_true_for_claude_agent() -> None:
+    """_should_preserve_sessions returns True when preserve_sessions_on_destroy is True."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "type": "claude",
+            "agent_config": {"preserve_sessions_on_destroy": True},
+        },
+    )
+    assert _should_preserve_sessions(ref) is True
+
+
+def test_should_preserve_sessions_false_when_disabled() -> None:
+    """_should_preserve_sessions returns False when preserve_sessions_on_destroy is False."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "type": "claude",
+            "agent_config": {"preserve_sessions_on_destroy": False},
+        },
+    )
+    assert _should_preserve_sessions(ref) is False
+
+
+def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
+    """_should_preserve_sessions returns False when the field is absent (non-Claude agent)."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"type": "echo"},
+    )
+    assert _should_preserve_sessions(ref) is False

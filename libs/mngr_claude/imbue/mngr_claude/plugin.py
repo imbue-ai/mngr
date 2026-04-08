@@ -47,12 +47,18 @@ from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import RelativePath
+from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
@@ -1801,8 +1807,7 @@ def _get_preserved_sessions_dir(agent: ClaudeAgent) -> Path:
     Always resolves to a path under the local mngr data directory, regardless
     of whether the agent ran locally or remotely.
     """
-    local_host_dir = Path(agent.mngr_ctx.config.default_host_dir).expanduser()
-    return local_host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent.name}--{agent.id}"
+    return _get_preserved_sessions_dir_for(agent.name, agent.id, agent.mngr_ctx)
 
 
 def _preserve_session_files(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
@@ -1905,6 +1910,148 @@ def _copy_single_file_to_local(
         logger.warning("Failed to preserve session history for agent {}: {}", agent_name, e)
 
 
+def _get_preserved_sessions_dir_for(agent_name: AgentName, agent_id: AgentId, mngr_ctx: MngrContext) -> Path:
+    """Return the local directory path for an agent's preserved session files.
+
+    Takes primitives instead of a ClaudeAgent so it can be used from both
+    the online (agent-based) and offline (volume-based) preservation paths.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    return local_host_dir / "plugin" / "mngr_claude" / "preserved_sessions" / f"{agent_name}--{agent_id}"
+
+
+def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
+    """Check whether an agent's config has preserve_sessions_on_destroy enabled.
+
+    Reads from certified_data (the raw data.json) so it works for offline
+    hosts without needing to resolve the full agent type.
+    """
+    agent_config = ref.certified_data.get("agent_config", {})
+    return bool(agent_config.get("preserve_sessions_on_destroy"))
+
+
+def _recursive_list_volume_files(volume: Volume, path: str) -> list[str]:
+    """Recursively list all file paths under a volume directory.
+
+    Returns full paths relative to the volume root (e.g. "projects/foo/bar.jsonl").
+    """
+    result: list[str] = []
+    try:
+        entries = volume.listdir(path)
+    except (MngrError, OSError) as e:
+        logger.trace("Failed to list volume directory '{}': {}", path, e)
+        return result
+
+    for entry in entries:
+        if entry.file_type == VolumeFileType.FILE:
+            result.append(entry.path)
+        elif entry.file_type == VolumeFileType.DIRECTORY:
+            result.extend(_recursive_list_volume_files(volume, entry.path))
+        else:
+            pass
+
+    return result
+
+
+def _copy_volume_file_to_local(volume: Volume, volume_path: str, dest_path: Path, agent_name: str) -> bool:
+    """Read a single file from a volume and write it locally.
+
+    Returns True on success, False on failure (logged as warning).
+    """
+    try:
+        data = volume.read_file(volume_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(data)
+        return True
+    except (MngrError, OSError) as e:
+        logger.warning("Failed to read volume file '{}' for agent {}: {}", volume_path, agent_name, e)
+        return False
+
+
+def _copy_volume_tree_to_local(volume: Volume, volume_path: str, dest_dir: Path, label: str, agent_name: str) -> bool:
+    """Recursively read files from a volume path and write them locally.
+
+    Returns True if at least one file was copied.
+    """
+    files = _recursive_list_volume_files(volume, volume_path)
+    if not files:
+        return False
+
+    copied_any = False
+    for file_path in files:
+        # file_path is relative to volume root (e.g. "plugin/claude/.../foo.jsonl")
+        # We want to preserve structure under volume_path, so strip the volume_path prefix
+        volume_path_normalized = volume_path.rstrip("/")
+        if file_path.startswith(volume_path_normalized + "/"):
+            relative = file_path[len(volume_path_normalized) + 1 :]
+        else:
+            relative = file_path
+        dest_file = dest_dir / relative
+        if _copy_volume_file_to_local(volume, file_path, dest_file, agent_name):
+            copied_any = True
+
+    if copied_any:
+        logger.debug("Preserved {} from volume for agent {}", label, agent_name)
+    return copied_any
+
+
+def _preserve_session_files_from_volume(
+    agent_volume: Volume,
+    agent_name: AgentName,
+    agent_id: AgentId,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Read session files from an agent's volume and write them locally.
+
+    This is the offline counterpart to _preserve_session_files. Instead of
+    using SSH/rsync on an online host, it reads directly from the host volume
+    via the Volume API. Used by on_before_host_destroy when the host is offline.
+
+    Session file paths on the agent volume (relative to agent state dir):
+    - plugin/claude/anthropic/projects/**/*.jsonl
+    - logs/claude_transcript/events.jsonl
+    - events/claude/common_transcript/events.jsonl
+    - claude_session_id_history
+    """
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, mngr_ctx)
+
+    with log_span("Preserving session files from volume for agent {}", agent_name):
+        # Session JSONL files from the per-agent Claude config dir
+        _copy_volume_tree_to_local(
+            agent_volume,
+            "plugin/claude/anthropic/projects",
+            dest_dir / "projects",
+            "session projects",
+            str(agent_name),
+        )
+
+        # Raw transcript
+        _copy_volume_tree_to_local(
+            agent_volume,
+            "logs/claude_transcript",
+            dest_dir / "raw_transcript",
+            "raw transcript",
+            str(agent_name),
+        )
+
+        # Common transcript
+        _copy_volume_tree_to_local(
+            agent_volume,
+            "events/claude/common_transcript",
+            dest_dir / "common_transcript",
+            "common transcript",
+            str(agent_name),
+        )
+
+        # Session history (single file)
+        _copy_volume_file_to_local(
+            agent_volume,
+            "claude_session_id_history",
+            dest_dir / "claude_session_id_history",
+            str(agent_name),
+        )
+
+
 def _generate_claude_home_settings() -> dict[str, Any]:
     """default contents for ~/.claude/settings.json"""
     return {"skipDangerousModePermissionPrompt": True}
@@ -1990,6 +2137,34 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
 def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
     """Expose Claude-specific agent fields for listing."""
     return ("claude", {"waiting_reason": _waiting_reason})
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve Claude session files from the host volume before it is destroyed.
+
+    When a host goes offline and is destroyed without calling agent.on_destroy(),
+    session data still lives on the host volume. This hook reads session files
+    via the Volume API and writes them locally before the volume is deleted.
+    """
+    agent_refs = host.discover_agents()
+    agents_to_preserve = [ref for ref in agent_refs if _should_preserve_sessions(ref)]
+    if not agents_to_preserve:
+        return
+
+    # Get the host volume from the provider
+    provider = get_provider_instance(agents_to_preserve[0].provider_name, mngr_ctx)
+    host_volume = provider.get_volume_for_host(host)
+    if host_volume is None:
+        logger.debug("No host volume available for host {}, skipping session preservation", host.id)
+        return
+
+    for ref in agents_to_preserve:
+        try:
+            agent_volume = host_volume.get_agent_volume(ref.agent_id)
+            _preserve_session_files_from_volume(agent_volume, ref.agent_name, ref.agent_id, mngr_ctx)
+        except (MngrError, OSError) as e:
+            logger.warning("Failed to preserve session files from volume for agent {}: {}", ref.agent_name, e)
 
 
 @hookimpl

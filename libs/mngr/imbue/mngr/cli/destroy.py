@@ -460,9 +460,9 @@ def _destroy_single_offline_host(
     host_name = offline.host.get_name()
     try:
         _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
-        mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host)
+        mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host, mngr_ctx=mngr_ctx)
         offline.provider.destroy_host(offline.host)
-        mngr_ctx.pm.hook.on_host_destroyed(host=offline.host)
+        mngr_ctx.pm.hook.on_host_destroyed(host=offline.host, mngr_ctx=mngr_ctx)
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
         for name in offline.agent_names:
