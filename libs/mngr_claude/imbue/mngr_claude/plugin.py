@@ -756,11 +756,6 @@ def _write_generated_files(
         for relative, content in generated_files.items():
             dest = config_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
-            # Remove any symlink so we write a regular file instead of
-            # following the symlink back into ~/.claude/ (which would
-            # corrupt the user's global config with agent-scoped paths).
-            if dest.is_symlink():
-                dest.unlink()
             host.write_text_file(dest, content)
     else:
         local_host = _get_local_host(mngr_ctx)
@@ -1530,7 +1525,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             Path("settings.json"): settings_json,
             Path(".claude.json"): json.dumps(claude_json_data, indent=2) + "\n",
         }
-        if config.sync_home_settings:
+        if config.sync_home_settings and not host.is_local:
+            # Rewrite plugin paths for remote hosts where ~/.claude/ doesn't exist.
+            # Local hosts don't need rewriting: the original absolute paths under
+            # ~/.claude/ are directly accessible, and _sync_user_resources already
+            # provides the file (via symlink or copy).
             installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
             if installed_plugins:
                 generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins

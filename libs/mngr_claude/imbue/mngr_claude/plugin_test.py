@@ -2998,8 +2998,8 @@ def test_build_settings_json_local_context_no_flags() -> None:
 # =============================================================================
 
 
-def test_write_generated_files_unlinks_symlink_before_writing(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """Writing a generated file should replace a symlink rather than following it."""
+def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """generated_files that don't include installed_plugins.json should not touch symlinked plugins."""
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     source_file = source_dir / "installed_plugins.json"
@@ -3012,12 +3012,11 @@ def test_write_generated_files_unlinks_symlink_before_writing(tmp_path: Path, te
     symlink.symlink_to(source_file)
 
     host = FakeHost()
-    generated_files = {Path("plugins/installed_plugins.json"): '{"rewritten": true}'}
+    # Only settings.json, no installed_plugins.json (as happens for local hosts)
+    generated_files = {Path("settings.json"): '{"some": "setting"}'}
 
     _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
 
-    # The symlink should be replaced with a regular file
-    assert not symlink.is_symlink()
-    assert json.loads(symlink.read_text()) == {"rewritten": True}
-    # The original source file should be untouched
+    # The symlink and source file should both be untouched
+    assert symlink.is_symlink()
     assert json.loads(source_file.read_text()) == {"original": True}
