@@ -8,7 +8,6 @@ import json
 import os
 import random
 import shlex
-import shutil
 import tempfile
 from abc import ABC
 from abc import abstractmethod
@@ -1881,17 +1880,10 @@ def _copy_to_local(
     label: str,
     agent_name: str,
 ) -> None:
-    """Copy a directory from the source host to the local host.
-
-    For local agents, uses shutil.copytree (no rsync dependency).
-    For remote agents, uses copy_directory (rsync over SSH).
-    """
+    """Copy a directory from the source host to the local host via copy_directory."""
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if source_host.is_local:
-            shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
-        else:
-            local_host.copy_directory(source_host, source_path, dest_path)
+        local_host.copy_directory(source_host, source_path, dest_path)
         logger.debug("Preserved {} for agent {}", label, agent_name)
     except (MngrError, OSError) as e:
         logger.warning("Failed to preserve {} for agent {}: {}", label, agent_name, e)

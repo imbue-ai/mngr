@@ -89,7 +89,7 @@ def make_claude_agent(
         work_dir.mkdir()
 
     if agent_config is None:
-        agent_config = ClaudeAgentConfig(check_installation=False)
+        agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=False)
     if agent_type is None:
         agent_type = AgentTypeName("claude")
 
@@ -1280,11 +1280,13 @@ def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
     }
 
 
+@pytest.mark.rsync
 def test_on_destroy_preserves_session_files(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_destroy should preserve session files when preserve_sessions_on_destroy is True."""
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
     files = _populate_session_files(agent)
     _write_mngr_trust_entry(agent.work_dir)
 
@@ -1345,6 +1347,7 @@ def test_on_destroy_handles_no_session_data(
     assert not dest_dir.exists()
 
 
+@pytest.mark.rsync
 def test_preserve_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code C
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_ask_simple_query(temp_git_repo: Path) -> None:
     """mngr ask should return a non-empty response from Claude."""
