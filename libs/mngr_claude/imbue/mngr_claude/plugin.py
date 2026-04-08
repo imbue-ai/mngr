@@ -1400,7 +1400,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         return transfers
 
-    def _configure_readiness_hooks(self, host: OnlineHostInterface) -> None:
+    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
         """Configure Claude hooks in the agent's work_dir.
 
         Writes hooks to .claude/settings.local.json in the agent's work_dir:
@@ -1701,7 +1701,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
             # Configure readiness hooks (for both local and remote hosts)
-            self._configure_readiness_hooks(host)
+            self._configure_agent_hooks(host)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)

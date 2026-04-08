@@ -132,7 +132,7 @@ def _setup_git_worktree(tmp_path: Path) -> tuple[Path, Path]:
     source.mkdir()
     init_git_repo(source, initial_commit=True)
 
-    # Add .gitignore (needed by _configure_readiness_hooks in provision)
+    # Add .gitignore (needed by _configure_agent_hooks in provision)
     (source / ".gitignore").write_text(".claude/settings.local.json\n")
     subprocess.run(["git", "-C", str(source), "add", ".gitignore"], check=True, capture_output=True)
     subprocess.run(
@@ -820,10 +820,10 @@ def test_preflight_check_skips_when_not_git_repo(
     )
 
 
-def test_configure_readiness_hooks_raises_when_not_gitignored(
+def test_configure_agent_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should raise when .claude/settings.local.json is not gitignored."""
+    """_configure_agent_hooks should raise when .claude/settings.local.json is not gitignored."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -844,13 +844,13 @@ def test_configure_readiness_hooks_raises_when_not_gitignored(
     )
 
     with pytest.raises(PluginMngrError, match="not gitignored"):
-        agent._configure_readiness_hooks(host)
+        agent._configure_agent_hooks(host)
 
 
-def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
+def test_configure_agent_hooks_skips_gitignore_check_when_not_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should skip gitignore check when the work_dir is not a git repo."""
+    """_configure_agent_hooks should skip gitignore check when the work_dir is not a git repo."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -869,7 +869,7 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     )
 
     # Should succeed without raising (no gitignore check needed for non-git dirs)
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the hooks file was still created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -879,10 +879,10 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     assert "SessionStart" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_creates_settings_file(
+def test_configure_agent_hooks_creates_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should create .claude/settings.local.json."""
+    """_configure_agent_hooks should create .claude/settings.local.json."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -900,7 +900,7 @@ def test_configure_readiness_hooks_creates_settings_file(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the file was actually created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -914,10 +914,10 @@ def test_configure_readiness_hooks_creates_settings_file(
     assert "Notification" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_merges_with_existing_settings(
+def test_configure_agent_hooks_merges_with_existing_settings(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should merge with existing settings."""
+    """_configure_agent_hooks should merge with existing settings."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -941,7 +941,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Read the file and verify it was merged
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -957,10 +957,10 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     assert "Notification" in settings["hooks"]
 
 
-def test_provision_configures_readiness_hooks(
+def test_provision_configures_agent_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should configure readiness hooks."""
+    """provision should configure agent hooks."""
     # check_installation=False avoids running `claude --version` which would fail in test env
     agent, host = make_claude_agent(
         local_provider,
