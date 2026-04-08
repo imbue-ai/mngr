@@ -20,6 +20,7 @@ members = [
     "imbue-mngr-claude-mind",
     "imbue-mngr-file",
     "imbue-mngr-kanpan",
+    "imbue-mngr-lima",
     "imbue-mngr-llm",
     "imbue-mngr-mind",
     "imbue-mngr-mind-chat",
@@ -1646,6 +1647,21 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-lima"
+version = "0.1.0"
+source = { editable = "libs/mngr_lima" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

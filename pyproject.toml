@@ -77,6 +77,7 @@ addopts = [
   "--cov=imbue.mngr_notifications",
   "--cov=imbue.mngr_mind_chat",
   "--cov=imbue.mngr_file",
+  "--cov=imbue.mngr_lima",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
@@ -159,6 +160,10 @@ omit = [
     "libs/mngr/imbue/mngr/providers/docker/instance.py",
     "libs/mngr/imbue/mngr/providers/docker/volume.py",
     "libs/mngr/imbue/mngr/providers/docker/testing.py",
+    # Lima provider requires Lima/QEMU for full integration testing
+    "libs/mngr_lima/imbue/mngr_lima/instance.py",
+    "libs/mngr_lima/imbue/mngr_lima/limactl.py",
+    "libs/mngr_lima/imbue/mngr_lima/testing.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",
