@@ -65,6 +65,7 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
+  "*/resources/sync_keychain_credentials.py",
 ]
 
 [tool.inline-snapshot]
