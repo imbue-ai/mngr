@@ -401,11 +401,13 @@ class AgentCreator(MutableModel):
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
                         # .git/worktrees/ dir, which breaks when copied into Docker.
-                        # Clone locally to get a standalone repo.
+                        # Clone locally to get a standalone repo. Use file:// protocol
+                        # so --depth 1 is honored (git ignores --depth for local paths).
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         temp_clone_dir = Path(tempfile.mkdtemp(prefix="minds-clone-"))
                         clone_target = temp_clone_dir / extract_repo_name(repo_source)
-                        clone_git_repo(GitUrl(str(resolved_path)), clone_target, on_output=emit_log, is_shallow=True)
+                        file_url = GitUrl("file://{}".format(resolved_path))
+                        clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
                         mind_dir = clone_target
                     else:
                         mind_dir = resolved_path
