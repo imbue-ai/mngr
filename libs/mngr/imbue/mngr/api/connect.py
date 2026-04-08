@@ -1,5 +1,6 @@
 import os
 import shlex
+import time
 from pathlib import Path
 from typing import Final
 
@@ -14,7 +15,6 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
-from imbue.mngr.utils.polling import poll_until
 
 # Exit codes used by the remote SSH wrapper script to signal post-disconnect actions.
 # These are checked by connect_to_agent after the SSH session ends to determine
@@ -274,7 +274,7 @@ def connect_to_agent(
                     attempt,
                     max_attempts,
                 )
-                poll_until(lambda: False, timeout=retry_delay_seconds, poll_interval=retry_delay_seconds)
+                time.sleep(retry_delay_seconds)
             else:
                 logger.debug(
                     "SSH session ended with exit code {} after {} attempt(s)",
