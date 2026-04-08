@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
+from imbue.minds.forwarding_server.agent_restarter import AgentRestarter
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
@@ -78,6 +79,7 @@ def _create_test_forwarding_server(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
+    agent_restarter: AgentRestarter | None = None,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a forwarding server with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -88,6 +90,7 @@ def _create_test_forwarding_server(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        agent_restarter=agent_restarter,
     )
     client = TestClient(app)
 
@@ -679,6 +682,65 @@ def test_mngr_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_pat
     assert response.status_code == 200
     assert "Loading..." in response.text
     assert "location.reload()" in response.text
+
+
+def test_proxy_triggers_agent_restart_when_backend_unavailable(tmp_path: Path) -> None:
+    """When the backend is unavailable, the proxy triggers an agent restart attempt."""
+    agent_id = AgentId()
+    data_dir = tmp_path / "minds_data"
+
+    backend_resolver = MngrCliBackendResolver()
+    restarter = AgentRestarter(mngr_binary="true", cooldown_seconds=100.0)
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=data_dir,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        agent_restarter=restarter,
+    )
+
+    _authenticate_client(client=client, auth_store=auth_store)
+    client.cookies.set(f"sw_installed_{agent_id}_web", "1")
+
+    client.get(f"/agents/{agent_id}/web/", headers={"Accept": "text/html"})
+
+    # The restarter should have recorded an attempt for this agent
+    with restarter._lock:
+        assert str(agent_id) in restarter._last_attempt_by_agent
+
+
+def test_proxy_triggers_restart_and_shows_loading_on_connection_refused(tmp_path: Path) -> None:
+    """When the backend URL exists but the connection is refused, trigger restart and show loading page."""
+    agent_id = AgentId()
+    data_dir = tmp_path / "minds_data"
+
+    backend_resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        server_logs={str(agent_id): make_server_log("web", "http://dead-backend:9999")},
+    )
+
+    class _RefusingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Connection refused")
+
+    refusing_client = httpx.AsyncClient(transport=_RefusingTransport())
+    restarter = AgentRestarter(mngr_binary="true", cooldown_seconds=100.0)
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=data_dir,
+        backend_resolver=backend_resolver,
+        http_client=refusing_client,
+        agent_restarter=restarter,
+    )
+
+    _authenticate_client(client=client, auth_store=auth_store)
+    client.cookies.set(f"sw_installed_{agent_id}_web", "1")
+
+    response = client.get(f"/agents/{agent_id}/web/", headers={"Accept": "text/html"})
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    assert "location.reload()" in response.text
+
+    with restarter._lock:
+        assert str(agent_id) in restarter._last_attempt_by_agent
 
 
 def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
