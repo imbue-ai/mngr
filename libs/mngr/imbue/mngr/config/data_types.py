@@ -755,8 +755,6 @@ class CommonCliOptions(FrozenModel):
     verbose: int
     log_file: str | None
     log_commands: bool | None
-    log_command_output: bool | None
-    log_env_vars: bool | None
     plugin: tuple[str, ...]
     disable_plugin: tuple[str, ...]
     setting: tuple[str, ...] = ()

@@ -69,8 +69,6 @@ def _make_opts(
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
         plugin=(),
         disable_plugin=(),
     )

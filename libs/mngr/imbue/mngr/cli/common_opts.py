@@ -57,8 +57,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - -v, --verbose: Increase verbosity
     - --log-file: Override log file path
     - --log-commands: Log executed commands
-    - --log-command-output: Log command output
-    - --log-env-vars: Log environment variables
     - --headless: Disable all interactive behavior
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
@@ -88,12 +86,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
         is_flag=True,
         default=False,
         help="Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key.",
-    )(command)
-    command = optgroup.option(
-        "--log-env-vars/--no-log-env-vars", default=None, help="Log environment variables (security risk)"
-    )(command)
-    command = optgroup.option(
-        "--log-command-output/--no-log-command-output", default=None, help="Log stdout/stderr from commands"
     )(command)
     command = optgroup.option(
         "--log-commands/--no-log-commands", default=None, help="Log commands that were executed"
@@ -222,8 +214,6 @@ def setup_command_context(
         verbose=opts.verbose,
         log_file=opts.log_file,
         log_commands=opts.log_commands,
-        log_command_output=opts.log_command_output,
-        log_env_vars=opts.log_env_vars,
         config=mngr_ctx.config,
     )
 
@@ -271,8 +261,6 @@ def parse_output_options(
     verbose: int,
     log_file: str | None,
     log_commands: bool | None,
-    log_command_output: bool | None,
-    log_env_vars: bool | None,
     config: MngrConfig,
 ) -> tuple[OutputOptions, LoggingConfig]:
     """Parse output-related CLI options. CLI flags can override config values.
@@ -317,12 +305,6 @@ def parse_output_options(
     # Use CLI overrides if provided, otherwise use config
     is_log_commands = log_commands if log_commands is not None else config.logging.is_logging_commands
 
-    is_log_command_output = (
-        log_command_output if log_command_output is not None else config.logging.is_logging_command_output
-    )
-
-    is_log_env_vars = log_env_vars if log_env_vars is not None else config.logging.is_logging_env_vars
-
     # Build the resolved logging config with CLI overrides applied to TOML defaults
     resolved_logging_config = LoggingConfig(
         file_level=config.logging.file_level,
@@ -331,8 +313,8 @@ def parse_output_options(
         console_level=console_level,
         log_file_path=log_file_path,
         is_logging_commands=is_log_commands,
-        is_logging_command_output=is_log_command_output,
-        is_logging_env_vars=is_log_env_vars,
+        is_logging_command_output=config.logging.is_logging_command_output,
+        is_logging_env_vars=config.logging.is_logging_env_vars,
     )
 
     output_opts = OutputOptions(

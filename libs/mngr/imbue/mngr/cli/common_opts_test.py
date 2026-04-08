@@ -410,8 +410,6 @@ def test_parse_output_options_quiet_sets_console_level_none(mngr_test_prefix: st
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
         config=config,
     )
     assert logging_config.console_level == LogLevel.NONE
@@ -427,8 +425,6 @@ def test_parse_output_options_verbose_1_sets_debug(mngr_test_prefix: str) -> Non
         verbose=1,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
         config=config,
     )
     assert logging_config.console_level == LogLevel.DEBUG
@@ -443,8 +439,6 @@ def test_parse_output_options_verbose_2_sets_trace(mngr_test_prefix: str) -> Non
         verbose=2,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
         config=config,
     )
     assert logging_config.console_level == LogLevel.TRACE
@@ -459,8 +453,6 @@ def test_parse_output_options_format_template(mngr_test_prefix: str) -> None:
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
         config=config,
     )
     assert output_opts.output_format == OutputFormat.HUMAN
@@ -477,8 +469,6 @@ def test_parse_output_options_invalid_template_raises(mngr_test_prefix: str) -> 
             verbose=0,
             log_file=None,
             log_commands=None,
-            log_command_output=None,
-            log_env_vars=None,
             config=config,
         )
 
@@ -564,8 +554,6 @@ def test_split_known_and_plugin_params_separates_known_from_extra() -> None:
         "verbose": 0,
         "log_file": None,
         "log_commands": None,
-        "log_command_output": None,
-        "log_env_vars": None,
         "plugin": (),
         "disable_plugin": (),
         "test_plugin_option": "hello",
@@ -594,8 +582,6 @@ def test_split_known_and_plugin_params_all_known() -> None:
         "verbose": 0,
         "log_file": None,
         "log_commands": None,
-        "log_command_output": None,
-        "log_env_vars": None,
         "plugin": (),
         "disable_plugin": (),
     }

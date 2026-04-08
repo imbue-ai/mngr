@@ -17,10 +17,6 @@ Logs are automatically saved to `~/.mngr/events/logs/<timestamp>-<pid>.json` wit
 
 - `--log-file PATH`: Override the log file path (e.g., `/tmp/mngr.log`)
 - `--[no-]log-commands`: Log what commands were executed [default: from config]
-- `--[no-]log-command-output`: Log stdout/stderr from executed commands [default: from config]
-- `--[no-]log-env-vars`: Log environment variables (security risk, disabled by default)
-
-Environment variables are redacted from logs by default for security. Use `--log-env-vars` to include them.
 
 ### Other Options
 
