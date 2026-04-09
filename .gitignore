@@ -220,10 +220,7 @@
 # Claude Code local settings (session-specific permissions)
 **/.claude/settings.local.json
 
-# PR status and URL files written by stop hook orchestrator for status line display
-**/.claude/pr_url
-**/.claude/pr_status
-**/.claude/pr_number
+# PR status/URL files are now in .reviewer/outputs/ (already gitignored)
 
 # Local Claude settings backup files
 **/.claude/*.bak
