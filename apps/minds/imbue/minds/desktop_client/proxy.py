@@ -1,3 +1,4 @@
+import html
 import re
 from typing import Final
 
@@ -225,11 +226,15 @@ def generate_browser_info_bar_html(
     viewing. The actual proxied content loads inside the iframe.
     """
     prefix = _get_server_prefix(agent_id, server_name)
+    safe_name = html.escape(agent_display_name)
+    safe_host = html.escape(host_id)
+    safe_server = html.escape(str(server_name))
+    safe_prefix = html.escape(prefix)
     return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>{agent_display_name} - {server_name}</title>
+<title>{safe_name} - {safe_server}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 html, body {{ height: 100%; overflow: hidden; }}
@@ -269,13 +274,13 @@ body {{ display: flex; flex-direction: column; font-family: system-ui, -apple-sy
 </head>
 <body>
 <div id="info-bar">
-  <span><span class="label">Agent: </span><span class="value">{agent_display_name}</span></span>
+  <span><span class="label">Agent: </span><span class="value">{safe_name}</span></span>
   <span class="separator"></span>
-  <span><span class="label">Host: </span><span class="value">{host_id}</span></span>
+  <span><span class="label">Host: </span><span class="value">{safe_host}</span></span>
   <span class="separator"></span>
-  <span><span class="label">Application: </span><span class="value">{server_name}</span></span>
+  <span><span class="label">Application: </span><span class="value">{safe_server}</span></span>
 </div>
-<iframe id="content-frame" src="{prefix}/?_embed=1"></iframe>
+<iframe id="content-frame" src="{safe_prefix}/?_embed=1"></iframe>
 </body>
 </html>"""
 
