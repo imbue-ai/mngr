@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
@@ -412,6 +413,66 @@ def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
 
     resolver = MinimalResolver()
     assert resolver.get_ssh_info(_AGENT_A) is None
+
+
+# -- MngrCliBackendResolver.get_agent_display_info tests --
+
+
+def test_mngr_cli_resolver_get_agent_display_info_returns_info_for_known_agent() -> None:
+    agents_json = make_agents_json(_AGENT_A)
+    resolver = make_resolver_with_data(agents_json=agents_json, server_logs={})
+
+    info = resolver.get_agent_display_info(_AGENT_A)
+    assert info is not None
+    assert isinstance(info, AgentDisplayInfo)
+    assert info.agent_name == str(_AGENT_A)
+
+
+def test_mngr_cli_resolver_get_agent_display_info_returns_none_for_unknown_agent() -> None:
+    agents_json = make_agents_json(_AGENT_A)
+    resolver = make_resolver_with_data(agents_json=agents_json, server_logs={})
+
+    assert resolver.get_agent_display_info(_AGENT_B) is None
+
+
+# -- BackendResolverInterface.get_agent_display_info default --
+
+
+def test_backend_resolver_interface_default_get_agent_display_info_returns_info_for_known() -> None:
+    """The base class default get_agent_display_info returns info using agent_id as name."""
+
+    class MinimalResolver(BackendResolverInterface):
+        def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+            return None
+
+        def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+            return (_AGENT_A,)
+
+        def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+            return ()
+
+    resolver = MinimalResolver()
+    info = resolver.get_agent_display_info(_AGENT_A)
+    assert info is not None
+    assert info.agent_name == str(_AGENT_A)
+    assert info.host_id == "localhost"
+
+
+def test_backend_resolver_interface_default_get_agent_display_info_returns_none_for_unknown() -> None:
+    """The base class default get_agent_display_info returns None for unknown agents."""
+
+    class MinimalResolver(BackendResolverInterface):
+        def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+            return None
+
+        def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+            return ()
+
+        def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+            return ()
+
+    resolver = MinimalResolver()
+    assert resolver.get_agent_display_info(_AGENT_A) is None
 
 
 # -- MngrStreamManager tests (calling methods directly, no subprocesses) --
