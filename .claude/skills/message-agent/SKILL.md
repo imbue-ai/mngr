@@ -33,13 +33,13 @@ To reply, use the /message-agent skill.
 
 ## Sending the Message
 
-Write the composed message to a temporary file using the Write tool, then send it with `--message-file`:
+Write the composed message to a temporary file using the Write tool, then send it with `--message-file`. Name the temp file `/tmp/mngr-message-from-YOUR_NAME-to-AGENT_NAME.txt` (using your agent name and the resolved target name):
 
 ```bash
-uv run mngr message AGENT_NAME --message-file /tmp/mngr-message-AGENT_NAME.txt
+uv run mngr message AGENT_NAME --message-file /tmp/mngr-message-from-YOUR_NAME-to-AGENT_NAME.txt
 ```
 
-Replace `AGENT_NAME` with the resolved target agent name. Use `--message-file` for all messages -- it avoids shell quoting issues and preserves formatting.
+Use `--message-file` for all messages -- it avoids shell quoting issues and preserves formatting.
 
 ## After Sending
 
