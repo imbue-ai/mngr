@@ -310,7 +310,7 @@ def test_build_connection_options_maps_all_fields(
         to_update(default_connect_cli_opts.field_ref().reconnect, False),
         to_update(default_connect_cli_opts.field_ref().retry, 5),
         to_update(default_connect_cli_opts.field_ref().retry_delay, "10s"),
-        to_update(default_connect_cli_opts.field_ref().attach_command, "bash"),
+        to_update(default_connect_cli_opts.field_ref().session_command, "bash"),
         to_update(default_connect_cli_opts.field_ref().allow_unknown_host, True),
     )
 
@@ -319,7 +319,7 @@ def test_build_connection_options_maps_all_fields(
     assert connection_opts.is_reconnect is False
     assert connection_opts.retry_count == 5
     assert connection_opts.retry_delay == "10s"
-    assert connection_opts.attach_command == "bash"
+    assert connection_opts.session_command == "bash"
     assert connection_opts.is_unknown_host_allowed is True
 
 

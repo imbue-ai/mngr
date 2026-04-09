@@ -86,7 +86,7 @@ class ConnectionOptions(FrozenModel):
         default="5s",
         description="Delay between retries (e.g., 5s, 1m)",
     )
-    attach_command: str | None = Field(
+    session_command: str | None = Field(
         default=None,
         description="Command to run instead of attaching to main session",
     )

@@ -411,7 +411,7 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries")
 @optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries (e.g., 5s, 1m)")
-@optgroup.option("--attach-command", help="Command to run instead of attaching to main session")
+@optgroup.option("--session-command", help="Command to run instead of attaching to main session")
 @optgroup.option(
     "--connect-command",
     help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
@@ -646,7 +646,7 @@ def _create_agent(
         message=None,
         retry_count=opts.retry,
         retry_delay=opts.retry_delay,
-        attach_command=opts.attach_command,
+        session_command=opts.session_command,
     )
 
     # If --reuse is set, try to find and reuse an existing agent with the same name
