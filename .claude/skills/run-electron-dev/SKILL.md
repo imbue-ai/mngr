@@ -19,7 +19,7 @@ In dev mode, the Electron app uses the monorepo workspace venv directly (no sepa
 (cd apps/minds && pnpm install && pnpm start)
 
 # With default template repo and agent name pre-filled:
-MIND_GIT_URL=/path/to/forever-claude-template \
+MIND_GIT_URL=/home/rtard/project/forever-claude-template \
 MIND_NAME=forever \
 (cd apps/minds && pnpm start)
 
