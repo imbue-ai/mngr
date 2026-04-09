@@ -230,7 +230,7 @@ class AgentTypeConfig(FrozenModel):
         auto_dismiss_dialogs) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
-        Tuples (cli_args): concatenate
+        Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
         Lists (permissions): concatenate if explicitly set
         """
         # Allow override to be the same class or a base class of self (e.g., when
