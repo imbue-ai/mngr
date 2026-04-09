@@ -15,23 +15,25 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 
 ### App shell
 
-The Electron window uses a single `shell.html` page that provides:
+The Electron window uses a frameless window (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` on macOS). A custom title bar is injected into every backend page via `webContents.insertCSS()` and `webContents.executeJavaScript()` on the `dom-ready` event. The title bar provides:
 
-- **Custom title bar**: A frameless window with back/forward navigation, a page title, an "open in browser" button, and minimize/maximize/close controls. On macOS, the native traffic light buttons are preserved via `titleBarStyle: 'hiddenInset'`.
-- **Loading view**: Shown during startup with a spinner and status messages.
-- **Error view**: Shown when the backend fails, with retry and log viewing options.
-- **Content iframe**: Loads the backend's web UI once it's ready.
+- **Navigation**: Back/forward buttons using `history.back()`/`history.forward()`
+- **Page title**: Tracks `document.title` via MutationObserver
+- **Open in browser**: Opens the current URL in the system browser
+- **Window controls**: Minimize/maximize/close buttons (on Linux/Windows; macOS uses native traffic lights)
+
+A separate `shell.html` page handles the loading spinner and error screen during startup.
 
 When accessing an agent URL in a regular browser (not the Electron app), the Python backend wraps the content in a lightweight info bar showing the agent name, host, and application name.
 
 ### Startup sequence
 
-1. Electron creates a window and loads the app shell
+1. Electron creates a frameless window showing a loading screen (`shell.html`)
 2. `uv sync` runs using the bundled `uv` binary and the packaged `pyproject.toml` + lockfile
 3. Electron finds an available port and spawns: `uv run mind --format jsonl --log-file <path> forward --host 127.0.0.1 --port <port> --no-browser`
 4. The backend emits a JSONL event `{"event": "login_url", "login_url": "..."}` on stdout
-5. Electron waits for the port to accept TCP connections, then navigates the content iframe to the login URL
-6. Auth completes (one-time code consumed, session cookie set), user sees the web UI
+5. Electron waits for the port to accept TCP connections, then navigates directly to the login URL
+6. Auth completes (one-time code consumed, session cookie set), the custom title bar is injected, user sees the web UI
 
 ### Shutdown
 
@@ -131,7 +133,7 @@ apps/minds/
     paths.js                # Platform-aware path resolution
     env-setup.js            # uv sync runner with progress reporting
     backend.js              # Python backend process manager
-    shell.html              # App shell (title bar, loading, error, and content iframe)
+    shell.html              # Loading and error screens (title bar is injected at runtime)
     assets/
       icon.svg              # App icon (SVG source)
       icon.png              # App icon (PNG for Electron)

@@ -4,15 +4,12 @@ contextBridge.exposeInMainWorld('minds', {
   // Platform info
   platform: process.platform,
 
-  // Status and error callbacks
+  // Status and error callbacks (used by shell.html loading/error screen)
   onStatusUpdate: (callback) => {
     ipcRenderer.on('status-update', (_event, message) => callback(message));
   },
   onErrorDetails: (callback) => {
     ipcRenderer.on('error-details', (_event, details) => callback(details));
-  },
-  onNavigate: (callback) => {
-    ipcRenderer.on('navigate', (_event, url) => callback(url));
   },
 
   // Actions
@@ -20,7 +17,7 @@ contextBridge.exposeInMainWorld('minds', {
   openLogFile: () => ipcRenderer.send('open-log-file'),
   openExternal: (url) => ipcRenderer.send('open-external', url),
 
-  // Window controls
+  // Window controls (used by injected title bar)
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
