@@ -220,8 +220,6 @@
 # Claude Code local settings (session-specific permissions)
 **/.claude/settings.local.json
 
-# PR status/URL files are now in .reviewer/outputs/ (already gitignored)
-
 # Local Claude settings backup files
 **/.claude/*.bak
 
