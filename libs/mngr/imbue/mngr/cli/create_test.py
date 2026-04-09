@@ -30,6 +30,7 @@ from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
+from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
@@ -1523,3 +1524,57 @@ def test_resolve_source_location_raises_outside_git_repo(
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,
         )
+
+
+# =============================================================================
+# Tests for _split_address_and_target_path
+# =============================================================================
+
+
+def test_split_address_no_colon() -> None:
+    """Plain address with no colon returns no target path."""
+    addr, path = _split_address_and_target_path("foo")
+    assert addr == "foo"
+    assert path is None
+
+
+def test_split_address_empty_string() -> None:
+    """Empty string returns empty address and no target path."""
+    addr, path = _split_address_and_target_path("")
+    assert addr == ""
+    assert path is None
+
+
+def test_split_address_with_absolute_path() -> None:
+    """Address with :PATH returns address and path."""
+    addr, path = _split_address_and_target_path("foo:/tmp/work")
+    assert addr == "foo"
+    assert path == Path("/tmp/work")
+
+
+def test_split_address_with_relative_path() -> None:
+    """Address with relative :PATH works."""
+    addr, path = _split_address_and_target_path(":./rel/path")
+    assert addr == ""
+    assert path == Path("./rel/path")
+
+
+def test_split_address_full_address_with_path() -> None:
+    """Full agent address with :PATH suffix."""
+    addr, path = _split_address_and_target_path("foo@host.modal:/root/work")
+    assert addr == "foo@host.modal"
+    assert path == Path("/root/work")
+
+
+def test_split_address_path_only() -> None:
+    """Colon-prefixed path with no address."""
+    addr, path = _split_address_and_target_path(":/tmp/work")
+    assert addr == ""
+    assert path == Path("/tmp/work")
+
+
+def test_split_address_trailing_colon() -> None:
+    """Trailing colon with no path returns no target path."""
+    addr, path = _split_address_and_target_path("foo:")
+    assert addr == "foo"
+    assert path is None
