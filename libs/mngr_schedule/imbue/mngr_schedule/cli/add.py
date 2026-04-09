@@ -105,7 +105,6 @@ def auto_fix_create_args(
     parts = shlex.split(args) if args else []
     mngr_args, passthrough_args = _split_args_at_separator(parts)
 
-    # FIXME: we should check that "--yes" is specified, and add it if not
     if not _has_flag(mngr_args, "--headless"):
         mngr_args.append("--headless")
 
