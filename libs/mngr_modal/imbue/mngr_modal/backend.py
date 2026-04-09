@@ -71,7 +71,7 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
             modal_interface.environment_create(environment_name)
             logger.info("Created Modal environment: {}", environment_name)
         except ModalProxyError as e:
-            logger.warning("Failed to create Modal environment: {}", e)
+            raise MngrError(f"Failed to create Modal environment '{environment_name}': {e}") from e
 
 
 def _lookup_persistent_app_with_env_retry(
