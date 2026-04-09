@@ -1,11 +1,10 @@
 #!/bin/bash
 # Start the Docker daemon inside a Modal sandbox with enable_docker=True.
-set -euo pipefail
 # Based on Modal's Docker-in-Sandboxes demo:
 # https://modal.com/docs/guide/docker-in-sandboxes
 #
 # This script is idempotent: if dockerd is already running, it exits early.
-set -xe -o pipefail
+set -euxo pipefail
 
 # Guard: skip if dockerd is already running
 if /usr/local/bin/docker info >/dev/null 2>&1; then
