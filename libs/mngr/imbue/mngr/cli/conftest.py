@@ -75,7 +75,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         source_host=None,
         source_path=None,
         target=None,
-        target_path=None,
         transfer=None,
         rsync=None,
         rsync_args=None,

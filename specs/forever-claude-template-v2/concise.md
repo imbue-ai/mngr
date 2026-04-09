@@ -23,8 +23,8 @@ A self-contained, self-modifying template repo for persistent Claude agents. No 
 
 * `worker`: For sub-agents created by the `launch-task` skill. Sets `type = "claude"`, adds reviewer env vars (`REVIEWER_AUTOFIX_ENABLE=1`, `REVIEWER_CI_ENABLE=1`, `REVIEWER_VERIFY_CONVERSATION_ENABLE=0`, `REVIEWER_AUTOFIX_MINOR=0`), the `create_reviewer_settings.sh` extra window, `--pass-env MIND_NAME`, and an `--append-system-prompt` with instructions: "You were launched by a mind agent. Your work will be reviewed via transcript and git diff. Commit your changes when done."
 * `local`: Sets `extra_window = ["bootstrap=uv run bootstrap"]` for the bootstrap service manager.
-* `modal`: Sets `provider = "modal"`, `target_path`, `idle_timeout`, a `github_setup` extra window (for SSH keyscan and git remote URL), `build_arg`, and the bootstrap extra window.
-* `docker`: Sets `provider = "docker"`, `target_path`, and the bootstrap extra window.
+* `modal`: Sets `provider = "modal"`, `idle_timeout`, a `github_setup` extra window (for SSH keyscan and git remote URL), `build_arg`, and the bootstrap extra window.
+* `docker`: Sets `provider = "docker"` and the bootstrap extra window.
 
 ### Agent creation flow
 

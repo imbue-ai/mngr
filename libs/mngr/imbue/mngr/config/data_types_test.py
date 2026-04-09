@@ -591,11 +591,11 @@ def test_command_defaults_merge_with_default_subcommand_independent_of_defaults(
 
 def test_create_template_merge_with_combines_options() -> None:
     """CreateTemplate.merge_with should combine options from both templates."""
-    base = CreateTemplate(options={"new_host": "local", "target_path": "/base"})
+    base = CreateTemplate(options={"new_host": "local", "source_path": "/base"})
     override = CreateTemplate(options={"new_host": "docker"})
     merged = base.merge_with(override)
     assert merged.options["new_host"] == "docker"
-    assert merged.options["target_path"] == "/base"
+    assert merged.options["source_path"] == "/base"
 
 
 def test_create_template_merge_with_override_wins_for_same_key() -> None:
@@ -633,19 +633,19 @@ def test_mngr_config_merge_with_merges_create_templates(mngr_test_prefix: str) -
     base = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("modal"): CreateTemplate(options={"new_host": "modal", "target_path": "/base"}),
+            CreateTemplateName("modal"): CreateTemplate(options={"new_host": "modal", "source_path": "/base"}),
         },
     )
     override = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("modal"): CreateTemplate(options={"target_path": "/override"}),
+            CreateTemplateName("modal"): CreateTemplate(options={"source_path": "/override"}),
         },
     )
     merged = base.merge_with(override)
     modal_template = merged.create_templates[CreateTemplateName("modal")]
     assert modal_template.options["new_host"] == "modal"
-    assert modal_template.options["target_path"] == "/override"
+    assert modal_template.options["source_path"] == "/override"
 
 
 def test_mngr_config_merge_with_adds_new_create_templates(mngr_test_prefix: str) -> None:

@@ -256,10 +256,10 @@ def test_create_modal_snapshot(e2e: E2eSession) -> None:
 def test_create_modal_target_path(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the target path where the agent's work directory will be mounted:
-    mngr create my-task --provider modal --target-path /workspace
+    mngr create my-task@.modal:/workspace
     """)
     result = e2e.run(
-        "mngr create my-task --provider modal --target-path /workspace --no-connect --no-ensure-clean",
+        "mngr create my-task@.modal:/workspace --no-connect --no-ensure-clean",
         comment="you can specify the target path where the agent's work directory will be mounted",
         timeout=_REMOTE_TIMEOUT,
     )

@@ -544,7 +544,7 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     Format: create_templates.{template_name}.{param_name} = value
     Example: [create_templates.modal-dev]
              new_host = "modal"
-             target_path = "/root/workspace"
+             source_path = "/root/workspace"
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """

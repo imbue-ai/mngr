@@ -552,11 +552,11 @@ def test_parse_commands_handles_empty_dict() -> None:
 
 def test_parse_create_templates_parses_valid_templates() -> None:
     """_parse_create_templates should parse valid create templates."""
-    raw = {"modal-dev": {"new_host": "modal", "target_path": "/root/workspace"}}
+    raw = {"modal-dev": {"new_host": "modal", "source_path": "/root/workspace"}}
     result = _parse_create_templates(raw)
     assert CreateTemplateName("modal-dev") in result
     assert result[CreateTemplateName("modal-dev")].options["new_host"] == "modal"
-    assert result[CreateTemplateName("modal-dev")].options["target_path"] == "/root/workspace"
+    assert result[CreateTemplateName("modal-dev")].options["source_path"] == "/root/workspace"
 
 
 def test_parse_create_templates_handles_empty_dict() -> None:

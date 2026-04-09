@@ -794,7 +794,6 @@ class CreateCliOptions(CommonCliOptions):
     source_host: str | None
     source_path: str | None
     target: str | None
-    target_path: str | None
     transfer: str | None
     rsync: bool | None
     rsync_args: str | None
