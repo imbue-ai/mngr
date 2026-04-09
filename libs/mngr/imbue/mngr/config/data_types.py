@@ -826,7 +826,7 @@ class CreateCliOptions(CommonCliOptions):
     edit_message: bool
     retry: int
     retry_delay: str
-    attach_command: str | None
+    session_command: str | None
     idle_timeout: str | None
     idle_mode: str | None
     activity_sources: str | None

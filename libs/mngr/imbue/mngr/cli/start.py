@@ -221,7 +221,7 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
                 is_reconnect=True,
                 retry_count=3,
                 retry_delay="5s",
-                attach_command=None,
+                session_command=None,
                 is_unknown_host_allowed=False,
             )
             logger.info("Connecting to agent: {}", last_started_agent.name)
