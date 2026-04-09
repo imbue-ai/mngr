@@ -114,7 +114,7 @@ def _destroy_agent(agent_name: str) -> None:
             logger.debug("git branch -D {} failed (best-effort cleanup): {}", branch_name, exc)
 
 
-class ForwardingServerFixture:
+class DesktopClientFixture:
     def __init__(self, tmp_dir: Path) -> None:
         self.host = "127.0.0.1"
         self.port = _find_free_port()
@@ -254,7 +254,7 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
     _SIGNAL_FILE.unlink(missing_ok=True)
     _destroy_agent(_AGENT_NAME)
 
-    server = ForwardingServerFixture(tmp_path)
+    server = DesktopClientFixture(tmp_path)
     server.start()
 
     client = httpx.Client(
@@ -314,7 +314,7 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
     os.environ["UV_TOOL_DIR"] = uv_tool_dir
     os.environ["UV_TOOL_BIN_DIR"] = uv_tool_bin_dir
 
-    server = ForwardingServerFixture(tmp_path)
+    server = DesktopClientFixture(tmp_path)
     client: httpx.Client | None = None
 
     try:
