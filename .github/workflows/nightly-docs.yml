@@ -1,0 +1,100 @@
+name: Nightly Docs Update
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # Daily at 7am UTC (midnight PDT)
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Full history needed for git log
+
+      - name: Set timestamp
+        id: ts
+        run: |
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "time=$(date -u +%H%M)" >> "$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are maintaining two living documents in this repository:
+            ARCHITECTURE.md (developer architecture overview) and CHANGELOG.md (user-facing changelog).
+
+            Today's date is ${{ steps.ts.outputs.date }} (UTC).
+
+            ## Step 1: Determine what changed
+
+            Look at the git log for commits on main since the last time CHANGELOG.md was updated.
+            Get the anchor date:
+
+              git log -1 --format=%ci -- CHANGELOG.md
+
+            If that returns empty (the file doesn't exist yet), use "7 days ago" instead.
+            Then find all commits since that anchor:
+
+              git log --oneline --since="<anchor>"
+
+            If that returns nothing, there are no changes to document. As a health check, verify
+            there have been *some* commits in the last 7 days:
+
+              git log --oneline --since="7 days ago" -1
+
+            If that also returns nothing, output "WARNING: no commits found in the last 7 days"
+            and exit with a non-zero status. Otherwise, exit early without making changes.
+
+            If there are commits since the anchor, read the diffs:
+
+              git log -p --since="<anchor>"
+
+            Focus on structural and user-facing changes.
+
+            ## Step 2: Update CHANGELOG.md
+
+            Add new entries to CHANGELOG.md for user-visible changes. Use newest-first ordering
+            (most recent date at the top). Use `## YYYY-MM-DD` section headers with bullet points
+            underneath. Follow the existing format in the file. Skip internal-only changes.
+
+            ## Step 3: Update ARCHITECTURE.md (if needed)
+
+            Read the current ARCHITECTURE.md. Update it if the commits changed the architecture.
+            The bar is high -- most days there should be no changes.
+
+            ## Step 4: Review ARCHITECTURE.md for quality
+
+            If you made changes to ARCHITECTURE.md in Step 3, do a critical review pass.
+
+            Review criteria -- fix any issues you find:
+            - **Importance**: every sentence should earn its place. Remove anything a developer
+              wouldn't need when navigating or extending the codebase.
+            - **No duplication**: if the same fact appears twice, keep the better version.
+            - **Tight wording**: cut filler phrases, redundant words, and verbose constructions.
+              Prefer "Built on X" over "It is built on X". Prefer label:value list items
+              (e.g., "- Tmux sessions: `mng-<name>`") over full sentences when listing facts.
+            - **Accuracy**: verify claims against the actual code. Remove anything that no
+              longer reflects reality.
+            - **Scope**: ARCHITECTURE.md is for orientation, not exhaustive documentation.
+              If a section reads like API docs, trim it back to what someone needs to know
+              to find and understand the right code, and link to the actual docs (e.g.,
+              a README or file in docs/) for details. Update those linked docs too if they
+              are outdated or missing the relevant information.
+
+            ## Step 5: Commit and create PR
+
+            If you made any changes, commit them and push to a new branch named
+            "docs/nightly-update-${{ steps.ts.outputs.date }}-${{ steps.ts.outputs.time }}".
+            Then create a PR.
+
+            If no changes were needed, do nothing.
+          claude_args: |
+            --model claude-opus-4
+            --allowedTools Read,Write,Edit,Glob,Grep,Bash(git:*),Bash(gh pr create:*)
