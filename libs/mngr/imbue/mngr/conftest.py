@@ -676,20 +676,17 @@ def _ensure_dockerd_for_release() -> None:
     docker_bin = Path("/usr/local/bin/docker")
     if not start_script.exists() or not docker_bin.exists():
         return
-    try:
-        subprocess.run(
+    cg = ConcurrencyGroup(name="ensure-dockerd")
+    with cg:
+        result = cg.run_process_to_completion(
             [str(docker_bin), "info"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
+            is_checked_after=False,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        subprocess.run(
-            [str(start_script)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        if result.returncode != 0:
+            cg.run_process_to_completion(
+                [str(start_script)],
+                is_checked_after=False,
+            )
 
 
 @pytest.fixture(scope="session", autouse=True)
