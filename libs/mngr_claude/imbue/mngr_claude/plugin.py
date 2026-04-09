@@ -2050,7 +2050,8 @@ def _preserve_session_files_from_volume(
         try:
             root_entries = agent_volume.listdir(".")
             has_history = any(e.path == "claude_session_id_history" for e in root_entries)
-        except (MngrError, OSError):
+        except (MngrError, OSError) as e:
+            logger.trace("Failed to list volume root for session history check: {}", e)
             has_history = False
         if has_history:
             _copy_volume_file_to_local(
