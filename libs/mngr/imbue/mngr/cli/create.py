@@ -64,13 +64,12 @@ from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -1317,13 +1316,15 @@ def _parse_agent_opts(
     # Parse label options
     label_options = resolve_labels(opts.label)
 
-    # Parse provisioning options
-    provisioning = AgentProvisioningOptions(
-        extra_provision_commands=opts.extra_provision_command,
-        upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
-        append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
-        prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
-    )
+    # Parse provisioning options using the shared field map.
+    # getattr with default () because not all map entries have CLI flags
+    # (e.g. create_directory is agent-type-only).
+    prov_kwargs: dict[str, tuple[Any, ...]] = {}
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
+        raw_values: tuple[str, ...] = getattr(opts, config_field, ())
+        if raw_values:
+            prov_kwargs[target_field] = tuple(parser(s) for s in raw_values)
+    provisioning = AgentProvisioningOptions(**prov_kwargs)
 
     # Parse target_path if provided
     parsed_target_path = Path(opts.target_path) if opts.target_path else None

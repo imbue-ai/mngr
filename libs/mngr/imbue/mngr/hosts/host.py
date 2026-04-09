@@ -72,11 +72,10 @@ from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -93,15 +92,6 @@ from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.polling import wait_for
 
-# Each agent type field maps to a parser and a target field on the options sub-models.
-_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
-    ("extra_provision_command", "extra_provision_commands", str),
-    ("upload_file", "upload_files", UploadFileSpec.from_string),
-    ("append_to_file", "append_to_files", FileModificationSpec.from_string),
-    ("prepend_to_file", "prepend_to_files", FileModificationSpec.from_string),
-    ("create_directory", "create_directories", Path),
-)
-
 
 @pure
 def _merge_agent_type_provisioning(
@@ -117,7 +107,7 @@ def _merge_agent_type_provisioning(
     Returns the original options unchanged if the agent config has no provisioning fields.
     """
     prov_updates: list[tuple[str, Any]] = []
-    for config_field, target_field, parser in _PROVISIONING_FIELD_MAP:
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
         raw_values: tuple[str, ...] = getattr(agent_config, config_field)
         if raw_values:
             existing: tuple[Any, ...] = getattr(options.provisioning, target_field)
