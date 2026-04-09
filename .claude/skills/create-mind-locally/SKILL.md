@@ -58,4 +58,5 @@ docker rm -f mngr-myagent-host
 The template's Dockerfile must:
 - Install Node.js and build the `claude-web-chat` frontend (`npm ci && npm run build` in `vendor/mngr/apps/claude_web_chat/frontend/`)
 - Install `claude-web-chat` as a uv tool with mngr plugin packages (`--with` mngr_claude, mngr_modal)
-- The template's `services.toml` must define a `web` service that runs `claude-web-chat` on port 8000
+
+The template's `services.toml` must define a `web` service that runs `claude-web-chat` on port 8000.
