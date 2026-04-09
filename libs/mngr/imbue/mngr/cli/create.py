@@ -555,7 +555,9 @@ class _CreateSetup(FrozenModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     address: AgentAddress = Field(description="Parsed agent address from the positional argument")
-    target_path: Path | None = Field(default=None, description="Target path from :PATH suffix in the address")
+    target_path: Path | None = Field(
+        default=None, description="Target path from :PATH in the address or --target-path"
+    )
     initial_message: str | None = Field(
         description="Resolved initial message content (from --message or --message-file)"
     )
@@ -1376,7 +1378,7 @@ def _parse_agent_opts(
         prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
     )
 
-    # target_path comes from the :PATH suffix in the address (parsed upstream)
+    # target_path comes from :PATH in the address or --target-path (merged upstream)
 
     # Determine agent type: --type and positional are equivalent; specifying both
     # with different values is an error. _CreateCommand.parse_args handles --
