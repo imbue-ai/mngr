@@ -369,9 +369,11 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         if field_name not in result:
             continue
         value = result[field_name]
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, str):
+            # Single string -> wrap in a one-element tuple (no shell splitting for these fields)
+            result = {**result, field_name: (value,)}
+        elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
-        # strings are not split for these fields -- each element is already a complete spec
     return result
 
 

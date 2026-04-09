@@ -1331,6 +1331,17 @@ def test_normalize_tuple_fields_handles_all_fields_together() -> None:
     assert result["create_directory"] == ("/tmp/test",)
 
 
+def test_normalize_tuple_fields_wraps_string_in_tuple() -> None:
+    """_normalize_tuple_fields_for_construct should wrap a bare string in a one-element tuple for provisioning fields."""
+    raw = {
+        "extra_provision_command": "echo setup",
+        "env": "FOO=1",
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["extra_provision_command"] == ("echo setup",)
+    assert result["env"] == ("FOO=1",)
+
+
 # =============================================================================
 # Tests for _parse_command_env_vars edge cases
 # =============================================================================
