@@ -106,7 +106,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         extra_provision_command=(),
         upload_file=(),
         update=False,
-        yes=False,
     )
 
 

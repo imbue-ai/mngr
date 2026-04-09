@@ -208,9 +208,6 @@ class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
     ) -> None:
         """No-op: skip trust/dialog validation for no-permissions agents."""
 
-    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """No-op: no permissions means no dialogs to check."""
-
 
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     """Config for the headless_claude agent type.

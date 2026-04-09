@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
-import click
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.config.data_types import LocalInstallPolicy
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.file_utils import atomic_write
@@ -27,24 +28,6 @@ class SkillProvisionedAgentConfig(ClaudeAgentConfig):
     """
 
 
-def _prompt_user_for_skill_install(skill_name: str, skill_path: Path) -> bool:
-    """Prompt the user to install or update a skill."""
-    if skill_path.exists():
-        logger.info(
-            "\nThe {} skill at {} will be updated.\n",
-            skill_name,
-            skill_path,
-        )
-        return click.confirm(f"Update the {skill_name} skill?", default=True)
-    else:
-        logger.info(
-            "\nThe {} skill will be installed to {}.\n",
-            skill_name,
-            skill_path,
-        )
-        return click.confirm(f"Install the {skill_name} skill?", default=True)
-
-
 def _install_skill_locally(skill_name: str, skill_content: str, mngr_ctx: MngrContext) -> None:
     """Install a skill to the local user's Claude config skills/ directory."""
     skill_path = get_user_claude_config_dir() / "skills" / skill_name / "SKILL.md"
@@ -55,10 +38,14 @@ def _install_skill_locally(skill_name: str, skill_content: str, mngr_ctx: MngrCo
             logger.debug("{} skill is already up to date at {}", skill_name, skill_path)
             return
 
-        if mngr_ctx.is_interactive and not mngr_ctx.is_auto_approve:
-            if not _prompt_user_for_skill_install(skill_name, skill_path):
-                logger.info("Skipped {} skill installation", skill_name)
-                return
+        install_policy = mngr_ctx.config.local_system_mutations.install_skills
+        if install_policy == LocalInstallPolicy.ERROR:
+            action = "update" if skill_path.exists() else "installation"
+            raise PluginMngrError(
+                f"The {skill_name} skill requires {action} but "
+                f"local_system_mutations.install_skills is set to ERROR. "
+                f"Manually install the skill to {skill_path}."
+            )
 
         atomic_write(skill_path, skill_content)
         logger.debug("Installed {} skill to {}", skill_name, skill_path)

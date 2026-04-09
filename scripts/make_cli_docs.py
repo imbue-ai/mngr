@@ -54,6 +54,7 @@ SECONDARY_COMMANDS = {
     "ask",
     "capture",
     "chat",
+    "claude",
     "cleanup",
     "config",
     "events",
