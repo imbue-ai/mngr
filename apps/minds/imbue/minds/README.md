@@ -4,7 +4,6 @@ This matches the import-linter contract in the root pyproject.toml:
 
 - `desktop_client`
 - `cli`
-- `desktop_client`
 - `core`
 - `interfaces`
 - `config`
