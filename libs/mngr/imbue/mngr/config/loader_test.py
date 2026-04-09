@@ -16,6 +16,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import PermissionDialogPolicy
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _apply_plugin_overrides
@@ -753,6 +754,7 @@ def test_load_config_threads_every_field_from_toml(
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
     assert ".test_output" in config.work_dir_extra_paths
+    assert config.local_system_mutations.accept_permission_dialogs == PermissionDialogPolicy.ERROR
 
 
 # Sample values used by the regression tests above. When adding a new field to

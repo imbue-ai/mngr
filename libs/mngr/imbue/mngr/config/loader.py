@@ -203,6 +203,8 @@ def load_config(
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
+    if config.local_system_mutations is not None:
+        config_dict["local_system_mutations"] = config.local_system_mutations
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
