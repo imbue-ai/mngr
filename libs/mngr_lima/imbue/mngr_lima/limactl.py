@@ -73,7 +73,7 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
     automatically when the concurrency group exits.
     """
     cg.run_process_in_background(
-        ["tail", "-f", serial_log_path],
+        ["tail", "--follow=name", "--retry", serial_log_path],
         on_output=_log_boot_output,
     )
 

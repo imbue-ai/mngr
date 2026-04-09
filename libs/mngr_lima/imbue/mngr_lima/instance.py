@@ -263,7 +263,7 @@ class LimaProviderInstance(BaseProviderInstance):
         """
         clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-p", str(port), hostname],
+            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
             timeout=10.0,
         )
         if result.returncode == 0 and result.stdout.strip():
