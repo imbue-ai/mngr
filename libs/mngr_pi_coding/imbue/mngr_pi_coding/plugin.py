@@ -298,14 +298,15 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
                     install_policy = mngr_ctx.config.local_system_mutations.install_agents
                     if install_policy == LocalInstallPolicy.ERROR:
                         raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
-                elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:
-                    raise PluginMngrError(
-                        "pi is not installed on the remote host and automatic remote installation is disabled."
-                    )
                 else:
-                    logger.info("Installing pi...")
-                    _install_pi(host)
-                    logger.info("pi installed successfully")
+                    if not mngr_ctx.config.is_remote_agent_installation_allowed:
+                        raise PluginMngrError(
+                            "pi is not installed on the remote host and automatic remote installation is disabled."
+                        )
+
+                logger.info("Installing pi...")
+                _install_pi(host)
+                logger.info("pi installed successfully")
 
         self._setup_per_agent_config_dir(host, config)
 
