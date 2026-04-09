@@ -29,6 +29,7 @@ target_path = "/code/mngr"
 [agent_types.coder]
 parent_type = "claude"
 cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}]}}'"""
+extra_provision_command = ["""bash -c 'printf '"'"'{"stop_hook": {"base_branch": "%s", "log_file": "%s/events/logs/stop_hook/events.jsonl"}}'"'"' "$GIT_BASE_BRANCH" "$MNGR_AGENT_STATE_DIR" > .reviewer/settings.local.json'"""]
 
 [providers.modal]
 is_enabled = true
