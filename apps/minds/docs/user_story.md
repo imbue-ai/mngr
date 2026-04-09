@@ -3,9 +3,9 @@ This is the primary flow for how a user would create a mind for the first time:
 1. User starts the forwarding server: `mind`
 2. The server prints a one-time login URL to the terminal
 3. User visits the login URL to authenticate (sets a global session cookie)
-4. Since no agents exist, the landing page shows a creation form with a git URL field (can also be pre-filled via `/?git_url=...`)
-5. User enters the git URL and clicks Create
-6. The forwarding server clones the repository, loads settings from `minds.toml`, adds configured vendor repos as git subtrees, resolves the agent type (or uses `claude-mind`), generates an agent ID, and runs `mngr create --type <type> --id <id> --transfer=none --label mind=true`
+4. Since no agents exist, the landing page shows a creation form with fields for agent name, git repository URL (or local path), branch, and launch mode (DEV/LOCAL/CLOUD)
+5. User fills in the form and clicks Create
+6. The forwarding server clones the repository to a temp directory (if a URL) or uses the local path directly, generates an agent ID, and runs `mngr create <name> --id <id> --no-connect --label mind=<name> --template main --template <mode>`. If Cloudflare credentials are configured, it also creates a tunnel and injects the tunnel token into the agent.
 7. While creating, the user sees a progress page that polls for status
 8. When creation completes, the user is redirected to their mind's web interface at `/agents/<agent-id>/web/`
 

@@ -17,6 +17,7 @@ from imbue.mngr.api.find import ResolvedSource
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
+from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -25,6 +26,7 @@ from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_source_string
+from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -35,7 +37,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -51,6 +55,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.logging import LoggingSuppressor
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -1098,6 +1103,62 @@ def test_is_creating_new_host() -> None:
     assert _is_creating_new_host(addr, new_host_flag=False) is False
 
 
+def test_parse_target_host_local_provider_uses_fixed_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None (use fixed localhost) when provider is local."""
+    address = parse_agent_address("foo@.local")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    # None means "use the local provider's default host" in _resolve_target_host
+    assert result is None
+
+
+def test_parse_target_host_local_provider_with_new_host_flag(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None for local provider even with --new-host flag."""
+    address = parse_agent_address("foo@myhost.local")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().new_host, True),
+    )
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert result is None
+
+
+def test_parse_target_host_non_local_provider_creates_new_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns NewHostOptions for non-local providers."""
+    address = parse_agent_address("foo@.modal")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provider == ProviderInstanceName("modal")
+
+
 def test_parse_agent_address_rejects_multiple_dots() -> None:
     """Addresses with more than one dot in the host part are invalid."""
     with pytest.raises(UserInputError, match="more than one dot"):
@@ -1129,6 +1190,26 @@ def test_parse_agent_address_bare_dot_means_nothing() -> None:
 
 
 # =============================================================================
+# Tests for --update / --reuse validation
+# =============================================================================
+
+
+def test_create_rejects_update_without_reuse(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--update without --reuse should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--update", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--update requires --reuse" in result.output
+
+
+# =============================================================================
 # Tests for positional / --name mutual exclusivity
 # =============================================================================
 
@@ -1146,6 +1227,27 @@ def test_create_rejects_positional_and_name_together(
 
     assert result.exit_code != 0
     assert "Cannot specify both" in result.output
+
+
+def test_create_edit_message_error_not_swallowed(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Early errors with --edit-message must still be visible.
+
+    LoggingSuppressor is enabled early when --edit-message is set. If an error
+    occurs before the editor opens, the suppressor must be cleaned up so the
+    error message is not swallowed and stdout/stderr are restored.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+    assert not LoggingSuppressor.is_suppressed()
 
 
 @pytest.mark.tmux
@@ -1347,3 +1449,77 @@ def test_editor_cleanup_scope_does_not_rescue_on_success(
 
     # Temp file should still be cleaned up
     assert not session.temp_file_path.exists()
+
+
+# =============================================================================
+# Tests for _check_source_does_not_contain_state_dir
+# =============================================================================
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_parent(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory is a parent of the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    parent_of_state_dir = state_dir.parent
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(parent_of_state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory IS the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_sibling(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Does not raise when the source directory is a sibling of the state dir."""
+    sibling_dir = tmp_path / "some-project"
+    sibling_dir.mkdir()
+
+    # Should not raise
+    _check_source_does_not_contain_state_dir(sibling_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_child_of_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Does not raise when the source directory is inside the state dir (child)."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    child_dir = state_dir / "agents" / "some-agent"
+    child_dir.mkdir(parents=True, exist_ok=True)
+
+    # Should not raise -- we only block the parent-contains-state-dir direction
+    _check_source_does_not_contain_state_dir(child_dir, temp_mngr_ctx)
+
+
+# =============================================================================
+# Tests for _resolve_source_location without git repo
+# =============================================================================
+
+
+def test_resolve_source_location_raises_outside_git_repo(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_source_location raises UserInputError when not in a git repo and no source specified."""
+    # tmp_path is not a git repo, change cwd to it
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(UserInputError, match="Not inside a git repository"):
+        _resolve_source_location(
+            default_create_cli_opts,
+            agent_and_host_loader=lambda: {},
+            mngr_ctx=temp_mngr_ctx,
+            is_start_desired=True,
+        )

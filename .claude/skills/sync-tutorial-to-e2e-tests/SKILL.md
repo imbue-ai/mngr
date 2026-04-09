@@ -4,7 +4,7 @@ argument-hint: <script_file> <test_directory>
 description: Match tutorial script blocks to e2e pytest functions and add missing tests
 ---
 
-Default arguments (if none provided): `libs/mngr/tutorials/mega_tutorial.sh libs/mngr/imbue/mngr/e2e`
+Default arguments (if none provided): `libs/mngr/imbue/mngr/resources/mega_tutorial.sh libs/mngr/imbue/mngr/e2e`
 
 Your task is to ensure that every command block in a tutorial shell script has a corresponding pytest function.
 

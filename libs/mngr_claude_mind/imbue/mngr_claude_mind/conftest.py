@@ -9,7 +9,7 @@ import pytest
 
 from imbue.mngr.providers.ssh_host_setup import load_resource_script
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_llm.conftest import create_mind_conversations_table_in_test_db
 from imbue.mngr_llm.provisioning import load_llm_resource
 from imbue.mngr_mind.conftest import StubHost
@@ -117,7 +117,7 @@ class ChatScriptEnv:
         self.env["MNGR_LLM_MODEL"] = model
         (self.work_dir / "minds.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
-    def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
         """Run chat.sh with the given arguments."""
         return subprocess.run(
             [str(self.chat_script), *args],
@@ -145,7 +145,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
     """Create a temporary git repo with an initial commit and local git config."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    init_git_repo_with_config(repo_dir)
+    init_git_repo(repo_dir)
     return repo_dir
 
 

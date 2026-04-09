@@ -1,3 +1,4 @@
+import importlib.resources
 import shlex
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
@@ -374,11 +376,17 @@ def _accumulate_chunks(chunks: Iterator[str]) -> str:
     return "".join(parts)
 
 
+def _load_mega_tutorial() -> str:
+    """Load the mega_tutorial.sh resource file."""
+    return importlib.resources.files(mngr_resources).joinpath("mega_tutorial.sh").read_text()
+
+
 def _build_ask_context() -> str:
-    """Build system prompt context from the registered help metadata.
+    """Build system prompt context from the registered help metadata and the mega tutorial.
 
     Constructs a documentation string from the in-memory help metadata
-    registry, so no pre-generated files are needed.
+    registry plus the mega tutorial (which contains the most up-to-date
+    usage examples), so no pre-generated files are needed.
     """
     parts: list[str] = [
         "# mngr CLI Documentation",
@@ -399,6 +407,12 @@ def _build_ask_context() -> str:
             for desc, cmd in metadata.examples:
                 parts.append(f"  {desc}: {cmd}")
             parts.append("")
+
+    parts.append("# Tutorial and Examples")
+    parts.append("")
+    parts.append("The following tutorial covers most mngr features with examples:")
+    parts.append("")
+    parts.append(_load_mega_tutorial())
 
     return "\n".join(parts)
 

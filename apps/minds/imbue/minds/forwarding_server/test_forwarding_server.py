@@ -907,9 +907,9 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", params={"git_url": "https://github.com/test/repo"})
+    response = client.get("/", params={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
-    assert "https://github.com/test/repo" in response.text
+    assert "file:///nonexistent-repo" in response.text
 
 
 def test_create_page_shows_form(tmp_path: Path) -> None:
@@ -969,7 +969,7 @@ def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) ->
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.post("/create", data={"git_url": "https://github.com/test/repo"})
+    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 501
 
 
@@ -983,7 +983,7 @@ def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> N
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 501
 
 
@@ -1025,15 +1025,16 @@ def _create_test_server_with_agent_creator(
 
 def test_create_form_submit_redirects_to_creating_page(tmp_path: Path) -> None:
     """POST /create with valid git_url redirects to /creating/{agent_id}."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "https://github.com/test/repo"},
+        data={"git_url": "file:///nonexistent-repo"},
         follow_redirects=False,
     )
     assert response.status_code == 303
     assert response.headers["location"].startswith("/creating/")
+    agent_creator.wait_for_all()
 
 
 def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
@@ -1046,38 +1047,41 @@ def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
 
 def test_create_form_submit_passes_agent_name(tmp_path: Path) -> None:
     """POST /create passes agent_name to the creator."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "https://github.com/test/repo", "agent_name": "my-agent"},
+        data={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
         follow_redirects=False,
     )
     assert response.status_code == 303
+    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_passes_agent_name(tmp_path: Path) -> None:
     """POST /api/create-agent passes agent_name to the creator."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/api/create-agent",
-        json={"git_url": "https://github.com/test/repo", "agent_name": "my-agent"},
+        json={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
     )
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
+    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
     """POST /api/create-agent returns JSON with agent_id and status."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
     assert data["status"] == "CLONING"
+    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
@@ -1105,11 +1109,12 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     """GET /creating/{agent_id} shows the creating progress page."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("https://github.com/test/repo")
+    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your mind" in response.text
+    agent_creator.wait_for_all()
 
 
 def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
@@ -1124,22 +1129,23 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
     """GET /api/create-agent/{id}/status returns a valid status for a tracked creation."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("https://github.com/test/repo")
+    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
 
     response = client.get("/api/create-agent/{}/status".format(agent_id))
     assert response.status_code == 200
     data = response.json()
     assert data["agent_id"] == str(agent_id)
     assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
+    agent_creator.wait_for_all()
 
 
 def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
     """GET /create?git_url=... pre-fills the form."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/create", params={"git_url": "https://github.com/test/repo"})
+    response = client.get("/create", params={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
-    assert "https://github.com/test/repo" in response.text
+    assert "file:///nonexistent-repo" in response.text
 
 
 def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Path) -> None:
@@ -1186,7 +1192,7 @@ def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
         http_client=None,
     )
 
-    response = client.post("/create", data={"git_url": "https://github.com/test/repo"})
+    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 403
 
 
@@ -1199,7 +1205,7 @@ def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
         http_client=None,
     )
 
-    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 403
 
 
@@ -1255,11 +1261,12 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/logs returns SSE stream for a tracked creation."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("https://github.com/test/repo")
+    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
 
     with client.stream("GET", "/api/create-agent/{}/logs".format(agent_id)) as response:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
+    agent_creator.wait_for_all()
 
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -1277,28 +1284,29 @@ def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
 
 def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
     """POST /create passes launch_mode to the creator."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
-            "git_url": "https://github.com/test/repo",
+            "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
             "launch_mode": "DEV",
         },
         follow_redirects=False,
     )
     assert response.status_code == 303
+    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
     """POST /api/create-agent passes launch_mode to the creator."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/api/create-agent",
         json={
-            "git_url": "https://github.com/test/repo",
+            "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
             "launch_mode": "DEV",
         },
@@ -1306,6 +1314,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
+    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
@@ -1315,7 +1324,7 @@ def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
     response = client.post(
         "/api/create-agent",
         json={
-            "git_url": "https://github.com/test/repo",
+            "git_url": "file:///nonexistent-repo",
             "agent_name": "my-agent",
             "launch_mode": "INVALID_MODE",
         },

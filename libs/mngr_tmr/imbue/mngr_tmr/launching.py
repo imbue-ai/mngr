@@ -39,7 +39,7 @@ _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 
 
 def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> NewHostBuildOptions:
-    """Resolve templates and build NewHostBuildOptions for host creation."""
+    """Resolve templates and build NewHostBuildOptions for a tmr agent or host pool entry."""
     tmpl = resolve_templates(config.templates, mngr_ctx.config) if config.templates else {}
     raw_build_args = tmpl.get("build_args", ())
     raw_start_args = tmpl.get("start_args", ())

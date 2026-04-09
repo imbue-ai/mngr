@@ -1,3 +1,4 @@
+import importlib.metadata
 import os
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -33,12 +35,12 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.utils.testing import assert_home_is_temp_directory
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import isolate_home
+from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
 
 # The urwid import above triggers creation of deprecated module aliases.
@@ -146,32 +148,26 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME so git commands work.
+def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git and provide user config for tests that run git commands.
 
-    Use this fixture for any test that runs git commands.
-    The temp_git_repo fixture depends on this, so you don't need both.
+    Sets GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT, and GIT_CONFIG_GLOBAL
+    via the shared isolate_git() helper. Tests that need git should request
+    this fixture (or temp_git_repo, which depends on it).
     """
-    gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n")
+    with isolate_git(monkeypatch):
+        yield
 
 
 @pytest.fixture
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit.
 
-    This fixture:
-    1. Ensures .gitconfig exists in the fake HOME (via setup_git_config)
-    2. Creates a git repo with one tracked file and an initial commit
-
-    Use this fixture for any test that needs a git repository.
+    Uses a subdirectory of tmp_path so that .gitconfig (written by
+    setup_git_config) does not appear as untracked in git status.
     """
     repo_dir = tmp_path / "git_repo"
-    repo_dir.mkdir()
-
     init_git_repo(repo_dir)
-
     return repo_dir
 
 
@@ -331,23 +327,7 @@ def setup_test_mngr_env(
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
     """
-    isolate_home(tmp_home_dir, monkeypatch)
-    monkeypatch.setenv("MNGR_HOST_DIR", str(temp_host_dir))
-    monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
-    monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
-    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
-
-    # Unison derives its config directory from $HOME. Since we override HOME
-    # above, unison tries to create its config dir inside tmp_path, which
-    # fails because the expected parent directories don't exist. The UNISON
-    # env var overrides this to a path we control.
-    unison_dir = tmp_home_dir / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
-
-    # Safety check: verify Path.home() is in a temp directory.
-    # If this fails, tests could accidentally modify the real home directory.
-    assert_home_is_temp_directory()
+    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
 
     yield
 
@@ -439,19 +419,33 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
     return venv_dir
 
 
+@pytest.fixture
+def enabled_plugins() -> frozenset[str]:
+    """Return the set of plugin entry point names to enable for this test.
+
+    Defaults to the BASIC-tier plugins (claude, opencode, pi_coding,
+    llm, modal, tutor).  Override in test files or local conftest.py
+    for different configurations::
+
+        @pytest.fixture
+        def enabled_plugins():
+            return frozenset()
+    """
+    return get_independent_entry_point_names()
+
+
 @pytest.fixture(autouse=True)
-def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with mngr hookspecs and local backend only.
+def plugin_manager(
+    enabled_plugins: frozenset[str],
+) -> Generator[pluggy.PluginManager, None, None]:
+    """Create a plugin manager with all external plugins disabled by default.
 
-    This fixture only loads the local provider backend, not modal. This ensures
-    tests don't depend on Modal credentials being available.
+    Discovers all entry-point plugins and blocks everything except those
+    listed in ``enabled_plugins``. Tests that need specific plugins
+    override the ``enabled_plugins`` fixture.
 
-    Also loads external plugins via setuptools entry points to match the behavior
-    of load_config(). This ensures that external plugins like mngr_opencode are
-    discovered and registered.
-
-    This fixture also resets the module-level plugin manager singleton to ensure
-    test isolation.
+    Backend loading uses ``load_local_backend_only`` to avoid docker/modal
+    SDK imports that would trigger resource guards.
     """
     # Reset the module-level plugin manager singleton before each test
     imbue.mngr.main.reset_plugin_manager()
@@ -461,13 +455,19 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     reset_agent_registry()
     reset_provider_instances()
 
+    # Discover all entry-point plugins and block everything except enabled_plugins
+    all_eps = {ep.name for ep in importlib.metadata.entry_points(group="mngr")}
+    to_block = all_eps - enabled_plugins
+
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
+    for name in to_block:
+        pm.set_blocked(name)
     pm.load_setuptools_entrypoints("mngr")
 
-    # Only register the local backend, not modal
-    # This prevents tests from depending on Modal credentials
-    # This also loads the provider configs since backends and configs are registered together
+    # Only register the local backend, not modal or docker.
+    # This prevents tests from depending on Modal credentials or Docker daemon.
+    # This also loads the provider configs since backends and configs are registered together.
     load_local_backend_only(pm)
 
     # Load other registries (agents)

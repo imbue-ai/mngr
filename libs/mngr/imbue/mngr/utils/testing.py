@@ -142,6 +142,10 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    # Clear Claude config dir env vars so tests resolve config paths relative
+    # to the temp HOME, not an inherited agent config dir.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
 
 
 @contextmanager
@@ -178,6 +182,50 @@ def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
+# Environment variables that isolate git from system-level config and
+# interactive prompts.  Applied via monkeypatch in isolate_git() and via
+# explicit env dict in _git_isolation_env() (used by run_git_command).
+_GIT_ISOLATION_ENV: Final[dict[str, str]] = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def _git_isolation_env() -> dict[str, str]:
+    """Return env dict for subprocess git calls with system config isolation.
+
+    Merges the current os.environ with GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT.  Used by run_git_command() to ensure every
+    subprocess git call skips /etc/gitconfig and never prompts
+    interactively, regardless of whether an isolate_git() context is
+    active.
+    """
+    return {**os.environ, **_GIT_ISOLATION_ENV}
+
+
+@contextmanager
+def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git from system config and provide default user config.
+
+    Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
+    prevent interactive credential prompts, and writes a .gitconfig in the
+    fake HOME (set by isolate_home) with default user info and
+    ``init.defaultBranch``.
+
+    Tests that create git repos should use a subdirectory of tmp_path rather
+    than tmp_path itself, so that .gitconfig does not appear as an untracked
+    file in ``git status --porcelain``.
+    """
+    for key, value in _GIT_ISOLATION_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    gitconfig = Path.home() / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+
+    yield
+
+
 def assert_home_is_temp_directory() -> None:
     """Assert that Path.home() is in a temp directory.
 
@@ -199,6 +247,49 @@ def assert_home_is_temp_directory() -> None:
             "Tests may be operating on real home directory! "
             "Ensure setup_test_mngr_env autouse fixture has run before this call."
         )
+
+
+def setup_mngr_test_environment(
+    home_dir: Path,
+    host_dir: Path,
+    prefix: str,
+    root_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Core environment setup shared by all setup_test_mngr_env fixtures.
+
+    This is the single source of truth for mngr test environment isolation.
+    All setup_test_mngr_env fixture definitions (in mngr/conftest.py,
+    plugin_testing.py, and plugin-specific overrides like mngr_modal/conftest.py)
+    should delegate to this function rather than duplicating the setup logic.
+
+    Callers that need additional env vars (e.g. Modal tokens) should set them
+    before calling this function, since isolate_home() overrides HOME.
+    """
+    isolate_home(home_dir, monkeypatch)
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", prefix)
+    monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
+    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+
+    # Unison derives its config directory from $HOME. Since we override HOME
+    # above, unison tries to create its config dir inside the temp home, which
+    # fails because the expected parent directories don't exist. The UNISON
+    # env var overrides this to a path we control.
+    unison_dir = home_dir / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
+
+    # Prevent uv from hitting the network or doing unnecessary work during
+    # tests. UV_OFFLINE stops network requests (uv tool run was checking for
+    # updates, causing ~10s delays on Modal). UV_FROZEN prevents uv.lock
+    # updates and the filesystem scan that goes with them.
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("UV_FROZEN", "1")
+
+    # Safety check: verify Path.home() is in a temp directory.
+    # If this fails, tests could accidentally modify the real home directory.
+    assert_home_is_temp_directory()
 
 
 def get_subprocess_test_env(
@@ -387,18 +478,26 @@ def cleanup_tmux_session(session_name: str) -> None:
     5. Kills any orphaned activity monitors for this session
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Use -s to list panes across ALL windows in the session, not just the current window.
-    all_pids: list[str] = []
-    result = subprocess.run(
-        ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
+    # Guard with has-session first: list-panes -s does not support the = prefix for
+    # exact matching, so it would prefix-match a different session if this one is gone.
+    has_result = subprocess.run(
+        ["tmux", "has-session", "-t", f"={session_name}"],
         capture_output=True,
-        text=True,
     )
-    if result.returncode == 0 and result.stdout.strip():
-        for pane_pid in result.stdout.strip().split("\n"):
-            if pane_pid:
-                all_pids.append(pane_pid)
-                all_pids.extend(_get_descendant_pids(pane_pid))
+    all_pids: list[str] = []
+    if has_result.returncode == 0:
+        # Session exists -- safe to list panes (no risk of prefix-matching a different session).
+        # Use -s to list panes across ALL windows in the session, not just the current window.
+        result = subprocess.run(
+            ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for pane_pid in result.stdout.strip().split("\n"):
+                if pane_pid:
+                    all_pids.append(pane_pid)
+                    all_pids.extend(_get_descendant_pids(pane_pid))
 
     # SIGTERM all processes
     for pid in all_pids:
@@ -409,7 +508,7 @@ def cleanup_tmux_session(session_name: str) -> None:
 
     # Kill the tmux session (sends SIGHUP to remaining pane processes)
     subprocess.run(
-        ["tmux", "kill-session", "-t", session_name],
+        ["tmux", "kill-session", "-t", f"={session_name}"],
         capture_output=True,
     )
 
@@ -484,7 +583,7 @@ def wait_for_agent_session(session_name: str, timeout: float = 15.0) -> None:
 def tmux_session_exists(session_name: str) -> bool:
     """Check if a tmux session exists."""
     result = subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
+        ["tmux", "has-session", "-t", f"={session_name}"],
         capture_output=True,
     )
     return result.returncode == 0
@@ -631,31 +730,16 @@ def make_test_agent_details(
     )
 
 
-def init_git_repo(path: Path, initial_commit: bool = True) -> None:
-    """Initialize a git repo at the given path.
-
-    If initial_commit is True, creates a README.md and commits it.
-    Requires setup_git_config fixture to have created .gitconfig in the fake HOME
-    (or temp_git_repo fixture, which depends on it).
-    """
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    if initial_commit:
-        (path / "README.md").write_text("Test repository")
-        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Initial commit"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-        )
-
-
 def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
 def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the given directory.
+    """Run a git command in the given directory with system config isolation.
+
+    Uses _git_isolation_env() to set GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT, preventing reads of /etc/gitconfig and interactive
+    prompts that can cause flakes under parallel execution.
 
     Raises an exception if the command fails.
     """
@@ -664,29 +748,34 @@ def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=_git_isolation_env(),
     )
     if result.returncode != 0:
         raise MngrError(f"git {' '.join(args)} failed: {result.stderr}")
     return result
 
 
-def init_git_repo_with_config(path: Path) -> None:
-    """Initialize a git repository with an initial commit and local git config.
+def init_git_repo(path: Path, initial_commit: bool = True) -> None:
+    """Initialize a git repository with local git config.
 
-    Creates the directory if it doesn't exist, initializes git, sets local
-    user.email and user.name config, and creates an initial commit with a
-    README.md file.
+    Creates the directory if it doesn't exist, initializes git with branch
+    "main", and sets local user.email and user.name config.
 
-    Use this variant when you don't have a global .gitconfig (e.g., in
-    subprocess tests without the setup_git_config fixture).
+    If initial_commit is True (the default), also creates a README.md and
+    commits it.
+
+    Self-contained: does not require any global gitconfig or the
+    setup_git_config fixture. Subprocess calls use _git_isolation_env()
+    to set GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT.
     """
     path.mkdir(parents=True, exist_ok=True)
     run_git_command(path, "init", "-b", "main")
     run_git_command(path, "config", "user.email", "test@example.com")
     run_git_command(path, "config", "user.name", "Test User")
-    (path / "README.md").write_text("Initial content")
-    run_git_command(path, "add", "README.md")
-    run_git_command(path, "commit", "-m", "Initial commit")
+    if initial_commit:
+        (path / "README.md").write_text("Initial content")
+        run_git_command(path, "add", "README.md")
+        run_git_command(path, "commit", "-m", "Initial commit")
 
 
 def get_stash_count(path: Path) -> int:
@@ -701,6 +790,11 @@ def get_stash_count(path: Path) -> int:
         return 0
     lines = result.stdout.strip().split("\n")
     return len([line for line in lines if line])
+
+
+def is_claude_installed() -> bool:
+    """Check if the Claude Code CLI is installed and available on PATH."""
+    return shutil.which("claude") is not None
 
 
 def setup_claude_trust_config_for_subprocess(
@@ -1006,6 +1100,13 @@ def generate_ssh_keypair(base_path: Path) -> tuple[Path, Path]:
     return key_path, Path(f"{key_path}.pub")
 
 
+def _sftp_server_path() -> str:
+    """Return the platform-appropriate path to the SFTP server binary."""
+    if sys.platform == "darwin":
+        return "/usr/libexec/sftp-server"
+    return "/usr/lib/openssh/sftp-server"
+
+
 @contextmanager
 def local_sshd(
     authorized_keys_content: str,
@@ -1071,7 +1172,7 @@ UsePAM no
 PermitRootLogin yes
 PidFile {run_dir}/sshd.pid
 StrictModes no
-Subsystem sftp /usr/lib/openssh/sftp-server
+Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
 """
     sshd_config_path.write_text(sshd_config)

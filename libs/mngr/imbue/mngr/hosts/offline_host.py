@@ -180,40 +180,15 @@ class BaseHost(HostInterface):
     def get_state(self) -> HostState:
         """Get the current state of the host.
 
-        For offline hosts, we determine state based on certified data, stop_reason, and snapshots:
-        - If certified data has a failure_reason, the host failed during creation
-        - If snapshots exist:
-          - stop_reason=PAUSED -> host became idle and was paused
-          - stop_reason=STOPPED -> user explicitly stopped all agents on the host
-          - stop_reason=None -> host crashed (no controlled shutdown recorded)
-        - If no snapshots exist for a provider that supports them, the host is DESTROYED
-        - If provider doesn't support snapshots, assume STOPPED
+        Delegates to derive_offline_host_state() which contains the canonical
+        state-derivation logic shared with provider discovery code.
         """
-        certified_data = self.get_certified_data()
-        if certified_data.failure_reason is not None:
-            return HostState.FAILED
-
-        # Determine state based on stop_reason
-        stop_reason = certified_data.stop_reason
-        if stop_reason is None:
-            return HostState.CRASHED
-
-        if self.provider_instance.supports_shutdown_hosts:
-            # if the provider normally allows hosts to be shutdown, the reason is fine
-            return HostState(stop_reason)
-
-        # if we cannot resume, and we don't support snapshots, this must be destroyed
-        if not self.provider_instance.supports_snapshots:
-            return HostState.DESTROYED
-
-        # otherwise, check if we have any snapshots
-        snapshots = self.get_snapshots()
-        # if we don't, I guess this is destroyed
-        if not snapshots:
-            return HostState.DESTROYED
-
-        # ok, the stored state is fine!
-        return HostState(stop_reason)
+        return derive_offline_host_state(
+            certified_data=self.get_certified_data(),
+            supports_shutdown_hosts=self.provider_instance.supports_shutdown_hosts,
+            supports_snapshots=self.provider_instance.supports_snapshots,
+            has_snapshots=len(self.get_snapshots()) > 0,
+        )
 
     def get_failure_reason(self) -> str | None:
         """Get the failure reason if this host failed during creation."""
@@ -233,6 +208,48 @@ class BaseHost(HostInterface):
         for agent_ref in self.discover_agents():
             permissions.update(str(p) for p in agent_ref.permissions)
         return list(permissions)
+
+
+def derive_offline_host_state(
+    certified_data: CertifiedHostData,
+    supports_shutdown_hosts: bool,
+    supports_snapshots: bool,
+    has_snapshots: bool,
+) -> HostState:
+    """Determine the lifecycle state of an offline host from its certified data.
+
+    This is the canonical logic for deriving host state without connecting to the
+    host. Both OfflineHost.get_state() and provider discovery code should use this
+    to avoid duplicating the state-derivation rules.
+
+    has_snapshots should reflect the most authoritative source available to the
+    caller: provider.list_snapshots() when accessible (OfflineHost.get_state),
+    or certified_data.snapshots when not (discovery code).
+    """
+    if certified_data.failure_reason is not None:
+        return HostState.FAILED
+
+    stop_reason = certified_data.stop_reason
+
+    if supports_shutdown_hosts:
+        # Provider supports controlled shutdown, so stop_reason is authoritative.
+        # None means the host crashed (no controlled shutdown recorded).
+        if stop_reason is None:
+            return HostState.CRASHED
+        return HostState(stop_reason)
+
+    # Provider does not support shutdown (e.g. Modal). stop_reason may be
+    # unset, so fall through to snapshot-based state derivation.
+    if not supports_snapshots:
+        return HostState.DESTROYED
+
+    if not has_snapshots:
+        return HostState.DESTROYED
+
+    # Has snapshots -- use stop_reason if set, otherwise CRASHED.
+    if stop_reason is None:
+        return HostState.CRASHED
+    return HostState(stop_reason)
 
 
 class OfflineHost(BaseHost):

@@ -51,11 +51,13 @@ def fake_claude(monkeypatch: pytest.MonkeyPatch) -> FakeClaude:
 
 
 def test_build_ask_context_contains_mngr_docs() -> None:
-    """The generated context should contain mngr command documentation from the registry."""
+    """The generated context should contain mngr command documentation and the mega tutorial."""
     context = _build_ask_context()
     assert len(context) > 100
     assert "mngr" in context
     assert "create" in context.lower()
+    assert "Tutorial and Examples" in context
+    assert "CREATING AGENTS" in context
 
 
 def test_no_query_shows_command_summary(

@@ -21,7 +21,29 @@ SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
 
-def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, agent_command: str) -> str:
+def build_post_attach_resize_script(session_name: str) -> str:
+    """Build a shell command that resizes tmux windows and sends SIGWINCH.
+
+    After a tmux client attaches, resize all windows to match the client
+    (resize-window -A), then explicitly send SIGWINCH to each pane's child
+    processes. The explicit SIGWINCH is needed because resize-window -A can
+    be a no-op (and thus not trigger SIGWINCH) when the window already
+    matches the client size (e.g., due to window-size=latest).
+
+    Uses pgrep -P to find child processes of each pane. This avoids any
+    dependency on matching the agent's process name, which is unreliable
+    (on macOS, Claude's process title shows as its version number rather
+    than "claude").
+    """
+    return (
+        f"tmux list-windows -t '={session_name}' -F '#I' | "
+        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
+        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
+        f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
+    )
+
+
+def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 
     The script:
@@ -50,10 +72,10 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, agent_
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        # resize all tmux windows to be the correct size and signal the agent that it needs to redraw. We do this with a delay so that it happens after attaching.
-        f"(sleep 5 && tmux list-windows -t '{session_name}' -F '#I' | xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A && sleep 1 && pkill -SIGWINCH -f {shlex.quote(agent_command)}) & "
+        # Force a terminal resize after attaching to trigger SIGWINCH delivery.
+        f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
         # actually attach
-        f"tmux attach -t '{session_name}'; "
+        f"tmux attach -t '={session_name}'; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -176,7 +198,7 @@ def connect_to_agent(
 ) -> None:
     """Connect to an agent via tmux attach (local) or SSH + tmux attach (remote).
 
-    For local agents, replaces the current process with: tmux attach -t <session_name>
+    For local agents, replaces the current process with: tmux attach -t =<session_name>
 
     For remote agents, runs SSH interactively and then checks the exit code to
     determine if a post-disconnect action (destroy/stop) was requested via the
@@ -200,13 +222,12 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        os.execvpe("tmux", ["tmux", "attach", "-t", session_name], env)
+        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 
         # Build wrapper script that tracks SSH activity while running tmux
-        agent_command = agent.get_expected_process_name()
-        wrapper_script = _build_ssh_activity_wrapper_script(session_name, host.host_dir, agent_command)
+        wrapper_script = _build_ssh_activity_wrapper_script(session_name, host.host_dir)
         # Pass the wrapper as a single remote command string so SSH doesn't
         # split it into separate words. SSH concatenates multiple remote command
         # arguments with spaces, which would cause 'bash -c' to only receive

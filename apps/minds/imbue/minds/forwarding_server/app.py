@@ -30,6 +30,7 @@ from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.agent_creator import LOG_SENTINEL
 from imbue.minds.forwarding_server.auth import AuthStoreInterface
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
+from imbue.minds.forwarding_server.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
 from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
@@ -296,7 +297,7 @@ def _handle_agent_default_redirect(
     return Response(status_code=307, headers={"Location": f"/agents/{agent_id}/web/"})
 
 
-def _handle_agent_servers_page(
+async def _handle_agent_servers_page(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
@@ -309,8 +310,64 @@ def _handle_agent_servers_page(
         return Response(status_code=403, content="Not authenticated")
 
     server_names = backend_resolver.list_servers_for_agent(parsed_id)
-    html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names)
+
+    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_services: dict[str, str] | None = None
+    if cf_client is not None:
+        cf_services = await asyncio.get_running_loop().run_in_executor(None, cf_client.list_services, parsed_id)
+
+    html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names, cf_services=cf_services)
     return HTMLResponse(content=html)
+
+
+async def _handle_toggle_global(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Toggle global cloudflare forwarding for a specific server on an agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    if cf_client is None:
+        return Response(
+            status_code=501,
+            content='{"error": "Cloudflare forwarding not configured"}',
+            media_type="application/json",
+        )
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(status_code=400, content='{"error": "Invalid JSON"}', media_type="application/json")
+
+    enabled = body.get("enabled", True)
+    parsed_id = AgentId(agent_id)
+
+    loop = asyncio.get_running_loop()
+    if enabled:
+        parsed_server = ServerName(server_name)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        if backend_url is None:
+            return Response(
+                status_code=404,
+                content='{"error": "Server not found locally"}',
+                media_type="application/json",
+            )
+        success = await loop.run_in_executor(None, cf_client.add_service, parsed_id, server_name, backend_url)
+    else:
+        success = await loop.run_in_executor(None, cf_client.remove_service, parsed_id, server_name)
+
+    if success:
+        return Response(content='{"ok": true}', media_type="application/json")
+    return Response(
+        status_code=502,
+        content='{"error": "Cloudflare API call failed"}',
+        media_type="application/json",
+    )
 
 
 async def _forward_http_request(
@@ -858,7 +915,11 @@ async def _stream_creation_logs(
                     result["redirect_url"] = info.redirect_url
                 if info.error is not None:
                     result["error"] = info.error
-                yield "event: done\ndata: {}\n\n".format(json.dumps(result))
+                result["_type"] = "done"
+                yield "data: {}\n\n".format(json.dumps(result))
+                # Yield a final keepalive so the done event is flushed to the
+                # browser in its own TCP segment, separate from the stream close.
+                yield ": end\n\n"
         else:
             yield "data: {}\n\n".format(json.dumps({"log": line}))
 
@@ -901,6 +962,7 @@ def create_forwarding_server(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
+    cloudflare_client: CloudflareForwardingClient | None = None,
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
@@ -909,6 +971,9 @@ def create_forwarding_server(
 
     When agent_creator is provided, the server can create new agents from git URLs
     via the /create form and /api/create-agent API.
+
+    When cloudflare_client is provided, the servers page shows global forwarding
+    URLs and toggle controls.
     """
     is_externally_managed_client = http_client is not None
 
@@ -923,6 +988,7 @@ def create_forwarding_server(
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
+    app.state.cloudflare_client = cloudflare_client
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -944,6 +1010,9 @@ def create_forwarding_server(
 
     # Agent server listing page: /agents/{agent_id}/servers/
     app.get("/agents/{agent_id}/servers/")(_handle_agent_servers_page)
+
+    # Toggle global forwarding for a server
+    app.post("/agents/{agent_id}/servers/{server_name}/global")(_handle_toggle_global)
 
     # Proxy routes: /agents/{agent_id}/{server_name}/{path:path}
     app.api_route(
