@@ -103,6 +103,15 @@ if [ -n "$PKGS_TO_INSTALL" ]; then
 fi
 
 mkdir -p /run/sshd
+
+# Increase MaxSessions so pyinfra can open enough concurrent SSH channels.
+# The default (10) causes "channel open FAILED" errors during provisioning.
+# Docker and Modal providers pass -o MaxSessions=100 when starting sshd directly;
+# Lima VMs run sshd via systemd so we configure it in sshd_config instead.
+if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
+    echo 'MaxSessions 100' >> /etc/ssh/sshd_config
+    systemctl restart sshd 2>/dev/null || true
+fi
 """
 
 
