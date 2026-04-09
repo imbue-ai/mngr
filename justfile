@@ -42,9 +42,12 @@ test-offload args="":
     fi
 
     # Generate .dockerignore from .gitignore: remove the current.tar.gz line
-    # (needed in the Docker build context) and add .git/ (not in .gitignore).
+    # (needed in the Docker build context) and add tracked files that offload
+    # modifies during builds (which causes Modal upload errors).
     grep -v 'current\.tar\.gz' .gitignore > .dockerignore
     echo '.git/' >> .dockerignore
+    echo '.offload-image-cache' >> .dockerignore
+    echo '.offload-cache-key' >> .dockerignore
 
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
@@ -105,9 +108,12 @@ test-offload-release args="":
     fi
 
     # Generate .dockerignore from .gitignore: remove the current.tar.gz line
-    # (needed in the Docker build context) and add .git/ (not in .gitignore).
+    # (needed in the Docker build context) and add tracked files that offload
+    # modifies during builds (which causes Modal upload errors).
     grep -v 'current\.tar\.gz' .gitignore > .dockerignore
     echo '.git/' >> .dockerignore
+    echo '.offload-image-cache' >> .dockerignore
+    echo '.offload-cache-key' >> .dockerignore
 
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
