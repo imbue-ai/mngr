@@ -98,8 +98,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         message=None,
         message_file=None,
         edit_message=False,
-        retry=3,
-        retry_delay="5s",
         attach_command=None,
         connect_command=None,
         idle_timeout=None,
@@ -135,8 +133,6 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         agent=None,
         start=True,
         reconnect=True,
-        retry=3,
-        retry_delay="5s",
         attach_command=None,
         allow_unknown_host=False,
     )

@@ -400,8 +400,6 @@ class _CreateCommand(click.Command):
     is_flag=True,
     help="Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content.",
 )
-@optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries")
-@optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries (e.g., 5s, 1m)")
 @optgroup.option("--attach-command", help="Command to run instead of attaching to main session")
 @optgroup.option(
     "--connect-command",
@@ -635,8 +633,8 @@ def _create_agent(
         is_reconnect=opts.reconnect,
         is_interactive=opts.interactive,
         message=None,
-        retry_count=opts.retry,
-        retry_delay=opts.retry_delay,
+        retry_count=mngr_ctx.config.retry.connect_retry_times,
+        retry_delay=mngr_ctx.config.retry.connect_retry_delay,
         attach_command=opts.attach_command,
     )
 

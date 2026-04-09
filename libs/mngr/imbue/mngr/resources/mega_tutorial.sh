@@ -224,8 +224,10 @@ mngr create my-task --no-ensure-clean
 mngr create sisyphus --reuse --provider modal
 # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
 
-# you can control connection retries and timeouts:
-mngr create my-task --provider modal --retry 5 --retry-delay 10s
+# you can control connection retries and timeouts via settings.toml:
+# [retry]
+# connect_retry_times = 5
+# connect_retry_delay = "10s"
 # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
 
 # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
