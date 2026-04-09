@@ -182,12 +182,6 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--attach-command` | text | Command to run instead of attaching to main session | None |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
-## Automation
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `-y`, `--yes` | boolean | Auto-approve all prompts (e.g., skill installation) without asking | `False` |
-
 ## Common
 
 | Name | Type | Description | Default |

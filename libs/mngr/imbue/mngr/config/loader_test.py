@@ -778,6 +778,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "is_error_reporting_enabled": False,
     "is_allowed_in_pytest": True,
     "default_destroyed_host_persisted_seconds": 12345.0,
+    "local_system_mutations": {"accept_permission_dialogs": "ERROR", "install_agents": "YES", "install_skills": "YES"},
 }
 
 _SAMPLE_TOML = """\
@@ -806,6 +807,11 @@ create = ["echo hello"]
 
 [logging]
 file_level = "DEBUG"
+
+[local_system_mutations]
+accept_permission_dialogs = "ERROR"
+install_agents = "YES"
+install_skills = "YES"
 """
 
 

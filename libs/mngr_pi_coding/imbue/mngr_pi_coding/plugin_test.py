@@ -9,6 +9,8 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import LocalInstallPolicy
+from imbue.mngr.config.data_types import LocalSystemMutations
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
@@ -79,13 +81,12 @@ def _make_options() -> CreateAgentOptions:
     )
 
 
-def _make_test_mngr_ctx(tmp_path: Path, *, is_auto_approve: bool = False) -> MngrContext:
+def _make_test_mngr_ctx(tmp_path: Path, *, config: MngrConfig | None = None) -> MngrContext:
     return make_mngr_ctx(
-        config=MngrConfig(),
+        config=config or MngrConfig(),
         pm=pluggy.PluginManager("mngr"),
         profile_dir=tmp_path / "profile",
         is_interactive=False,
-        is_auto_approve=is_auto_approve,
         concurrency_group=ConcurrencyGroup(name="test"),
     )
 
@@ -357,7 +358,10 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
         command_results={"command -v pi": CommandResult(stdout="", stderr="", success=False)},
     )
     options = _make_options()
-    mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=False)
+    config = MngrConfig(
+        local_system_mutations=LocalSystemMutations(install_agents=LocalInstallPolicy.ERROR),
+    )
+    mngr_ctx = _make_test_mngr_ctx(tmp_path, config=config)
 
     with pytest.raises(PluginMngrError, match="pi is not installed"):
         pi_agent.provision(host, options, mngr_ctx)
@@ -389,14 +393,8 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
         command_results={"command -v pi": CommandResult(stdout="", stderr="", success=False)},
     )
     options = _make_options()
-    mngr_ctx = make_mngr_ctx(
-        config=MngrConfig(is_remote_agent_installation_allowed=False),
-        pm=pluggy.PluginManager("mngr"),
-        profile_dir=tmp_path / "profile",
-        is_interactive=False,
-        is_auto_approve=False,
-        concurrency_group=ConcurrencyGroup(name="test"),
-    )
+    config = MngrConfig(is_remote_agent_installation_allowed=False)
+    mngr_ctx = _make_test_mngr_ctx(tmp_path, config=config)
 
     with pytest.raises(PluginMngrError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)

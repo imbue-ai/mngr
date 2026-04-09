@@ -36,7 +36,9 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import LocalInstallPolicy
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import PermissionDialogPolicy
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -60,27 +62,20 @@ from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
-from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
-from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
-from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
-from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
-from imbue.mngr_claude.claude_config import complete_onboarding
-from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_path
-from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
-from imbue.mngr_claude.claude_config import is_onboarding_completed
-from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
+from imbue.mngr_claude.claude_config import warn_undismissed_claude_dialogs
+from imbue.mngr_claude.cli import claude_group
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -216,11 +211,6 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "When set, installation uses this specific version and provisioning verifies the installed version matches. "
         "If None, uses the latest available version.",
     )
-    auto_dismiss_dialogs: bool = Field(
-        default=False,
-        description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
-        "before startup. When False, the interactive flow prompts.",
-    )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
         description="Key-value overrides merged into settings.json at provisioning time. "
@@ -274,9 +264,9 @@ def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
 
 
 @pure
-def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -> bool:
+def should_trust_work_dir(ctx: ProvisioningContext) -> bool:
     """Determine whether work_dir should be auto-trusted."""
-    return ctx.is_unattended or config.auto_dismiss_dialogs
+    return ctx.is_unattended
 
 
 @pure
@@ -362,7 +352,7 @@ def _build_claude_json(
     1. Reads base config (global ~/.claude.json if sync_local, else generated defaults)
     2. Applies context-dependent flags (e.g. bypassPermissionsModeAccepted for unattended)
     3. Copies source project config to work_dir if ctx.copy_project_config_from is set
-    4. Trusts work_dir if should_trust_work_dir(config, ctx)
+    4. Trusts work_dir if should_trust_work_dir(ctx)
 
     Returns the dict so callers can do further modifications (e.g. keychain merge)
     before serializing.
@@ -394,8 +384,8 @@ def _build_claude_json(
                 worktree_config["_mngrSourcePath"] = str(source_path)
                 projects[worktree_path_str] = worktree_config
 
-    # Trust work_dir if unattended or auto_dismiss_dialogs
-    if should_trust_work_dir(config, ctx):
+    # Trust work_dir if unattended (remote/deploy agents)
+    if should_trust_work_dir(ctx):
         projects.setdefault(str(work_dir.resolve()), {})["hasTrustDialogAccepted"] = True
 
     return data
@@ -496,16 +486,6 @@ def _install_claude(host: OnlineHostInterface, version: str | None = None) -> No
         raise PluginMngrError(f"Failed to install claude. stderr: {result.stderr}")
 
 
-def _prompt_user_for_installation(version: str | None = None) -> bool:
-    """Prompt the user to install claude locally."""
-    install_cmd = _build_install_command_hint(version)
-    logger.info(
-        "\nClaude is not installed on this machine.\nYou can install it by running:\n  {}\n",
-        install_cmd,
-    )
-    return click.confirm("Would you like to install it now?", default=True)
-
-
 def _warn_about_version_consistency(config: ClaudeAgentConfig, concurrency_group: ConcurrencyGroup) -> None:
     """Warn about potential version inconsistency when syncing local claude files to a remote host.
 
@@ -533,38 +513,6 @@ def _warn_about_version_consistency(config: ClaudeAgentConfig, concurrency_group
         )
     else:
         logger.debug("Version consistency check passed (pinned={}, local={})", config.version, local_version)
-
-
-def _prompt_user_for_trust(source_path: Path) -> bool:
-    """Prompt the user to trust a directory for Claude Code."""
-    logger.info(
-        "\nSource directory {} is not yet trusted by Claude Code.\n"
-        "mngr needs to add a trust entry for this directory to ~/.claude.json\n"
-        "so that the trust dialog doesn't interfere with automated input.\n",
-        source_path,
-    )
-    return click.confirm("Would you like to update ~/.claude.json to trust this directory?", default=False)
-
-
-def _prompt_user_for_effort_callout_dismissal() -> bool:
-    """Prompt the user to dismiss the Claude Code effort callout."""
-    logger.info(
-        "\nClaude Code shows a one-time tip about setting model effort with /model.\n"
-        "mngr needs to dismiss this tip in ~/.claude.json so that it doesn't\n"
-        "interfere with automated input.\n",
-    )
-    return click.confirm("Would you like to update ~/.claude.json to dismiss this tip?", default=True)
-
-
-def _prompt_user_for_onboarding_completion() -> bool:
-    """Prompt the user to mark Claude Code onboarding as complete."""
-    logger.info(
-        "\nClaude Code onboarding has not been completed yet.\n"
-        "mngr needs to mark onboarding as complete in ~/.claude.json so that\n"
-        "the onboarding flow doesn't interfere with automated input.\n"
-        "If you'd like to go through onboarding first, run `claude` directly.\n",
-    )
-    return click.confirm("Would you like to update ~/.claude.json to skip onboarding?", default=True)
 
 
 def _claude_json_has_primary_api_key() -> bool:
@@ -1300,10 +1248,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         This method performs read-only validation only. No writes to
         disk or interactive prompts -- actual setup happens in provision().
 
-        For non-interactive local runs: validates that all known Claude
-        startup dialogs are dismissed so we fail early with a clear message.
-        Interactive and auto-approve runs skip these checks because
-        provision() will handle them.
+        For ERROR/IGNORE dialog policies on local hosts: validates that all
+        known Claude startup dialogs are dismissed, failing or warning as
+        appropriate. The YES policy skips validation here because provision()
+        will auto-dismiss.
         """
         if options.transfer_mode == TransferMode.GIT_WORKTREE:
             if not host.is_local:
@@ -1314,23 +1262,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 )
 
         config = self.agent_config
+        dialog_policy = mngr_ctx.config.local_system_mutations.accept_permission_dialogs
 
-        # Validate dialogs for non-interactive local runs so we fail early with
-        # a clear message. Skip when auto_dismiss_dialogs is True because
-        # provision() will auto-dismiss all dialogs in that case.
-        if (
-            host.is_local
-            and not mngr_ctx.is_interactive
-            and not mngr_ctx.is_auto_approve
-            and not config.auto_dismiss_dialogs
-        ):
-            transfer_mode = options.transfer_mode
-            if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
-                source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
-                trust_path = source_path if source_path is not None else self.work_dir
+        # For ERROR/IGNORE policies, validate dialogs early (read-only).
+        # YES policy skips: provision() will auto-dismiss all dialogs.
+        if host.is_local and dialog_policy != PermissionDialogPolicy.YES:
+            trust_path = self._resolve_trust_path(options.transfer_mode, mngr_ctx.concurrency_group)
+            if dialog_policy == PermissionDialogPolicy.ERROR:
+                check_claude_dialogs_dismissed(get_user_claude_config_path(), trust_path)
             else:
-                trust_path = self.work_dir
-            check_claude_dialogs_dismissed(get_user_claude_config_path(), trust_path)
+                # IGNORE: warn about undismissed dialogs but proceed
+                warnings = warn_undismissed_claude_dialogs(get_user_claude_config_path(), trust_path)
+                for w in warnings:
+                    logger.warning("{}", w)
+
         if not config.check_installation:
             logger.debug("Skipped claude installation check (check_installation=False)")
             return
@@ -1419,48 +1364,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         with log_span("Configuring readiness hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
-    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """Ensure all known Claude startup dialogs are dismissed in the global config.
-
-        All dialogs that could intercept tmux input must be dismissed before
-        starting an agent, otherwise mngr message will break. Writes to the
-        global config (~/.claude.json) to record user intent; the per-agent
-        config inherits these settings.
-
-        For auto-approve mode, silently dismisses all dialogs. For interactive
-        mode, prompts the user for each undismissed dialog. For non-interactive
-        mode, raises the appropriate error.
-
-        source_path is the trusted source directory (for git-worktree/git-mirror modes).
-        When None (rsync/none mode), trust is prompted for work_dir instead.
-        """
-        global_config_path = get_user_claude_config_path()
-        trust_path = source_path if source_path is not None else self.work_dir
-
-        if mngr_ctx.is_auto_approve:
-            auto_dismiss_claude_dialogs(global_config_path, trust_path)
-            return
-
-        if not is_source_directory_trusted(global_config_path, trust_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_trust(trust_path):
-                raise ClaudeDirectoryNotTrustedError(str(trust_path))
-            add_claude_trust_for_path(global_config_path, trust_path)
-
-        if not is_effort_callout_dismissed(global_config_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_effort_callout_dismissal():
-                raise ClaudeEffortCalloutNotDismissedError()
-            dismiss_effort_callout(global_config_path)
-
-        if not is_onboarding_completed(global_config_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_onboarding_completion():
-                raise ClaudeOnboardingNotCompletedError()
-            complete_onboarding(global_config_path)
-
-        # Note: bypassPermissionsModeAccepted is NOT checked here because Claude Code
-        # periodically resets it to null in ~/.claude.json, causing repeated prompts.
-        # The bypass-permissions warning is reliably suppressed by
-        # skipDangerousModePermissionPrompt in settings.json instead.
-
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
@@ -1471,6 +1374,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         if git_common_dir is None:
             return None
         return git_common_dir.parent
+
+    def _resolve_trust_path(self, transfer_mode: TransferMode, concurrency_group: ConcurrencyGroup) -> Path:
+        """Determine the path that needs to be trusted for this agent.
+
+        For git-worktree/git-mirror modes, trust is extended from the source
+        directory. For other modes, trust targets the work_dir directly.
+        """
+        if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
+            source_path = self._find_git_source_path(concurrency_group)
+            if source_path is not None:
+                return source_path
+        return self.work_dir
 
     def _setup_per_agent_config_dir(
         self,
@@ -1570,12 +1485,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     ) -> None:
         """Provision the per-agent config dir, install Claude, and configure hooks.
 
-        For local hosts, ensures all known Claude startup dialogs are dismissed
-        in the global config so they don't intercept tmux input. Trust handling
-        depends on the transfer mode:
-        - git-worktree/git-mirror: trust is extended from the source directory
-        - rsync/none: trust is prompted for the work_dir
-        - auto_dismiss_dialogs=True: trust is auto-added for work_dir
+        For local hosts with accept_permission_dialogs=YES, auto-dismisses all
+        known Claude startup dialogs in the global config. ERROR/IGNORE policies
+        are handled in on_before_provisioning (read-only check).
         """
         # Resolve sentinel-prefixed installPaths in ~/.claude/ if present.
         # Deploy images have paths rewritten to a sentinel at build time
@@ -1592,20 +1504,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
             )
 
+            # Auto-dismiss dialogs for YES policy on local hosts.
+            # ERROR/IGNORE already checked in on_before_provisioning.
             if host.is_local:
-                # Determine the source path for trust extension
-                source_path: Path | None = None
-                transfer_mode = options.transfer_mode
-                if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
-                    source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
-
-                if config.auto_dismiss_dialogs:
-                    # Auto-approve all dialogs for agents that opt into dismissal
-                    auto_dismiss_claude_dialogs(get_user_claude_config_path(), self.work_dir)
-                else:
-                    # Check/prompt for all blocking dialogs
-                    # source_path=None (clone/no-git) means trust is prompted for work_dir
-                    self.interactively_dismiss_claude_dialogs(source_path, mngr_ctx)
+                dialog_policy = mngr_ctx.config.local_system_mutations.accept_permission_dialogs
+                if dialog_policy == PermissionDialogPolicy.YES:
+                    trust_path = self._resolve_trust_path(options.transfer_mode, mngr_ctx.concurrency_group)
+                    auto_dismiss_claude_dialogs(get_user_claude_config_path(), trust_path)
 
             # Ensure claude is installed (and at the right version if pinned)
             if config.check_installation:
@@ -1627,18 +1532,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                     install_hint = _build_install_command_hint(config.version)
 
                     if host.is_local:
-                        # For local hosts, auto-approve or prompt the user for consent
-                        if mngr_ctx.is_auto_approve:
-                            logger.debug("Auto-approving claude installation (--yes)")
-                        elif mngr_ctx.is_interactive:
-                            if _prompt_user_for_installation(config.version):
-                                logger.debug("User consented to install claude locally")
-                            else:
-                                raise PluginMngrError(
-                                    f"Claude is not installed. Please install it manually with:\n  {install_hint}"
-                                )
-                        else:
-                            # Non-interactive mode: fail with a clear message
+                        install_policy = mngr_ctx.config.local_system_mutations.install_agents
+                        if install_policy == LocalInstallPolicy.ERROR:
                             raise PluginMngrError(
                                 f"Claude is not installed. Please install it manually with:\n  {install_hint}"
                             )
@@ -1820,6 +1715,12 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
+
+
+@hookimpl
+def register_cli_commands() -> Sequence[click.Command] | None:
+    """Register the claude CLI command group."""
+    return [claude_group]
 
 
 class WaitingReason(UpperCaseStrEnum):

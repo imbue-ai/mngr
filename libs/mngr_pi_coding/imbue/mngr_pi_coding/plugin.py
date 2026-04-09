@@ -10,6 +10,7 @@ from pydantic import Field
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import LocalInstallPolicy
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -293,8 +294,10 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
                 logger.debug("pi is already installed on the host")
             else:
                 install_hint = "npm install -g @mariozechner/pi-coding-agent"
-                if host.is_local and not mngr_ctx.is_auto_approve:
-                    raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
+                if host.is_local:
+                    install_policy = mngr_ctx.config.local_system_mutations.install_agents
+                    if install_policy == LocalInstallPolicy.ERROR:
+                        raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
                 elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:
                     raise PluginMngrError(
                         "pi is not installed on the remote host and automatic remote installation is disabled."

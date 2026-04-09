@@ -121,7 +121,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         append_to_file=(),
         prepend_to_file=(),
         update=False,
-        yes=False,
     )
 
 

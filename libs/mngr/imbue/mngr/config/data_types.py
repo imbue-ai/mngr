@@ -103,6 +103,30 @@ class WorkDirExtraPathMode(UpperCaseStrEnum):
     COPY = auto()
 
 
+class PermissionDialogPolicy(UpperCaseStrEnum):
+    """Policy for handling Claude permission dialogs on the local system.
+
+    YES: auto-dismiss all known blocking dialogs.
+    ERROR: check if all dialogs are dismissed; abort if any are not.
+    IGNORE: check if all dialogs are dismissed; warn but proceed if any are not.
+    """
+
+    YES = auto()
+    ERROR = auto()
+    IGNORE = auto()
+
+
+class LocalInstallPolicy(UpperCaseStrEnum):
+    """Policy for installing agents or skills on the local system.
+
+    YES: install automatically without prompting.
+    ERROR: abort if not already installed.
+    """
+
+    YES = auto()
+    ERROR = auto()
+
+
 # === Value Types ===
 
 
@@ -185,7 +209,7 @@ class AgentTypeConfig(FrozenModel):
 
         Uses model_fields_set to determine which fields were explicitly set in
         the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        auto_dismiss_dialogs) are correctly preserved during merges.
+        settings_overrides) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
         Tuples (cli_args): concatenate
@@ -375,6 +399,50 @@ class CreateTemplate(FrozenModel):
         return self.__class__(options=merged_options)
 
 
+class LocalSystemMutations(FrozenModel):
+    """Configuration for local system mutations during agent provisioning.
+
+    Controls how mngr handles operations that modify the user's local system:
+    dismissing Claude permission dialogs, installing agents, and installing skills.
+    """
+
+    accept_permission_dialogs: PermissionDialogPolicy = Field(
+        default=PermissionDialogPolicy.YES,
+        description="Policy for Claude permission dialogs. "
+        "YES: auto-dismiss all known blocking dialogs. "
+        "ERROR: abort if any dialog is not dismissed. "
+        "IGNORE: warn but proceed if any dialog is not dismissed.",
+    )
+    install_agents: LocalInstallPolicy = Field(
+        default=LocalInstallPolicy.YES,
+        description="Policy for installing agents (e.g. Claude Code) locally. "
+        "YES: install automatically. ERROR: abort if not already installed.",
+    )
+    install_skills: LocalInstallPolicy = Field(
+        default=LocalInstallPolicy.YES,
+        description="Policy for installing skills locally. "
+        "YES: install automatically. ERROR: abort if not already installed.",
+    )
+
+    def merge_with(self, override: Self) -> Self:
+        """Merge this config with an override config.
+
+        Important note: despite the type signatures, any of these fields may be None
+        in the override -- this means they were NOT set in the toml (and thus should be ignored).
+
+        Scalar fields: override wins if not None.
+        """
+        return self.__class__(
+            accept_permission_dialogs=(
+                override.accept_permission_dialogs
+                if override.accept_permission_dialogs is not None
+                else self.accept_permission_dialogs
+            ),
+            install_agents=(override.install_agents if override.install_agents is not None else self.install_agents),
+            install_skills=(override.install_skills if override.install_skills is not None else self.install_skills),
+        )
+
+
 class MngrConfig(FrozenModel):
     """Root configuration model for mngr."""
 
@@ -436,6 +504,10 @@ class MngrConfig(FrozenModel):
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig,
         description="Logging configuration",
+    )
+    local_system_mutations: LocalSystemMutations = Field(
+        default_factory=LocalSystemMutations,
+        description="Policies for operations that modify the local system (dismissing dialogs, installing agents/skills)",
     )
     is_remote_agent_installation_allowed: bool = Field(
         default=True,
@@ -616,6 +688,11 @@ class MngrConfig(FrozenModel):
         if override.logging is not None:
             merged_logging = self.logging.merge_with(override.logging)
 
+        # Merge local_system_mutations (nested config)
+        merged_local_system_mutations = self.local_system_mutations
+        if override.local_system_mutations is not None:
+            merged_local_system_mutations = self.local_system_mutations.merge_with(override.local_system_mutations)
+
         return self.__class__(
             prefix=merged_prefix,
             default_host_dir=merged_default_host_dir,
@@ -633,6 +710,7 @@ class MngrConfig(FrozenModel):
             is_remote_agent_installation_allowed=is_remote_agent_installation_allowed,
             connect_command=merged_connect_command,
             logging=merged_logging,
+            local_system_mutations=merged_local_system_mutations,
             is_nested_tmux_allowed=merged_is_nested_tmux_allowed,
             headless=merged_headless,
             is_error_reporting_enabled=merged_is_error_reporting_enabled,
@@ -660,10 +738,6 @@ class MngrContext(FrozenModel):
     is_interactive: bool = Field(
         default=False,
         description="Whether the CLI is running in interactive mode (can prompt user for input)",
-    )
-    is_auto_approve: bool = Field(
-        default=False,
-        description="Whether to auto-approve prompts (e.g., skill installation) without asking",
     )
     profile_dir: Path = Field(
         description="Profile-specific directory for user data (user_id, providers, settings)",
@@ -839,4 +913,3 @@ class CreateCliOptions(CommonCliOptions):
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]
     update: bool
-    yes: bool

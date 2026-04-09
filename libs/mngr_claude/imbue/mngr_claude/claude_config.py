@@ -33,8 +33,7 @@ class ClaudeDirectoryNotTrustedError(ConfigError):
         self.source_path = source_path
         super().__init__(
             f"Source directory {source_path} is not trusted by Claude Code. "
-            "Run `mngr create` interactively (without --no-connect) to be prompted, "
-            f"or run Claude Code manually in {source_path} and accept the trust dialog."
+            f"Fix with: uv run mngr claude dismiss trust {source_path}"
         )
 
 
@@ -44,8 +43,7 @@ class ClaudeEffortCalloutNotDismissedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's effort callout has not been dismissed in ~/.claude.json. "
-            "Run `mngr create` interactively (without --no-connect) to be prompted, "
-            "or run Claude Code manually and dismiss the callout."
+            "Fix with: uv run mngr claude dismiss effort-callout"
         )
 
 
@@ -55,8 +53,7 @@ class ClaudeOnboardingNotCompletedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code onboarding has not been completed in ~/.claude.json. "
-            "Run `mngr create` interactively (without --no-connect) to be prompted, "
-            "or run Claude Code manually to complete onboarding."
+            "Fix with: uv run mngr claude dismiss onboarding"
         )
 
 
@@ -66,8 +63,7 @@ class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's dangerous-mode safety warning has not been dismissed in ~/.claude.json. "
-            "Run `mngr create` interactively (without --no-connect) to be prompted, "
-            "or run Claude Code manually and dismiss the warning."
+            "Fix with: uv run mngr claude dismiss all <path>"
         )
 
 
@@ -419,6 +415,30 @@ def auto_dismiss_claude_dialogs(config_path: Path, source_path: Path) -> None:
     acknowledge_cost_threshold(config_path)
     # bypassPermissionsModeAccepted: not set here (Claude Code resets it).
     # skipDangerousModePermissionPrompt in settings.json handles this instead.
+
+
+def warn_undismissed_claude_dialogs(config_path: Path, source_path: Path) -> list[str]:
+    """Check each dialog and return warning messages for any that are not dismissed.
+
+    Returns a list of human-readable warning strings, each containing the
+    ``mngr claude dismiss`` command needed to fix the issue. Returns an empty
+    list when every dialog is already dismissed.
+    """
+    warnings: list[str] = []
+    if not is_source_directory_trusted(config_path, source_path):
+        warnings.append(
+            f"Source directory {source_path} is not trusted by Claude Code. "
+            f"Fix with: uv run mngr claude dismiss trust {source_path}"
+        )
+    if not is_effort_callout_dismissed(config_path):
+        warnings.append(
+            "Claude Code's effort callout has not been dismissed. Fix with: uv run mngr claude dismiss effort-callout"
+        )
+    if not is_onboarding_completed(config_path):
+        warnings.append(
+            "Claude Code onboarding has not been completed. Fix with: uv run mngr claude dismiss onboarding"
+        )
+    return warnings
 
 
 def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, Any] | None:

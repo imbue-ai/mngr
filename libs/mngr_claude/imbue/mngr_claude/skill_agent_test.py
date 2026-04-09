@@ -10,8 +10,11 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.config.data_types import LocalInstallPolicy
+from imbue.mngr.config.data_types import LocalSystemMutations
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -240,12 +243,12 @@ def test_fixme_fairy_skill_content_contains_fixme_instructions() -> None:
 
 
 @pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_creates_skill_file_in_non_interactive_mode(
+def test_install_skill_locally_creates_skill_file_with_yes_policy(
     skill_name: str,
     skill_content: str,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """In non-interactive mode, _install_skill_locally should create the skill file without prompting."""
+    """With install_skills=YES (the default), _install_skill_locally should create the skill file."""
     skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
     assert not skill_path.exists()
 
@@ -256,12 +259,12 @@ def test_install_skill_locally_creates_skill_file_in_non_interactive_mode(
 
 
 @pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_overwrites_existing_skill_in_non_interactive_mode(
+def test_install_skill_locally_overwrites_existing_skill_with_yes_policy(
     skill_name: str,
     skill_content: str,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """In non-interactive mode, _install_skill_locally should overwrite an existing skill file."""
+    """With install_skills=YES, _install_skill_locally should overwrite an existing skill file."""
     skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     skill_path.write_text("old content")
@@ -290,30 +293,59 @@ def test_install_skill_locally_skips_when_content_unchanged(
 
 
 @pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_auto_approve_installs_without_prompting(
+def test_install_skill_locally_raises_with_error_policy(
     skill_name: str,
     skill_content: str,
-    temp_config: MngrConfig,
     temp_profile_dir: Path,
     plugin_manager: "pluggy.PluginManager",
 ) -> None:
-    """With is_auto_approve=True and is_interactive=True, skill should install without prompting."""
-    with ConcurrencyGroup(name="test-auto-approve") as cg:
-        auto_approve_ctx = make_mngr_ctx(
-            temp_config,
+    """With install_skills=ERROR, _install_skill_locally should raise PluginMngrError."""
+    error_config = MngrConfig(
+        local_system_mutations=LocalSystemMutations(install_skills=LocalInstallPolicy.ERROR),
+    )
+    with ConcurrencyGroup(name="test-error-policy") as cg:
+        error_ctx = make_mngr_ctx(
+            error_config,
             plugin_manager,
             temp_profile_dir,
-            is_interactive=True,
-            is_auto_approve=True,
             concurrency_group=cg,
         )
         skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
         assert not skill_path.exists()
 
-        _install_skill_locally(skill_name, skill_content, auto_approve_ctx)
+        with pytest.raises(PluginMngrError, match="install_skills is set to ERROR"):
+            _install_skill_locally(skill_name, skill_content, error_ctx)
 
-        assert skill_path.exists()
-        assert skill_path.read_text() == skill_content
+        assert not skill_path.exists()
+
+
+@pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
+def test_install_skill_locally_error_policy_skips_when_content_unchanged(
+    skill_name: str,
+    skill_content: str,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+) -> None:
+    """With install_skills=ERROR, _install_skill_locally should still skip when content matches."""
+    error_config = MngrConfig(
+        local_system_mutations=LocalSystemMutations(install_skills=LocalInstallPolicy.ERROR),
+    )
+    with ConcurrencyGroup(name="test-error-policy-skip") as cg:
+        error_ctx = make_mngr_ctx(
+            error_config,
+            plugin_manager,
+            temp_profile_dir,
+            concurrency_group=cg,
+        )
+        skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+        skill_path.parent.mkdir(parents=True, exist_ok=True)
+        skill_path.write_text(skill_content)
+        original_mtime = skill_path.stat().st_mtime
+
+        # Should NOT raise even with ERROR policy because content is already up to date
+        _install_skill_locally(skill_name, skill_content, error_ctx)
+
+        assert skill_path.stat().st_mtime == original_mtime
 
 
 # -- SkillProvisionedAgentConfig tests --

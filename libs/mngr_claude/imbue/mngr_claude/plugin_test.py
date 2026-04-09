@@ -1,6 +1,5 @@
 import json
 import subprocess
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -19,8 +18,11 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import EnvVar
+from imbue.mngr.config.data_types import LocalInstallPolicy
+from imbue.mngr.config.data_types import LocalSystemMutations
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import PermissionDialogPolicy
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -203,31 +205,6 @@ def _write_all_dialogs_dismissed(work_dir: Path) -> None:
         },
     }
     config_path.write_text(json.dumps(config))
-
-
-_CLAUDE_AGENT_MODULE = "imbue.mngr_claude.plugin"
-
-
-@contextmanager
-def _mock_all_dialog_prompts(
-    trust_accepted: bool = True,
-    effort_accepted: bool = True,
-    onboarding_accepted: bool = True,
-):
-    """Mock all interactive dialog prompts with the given return values.
-
-    Yields a dict of mock names to mock objects for assertion.
-    """
-    with (
-        patch(f"{_CLAUDE_AGENT_MODULE}._prompt_user_for_trust", return_value=trust_accepted) as mock_trust,
-        patch(
-            f"{_CLAUDE_AGENT_MODULE}._prompt_user_for_effort_callout_dismissal", return_value=effort_accepted
-        ) as mock_effort,
-        patch(
-            f"{_CLAUDE_AGENT_MODULE}._prompt_user_for_onboarding_completion", return_value=onboarding_accepted
-        ) as mock_onboarding,
-    ):
-        yield {"trust": mock_trust, "effort": mock_effort, "onboarding": mock_onboarding}
 
 
 _WORKTREE_OPTIONS = CreateAgentOptions(
@@ -1107,12 +1084,14 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
     assert str(agent.work_dir.resolve()) in config["projects"]
 
 
-def test_provision_trusts_working_directory_when_enabled(
+def test_provision_auto_dismisses_dialogs_with_yes_policy(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should add trust for work_dir when auto_dismiss_dialogs is True."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
+    """provision should auto-dismiss dialogs when accept_permission_dialogs is YES (default)."""
+    # temp_mngr_ctx uses default config which has YES policy
+    agent, host = make_claude_agent(
+        local_provider, tmp_path, temp_mngr_ctx, agent_config=ClaudeAgentConfig(check_installation=False)
+    )
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
@@ -1125,28 +1104,37 @@ def test_provision_trusts_working_directory_when_enabled(
     assert claude_config["effortCalloutDismissed"] is True
 
 
-def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+def test_provision_does_not_auto_dismiss_dialogs_with_error_policy(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
 ) -> None:
-    """provision should not add trust when auto_dismiss_dialogs is False (default)."""
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    _write_all_dialogs_dismissed(agent.work_dir)
+    """provision should not auto-dismiss dialogs when accept_permission_dialogs is ERROR."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.ERROR,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
+    )
+    with ConcurrencyGroup(name="test-error-policy") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+        agent, host = make_claude_agent(local_provider, tmp_path, ctx)
+        _write_all_dialogs_dismissed(agent.work_dir)
 
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+        options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+        agent.provision(host=host, options=options, mngr_ctx=ctx)
 
-    # The global config should only contain what _write_all_dialogs_dismissed wrote.
-    # auto_dismiss_dialogs=False (default) means no additional trust was added.
-    config_path = Path.home() / ".claude.json"
-    config = json.loads(config_path.read_text())
-    assert str(agent.work_dir.resolve()) in config["projects"]
-
-
-def test_auto_dismiss_dialogs_defaults_to_false() -> None:
-    """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
-    config = ClaudeAgentConfig()
-    assert config.auto_dismiss_dialogs is False
+        # The global config should only contain what _write_all_dialogs_dismissed wrote.
+        # ERROR policy means no additional trust was added by provision().
+        config_path = Path.home() / ".claude.json"
+        cfg = json.loads(config_path.read_text())
+        assert str(agent.work_dir.resolve()) in cfg["projects"]
 
 
 def test_on_before_provisioning_raises_for_worktree_on_remote_host(
@@ -1169,39 +1157,53 @@ def test_on_before_provisioning_raises_for_worktree_on_remote_host(
         agent.on_before_provisioning(host=non_local_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_provisioning_validates_trust_for_worktree(
+def test_on_before_provisioning_validates_trust_for_worktree_with_error_policy(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
+    setup_git_config: None,
+) -> None:
+    """on_before_provisioning should pass when source directory is trusted under ERROR policy."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.ERROR,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
+    )
+    with ConcurrencyGroup(name="test-validates-trust") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+        source_path, worktree_path, agent, host = _setup_worktree_agent(
+            local_provider,
+            tmp_path,
+            ctx,
+            is_source_trusted=True,
+        )
+
+        # Should succeed without error because the source directory is trusted
+        agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
+
+
+def test_on_before_provisioning_skips_dialog_check_with_yes_policy(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     setup_git_config: None,
 ) -> None:
-    """on_before_provisioning should validate source directory is trusted for worktree mode."""
+    """on_before_provisioning should skip dialog check when accept_permission_dialogs is YES (default)."""
+    # temp_mngr_ctx uses default config which has YES policy
     source_path, worktree_path, agent, host = _setup_worktree_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        is_source_trusted=True,
     )
 
-    # Should succeed without error because the source directory is trusted
+    # Should NOT raise even though dialogs are not dismissed -- YES policy defers to provision()
     agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
-
-
-def test_on_before_provisioning_skips_dialog_check_when_interactive(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    interactive_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """on_before_provisioning should skip dialog check for interactive runs (provision() handles it)."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        interactive_mngr_ctx,
-    )
-
-    # Should NOT raise even though dialogs are not dismissed -- interactive defers to provision()
-    agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
 
 
 def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
@@ -1237,76 +1239,34 @@ def test_on_destroy_removes_trust(
     assert str(agent.work_dir.resolve()) not in config_after.get("projects", {})
 
 
-def test_provision_prompts_for_all_dialogs_when_interactive(
+def test_on_before_provisioning_raises_when_error_policy_and_untrusted(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    interactive_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
     setup_git_config: None,
 ) -> None:
-    """provision should prompt for trust, effort callout, onboarding, and bypass permissions when none are set."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        interactive_mngr_ctx,
+    """on_before_provisioning should raise when accept_permission_dialogs is ERROR and source is untrusted."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.ERROR,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
     )
+    with ConcurrencyGroup(name="test-error-untrusted") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+        source_path, worktree_path, agent, host = _setup_worktree_agent(
+            local_provider,
+            tmp_path,
+            ctx,
+        )
 
-    with _mock_all_dialog_prompts() as mocks:
-        agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
-
-    mocks["trust"].assert_called_once_with(source_path)
-    mocks["effort"].assert_called_once()
-    mocks["onboarding"].assert_called_once()
-
-    # Verify dialogs were resolved in the global config (user intent)
-    config_path = Path.home() / ".claude.json"
-    config = json.loads(config_path.read_text())
-    assert str(source_path.resolve()) in config["projects"]
-    assert config["effortCalloutDismissed"] is True
-    assert config["hasCompletedOnboarding"] is True
-
-    # Verify worktree trust was added to the per-agent config
-    per_agent_config_path = agent.get_claude_config_dir() / ".claude.json"
-    per_agent_config = json.loads(per_agent_config_path.read_text())
-    assert str(worktree_path.resolve()) in per_agent_config["projects"]
-    worktree_entry = per_agent_config["projects"][str(worktree_path.resolve())]
-    assert worktree_entry["hasTrustDialogAccepted"] is True
-
-
-def test_provision_raises_when_non_interactive_and_untrusted(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """provision should raise when non-interactive and source is untrusted."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-    )
-
-    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-        agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
-    assert exc_info.value.only_exception_is_instance_of(ClaudeDirectoryNotTrustedError)
-
-
-def test_provision_raises_when_user_declines_trust(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    interactive_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """provision should raise when user declines the trust prompt."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        interactive_mngr_ctx,
-    )
-
-    with _mock_all_dialog_prompts(trust_accepted=False):
-        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-            agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
-        assert exc_info.value.only_exception_is_instance_of(ClaudeDirectoryNotTrustedError)
+        with pytest.raises(ClaudeDirectoryNotTrustedError):
+            agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
 
 
 # =============================================================================
@@ -1659,115 +1619,47 @@ def _write_claude_trust_without_dialog_dismissed(source_path: Path) -> None:
     config_path.write_text(json.dumps(config))
 
 
-def test_on_before_provisioning_raises_when_dialogs_not_dismissed(
+def test_on_before_provisioning_raises_when_dialogs_not_dismissed_with_error_policy(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """on_before_provisioning should raise when effortCalloutDismissed is not set."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-    )
-
-    # Write trust but without effortCalloutDismissed
-    _write_claude_trust_without_dialog_dismissed(source_path)
-
-    with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
-
-
-def test_provision_dismisses_dialogs_when_auto_approve(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_config: MngrConfig,
+    temp_host_dir: Path,
     temp_profile_dir: Path,
     plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
     setup_git_config: None,
 ) -> None:
-    """provision should auto-dismiss dialogs when auto_approve is enabled."""
-    with ConcurrencyGroup(name="test-auto-approve-dialogs") as cg:
-        auto_approve_ctx = make_mngr_ctx(
-            temp_config, plugin_manager, temp_profile_dir, is_auto_approve=True, concurrency_group=cg
-        )
+    """on_before_provisioning should raise when accept_permission_dialogs is ERROR and effortCalloutDismissed is not set."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.ERROR,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
+    )
+    with ConcurrencyGroup(name="test-error-dialogs") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
         source_path, worktree_path, agent, host = _setup_worktree_agent(
             local_provider,
             tmp_path,
-            auto_approve_ctx,
+            ctx,
         )
 
         # Write trust but without effortCalloutDismissed
         _write_claude_trust_without_dialog_dismissed(source_path)
 
-        agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=auto_approve_ctx)
-
-        # Verify effortCalloutDismissed was set
-        config_path = Path.home() / ".claude.json"
-        config = json.loads(config_path.read_text())
-        assert config["effortCalloutDismissed"] is True
+        with pytest.raises(ClaudeEffortCalloutNotDismissedError):
+            agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
 
 
-def test_provision_prompts_for_dialog_dismissal_when_interactive(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    interactive_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """provision should prompt and dismiss dialogs when interactive and not yet dismissed."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        interactive_mngr_ctx,
-    )
-
-    # Write trust but without effortCalloutDismissed or hasCompletedOnboarding
-    _write_claude_trust_without_dialog_dismissed(source_path)
-
-    with _mock_all_dialog_prompts() as mocks:
-        agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
-
-    # Trust was already set, so trust prompt should not fire
-    mocks["trust"].assert_not_called()
-    mocks["effort"].assert_called_once()
-    mocks["onboarding"].assert_called_once()
-
-    config_path = Path.home() / ".claude.json"
-    config = json.loads(config_path.read_text())
-    assert config["effortCalloutDismissed"] is True
-    assert config["hasCompletedOnboarding"] is True
-
-
-def test_provision_raises_when_user_declines_dialog_dismissal(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    interactive_mngr_ctx: MngrContext,
-    setup_git_config: None,
-) -> None:
-    """provision should raise when user declines dialog dismissal prompt."""
-    source_path, worktree_path, agent, host = _setup_worktree_agent(
-        local_provider,
-        tmp_path,
-        interactive_mngr_ctx,
-    )
-
-    # Write trust but without effortCalloutDismissed
-    _write_claude_trust_without_dialog_dismissed(source_path)
-
-    with _mock_all_dialog_prompts(effort_accepted=False):
-        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-            agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
-        assert exc_info.value.only_exception_is_instance_of(ClaudeEffortCalloutNotDismissedError)
-
-
-def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
+def test_provision_dismisses_dialogs_with_yes_policy(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     setup_git_config: None,
 ) -> None:
-    """provision should raise when non-interactive and dialogs are not dismissed."""
+    """provision should auto-dismiss dialogs when accept_permission_dialogs is YES (default)."""
+    # temp_mngr_ctx uses default config which has YES policy
     source_path, worktree_path, agent, host = _setup_worktree_agent(
         local_provider,
         tmp_path,
@@ -1777,9 +1669,45 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
     # Write trust but without effortCalloutDismissed
     _write_claude_trust_without_dialog_dismissed(source_path)
 
-    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-        agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
-    assert exc_info.value.only_exception_is_instance_of(ClaudeEffortCalloutNotDismissedError)
+    agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
+
+    # Verify effortCalloutDismissed was set
+    config_path = Path.home() / ".claude.json"
+    config = json.loads(config_path.read_text())
+    assert config["effortCalloutDismissed"] is True
+
+
+def test_on_before_provisioning_raises_when_error_policy_and_dialogs_not_dismissed(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
+    setup_git_config: None,
+) -> None:
+    """on_before_provisioning should raise when accept_permission_dialogs is ERROR and dialogs are not dismissed."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.ERROR,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
+    )
+    with ConcurrencyGroup(name="test-error-dialogs-not-dismissed") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+        source_path, worktree_path, agent, host = _setup_worktree_agent(
+            local_provider,
+            tmp_path,
+            ctx,
+        )
+
+        # Write trust but without effortCalloutDismissed
+        _write_claude_trust_without_dialog_dismissed(source_path)
+
+        with pytest.raises(ClaudeEffortCalloutNotDismissedError):
+            agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
 
 
 # =============================================================================
@@ -2445,7 +2373,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should find session by ID, copy project dir, and write session ID."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
+    config = ClaudeAgentConfig(check_installation=False)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2517,7 +2445,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """Session lookup should find sessions in ~/.claude/ even when CLAUDE_CONFIG_DIR points elsewhere."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
+    config = ClaudeAgentConfig(check_installation=False)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2559,7 +2487,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should accept a .jsonl file path and extract the session ID."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
+    config = ClaudeAgentConfig(check_installation=False)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 

@@ -69,18 +69,8 @@ OBSERVER_COMMAND: Final[str] = 'mngr observe -v --events-dir "$MNGR_AGENT_STATE_
 
 
 class ClaudeMindConfig(ClaudeAgentConfig):
-    """Config for the claude-mind agent type.
+    """Config for the claude-mind agent type."""
 
-    Defaults auto_dismiss_dialogs to True because minds run
-    --transfer=none in their own repo directory (e.g. ~/.minds/<name>/)
-    and should not show the trust dialog on startup.
-    """
-
-    auto_dismiss_dialogs: bool = Field(
-        default=True,
-        description="Automatically dismiss all Claude startup dialogs. "
-        "Enabled by default for minds since they run in-place in their own repo.",
-    )
     sync_home_settings: bool = Field(
         default=False,
         description="Whether to sync Claude settings from ~/.claude/ to the per-agent config dir",

@@ -20,6 +20,7 @@ from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
+from imbue.mngr.config.data_types import LocalSystemMutations
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
@@ -402,7 +403,7 @@ def _parse_agent_types(
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
-        # has auto_dismiss_dialogs). Without this, unregistered custom type names
+        # has settings_overrides). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
         parent_type = raw_config.get("parent_type")
         # Walk the parent chain through raw_types to check if this type or
@@ -510,6 +511,15 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -
     return LoggingConfig.model_construct(**raw_logging)
 
 
+def _parse_local_system_mutations(raw_mutations: dict[str, Any], *, strict: bool = True) -> LocalSystemMutations:
+    """Parse local_system_mutations config.
+
+    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    """
+    _check_unknown_fields(raw_mutations, LocalSystemMutations, "local_system_mutations", strict=strict)
+    return LocalSystemMutations.model_construct(**raw_mutations)
+
+
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:
     """Parse command defaults from config.
 
@@ -609,6 +619,11 @@ def parse_config(
     kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
+    kwargs["local_system_mutations"] = (
+        _parse_local_system_mutations(raw.pop("local_system_mutations", {}), strict=strict)
+        if "local_system_mutations" in raw
+        else None
+    )
 
     if len(raw) > 0:
         if strict:

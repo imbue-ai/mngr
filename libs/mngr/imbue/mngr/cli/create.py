@@ -416,14 +416,6 @@ class _CreateCommand(click.Command):
     "--connect-command",
     help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
 )
-@optgroup.group("Automation")
-@optgroup.option(
-    "-y",
-    "--yes",
-    is_flag=True,
-    default=False,
-    help="Auto-approve all prompts (e.g., skill installation) without asking",
-)
 @add_common_options
 @click.pass_context
 def create(ctx: click.Context, **kwargs) -> None:
@@ -468,12 +460,6 @@ def create(ctx: click.Context, **kwargs) -> None:
                 address = address.model_copy_update(
                     to_update(address.field_ref().provider_name, flag_provider),
                 )
-
-        # Apply --yes flag to auto-approve prompts (e.g., skill installation)
-        if opts.yes:
-            mngr_ctx = mngr_ctx.model_copy_update(
-                to_update(mngr_ctx.field_ref().is_auto_approve, True),
-            )
 
         # Validate --update requires --reuse
         if opts.update and not opts.reuse:
