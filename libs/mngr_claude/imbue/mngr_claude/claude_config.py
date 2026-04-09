@@ -33,7 +33,7 @@ class ClaudeDirectoryNotTrustedError(ConfigError):
         self.source_path = source_path
         super().__init__(
             f"Source directory {source_path} is not trusted by Claude Code. "
-            f"Fix with: uv run mngr claude dismiss trust {source_path}"
+            f"Fix with: mngr claude dismiss trust {source_path}"
         )
 
 
@@ -43,7 +43,7 @@ class ClaudeEffortCalloutNotDismissedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's effort callout has not been dismissed in ~/.claude.json. "
-            "Fix with: uv run mngr claude dismiss effort-callout"
+            "Fix with: mngr claude dismiss effort-callout"
         )
 
 
@@ -52,8 +52,7 @@ class ClaudeOnboardingNotCompletedError(ConfigError):
 
     def __init__(self) -> None:
         super().__init__(
-            "Claude Code onboarding has not been completed in ~/.claude.json. "
-            "Fix with: uv run mngr claude dismiss onboarding"
+            "Claude Code onboarding has not been completed in ~/.claude.json. Fix with: mngr claude dismiss onboarding"
         )
 
 
@@ -63,7 +62,7 @@ class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's dangerous-mode safety warning has not been dismissed in ~/.claude.json. "
-            "Fix with: uv run mngr claude dismiss all <path>"
+            "Fix with: mngr claude dismiss all <path>"
         )
 
 
@@ -428,16 +427,14 @@ def warn_undismissed_claude_dialogs(config_path: Path, source_path: Path) -> lis
     if not is_source_directory_trusted(config_path, source_path):
         warnings.append(
             f"Source directory {source_path} is not trusted by Claude Code. "
-            f"Fix with: uv run mngr claude dismiss trust {source_path}"
+            f"Fix with: mngr claude dismiss trust {source_path}"
         )
     if not is_effort_callout_dismissed(config_path):
         warnings.append(
-            "Claude Code's effort callout has not been dismissed. Fix with: uv run mngr claude dismiss effort-callout"
+            "Claude Code's effort callout has not been dismissed. Fix with: mngr claude dismiss effort-callout"
         )
     if not is_onboarding_completed(config_path):
-        warnings.append(
-            "Claude Code onboarding has not been completed. Fix with: uv run mngr claude dismiss onboarding"
-        )
+        warnings.append("Claude Code onboarding has not been completed. Fix with: mngr claude dismiss onboarding")
     return warnings
 
 
