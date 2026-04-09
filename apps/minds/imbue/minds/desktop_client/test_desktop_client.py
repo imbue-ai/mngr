@@ -971,6 +971,9 @@ def test_landing_page_discovery_preserves_query_params(tmp_path: Path) -> None:
     # The redirect URL should include the original query params
     assert "git_url=" in response.text
     assert "branch=main" in response.text
+    # The redirect URL is inside a <script> tag where HTML entities are NOT
+    # decoded. Verify '&' separators are NOT mangled to '&amp;'.
+    assert "&amp;" not in response.text
 
 
 def test_landing_page_shows_create_form_after_discovery_retries(tmp_path: Path) -> None:

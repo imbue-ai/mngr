@@ -1,5 +1,4 @@
 import asyncio
-import html as html_module
 import json
 import os
 import queue
@@ -88,7 +87,7 @@ body {{
   <div class="spinner"></div>
   <p>Discovering agents...</p>
 </div>
-<script>setTimeout(function() {{ location.href = '{redirect_url}'; }}, 1500);</script>
+<script>setTimeout(function() {{ location.href = {redirect_url_js}; }}, 1500);</script>
 </body>
 </html>"""
 
@@ -340,7 +339,7 @@ def _handle_landing_page(
         redirect_url = "/?" + urllib.parse.urlencode(preserved_params)
         return HTMLResponse(
             content=_DISCOVERY_LOADING_HTML.format(
-                redirect_url=html_module.escape(redirect_url),
+                redirect_url_js=json.dumps(redirect_url),
             ),
         )
 
