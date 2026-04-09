@@ -2,22 +2,14 @@
 name: message-agent
 argument-hint: <agent_name> <description of what to say>
 description: Send a message to another mngr agent. Use when you need to communicate with a peer agent.
-allowed-tools: Bash(echo *), Bash(uv run mngr message *), Bash(uv run mngr list *), Write(*)
+allowed-tools: Bash(echo *), Bash(uv run mngr message *), Write(*), Skill(find-agent)
 ---
 
 The user's message contains a target agent name (the first word) and a description of what to communicate. Extract the agent name and treat everything after it as the intent/content of the message.
 
-Note: the user may paste a git branch name like `mngr/some-agent` instead of the bare agent name. In that case, strip the `mngr/` prefix to get the actual agent name (e.g. `mngr/better-tabcomplete` -> `better-tabcomplete`).
-
 ## Agent Name Resolution
 
-First, verify the target agent exists by running:
-
-```
-uv run mngr list --format '{name}'
-```
-
-If the extracted name doesn't match any agent exactly, check if the user's input was a description (e.g. "the agent working on X") rather than a name, and try to match against the listed agents and their git branches. If there's an unambiguous match, use it. Otherwise, use AskUserQuestion to ask the user which agent they meant, presenting the plausible candidates.
+Use the `/find-agent` skill with the first word of the user's input to resolve it to an exact agent name.
 
 ## Your Agent Name
 
