@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import patch
 from uuid import UUID
 
+import click
 import pluggy
 import pytest
 
@@ -66,6 +67,7 @@ from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
+from imbue.mngr_claude.plugin import register_cli_commands
 from imbue.mngr_claude.plugin import register_cli_options
 
 # =============================================================================
@@ -2291,6 +2293,16 @@ def test_install_claude_verifies_binary_exists() -> None:
 # =============================================================================
 # register_cli_options Tests
 # =============================================================================
+
+
+def test_register_cli_commands_returns_claude_group() -> None:
+    """Verify that register_cli_commands returns the claude command group."""
+    result = register_cli_commands()
+
+    assert result is not None
+    assert len(result) == 1
+    assert isinstance(result[0], click.BaseCommand)
+    assert result[0].name == "claude"
 
 
 def test_register_cli_options_returns_adopt_session_for_create() -> None:
