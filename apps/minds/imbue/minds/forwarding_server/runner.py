@@ -16,6 +16,8 @@ from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolve
 from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.output import emit_event
 
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
 
@@ -24,12 +26,15 @@ def start_forwarding_server(
     data_directory: Path,
     host: str,
     port: int,
+    output_format: OutputFormat,
+    is_no_browser: bool = False,
 ) -> None:
     """Start the forwarding server using uvicorn.
 
-    Generates a one-time login URL and prints it to the console so the
-    user can authenticate. Starts background streaming subprocesses via
-    MngrStreamManager for continuous agent and server discovery.
+    Generates a one-time login URL for authentication. The URL is always
+    logged to stderr. It is also emitted to stdout in the active output
+    format (human-readable text or JSONL event). Unless --no-browser is
+    set, the URL is opened in the system browser.
     """
     paths = MindPaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
@@ -43,10 +48,16 @@ def start_forwarding_server(
     auth_store.add_one_time_code(code=code)
     login_url = "http://{}:{}/login?one_time_code={}".format(host, port, code)
 
-    logger.info("")
-    logger.info("Login URL (one-time use):")
-    logger.info("  {}", login_url)
-    logger.info("")
+    # Log to stderr (always)
+    logger.info("Login URL (one-time use): {}", login_url)
+
+    # Emit to stdout in the active output format so machine consumers
+    # (like the Electron shell) can parse it
+    emit_event(
+        "login_url",
+        {"login_url": login_url, "message": login_url},
+        output_format,
+    )
 
     stream_manager.start()
 
@@ -58,9 +69,10 @@ def start_forwarding_server(
         agent_creator=agent_creator,
     )
 
-    thread = Thread(target=_sleep_then_open, args=(login_url,))
-    thread.daemon = True
-    thread.start()
+    if not is_no_browser:
+        thread = Thread(target=_sleep_then_open, args=(login_url,))
+        thread.daemon = True
+        thread.start()
 
     try:
         uvicorn.run(app, host=host, port=port)

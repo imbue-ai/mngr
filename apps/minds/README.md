@@ -26,5 +26,6 @@ mind
 ## Learn more
 
 - [How it works](./docs/overview.md)
+- [Desktop app](./docs/desktop-app.md)
 - [Glossary of key concepts](./docs/mind/glossary.md)
 - [Design principles and mind architecture](./docs/design.md)
