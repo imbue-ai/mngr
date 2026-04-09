@@ -220,12 +220,13 @@ function registerShortcuts() {
   // Window-local shortcut: Open DevTools with Ctrl+Shift+C (Win/Linux) or Cmd+Option+I (macOS).
   // Uses before-input-event so the shortcut only fires when the window is focused,
   // avoiding stealing key combinations from other applications.
-  mainWindow.webContents.on('before-input-event', (_event, input) => {
+  mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     const devTools =
       (isMac && input.meta && input.alt && input.key.toLowerCase() === 'i') ||
       (!isMac && input.control && input.shift && input.key.toLowerCase() === 'c');
     if (devTools) {
+      event.preventDefault();
       mainWindow.webContents.toggleDevTools();
     }
   });
