@@ -9,11 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     git \
     git-lfs \
-    gnupg \
-    iproute2 \
-    iptables \
     jq \
-    lsb-release \
     nano \
     openssh-server \
     procps \
@@ -25,26 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     xxd \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Docker CE for Docker-in-Modal support
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin \
-    && rm -rf /var/lib/apt/lists/*
-
-# Replace runc with a version compatible with Modal/gVisor
-ARG RUNC_VERSION=v1.4.0
-RUN rm -f $(which runc) || true \
-    && wget -q "https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}/runc.amd64" \
-    && chmod +x runc.amd64 \
-    && mv runc.amd64 /usr/local/bin/runc
 
 # Install ttyd binary from GitHub releases (not available via apt)
 RUN ARCH=$(uname -m) && \
@@ -72,11 +48,6 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
-
-# Docker daemon management scripts (for Docker-in-Modal)
-COPY start_dockerd.sh /start_dockerd.sh
-COPY wait_for_docker.sh /wait_for_docker.sh
-RUN chmod +x /start_dockerd.sh /wait_for_docker.sh
 
 # copy in all of our code:
 COPY . /code/
