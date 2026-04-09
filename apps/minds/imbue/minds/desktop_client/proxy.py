@@ -202,6 +202,85 @@ def _inject_into_head(html_content: str, injection: str) -> str:
         return injection + html_content
 
 
+_ELECTRON_USER_AGENT_MARKER: Final[str] = "Electron"
+
+
+@pure
+def is_electron_client(user_agent: str) -> bool:
+    """Return True if the request comes from the Electron desktop app."""
+    return _ELECTRON_USER_AGENT_MARKER in user_agent
+
+
+@pure
+def generate_browser_info_bar_html(
+    agent_id: AgentId,
+    server_name: ServerName,
+    agent_display_name: str,
+    host_id: str,
+    iframe_url: str,
+) -> str:
+    """Generate an HTML wrapper page with an info bar and iframe for browser clients.
+
+    When the user accesses a forwarded agent URL in a regular browser (not the
+    Electron app), this wrapper shows which agent, host, and application they are
+    viewing. The actual proxied content loads inside the iframe.
+    """
+    prefix = _get_server_prefix(agent_id, server_name)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>{agent_display_name} - {server_name}</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ height: 100%; overflow: hidden; }}
+body {{ display: flex; flex-direction: column; font-family: system-ui, -apple-system, sans-serif; }}
+#info-bar {{
+  height: 36px;
+  background: rgb(26, 26, 46);
+  color: rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 13px;
+  gap: 16px;
+  flex-shrink: 0;
+}}
+#info-bar .label {{
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}}
+#info-bar .value {{
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 500;
+}}
+#info-bar .separator {{
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.2);
+}}
+#content-frame {{
+  flex: 1;
+  width: 100%;
+  border: none;
+}}
+</style>
+</head>
+<body>
+<div id="info-bar">
+  <span><span class="label">Agent: </span><span class="value">{agent_display_name}</span></span>
+  <span class="separator"></span>
+  <span><span class="label">Host: </span><span class="value">{host_id}</span></span>
+  <span class="separator"></span>
+  <span><span class="label">Application: </span><span class="value">{server_name}</span></span>
+</div>
+<iframe id="content-frame" src="{prefix}/?_embed=1"></iframe>
+</body>
+</html>"""
+
+
 _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 
 

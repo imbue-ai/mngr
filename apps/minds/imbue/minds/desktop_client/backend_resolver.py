@@ -29,6 +29,13 @@ from imbue.mngr.primitives import DiscoveredAgent
 SERVERS_EVENT_SOURCE_NAME: Final[str] = "servers"
 
 
+class AgentDisplayInfo(FrozenModel):
+    """Display-oriented information about an agent for UI rendering."""
+
+    agent_name: str = Field(description="Human-readable agent name")
+    host_id: str = Field(description="Host identifier (e.g. 'localhost' or a remote host ID)")
+
+
 class ServerLogParseError(ValueError):
     """Raised when a server log record cannot be parsed."""
 
@@ -77,6 +84,16 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation returns None (all agents treated as local).
         Subclasses that discover remote agents should override this.
         """
+        return None
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        """Return display-oriented info about an agent, or None if unknown.
+
+        Default implementation returns a minimal result using the agent_id as the name.
+        Subclasses with richer agent data should override this.
+        """
+        if agent_id in self.list_known_agent_ids():
+            return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
         return None
 
 
@@ -276,6 +293,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        """Return display info from discovered agent data."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return AgentDisplayInfo(
+                        agent_name=str(agent.agent_name),
+                        host_id=str(agent.host_id),
+                    )
+            return None
 
 
 # -- MngrStreamManager --

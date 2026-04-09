@@ -36,7 +36,9 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
+from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
+from imbue.minds.desktop_client.proxy import is_electron_client
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -537,6 +539,27 @@ async def _handle_proxy_http(
             media_type="application/javascript",
         )
 
+    # For non-Electron browsers, wrap the agent content in an info bar iframe on
+    # the initial navigation (when _embed is not in the query params). The iframe
+    # loads the same URL with _embed=1, which bypasses this check and serves the
+    # normal proxied content.
+    user_agent = request.headers.get("user-agent", "")
+    is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
+    is_embed = request.query_params.get("_embed") == "1"
+
+    if is_navigation and not is_electron_client(user_agent) and not is_embed:
+        agent_info = backend_resolver.get_agent_display_info(parsed_id)
+        agent_display_name = agent_info.agent_name if agent_info else str(agent_id)
+        host_id = agent_info.host_id if agent_info else "localhost"
+        html = generate_browser_info_bar_html(
+            agent_id=parsed_id,
+            server_name=parsed_server,
+            agent_display_name=agent_display_name,
+            host_id=host_id,
+            iframe_url=f"/agents/{agent_id}/{server_name}/?_embed=1",
+        )
+        return HTMLResponse(content=html)
+
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
         # Return immediately instead of holding the connection open.
@@ -557,7 +580,6 @@ async def _handle_proxy_http(
 
     # Check if SW is installed via cookie (scoped per server)
     sw_cookie = request.cookies.get(f"sw_installed_{agent_id}_{server_name}")
-    is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
 
     # First HTML navigation without SW -> serve bootstrap
     if is_navigation and not sw_cookie:

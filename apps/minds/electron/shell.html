@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Minds</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      background: #0f172a;
+    }
+
+    /* -- Title bar -- */
+    #titlebar {
+      height: 38px;
+      background: #1e293b;
+      display: flex;
+      align-items: center;
+      -webkit-app-region: drag;
+      user-select: none;
+      flex-shrink: 0;
+      border-bottom: 1px solid #334155;
+      padding: 0 4px;
+    }
+
+    #titlebar button {
+      -webkit-app-region: no-drag;
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      width: 32px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    #titlebar button:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+    #titlebar button:active { background: rgba(255,255,255,0.12); }
+    #titlebar button:disabled { color: #475569; cursor: default; background: none; }
+
+    .nav-buttons { display: flex; gap: 2px; }
+
+    .title-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 0;
+      padding: 0 8px;
+    }
+    #page-title {
+      color: #cbd5e1;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #open-external-btn {
+      font-size: 13px;
+    }
+
+    .window-controls { display: flex; }
+    .window-controls button { border-radius: 0; width: 36px; height: 38px; }
+    .window-controls button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
+    .window-controls #close-btn:hover { background: #dc2626; color: white; }
+
+    /* macOS: traffic light space on left, no window control buttons needed */
+    body.platform-darwin #titlebar { padding-left: 72px; }
+    body.platform-darwin .window-controls { display: none; }
+
+    /* -- Content area -- */
+    #content {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #content-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: none;
+    }
+
+    /* -- Loading state -- */
+    #loading-view {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    #loading-view .logo {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 32px;
+    }
+    #loading-view .logo svg { width: 100%; height: 100%; }
+    #loading-view h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #f8fafc;
+    }
+    #loading-view .status {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      min-height: 20px;
+    }
+    #loading-view .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* -- Error state -- */
+    #error-view {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 32px;
+    }
+    #error-view h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: #f8fafc;
+      margin-bottom: 12px;
+    }
+    #error-view .message {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      text-align: center;
+      max-width: 400px;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+      -webkit-app-region: no-drag;
+    }
+    .actions button {
+      padding: 8px 20px;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 500;
+      -webkit-app-region: no-drag;
+    }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-secondary:hover { background: #475569; }
+    .toggle-details {
+      background: none;
+      border: none;
+      color: #64748b;
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-bottom: 12px;
+      -webkit-app-region: no-drag;
+    }
+    .toggle-details:hover { color: #94a3b8; }
+    .details {
+      display: none;
+      width: 100%;
+      max-width: 600px;
+      max-height: 200px;
+      overflow: auto;
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+      font-size: 12px;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-all;
+      -webkit-app-region: no-drag;
+      user-select: text;
+    }
+    .details.visible { display: block; }
+
+    /* SVG icons for buttons */
+    #titlebar button svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .window-controls button svg {
+      width: 12px;
+      height: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div id="titlebar">
+    <div class="nav-buttons">
+      <button id="back-btn" title="Back" disabled>
+        <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button id="forward-btn" title="Forward" disabled>
+        <svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+      </button>
+    </div>
+    <div class="title-area">
+      <span id="page-title">Minds</span>
+    </div>
+    <button id="open-external-btn" title="Open in browser">
+      <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+    </button>
+    <div class="window-controls">
+      <button id="minimize-btn" title="Minimize">
+        <svg viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+      </button>
+      <button id="maximize-btn" title="Maximize">
+        <svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
+      </button>
+      <button id="close-btn" title="Close">
+        <svg viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="content">
+    <!-- Loading state (shown initially) -->
+    <div id="loading-view">
+      <div class="logo">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="50" cy="50" r="45" fill="none" stroke="#3b82f6" stroke-width="3"/>
+          <path d="M30 55 C30 35, 50 25, 50 25 C50 25, 70 35, 70 55 C70 70, 55 75, 50 75 C45 75, 30 70, 30 55Z"
+                fill="none" stroke="#3b82f6" stroke-width="2.5"/>
+          <path d="M40 50 C40 42, 50 35, 50 35 C50 35, 60 42, 60 50 C60 58, 55 62, 50 62 C45 62, 40 58, 40 50Z"
+                fill="#3b82f6" opacity="0.3"/>
+          <circle cx="50" cy="48" r="4" fill="#3b82f6"/>
+        </svg>
+      </div>
+      <h1>Minds</h1>
+      <p class="status" id="status-text">Starting...</p>
+      <div class="spinner"></div>
+    </div>
+
+    <!-- Error state (hidden initially) -->
+    <div id="error-view">
+      <h1>Something went wrong</h1>
+      <p class="message" id="error-message">Minds stopped unexpectedly.</p>
+      <div class="actions">
+        <button class="btn-primary" id="retry-btn">Retry</button>
+        <button class="btn-secondary" id="log-btn">View full log</button>
+      </div>
+      <button class="toggle-details" id="toggle-details-btn">Show details</button>
+      <pre class="details" id="error-details"></pre>
+    </div>
+
+    <!-- Content iframe (hidden initially, shown when backend is ready) -->
+    <iframe id="content-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-downloads"></iframe>
+  </div>
+
+  <script>
+    var frame = document.getElementById('content-frame');
+    var loadingView = document.getElementById('loading-view');
+    var errorView = document.getElementById('error-view');
+    var titleEl = document.getElementById('page-title');
+    var backBtn = document.getElementById('back-btn');
+    var forwardBtn = document.getElementById('forward-btn');
+    var titleObserver = null;
+    var currentUrl = '';
+
+    // Platform detection
+    if (window.minds && window.minds.platform) {
+      document.body.classList.add('platform-' + window.minds.platform);
+    }
+
+    // -- State management --
+
+    function showLoading() {
+      loadingView.style.display = 'flex';
+      errorView.style.display = 'none';
+      frame.style.display = 'none';
+    }
+
+    function showError(message, details) {
+      loadingView.style.display = 'none';
+      errorView.style.display = 'flex';
+      frame.style.display = 'none';
+      if (message) document.getElementById('error-message').textContent = message;
+      if (details) document.getElementById('error-details').textContent = details;
+    }
+
+    function showContent(url) {
+      currentUrl = url;
+      loadingView.style.display = 'none';
+      errorView.style.display = 'none';
+      frame.style.display = 'block';
+      frame.src = url;
+    }
+
+    // -- Title tracking --
+
+    function updateTitle() {
+      try {
+        var doc = frame.contentDocument;
+        if (doc && doc.title) {
+          titleEl.textContent = doc.title;
+          return;
+        }
+      } catch (e) {
+        // Cross-origin frame - can't read title
+      }
+      titleEl.textContent = 'Minds';
+    }
+
+    function startTitleTracking() {
+      // Update title on iframe load
+      frame.addEventListener('load', function() {
+        updateTitle();
+        // Watch for dynamic title changes via MutationObserver
+        try {
+          var doc = frame.contentDocument;
+          if (doc) {
+            if (titleObserver) titleObserver.disconnect();
+            var headEl = doc.querySelector('head');
+            if (headEl) {
+              titleObserver = new MutationObserver(updateTitle);
+              titleObserver.observe(headEl, { childList: true, subtree: true, characterData: true });
+            }
+          }
+        } catch (e) {
+          // Cross-origin - fall back to polling
+        }
+      });
+    }
+
+    startTitleTracking();
+
+    // -- Navigation buttons --
+
+    backBtn.addEventListener('click', function() {
+      try { frame.contentWindow.history.back(); } catch (e) {}
+    });
+
+    forwardBtn.addEventListener('click', function() {
+      try { frame.contentWindow.history.forward(); } catch (e) {}
+    });
+
+    // Enable nav buttons once the iframe has navigated at least once
+    frame.addEventListener('load', function() {
+      // We can't reliably determine if forward is possible, so just enable both
+      // after first navigation. The browser handles no-op gracefully.
+      backBtn.disabled = false;
+      forwardBtn.disabled = false;
+    });
+
+    // -- Open in browser --
+
+    document.getElementById('open-external-btn').addEventListener('click', function() {
+      var url = currentUrl;
+      try {
+        url = frame.contentWindow.location.href;
+      } catch (e) {
+        // Cross-origin, use the original URL
+      }
+      if (window.minds && url) {
+        window.minds.openExternal(url);
+      }
+    });
+
+    // -- Window controls --
+
+    document.getElementById('minimize-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.minimize();
+    });
+
+    document.getElementById('maximize-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.maximize();
+    });
+
+    document.getElementById('close-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.close();
+    });
+
+    // -- Error view controls --
+
+    document.getElementById('retry-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.retry();
+    });
+
+    document.getElementById('log-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.openLogFile();
+    });
+
+    document.getElementById('toggle-details-btn').addEventListener('click', function() {
+      var detailsEl = document.getElementById('error-details');
+      detailsEl.classList.toggle('visible');
+      this.textContent = detailsEl.classList.contains('visible') ? 'Hide details' : 'Show details';
+    });
+
+    // -- IPC event handlers --
+
+    if (window.minds) {
+      window.minds.onStatusUpdate(function(message) {
+        document.getElementById('status-text').textContent = message;
+      });
+
+      window.minds.onErrorDetails(function(data) {
+        showError(data.message, data.details);
+      });
+
+      window.minds.onNavigate(function(url) {
+        showContent(url);
+      });
+    }
+  </script>
+</body>
+</html>
