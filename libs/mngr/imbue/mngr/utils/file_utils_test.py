@@ -108,3 +108,37 @@ def test_atomic_write_to_new_nested_directory(tmp_path: Path) -> None:
     assert target.exists()
     assert target.read_text() == "deep content"
     assert target.parent.is_dir()
+
+
+def test_atomic_write_preserves_symlink(tmp_path: Path) -> None:
+    """atomic_write should write through a symlink, not replace it."""
+    real_file = tmp_path / "real" / "settings.toml"
+    real_file.parent.mkdir()
+    real_file.write_text("original")
+
+    link = tmp_path / "link" / "settings.toml"
+    link.parent.mkdir()
+    link.symlink_to(real_file)
+
+    atomic_write(link, "updated")
+
+    assert link.is_symlink(), "symlink was replaced with a regular file"
+    assert link.resolve() == real_file.resolve()
+    assert real_file.read_text() == "updated"
+    assert link.read_text() == "updated"
+
+
+def test_atomic_write_preserves_symlink_permissions(tmp_path: Path) -> None:
+    """atomic_write through a symlink should preserve the target's permissions."""
+    real_file = tmp_path / "real.toml"
+    real_file.write_text("original")
+    os.chmod(real_file, 0o644)
+
+    link = tmp_path / "link.toml"
+    link.symlink_to(real_file)
+
+    atomic_write(link, "updated")
+
+    assert link.is_symlink()
+    actual_mode = stat.S_IMODE(real_file.stat().st_mode)
+    assert actual_mode == 0o644

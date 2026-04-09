@@ -7,10 +7,11 @@ set -euo pipefail
 # conversation review have been completed. Exits 0 if all enabled gates
 # pass, 2 if any are missing.
 #
-# Safety hatch: after 3 consecutive blocks at the same state, exits 0
-# with a warning instead of blocking forever. This prevents infinite
-# loops when the agent cannot make progress (e.g., waiting for user
-# input).
+# Safety hatch: after N consecutive blocks at the same state (default 3,
+# configurable via stop_hook.max_consecutive_blocks), exits 0 with a
+# warning instead of blocking forever. This prevents infinite loops when
+# the agent cannot make progress (e.g., waiting for user input). Set to
+# 1 for "remind once" mode.
 #
 # Usage:
 #   ./stop_hook_gates.sh [COMMIT_HASH]
@@ -58,10 +59,13 @@ HASH="${1:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 # Safety hatch: prevent infinite stop-hook loops.
 #
 # Track consecutive blocks in .reviewer/outputs/stop_hook_consecutive_blocks.
-# Each line is a commit hash from a blocked attempt. If the last 3
+# Each line is a commit hash from a blocked attempt. If the last N
 # entries are all the same hash, the agent is stuck -- let it through.
+# N defaults to 3 but is configurable via stop_hook.max_consecutive_blocks.
+# Setting it to 1 makes the hook non-binding: it reminds once, then
+# lets the agent through.
 # ---------------------------------------------------------------------------
-MAX_CONSECUTIVE_BLOCKS=3
+MAX_CONSECUTIVE_BLOCKS=$(read_json_config "$REVIEWER_SETTINGS" "stop_hook.max_consecutive_blocks" "3")
 BLOCK_TRACKER=".reviewer/outputs/stop_hook_consecutive_blocks"
 
 _count_consecutive_blocks() {
