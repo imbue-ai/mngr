@@ -109,55 +109,47 @@ def _merge_agent_type_provisioning(
 
     Returns the original options unchanged if the agent config has no provisioning fields.
     """
-    if not (
-        agent_config.extra_provision_command
-        or agent_config.upload_file
-        or agent_config.append_to_file
-        or agent_config.prepend_to_file
-        or agent_config.create_directory
-        or agent_config.env
-        or agent_config.env_file
-    ):
-        return options
+    # Parse raw strings from agent type config into typed provisioning specs.
+    # Each agent type field maps to a parser and a target field on the options sub-models.
+    _PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+        ("extra_provision_command", "extra_provision_commands", str),
+        ("upload_file", "upload_files", UploadFileSpec.from_string),
+        ("append_to_file", "append_to_files", FileModificationSpec.from_string),
+        ("prepend_to_file", "prepend_to_files", FileModificationSpec.from_string),
+        ("create_directory", "create_directories", Path),
+    )
 
-    # Parse and prepend provisioning options
-    new_provisioning = options.provisioning
-    if (
-        agent_config.extra_provision_command
-        or agent_config.upload_file
-        or agent_config.append_to_file
-        or agent_config.prepend_to_file
-        or agent_config.create_directory
-    ):
-        new_provisioning = AgentProvisioningOptions(
-            extra_provision_commands=tuple(agent_config.extra_provision_command)
-            + options.provisioning.extra_provision_commands,
-            upload_files=tuple(UploadFileSpec.from_string(s) for s in agent_config.upload_file)
-            + options.provisioning.upload_files,
-            append_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.append_to_file)
-            + options.provisioning.append_to_files,
-            prepend_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.prepend_to_file)
-            + options.provisioning.prepend_to_files,
-            create_directories=tuple(Path(s) for s in agent_config.create_directory)
-            + options.provisioning.create_directories,
-        )
+    prov_updates: dict[str, tuple[Any, ...]] = {}
+    for config_field, target_field, parser in _PROVISIONING_FIELD_MAP:
+        raw_values = agent_config.model_dump()[config_field]
+        if raw_values:
+            existing = options.provisioning.model_dump()[target_field]
+            prov_updates[target_field] = tuple(parser(s) for s in raw_values) + tuple(existing)
 
-    # Parse and prepend environment options
-    new_environment = options.environment
-    if agent_config.env or agent_config.env_file:
-        new_environment = AgentEnvironmentOptions(
-            env_vars=tuple(EnvVar.from_string(s) for s in agent_config.env) + options.environment.env_vars,
-            env_files=tuple(Path(s) for s in agent_config.env_file) + options.environment.env_files,
-        )
+    env_vars = tuple(EnvVar.from_string(s) for s in agent_config.env) if agent_config.env else ()
+    env_files = tuple(Path(s) for s in agent_config.env_file) if agent_config.env_file else ()
 
-    if new_provisioning is options.provisioning and new_environment is options.environment:
+    if not prov_updates and not env_vars and not env_files:
         return options
 
     updates: list[tuple[str, Any]] = []
-    if new_provisioning is not options.provisioning:
-        updates.append(("provisioning", new_provisioning))
-    if new_environment is not options.environment:
-        updates.append(("environment", new_environment))
+    if prov_updates:
+        updates.append(
+            (
+                "provisioning",
+                AgentProvisioningOptions(**{**options.provisioning.model_dump(), **prov_updates}),
+            )
+        )
+    if env_vars or env_files:
+        updates.append(
+            (
+                "environment",
+                AgentEnvironmentOptions(
+                    env_vars=env_vars + options.environment.env_vars,
+                    env_files=env_files + options.environment.env_files,
+                ),
+            )
+        )
     return options.model_copy_update(*updates)
 
 
