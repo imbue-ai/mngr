@@ -374,6 +374,9 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
             result = {**result, field_name: (value,)}
         elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
+        else:
+            # Unrecognized type: pass through for Pydantic to validate or reject
+            pass
     return result
 
 
