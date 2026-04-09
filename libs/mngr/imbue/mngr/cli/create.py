@@ -127,8 +127,9 @@ class _CachedAgentHostLoader(MutableModel):
 def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
     """Split an address string into the address part and an optional target path.
 
-    The format is [ADDRESS][:PATH]. The first colon separates the address from
-    the target path.
+    Uses the same first-colon splitting convention as parse_source_string,
+    but without the bare-path recognition (since the positional arg is always
+    an agent address, not a path).
 
     Examples:
       - "foo" -> ("foo", None)
@@ -138,18 +139,13 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
       - ":./rel/path" -> ("", Path("./rel/path"))
       - "foo:" -> ("foo", None)  [trailing colon with no path]
     """
+    # Same first-colon splitting as parse_source_string
     if ":" not in raw:
         return raw, None
 
-    idx = raw.index(":")
-    path_candidate = raw[idx + 1 :]
-    address_part = raw[:idx]
-
-    if not path_candidate:
-        # Trailing colon with no path (e.g. "foo:") -- treat as no path
-        return address_part, None
-
-    return address_part, Path(path_candidate)
+    address_part, path_str = raw.split(":", 1)
+    path = Path(path_str) if path_str else None
+    return address_part, path
 
 
 @pure
