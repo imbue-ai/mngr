@@ -109,6 +109,10 @@ mkdir -p /run/sshd
 # "channel open FAILED" and "no more sessions" errors during provisioning.
 # Docker and Modal providers pass -o MaxSessions=100 when starting sshd
 # directly; Lima VMs run sshd via systemd so we configure sshd_config.
+# Create /code directory for agent work directories (writable by all users).
+# Lima VMs run as a regular user, not root, so /code must be pre-created.
+mkdir -p /code && chmod 777 /code
+
 if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
     cat >> /etc/ssh/sshd_config <<SSHD_EOF
 MaxSessions 100
