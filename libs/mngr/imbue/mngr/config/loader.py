@@ -15,6 +15,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
@@ -344,17 +345,7 @@ def _parse_providers(
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: frozenset[str] = frozenset(
-    {
-        "extra_provision_command",
-        "upload_file",
-        "append_to_file",
-        "prepend_to_file",
-        "create_directory",
-        "env",
-        "env_file",
-    }
-)
+_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
