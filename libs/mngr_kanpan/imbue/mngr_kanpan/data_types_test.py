@@ -170,17 +170,17 @@ def test_kanpan_plugin_config_merge_with_columns() -> None:
 
 
 def test_kanpan_plugin_config_merge_with_column_order() -> None:
-    base = KanpanPluginConfig(column_order=["name", "state", "link"])
-    override = KanpanPluginConfig(column_order=["name", "link"])
+    base = KanpanPluginConfig(column_order=["name", "state", "ci"])
+    override = KanpanPluginConfig(column_order=["name", "ci"])
     merged = base.merge_with(override)
-    assert merged.column_order == ["name", "link"]
+    assert merged.column_order == ["name", "ci"]
 
 
 def test_kanpan_plugin_config_merge_with_column_order_none_keeps_base() -> None:
-    base = KanpanPluginConfig(column_order=["name", "state", "link"])
+    base = KanpanPluginConfig(column_order=["name", "state", "ci"])
     override = KanpanPluginConfig()
     merged = base.merge_with(override)
-    assert merged.column_order == ["name", "state", "link"]
+    assert merged.column_order == ["name", "state", "ci"]
 
 
 def test_kanpan_plugin_config_merge_with_column_override_replaces() -> None:
