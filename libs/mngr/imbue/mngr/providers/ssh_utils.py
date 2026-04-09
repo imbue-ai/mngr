@@ -160,10 +160,13 @@ def add_host_to_known_hosts(
 
         # Check if this exact entry already exists
         if entry.strip() not in existing_content:
-            # Also check if we already have an entry for this host (might be stale)
-            # and remove it before adding the new one
+            # Remove any existing entry for this host with the same key type
+            # (might be stale), but preserve entries with different key types
+            # so that multiple key types can coexist for the same host.
+            key_type = public_key.split()[0]
+            entry_prefix = f"{host_pattern} {key_type} "
             lines = existing_content.splitlines(keepends=True)
-            new_lines = [line for line in lines if not line.startswith(f"{host_pattern} ")]
+            new_lines = [line for line in lines if not line.startswith(entry_prefix)]
             new_lines.append(entry)
 
             # Rewrite the file
