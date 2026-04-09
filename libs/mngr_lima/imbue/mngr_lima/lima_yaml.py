@@ -50,16 +50,10 @@ def generate_default_lima_yaml(
         config_image_url_aarch64: Config-level override for aarch64 image URL.
         config_image_url_x86_64: Config-level override for x86_64 image URL.
     """
-    image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
+    image_url = custom_image_url or config_image_url_aarch64 or config_image_url_x86_64
     arch = _get_arch_string()
 
     config: dict = {
-        "images": [
-            {
-                "location": image_url,
-                "arch": arch,
-            },
-        ],
         "mounts": [
             {
                 "location": str(volume_host_path),
@@ -77,6 +71,9 @@ def generate_default_lima_yaml(
             },
         ],
     }
+
+    if image_url is not None:
+        config["images"] = [{"location": image_url, "arch": arch}]
 
     return config
 
