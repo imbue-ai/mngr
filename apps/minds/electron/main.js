@@ -172,6 +172,7 @@ function createWindow() {
     title: 'Minds',
     show: false,
     frame: false,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -179,13 +180,19 @@ function createWindow() {
     },
   };
 
-  // On macOS, use hiddenInset to preserve native traffic light buttons
   if (isMac) {
+    // On macOS, use hiddenInset to preserve native traffic light buttons
     delete windowOptions.frame;
     windowOptions.titleBarStyle = 'hiddenInset';
+  } else {
+    // On Linux/Windows, also set titleBarStyle to 'hidden' alongside
+    // frame:false for better compatibility with window managers that
+    // ignore frame:false (e.g. KDE Plasma with server-side decorations).
+    windowOptions.titleBarStyle = 'hidden';
   }
 
   mainWindow = new BrowserWindow(windowOptions);
+  mainWindow.removeMenu();
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
