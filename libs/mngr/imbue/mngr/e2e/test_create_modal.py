@@ -148,6 +148,7 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
     expect(result).to_succeed()
 
 
+@pytest.mark.modal
 def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
