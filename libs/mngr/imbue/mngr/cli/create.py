@@ -64,7 +64,6 @@ from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
@@ -229,6 +228,10 @@ class _CreateCommand(click.Command):
     help='Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names',
 )
 @optgroup.option("--label", multiple=True, help="Agent label KEY=VALUE [repeatable] [experimental]")
+@optgroup.option(
+    "--project",
+    help="Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name]",
+)
 @optgroup.group("Host Options")
 @optgroup.option(
     "--provider",
@@ -239,10 +242,6 @@ class _CreateCommand(click.Command):
     is_flag=True,
     default=False,
     help="Force creating a new host (requires a provider via address or --provider)",
-)
-@optgroup.option(
-    "--project",
-    help="Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name]",
 )
 @optgroup.option("--host-label", multiple=True, help="Host metadata label KEY=VALUE [repeatable]")
 @optgroup.option(
@@ -273,7 +272,7 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Automatically start offline hosts (source and target) before proceeding",
 )
-@optgroup.group("Agent Source Data (what to include in the new agent)")
+@optgroup.group("Source Data (what to include in the new agent)")
 @optgroup.option(
     "--from",
     "--source",
@@ -289,9 +288,7 @@ class _CreateCommand(click.Command):
     help="Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled]",
 )
 @optgroup.option("--rsync-args", help="Additional arguments to pass to rsync")
-@optgroup.option("--include-git/--no-include-git", default=True, show_default=True, help="Include .git directory")
-@optgroup.group("Agent Target (where to put the new agent)")
-@optgroup.option("--target", help="Target [HOST][:PATH]. Defaults to current dir if no other target args are given")
+@optgroup.group("Target (where to put the new agent)")
 @optgroup.option(
     "--target-path", help="Directory to mount source inside agent host. Incompatible with --transfer=none"
 )
@@ -306,7 +303,7 @@ class _CreateCommand(click.Command):
     "git-worktree: create a git worktree (git projects, local only). "
     "[default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git]",
 )
-@optgroup.group("Agent Git Configuration")
+@optgroup.group("Git Configuration")
 @optgroup.option(
     "--branch",
     default=f":{_DEFAULT_NEW_BRANCH_PATTERN}",
@@ -317,8 +314,6 @@ class _CreateCommand(click.Command):
     "Omit :NEW to use BASE directly without creating a branch. "
     f"Empty NEW (e.g. 'main:') defaults to {_DEFAULT_NEW_BRANCH_PATTERN}.",
 )
-@optgroup.option("--depth", type=int, help="Shallow clone depth [default: full]")
-@optgroup.option("--shallow-since", help="Shallow clone since date")
 @optgroup.option(
     "--ensure-clean/--no-ensure-clean", default=True, show_default=True, help="Abort if working tree is dirty"
 )
@@ -340,7 +335,7 @@ class _CreateCommand(click.Command):
     type=click.Path(),
     help="Base folder for git worktrees [default: ~/.mngr/worktrees/]",
 )
-@optgroup.group("Agent Environment Variables")
+@optgroup.group("Environment Variables")
 @optgroup.option("--env", multiple=True, help="Set environment variable KEY=VALUE")
 @optgroup.option(
     "--env-file",
@@ -349,7 +344,7 @@ class _CreateCommand(click.Command):
     help="Load env",
 )
 @optgroup.option("--pass-env", multiple=True, help="Forward variable from shell")
-@optgroup.group("Agent Provisioning")
+@optgroup.group("Provisioning")
 @optgroup.option("--grant", "grant", multiple=True, help="Grant a permission to the agent [repeatable]")
 @optgroup.option(
     "--extra-provision-command",
@@ -358,10 +353,6 @@ class _CreateCommand(click.Command):
     help="Run custom shell command during provisioning [repeatable]",
 )
 @optgroup.option("--upload-file", "upload_file", multiple=True, help="Upload LOCAL:REMOTE file pair [repeatable]")
-@optgroup.option("--append-to-file", "append_to_file", multiple=True, help="Append REMOTE:TEXT to file [repeatable]")
-@optgroup.option(
-    "--prepend-to-file", "prepend_to_file", multiple=True, help="Prepend REMOTE:TEXT to file [repeatable]"
-)
 @optgroup.group("New Host Environment Variables")
 @optgroup.option("--host-env", multiple=True, help="Set environment variable KEY=VALUE for host [repeatable]")
 @optgroup.option(
@@ -1280,9 +1271,6 @@ def _parse_agent_opts(
         git = AgentGitOptions(
             base_branch=base_branch or _get_current_git_branch(source_location, mngr_ctx),
             new_branch_name=new_branch_name,
-            depth=opts.depth,
-            shallow_since=opts.shallow_since,
-            is_git_synced=opts.include_git,
             is_include_unclean=is_include_unclean,
             is_include_gitignored=opts.include_gitignored,
         )
@@ -1321,8 +1309,6 @@ def _parse_agent_opts(
     provisioning = AgentProvisioningOptions(
         extra_provision_commands=opts.extra_provision_command,
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
-        append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
-        prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
     )
 
     # Parse target_path if provided

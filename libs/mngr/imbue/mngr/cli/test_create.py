@@ -820,13 +820,12 @@ ensure_clean = false
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
-                "--context",
-                str(config_dir),
                 "--template",
                 "mytemplate",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
+            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -876,8 +875,6 @@ ensure_clean = false
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
-                "--context",
-                str(config_dir),
                 "--template",
                 "mytemplate",
                 "--message",
@@ -885,6 +882,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
+            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -935,12 +933,11 @@ ensure_clean = false
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
-            "--context",
-            str(config_dir),
             "--template",
             "nonexistent",
         ],
         obj=plugin_manager,
+        env={"MNGR_PROJECT_DIR": str(mngr_dir)},
     )
 
     assert result.exit_code != 0

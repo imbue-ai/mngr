@@ -273,7 +273,6 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     e2e.write_tutorial_block("""
     # you can upload files and run custom commands during host provisioning:
     mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
-    # (--append-to-file and --prepend-to-file are also available)
     """)
     result = e2e.run(
         'mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo" --no-connect --no-ensure-clean',

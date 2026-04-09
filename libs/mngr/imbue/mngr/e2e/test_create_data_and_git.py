@@ -244,27 +244,6 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
-def test_create_with_shallow_depth(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can make a shallow clone for faster setup:
-    mngr create my-task --depth 1
-    # (--shallow-since clones since a specific date instead)
-    """)
-    expect(
-        e2e.run(
-            "mngr create my-task --depth 1 --command 'sleep 99999' --no-ensure-clean",
-            comment="you can make a shallow clone for faster setup",
-        )
-    ).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify agent appears in list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
-
-
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
 def test_create_from_another_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can clone from an existing agent's work directory:
