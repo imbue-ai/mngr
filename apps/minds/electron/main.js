@@ -207,7 +207,9 @@ function createWindow() {
 
     const css = TITLEBAR_CSS + (isMac ? TITLEBAR_CSS_MAC : '');
     mainWindow.webContents.insertCSS(css);
-    mainWindow.webContents.executeJavaScript(TITLEBAR_JS).catch(() => {});
+    mainWindow.webContents.executeJavaScript(TITLEBAR_JS).catch((err) => {
+      console.error('Failed to inject title bar JS:', err);
+    });
   });
 }
 
