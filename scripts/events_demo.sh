@@ -9,7 +9,7 @@ set -euo pipefail
 export AGENT_ID=agent-`python3 -c "from uuid import uuid4; print(uuid4().hex)"`
 
 # create the mind
-( source .env && export CLAUDE_CODE_DISABLE_FAST_MODE=1 && mkdir ~/.minds/$AGENT_ID && cd ~/.minds/$AGENT_ID && mkdir -p thinking/.mngr && cp ~/agent_repos/elena-code/instructions.txt ./instructions.txt && cp ~/agent_repos/elena-code/thinking/.mngr/settings.toml ./thinking/.mngr/settings.toml && mngr create selene --agent-id $AGENT_ID --no-connect --await-ready --agent-type claude-mind --env ROLE=thinking --label mind=true --yes --pass-env ANTHROPIC_API_KEY --in-place -- --dangerously-skip-permissions && echo " " && echo "http://127.0.0.1:8420/agents/$AGENT_ID/" && echo " " )
+( source .env && export CLAUDE_CODE_DISABLE_FAST_MODE=1 && mkdir ~/.minds/$AGENT_ID && cd ~/.minds/$AGENT_ID && mkdir -p thinking/.mngr && cp ~/agent_repos/elena-code/instructions.txt ./instructions.txt && cp ~/agent_repos/elena-code/thinking/.mngr/settings.toml ./thinking/.mngr/settings.toml && mngr create selene --agent-id $AGENT_ID --no-connect --await-ready --agent-type claude-mind --env ROLE=thinking --label mind=true --pass-env ANTHROPIC_API_KEY --in-place -- --dangerously-skip-permissions && echo " " && echo "http://127.0.0.1:8420/agents/$AGENT_ID/" && echo " " )
 
 # start a tmux session and attach to the chat via "mngr chat"
 tmux new-session -s event_demo
