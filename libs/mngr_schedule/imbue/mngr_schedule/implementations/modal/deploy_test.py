@@ -15,7 +15,7 @@ from loguru import logger
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
@@ -104,7 +104,7 @@ def test_get_repo_root_raises_outside_git_repo(
 def test_package_repo_at_commit_succeeds_with_valid_script(tmp_path: Path) -> None:
     """package_repo_at_commit should succeed when the packaging script exists."""
     repo_root = tmp_path / "repo"
-    init_git_repo_with_config(repo_root)
+    init_git_repo(repo_root)
 
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir()
@@ -129,7 +129,7 @@ def test_package_repo_at_commit_succeeds_with_valid_script(tmp_path: Path) -> No
 def test_package_repo_at_commit_raises_when_script_fails(tmp_path: Path) -> None:
     """package_repo_at_commit should raise when the packaging script exits non-zero."""
     repo_root = tmp_path / "repo"
-    init_git_repo_with_config(repo_root)
+    init_git_repo(repo_root)
 
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir()

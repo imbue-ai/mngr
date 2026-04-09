@@ -1,15 +1,15 @@
 [project]
 name = "modal-proxy"
-version = "0.1.3"
+version = "0.1.4"
 description = "Abstraction layer over Modal SDK for mngr: supports direct, testing, and remote modes"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "concurrency-group==0.1.11",
-    "imbue-common==0.1.11",
-    "imbue-mngr==0.2.2",
+    "concurrency-group==0.1.12",
+    "imbue-common==0.1.12",
+    "imbue-mngr==0.2.3",
     "modal==1.3.1",
-    "resource-guards==0.1.2",
+    "resource-guards==0.1.3",
 ]
 
 [build-system]

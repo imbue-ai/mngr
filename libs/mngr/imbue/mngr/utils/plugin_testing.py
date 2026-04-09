@@ -27,6 +27,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
@@ -107,22 +108,21 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 
 @pytest.fixture
-def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME so git commands work.
+def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git and provide user config for tests that run git commands.
 
-    Use this fixture for any test that runs git commands.
-    The temp_git_repo fixture depends on this, so you don't need both.
+    Sets GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT, and GIT_CONFIG_GLOBAL
+    via the shared isolate_git() helper. Tests that need git should request
+    this fixture (or temp_git_repo, which depends on it).
     """
-    gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n")
+    with isolate_git(monkeypatch):
+        yield
 
 
 @pytest.fixture
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit."""
     repo_dir = tmp_path / "git_repo"
-    repo_dir.mkdir()
     init_git_repo(repo_dir)
     return repo_dir
 

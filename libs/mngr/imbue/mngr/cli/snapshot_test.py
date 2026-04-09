@@ -45,9 +45,6 @@ def test_snapshot_create_cli_options_fields() -> None:
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )
@@ -72,9 +69,6 @@ def test_snapshot_list_cli_options_fields() -> None:
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )
@@ -96,9 +90,6 @@ def test_snapshot_destroy_cli_options_fields() -> None:
         verbose=0,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )
@@ -253,9 +244,6 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
         verbose=1,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )
@@ -279,9 +267,6 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
         verbose=2,
         log_file=None,
         log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
         plugin=(),
         disable_plugin=(),
     )

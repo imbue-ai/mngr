@@ -5,6 +5,7 @@ from imbue.mngr.cli.connect import _build_connection_options
 from imbue.mngr.cli.connect import build_status_text
 from imbue.mngr.cli.connect import filter_agents
 from imbue.mngr.cli.connect import handle_search_key
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -18,8 +19,6 @@ def _make_connect_opts(
     agent: str | None = "my-agent",
     start: bool = True,
     reconnect: bool = True,
-    retry: int = 3,
-    retry_delay: str = "5s",
     attach_command: str | None = None,
     allow_unknown_host: bool = False,
     output_format: str = "human",
@@ -27,9 +26,6 @@ def _make_connect_opts(
     verbose: int = 0,
     log_file: str | None = None,
     log_commands: bool | None = None,
-    log_command_output: bool | None = None,
-    log_env_vars: bool | None = None,
-    project_context_path: str | None = None,
     plugin: tuple[str, ...] = (),
     disable_plugin: tuple[str, ...] = (),
 ) -> ConnectCliOptions:
@@ -38,8 +34,6 @@ def _make_connect_opts(
         agent=agent,
         start=start,
         reconnect=reconnect,
-        retry=retry,
-        retry_delay=retry_delay,
         attach_command=attach_command,
         allow_unknown_host=allow_unknown_host,
         output_format=output_format,
@@ -47,9 +41,6 @@ def _make_connect_opts(
         verbose=verbose,
         log_file=log_file,
         log_commands=log_commands,
-        log_command_output=log_command_output,
-        log_env_vars=log_env_vars,
-        project_context_path=project_context_path,
         plugin=plugin,
         disable_plugin=disable_plugin,
     )
@@ -66,7 +57,6 @@ def test_connect_cli_options_can_be_instantiated() -> None:
     assert opts.agent == "my-agent"
     assert opts.start is True
     assert opts.reconnect is True
-    assert opts.retry == 3
 
 
 # =============================================================================
@@ -207,30 +197,28 @@ def test_handle_search_key_printable_but_no_character() -> None:
 # =============================================================================
 
 
-def test_build_connection_options_default_values() -> None:
-    """_build_connection_options should create ConnectionOptions from CLI options."""
+def test_build_connection_options_default_values(temp_mngr_ctx: MngrContext) -> None:
+    """_build_connection_options should create ConnectionOptions from CLI options and config."""
     opts = _make_connect_opts()
-    conn_opts = _build_connection_options(opts)
+    conn_opts = _build_connection_options(opts, temp_mngr_ctx)
     assert conn_opts.is_reconnect is True
-    assert conn_opts.retry_count == 3
-    assert conn_opts.retry_delay == "5s"
+    assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
+    assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
     assert conn_opts.attach_command is None
     assert conn_opts.is_unknown_host_allowed is False
 
 
-def test_build_connection_options_custom_values() -> None:
+def test_build_connection_options_custom_values(temp_mngr_ctx: MngrContext) -> None:
     """_build_connection_options should map custom CLI values correctly."""
     opts = _make_connect_opts(
         reconnect=False,
-        retry=5,
-        retry_delay="10s",
         attach_command="ssh user@host",
         allow_unknown_host=True,
     )
-    conn_opts = _build_connection_options(opts)
+    conn_opts = _build_connection_options(opts, temp_mngr_ctx)
     assert conn_opts.is_reconnect is False
-    assert conn_opts.retry_count == 5
-    assert conn_opts.retry_delay == "10s"
+    assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
+    assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
     assert conn_opts.attach_command == "ssh user@host"
     assert conn_opts.is_unknown_host_allowed is True
 

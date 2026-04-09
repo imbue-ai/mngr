@@ -98,8 +98,13 @@ def check_global_keyword(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_GLOBAL_KEYWORD, source_dir, max_count)
 
 
-def check_bare_print(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_BARE_PRINT, source_dir, max_count)
+def check_bare_print(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    chunks = check_ratchet_rule(PREVENT_BARE_PRINT, source_dir, _SELF_EXCLUSION + excluded_patterns)
+    assert len(chunks) <= max_count, PREVENT_BARE_PRINT.format_failure(chunks)
 
 
 # --- Exception handling ---

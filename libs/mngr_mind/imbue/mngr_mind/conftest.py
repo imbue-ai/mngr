@@ -13,7 +13,7 @@ import pytest
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_mind import event_watcher as event_watcher_module
 
 register_plugin_test_fixtures(globals())
@@ -143,7 +143,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
     """Create a temporary git repo with an initial commit and local git config."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    init_git_repo_with_config(repo_dir)
+    init_git_repo(repo_dir)
     return repo_dir
 
 
