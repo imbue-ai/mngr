@@ -33,6 +33,26 @@ def has_interactive_terminal(
         return False
 
 
+def resolve_real_tty_path() -> str:
+    """Return the path to the real pty device for the controlling terminal.
+
+    macOS kqueue does not support EVFILT_READ on ``/dev/tty`` (the virtual
+    controlling-terminal device), returning EINVAL.  It *does* work on the
+    actual pty device (e.g. ``/dev/ttys003``).  This function resolves the
+    real device path by inspecting stdout/stderr, falling back to
+    ``/dev/tty`` when no real path can be determined (which still works on
+    Linux where epoll is used instead of kqueue).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            fd = stream.fileno()
+            if os.isatty(fd):
+                return os.ttyname(fd)
+        except (OSError, ValueError):
+            continue
+    return "/dev/tty"
+
+
 @contextmanager
 def create_urwid_screen_preserving_terminal() -> Generator[Screen, None, None]:
     """Create a urwid Screen that preserves terminal settings on exit.
@@ -43,11 +63,11 @@ def create_urwid_screen_preserving_terminal() -> Generator[Screen, None, None]:
     session. This context manager saves terminal settings before the Screen
     is created and restores them in a finally block.
 
-    When sys.stdin is not a tty (e.g. piped through ``uv run``), the
-    Screen reads input from /dev/tty instead so the TUI still works as
+    When sys.stdin is not a tty (e.g. piped through ``curl | bash``), the
+    Screen reads input from the real pty device so the TUI still works as
     long as a controlling terminal exists.
     """
-    tty_source = open("/dev/tty") if not sys.stdin.isatty() else nullcontext(sys.stdin)
+    tty_source = open(resolve_real_tty_path()) if not sys.stdin.isatty() else nullcontext(sys.stdin)
     with tty_source as tty_input:
         saved_tty_attrs = termios.tcgetattr(tty_input)
         screen = Screen(input=tty_input)

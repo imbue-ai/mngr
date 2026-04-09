@@ -1232,16 +1232,13 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - You can use Python-style list slicing for list fields (e.g., `host.snapshots[0]` for the first snapshot, `host.snapshots[:3]` for the first 3)
 """,
         ),
-        (
-            "Related Documentation",
-            """- [Multi-target Options](../generic/multi_target.md) - Behavior when some agents cannot be accessed
-- [Common Options](../generic/common.md) - Common CLI options for output format, logging, etc.""",
-        ),
     ),
     see_also=(
         ("create", "Create a new agent"),
         ("connect", "Connect to an existing agent"),
         ("destroy", "Destroy agents"),
+        ("multi_target", "Behavior when some agents cannot be accessed"),
+        ("common", "Common CLI options for output format, logging, etc."),
     ),
 ).register()
 

@@ -8,8 +8,10 @@ Both commands and topics support aliases (e.g., ``mngr help c`` for create,
 ``mngr help addr`` for address).
 """
 
+import re
 import sys
 from io import StringIO
+from pathlib import Path
 
 import click
 from pydantic import Field
@@ -43,6 +45,11 @@ class TopicHelpPage(FrozenModel):
     see_also: tuple[tuple[str, str], ...] = Field(
         default=(), description="See Also references as (name, description) tuples"
     )
+    docs_path: str | None = Field(
+        default=None,
+        description="Path to the source doc file relative to the docs root (e.g., 'concepts/idle_detection.md'). "
+        "Used by the doc generator to create correct relative links.",
+    )
 
     def register(self) -> None:
         """Register this topic page in the global topic registry."""
@@ -64,6 +71,75 @@ def get_topic(name: str) -> TopicHelpPage | None:
 def get_all_topics() -> dict[str, TopicHelpPage]:
     """Return a copy of the topic registry."""
     return dict(_topic_registry)
+
+
+# =============================================================================
+# Doc-based topic registration
+# =============================================================================
+
+# Docs root relative to this file:
+# this file: libs/mngr/imbue/mngr/cli/help.py
+# docs root: libs/mngr/docs/
+_DOCS_ROOT = Path(__file__).resolve().parents[3] / "docs"
+
+# Directories containing topic documentation, mapped to their path prefix
+# relative to the docs root.
+_TOPIC_DOC_DIRECTORIES: tuple[tuple[str, Path], ...] = (
+    ("commands/generic", _DOCS_ROOT / "commands" / "generic"),
+    ("concepts", _DOCS_ROOT / "concepts"),
+)
+
+
+def _extract_first_heading(content: str) -> str:
+    """Extract the text of the first markdown heading from content."""
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            # Remove [future] tags
+            title = re.sub(r"\s*\[future\]", "", title)
+            return title
+    return ""
+
+
+def _strip_first_heading(content: str) -> str:
+    """Strip the first markdown heading and any trailing blank lines after it."""
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip().startswith("#"):
+            remaining = lines[i + 1 :]
+            while remaining and not remaining[0].strip():
+                remaining.pop(0)
+            return "\n".join(remaining)
+    return content
+
+
+def _register_docs_topics() -> None:
+    """Register topic pages from markdown documentation files.
+
+    Scans the generic/ and concepts/ doc directories, and creates a
+    TopicHelpPage for each .md file found. The topic key is the filename
+    stem (e.g., ``multi_target`` from ``multi_target.md``).
+    """
+    for path_prefix, directory in _TOPIC_DOC_DIRECTORIES:
+        if not directory.exists():
+            continue
+        for md_file in sorted(directory.glob("*.md")):
+            key = md_file.stem
+            if key in _topic_registry:
+                continue
+            raw_content = md_file.read_text()
+            title = _extract_first_heading(raw_content)
+            body = _strip_first_heading(raw_content)
+            TopicHelpPage(
+                key=key,
+                one_line_description=title,
+                content=body,
+                docs_path=f"{path_prefix}/{md_file.name}",
+            ).register()
+
+
+_register_docs_topics()
 
 
 # =============================================================================
@@ -270,42 +346,6 @@ def help_command(ctx: click.Context, topic: tuple[str, ...]) -> None:
     ctx.exit(1)
 
 
-# === Help metadata for the help command itself ===
-
-CommandHelpMetadata(
-    key="help",
-    one_line_description="Show help for a command or topic",
-    synopsis="mngr help [<command> | <topic>]",
-    description="""Show help for a mngr command or topic. Without arguments, lists all
-available commands and help topics.
-
-For commands, 'mngr help <command>' is equivalent to 'mngr <command> --help'.
-Command aliases are supported (e.g., 'mngr help c' shows help for 'create').
-
-For subcommands, specify the full command path (e.g., 'mngr help snapshot create').
-
-Help topics provide documentation on concepts that span multiple commands,
-such as agent address format.""",
-    additional_sections=(
-        (
-            "Available Topics",
-            "| Topic | Aliases | Description |\n"
-            "| ----- | ------- | ----------- |\n"
-            "| `address` | `addr` | Agent address syntax for targeting agents and hosts |",
-        ),
-    ),
-    examples=(
-        ("Show help for the create command", "mngr help create"),
-        ("Show help using a command alias", "mngr help c"),
-        ("Show help for a subcommand", "mngr help snapshot create"),
-        ("Show the address format topic", "mngr help address"),
-        ("List all commands and topics", "mngr help"),
-    ),
-).register()
-
-add_pager_help_option(help_command)
-
-
 # =============================================================================
 # Topic page definitions
 # =============================================================================
@@ -383,3 +423,53 @@ EXAMPLES
         ("connect", "Connect to an existing agent"),
     ),
 ).register()
+
+
+# =============================================================================
+# Help metadata for the help command itself
+# =============================================================================
+
+
+def _build_available_topics_section() -> str:
+    """Build the Available Topics section content from the topic registry.
+
+    Uses a bullet-list format that renders well in both terminal (indented
+    by the help formatter) and markdown (in generated docs).
+    """
+    all_topics = get_all_topics()
+    if not all_topics:
+        return ""
+    lines: list[str] = []
+    for key, topic in sorted(all_topics.items()):
+        name_str = key
+        if topic.aliases:
+            name_str += f" ({', '.join(topic.aliases)})"
+        lines.append(f"- {name_str} - {topic.one_line_description}")
+    return "\n".join(lines)
+
+
+CommandHelpMetadata(
+    key="help",
+    one_line_description="Show help for a command or topic",
+    synopsis="mngr help [<command> | <topic>]",
+    description="""Show help for a mngr command or topic. Without arguments, lists all
+available commands and help topics.
+
+For commands, 'mngr help <command>' is equivalent to 'mngr <command> --help'.
+Command aliases are supported (e.g., 'mngr help c' shows help for 'create').
+
+For subcommands, specify the full command path (e.g., 'mngr help snapshot create').
+
+Help topics provide documentation on concepts that span multiple commands,
+such as agent address format.""",
+    additional_sections=(("Available Topics", _build_available_topics_section()),),
+    examples=(
+        ("Show help for the create command", "mngr help create"),
+        ("Show help using a command alias", "mngr help c"),
+        ("Show help for a subcommand", "mngr help snapshot create"),
+        ("Show the address format topic", "mngr help address"),
+        ("List all commands and topics", "mngr help"),
+    ),
+).register()
+
+add_pager_help_option(help_command)

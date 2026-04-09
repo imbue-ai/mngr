@@ -23,7 +23,7 @@ def _build_create_args(
     supplied ``--`` and, if so, re-insert it at the correct position so that
     downstream commands (e.g. ``create``) see it.
     """
-    prefix = ["--from-agent", source_agent]
+    prefix = ["--from", source_agent]
 
     if "--" not in original_argv:
         return prefix + remaining
@@ -106,7 +106,7 @@ def _reject_source_agent_options(
     ctx: click.Context,
     before_dd: int | None = None,
 ) -> None:
-    """Raise an error if --from-agent or --source-agent appears before ``--``.
+    """Raise an error if --from or --source appears before ``--``.
 
     *before_dd* is the number of items in *args* that precede the ``--``
     separator.  When ``None`` (no ``--`` was present), all items are checked.
@@ -114,7 +114,7 @@ def _reject_source_agent_options(
     check = args if before_dd is None else args[:before_dd]
     for arg in check:
         # Check exact match and --opt=value forms
-        if arg in ("--from-agent", "--source-agent") or arg.startswith(("--from-agent=", "--source-agent=")):
+        if arg in ("--from", "--source") or arg.startswith(("--from=", "--source=")):
             raise click.UsageError(
                 f"Cannot use {arg.split('=')[0]} with {ctx.info_name}. "
                 "The source agent is specified as the first positional argument.",
@@ -126,7 +126,7 @@ CommandHelpMetadata(
     key="clone",
     one_line_description="Create a new agent by cloning an existing one [experimental]",
     synopsis="mngr clone <SOURCE_AGENT> [<AGENT_NAME>] [create-options...]",
-    description="""This is a convenience wrapper around `mngr create --from-agent <source>`.
+    description="""This is a convenience wrapper around `mngr create --from <source>`.
 The first argument is the source agent to clone from. An optional second
 positional argument sets the new agent's name. All remaining arguments are
 passed through to the create command.""",
