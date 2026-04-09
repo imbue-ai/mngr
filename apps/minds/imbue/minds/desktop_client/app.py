@@ -1,8 +1,10 @@
 import asyncio
+import html as html_module
 import json
 import os
 import queue
 import socket as socket_module
+import urllib.parse
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -86,7 +88,7 @@ body {{
   <div class="spinner"></div>
   <p>Discovering agents...</p>
 </div>
-<script>setTimeout(function() {{ location.href = '/?_discovery_wait={next_wait}'; }}, 1500);</script>
+<script>setTimeout(function() {{ location.href = '{redirect_url}'; }}, 1500);</script>
 </body>
 </html>"""
 
@@ -327,8 +329,19 @@ def _handle_landing_page(
     except ValueError:
         discovery_wait = 0
     if discovery_wait < 3:
+        # Preserve existing query params (git_url, branch, etc.) through the
+        # redirect chain so they are available when the create form is shown.
+        preserved_params: dict[str, str] = {
+            k: v
+            for k, v in request.query_params.items()
+            if k != "_discovery_wait"
+        }
+        preserved_params["_discovery_wait"] = str(discovery_wait + 1)
+        redirect_url = "/?" + urllib.parse.urlencode(preserved_params)
         return HTMLResponse(
-            content=_DISCOVERY_LOADING_HTML.format(next_wait=discovery_wait + 1),
+            content=_DISCOVERY_LOADING_HTML.format(
+                redirect_url=html_module.escape(redirect_url),
+            ),
         )
 
     # After retries, no agents found: show the create form

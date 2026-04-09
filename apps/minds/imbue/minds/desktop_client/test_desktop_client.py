@@ -955,6 +955,24 @@ def test_landing_page_shows_discovery_loading_when_no_agents_yet(tmp_path: Path)
     assert "Discovering agents" in response.text
 
 
+def test_landing_page_discovery_preserves_query_params(tmp_path: Path) -> None:
+    """The discovery loading page preserves git_url and branch params in the redirect URL."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/", params={"git_url": "https://example.com/repo.git", "branch": "main"})
+    assert response.status_code == 200
+    assert "Discovering agents" in response.text
+    # The redirect URL should include the original query params
+    assert "git_url=" in response.text
+    assert "branch=main" in response.text
+
+
 def test_landing_page_shows_create_form_after_discovery_retries(tmp_path: Path) -> None:
     """After discovery retries complete with no agents, the create form is shown."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
