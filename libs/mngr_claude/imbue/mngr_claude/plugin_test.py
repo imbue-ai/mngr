@@ -2167,6 +2167,21 @@ def test_get_files_for_deploy_includes_credentials(temp_mngr_ctx: MngrContext, t
     assert result[Path("~/.claude/.credentials.json")] == credentials
 
 
+def test_get_files_for_deploy_includes_keybindings(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """get_files_for_deploy includes ~/.claude/keybindings.json when it exists."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    keybindings = claude_dir / "keybindings.json"
+    keybindings.write_text('{"bindings": []}')
+
+    result = get_files_for_deploy(
+        mngr_ctx=temp_mngr_ctx, include_user_settings=True, include_project_settings=False, repo_root=tmp_path
+    )
+
+    assert Path("~/.claude/keybindings.json") in result
+    assert result[Path("~/.claude/keybindings.json")] == keybindings
+
+
 # =============================================================================
 # Version Pinning Tests
 # =============================================================================
@@ -2688,8 +2703,8 @@ def test_rewrite_installed_plugins_paths_handles_multiple_plugins() -> None:
     assert result["plugins"]["plugin-b@org-b"][0]["installPath"] == "/remote/config/plugins/cache/org-b/plugin-b/2.0.0"
 
 
-def test_rewrite_installed_plugins_paths_best_effort_for_non_matching_prefix() -> None:
-    """installPath not under source_claude_dir is rewritten best-effort via /plugins/ marker."""
+def test_rewrite_installed_plugins_paths_rewrites_non_matching_prefix_best_effort() -> None:
+    """installPath values that don't start with the expected prefix are rewritten best-effort."""
     local_claude_dir = Path("/Users/testuser/.claude")
     remote_config_dir = Path("/remote/config")
     content = json.dumps(
@@ -2707,11 +2722,8 @@ def test_rewrite_installed_plugins_paths_best_effort_for_non_matching_prefix() -
     )
 
     result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
-
-    assert (
-        result["plugins"]["other-plugin@other-org"][0]["installPath"]
-        == "/remote/config/plugins/cache/other-org/other-plugin/1.0.0"
-    )
+    entry = result["plugins"]["other-plugin@other-org"][0]
+    assert entry["installPath"] == "/remote/config/plugins/cache/other-org/other-plugin/1.0.0"
 
 
 def test_rewrite_installed_plugins_paths_preserves_other_fields() -> None:
@@ -2757,8 +2769,8 @@ def test_rewrite_installed_plugins_paths_handles_empty_plugins() -> None:
     assert result["plugins"] == {}
 
 
-def test_rewrite_installed_plugins_paths_best_effort_for_similar_prefix() -> None:
-    """A path like /Users/testuser/.claude2/ is rewritten best-effort via /plugins/ marker."""
+def test_rewrite_installed_plugins_paths_rewrites_similar_prefix_best_effort() -> None:
+    """A path like /Users/testuser/.claude2/ is rewritten best-effort via the plugins/ marker."""
     local_claude_dir = Path("/Users/testuser/.claude")
     remote_config_dir = Path("/remote/config")
     content = json.dumps(
@@ -2776,8 +2788,8 @@ def test_rewrite_installed_plugins_paths_best_effort_for_similar_prefix() -> Non
     )
 
     result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
-
-    assert result["plugins"]["plugin@org"][0]["installPath"] == "/remote/config/plugins/cache/org/plugin/1.0.0"
+    entry = result["plugins"]["plugin@org"][0]
+    assert entry["installPath"] == "/remote/config/plugins/cache/org/plugin/1.0.0"
 
 
 def test_rewrite_installed_plugins_paths_best_effort_for_mngr_agent_path() -> None:
