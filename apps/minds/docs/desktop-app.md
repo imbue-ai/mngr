@@ -112,8 +112,7 @@ apps/minds/
     paths.js                # Platform-aware path resolution
     env-setup.js            # uv sync runner with progress reporting
     backend.js              # Python backend process manager
-    loading.html            # Loading/setup screen
-    error.html              # Error screen with retry
+    shell.html              # App shell (title bar, loading, error, and content iframe)
     assets/
       icon.svg              # App icon (SVG source)
       icon.png              # App icon (PNG for Electron)
