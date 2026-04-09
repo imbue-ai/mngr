@@ -18,21 +18,21 @@ path = resolve_real_tty_path()
 print(f"resolved_tty_path={path}")
 
 tty_file = open(path)
-
-rd, wr = socket.socketpair()
-rd.setblocking(False)
-
-sel = selectors.DefaultSelector()
 try:
-    sel.register(rd, selectors.EVENT_READ)
-    sel.register(tty_file, selectors.EVENT_READ)
-    print("kqueue_register=OK")
-except OSError as e:
-    print(f"kqueue_register=FAILED: {e}")
+    rd, wr = socket.socketpair()
+    rd.setblocking(False)
+    sel = selectors.DefaultSelector()
+    try:
+        sel.register(rd, selectors.EVENT_READ)
+        sel.register(tty_file, selectors.EVENT_READ)
+        print("kqueue_register=OK")
+    except OSError as e:
+        print(f"kqueue_register=FAILED: {e}")
+    finally:
+        sel.close()
+        rd.close()
+        wr.close()
 finally:
-    sel.close()
-    rd.close()
-    wr.close()
     tty_file.close()
 
 print("URWID_TTY_TEST_DONE")
