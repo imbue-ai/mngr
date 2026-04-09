@@ -538,72 +538,13 @@ def apply_create_template(
         for param_name, template_value in template.options.items():
             if template_value is None:
                 continue
-            # target_path is not a Click parameter; it's handled separately below
-            if param_name == "target_path":
-                continue
             if param_name not in params:
                 continue
             source = ctx.get_parameter_source(param_name)
             if source == ParameterSource.DEFAULT:
                 updated_params[param_name] = template_value
 
-    # Handle target_path from templates: append :PATH to the positional_name
-    # (or name) parameter. Templates specify target_path as a separate field,
-    # which gets converted to a :PATH suffix on the address. Only applies if
-    # the user hasn't already specified a target path in their address.
-    template_target_path = _extract_template_target_path(template_names, config)
-    if template_target_path is not None:
-        updated_params = _apply_template_target_path(ctx, updated_params, template_target_path)
-
     return updated_params
-
-
-def _extract_template_target_path(
-    template_names: tuple[str, ...],
-    config: MngrConfig,
-) -> str | None:
-    """Extract the effective target_path from stacked templates (last one wins)."""
-    result: str | None = None
-    for template_name in template_names:
-        template_key = CreateTemplateName(template_name)
-        if template_key in config.create_templates:
-            tp = config.create_templates[template_key].options.get("target_path")
-            if tp is not None:
-                result = tp
-    return result
-
-
-def _apply_template_target_path(
-    ctx: click.Context,
-    params: dict[str, Any],
-    target_path: str,
-) -> dict[str, Any]:
-    """Append :PATH to the address parameter from a template's target_path.
-
-    Skips if the user's address already contains a :PATH suffix. Otherwise,
-    appends :PATH to whichever name parameter is active (positional_name,
-    --name, or creates a new positional_name with just the path).
-    """
-    updated = params.copy()
-
-    # Determine which name parameter to modify
-    name_source = ctx.get_parameter_source("positional_name")
-    if name_source == ParameterSource.COMMANDLINE:
-        # User explicitly provided a positional name; append :path to it
-        # only if it doesn't already contain a :path
-        current = updated.get("positional_name") or ""
-        if ":" not in current:
-            updated["positional_name"] = f"{current}:{target_path}"
-    elif ctx.get_parameter_source("name") == ParameterSource.COMMANDLINE:
-        # User used --name; append :path to it only if no : already
-        current = updated.get("name") or ""
-        if ":" not in current:
-            updated["name"] = f"{current}:{target_path}"
-    else:
-        # Neither positional nor --name set by user; set positional_name
-        updated["positional_name"] = f":{target_path}"
-
-    return updated
 
 
 def is_param_explicit(ctx: click.Context, param_name: str) -> bool:

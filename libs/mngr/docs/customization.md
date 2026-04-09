@@ -99,7 +99,6 @@ Templates provide named presets of create command arguments that can be quickly 
 - When templates overlap on the same parameter, later templates override earlier ones
 - CLI arguments still take precedence over all template values
 - Templates from multiple config files with the same name are merged (later configs override earlier ones)
-- `target_path` is a special template field: it sets the target working directory path, equivalent to using the `:PATH` suffix in the agent address (e.g., `mngr create my-agent@.modal:/root/workspace`). If the user's address already includes a `:PATH`, the template value is ignored.
 
 **Example:**
 

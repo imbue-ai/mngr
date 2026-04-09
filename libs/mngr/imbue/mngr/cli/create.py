@@ -322,6 +322,10 @@ class _CreateCommand(click.Command):
 @optgroup.group("Agent Target (where to put the new agent)")
 @optgroup.option("--target", help="Target [HOST][:PATH]. Defaults to current dir if no other target args are given")
 @optgroup.option(
+    "--target-path",
+    help="Directory to mount source inside agent host (alternative to :PATH in address). Incompatible with --transfer=none",
+)
+@optgroup.option(
     "--transfer",
     type=click.Choice(["none", "rsync", "git-mirror", "git-worktree"], case_sensitive=False),
     default=None,
@@ -498,6 +502,17 @@ def create(ctx: click.Context, **kwargs) -> None:
                 address = address.model_copy_update(
                     to_update(address.field_ref().provider_name, flag_provider),
                 )
+
+        # Merge --target-path flag into the address (alternative to :PATH in the address).
+        if opts.target_path:
+            flag_target_path = Path(opts.target_path)
+            if target_path is not None and target_path != flag_target_path:
+                raise UserInputError(
+                    f"Conflicting target paths: address has '{target_path}' "
+                    f"but --target-path is '{flag_target_path}'. Use one or the other."
+                )
+            if target_path is None:
+                target_path = flag_target_path
 
         # Apply --yes flag to auto-approve prompts (e.g., skill installation)
         if opts.yes:

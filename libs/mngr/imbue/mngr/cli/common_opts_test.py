@@ -551,53 +551,6 @@ def test_apply_create_template_skips_unknown_params(mngr_test_prefix: str) -> No
     assert "nonexistent_param" not in result
 
 
-def test_apply_create_template_target_path_appends_to_positional_name(mngr_test_prefix: str) -> None:
-    """apply_create_template should convert target_path to :PATH suffix on positional_name."""
-    ctx = _make_click_context(
-        params={"template": ("modal",), "positional_name": None, "name": None},
-    )
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("modal"): CreateTemplate(options={"target_path": "/root/workspace"}),
-        },
-    )
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["positional_name"] == ":/root/workspace"
-
-
-def test_apply_create_template_target_path_appends_to_cli_positional_name(mngr_test_prefix: str) -> None:
-    """apply_create_template should append :PATH to user-specified positional_name."""
-    ctx = _make_click_context(
-        params={"template": ("modal",), "positional_name": "my-agent", "name": None},
-        source_by_param_name={"positional_name": ParameterSource.COMMANDLINE},
-    )
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("modal"): CreateTemplate(options={"target_path": "/root/workspace"}),
-        },
-    )
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["positional_name"] == "my-agent:/root/workspace"
-
-
-def test_apply_create_template_target_path_skipped_when_address_has_path(mngr_test_prefix: str) -> None:
-    """apply_create_template should not override a :PATH already in the address."""
-    ctx = _make_click_context(
-        params={"template": ("modal",), "positional_name": "my-agent:/custom/path", "name": None},
-        source_by_param_name={"positional_name": ParameterSource.COMMANDLINE},
-    )
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("modal"): CreateTemplate(options={"target_path": "/root/workspace"}),
-        },
-    )
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["positional_name"] == "my-agent:/custom/path"
-
-
 # =============================================================================
 # Tests for _split_known_and_plugin_params
 # =============================================================================

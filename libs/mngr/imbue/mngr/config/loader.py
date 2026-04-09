@@ -538,16 +538,6 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     return commands
 
 
-_TEMPLATE_EXTRA_FIELDS: frozenset[str] = frozenset(
-    {
-        # target_path is specified via the address :PATH suffix, but templates
-        # support it as a separate field. apply_create_template converts it by
-        # appending :PATH to the positional_name parameter.
-        "target_path",
-    }
-)
-
-
 def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[CreateTemplateName, CreateTemplate]:
     """Parse create templates from config.
 
@@ -559,14 +549,13 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     templates: dict[CreateTemplateName, CreateTemplate] = {}
-    valid_fields = set(CreateCliOptions.model_fields) | _TEMPLATE_EXTRA_FIELDS
 
     for template_name, raw_options in raw_templates.items():
         # make sure the options don't define anything that cannot be handled:
         for field in raw_options.keys():
-            if field not in valid_fields:
+            if field not in CreateCliOptions.model_fields:
                 raise ConfigParseError(
-                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(valid_fields)}"
+                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
                 )
         # fine, add the template
         templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
