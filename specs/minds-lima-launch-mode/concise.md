@@ -14,7 +14,7 @@
 * Selecting "lima" and submitting the form creates an agent inside a Lima VM, using the address format `agent_name@agent_name-host.lima`
 * The API endpoint `POST /api/create-agent` accepts `"launch_mode": "LIMA"` in the JSON body
 * The resulting `mngr create` command uses `--template main --new-host --template lima`, analogous to how Docker uses `--template main --new-host --template docker`
-* The lima template in the forever-claude-template configures: `provider = "lima"`, `target_path = "/code/"`, `idle_timeout = "2147483647"`, and default start args `--cpus=2 --memory=4GiB --disk=5GiB`
+* The lima template in the forever-claude-template configures: `provider = "lima"`, `target_path = "/code/"`, `idle_timeout = "2147483647"`, and default start args `--cpus=2 --memory=4 --disk=5`
 * The `CLOUD` launch mode remains unimplemented (raises `NotImplementedError`)
 
 ## Changes
