@@ -239,6 +239,7 @@ class LimaProviderInstance(BaseProviderInstance):
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
             known_hosts_path=self._known_hosts_path,
+            ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
 
@@ -253,21 +254,27 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan the SSH host key and add it to known_hosts."""
+        """Scan SSH host keys and add all of them to known_hosts.
+
+        ssh-keyscan returns multiple key types (rsa, ed25519, ecdsa). We add
+        all of them because paramiko may negotiate any key type during the SSH
+        handshake, and a mismatch causes a connection failure.
+        """
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-p", str(port), hostname],
             timeout=10.0,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Parse the first key line from ssh-keyscan output
+            added_any = False
             for line in result.stdout.strip().splitlines():
                 if line and not line.startswith("#"):
-                    # Extract just the key type and key data
                     parts = line.split(None, 2)
                     if len(parts) >= 3:
                         key_type_and_data = f"{parts[1]} {parts[2]}"
                         add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        return
+                        added_any = True
+            if added_any:
+                return
         logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:

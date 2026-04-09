@@ -9,13 +9,13 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 # Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
-# Default image URLs for the pre-built mngr Lima image (Ubuntu LTS with mngr deps)
-# These are hosted on GitHub Releases and downloaded on first use.
+# Default image URLs for Lima VMs (Ubuntu 24.04 LTS cloud images).
+# The cloud-init provisioning script installs any missing mngr dependencies.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://github.com/imbue-ai/mngr/releases/download/lima-image-v0.1.0/mngr-lima-aarch64.qcow2"
+    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://github.com/imbue-ai/mngr/releases/download/lima-image-v0.1.0/mngr-lima-x86_64.qcow2"
+    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
 )
 
 # Default host directory inside the VM

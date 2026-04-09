@@ -208,7 +208,13 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     raise MngrError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 
-def create_pyinfra_host(hostname: str, port: int, private_key_path: Path, known_hosts_path: Path) -> PyinfraHost:
+def create_pyinfra_host(
+    hostname: str,
+    port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    ssh_user: str = "root",
+) -> PyinfraHost:
     """Create a pyinfra host with SSH connector.
 
     Clears pyinfra's memoized known_hosts cache to ensure fresh reads,
@@ -217,7 +223,7 @@ def create_pyinfra_host(hostname: str, port: int, private_key_path: Path, known_
     get_host_keys.cache.clear()
 
     host_data = {
-        "ssh_user": "root",
+        "ssh_user": ssh_user,
         "ssh_port": port,
         "ssh_key": str(private_key_path),
         "ssh_known_hosts_file": str(known_hosts_path),
