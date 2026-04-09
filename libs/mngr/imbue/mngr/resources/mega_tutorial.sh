@@ -173,7 +173,7 @@ mngr create my-task --provider docker -s "--gpus all"
 # these args are passed to "docker run", whereas the build args are passed to "docker build".
 
 # you can specify the target path where the agent's work directory will be mounted:
-mngr create my-task --provider modal --target-path /workspace
+mngr create my-task@.modal:/workspace
 
 # you can upload files and run custom commands during host provisioning:
 mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
