@@ -87,6 +87,36 @@ def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subproces
     )
 
 
+def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
+    """Assert that session files were preserved for the given agent under host_dir.
+
+    Checks that the preserved_sessions directory exists, contains exactly one
+    directory for the agent, and that directory has at least one non-empty
+    session JSONL file.
+    """
+    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
+    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
+
+    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
+    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    assert len(agent_dirs) == 1, (
+        f"Expected exactly one preserved dir for {agent_name}, "
+        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+    )
+    agent_preserved_dir = agent_dirs[0]
+
+    # At minimum, session JSONL files should be preserved (the projects/ directory)
+    preserved_projects = agent_preserved_dir / "projects"
+    assert preserved_projects.exists(), (
+        f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
+    )
+    session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"Expected at least one session .jsonl file in {preserved_projects}"
+    # Each session file should have content (Claude responded to the prompt)
+    for session_file in session_files:
+        assert session_file.stat().st_size > 0, f"Session file {session_file} is empty"
+
+
 @pytest.mark.release
 @pytest.mark.timeout(600)
 def test_claude_agent_provisioning_on_modal(
@@ -153,28 +183,7 @@ def test_destroy_modal_agent_preserves_sessions_locally(
         f"Destroy failed with stderr: {destroy_result.stderr}\nstdout: {destroy_result.stdout}"
     )
 
-    # Verify that session files were preserved under the local host_dir
-    preserved_sessions_dir = modal_subprocess_env.host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-
-    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
-    assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
-    )
-    agent_preserved_dir = agent_dirs[0]
-
-    # At minimum, session JSONL files should be preserved (the projects/ directory)
-    preserved_projects = agent_preserved_dir / "projects"
-    assert preserved_projects.exists(), (
-        f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
-    )
-    session_files = list(preserved_projects.rglob("*.jsonl"))
-    assert len(session_files) >= 1, f"Expected at least one session .jsonl file in {preserved_projects}"
-    # Each session file should have content (Claude responded to the prompt)
-    for session_file in session_files:
-        assert session_file.stat().st_size > 0, f"Session file {session_file} is empty"
+    _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
 
 
 @pytest.mark.release
@@ -214,24 +223,4 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
         f"Destroy failed with stderr: {destroy_result.stderr}\nstdout: {destroy_result.stdout}"
     )
 
-    # Verify that session files were preserved under the local host_dir
-    preserved_sessions_dir = modal_subprocess_env.host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-
-    # Find the agent's preserved directory (named <agent-name>--<agent-id>)
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
-    assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
-    )
-    agent_preserved_dir = agent_dirs[0]
-
-    # At minimum, session JSONL files should be preserved (the projects/ directory)
-    preserved_projects = agent_preserved_dir / "projects"
-    assert preserved_projects.exists(), (
-        f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
-    )
-    session_files = list(preserved_projects.rglob("*.jsonl"))
-    assert len(session_files) >= 1, f"Expected at least one session .jsonl file in {preserved_projects}"
-    for session_file in session_files:
-        assert session_file.stat().st_size > 0, f"Session file {session_file} is empty"
+    _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
