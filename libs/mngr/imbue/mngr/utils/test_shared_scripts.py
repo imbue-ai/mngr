@@ -15,7 +15,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 
 _SHARED_SCRIPTS = [
     "config_utils.sh",
-    "stop_hook_gates.sh",
     "export_transcript_paths.sh",
     "filter_transcript.py",
 ]

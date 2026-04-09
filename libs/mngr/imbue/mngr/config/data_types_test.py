@@ -895,7 +895,7 @@ def test_split_cli_args_string_preserves_quoting_for_assemble_command() -> None:
 
     This is the end-to-end scenario: TOML string -> split -> tuple -> join -> command.
     """
-    cli_args_str = """--settings '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "./scripts/check_commit_status.sh"}]}, {"hooks": [{"type": "command", "timeout": 600, "command": "./scripts/main_claude_stop_hook.sh"}]}]}}'"""
+    cli_args_str = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}]}}'"""
     parts = split_cli_args_string(cli_args_str)
     reassembled = " ".join(parts)
     assert reassembled == cli_args_str
