@@ -151,14 +151,10 @@ if (!gotLock) {
 }
 
 async function onReady() {
-  // Hide the application menu if MINDS_HIDE_MENU is set
-  if (process.env.MINDS_HIDE_MENU === '1') {
-    Menu.setApplicationMenu(null);
-  }
-
-  // On Linux/Windows with frameless windows, also remove the menu to
-  // prevent it from showing as part of window decorations.
-  if (!isMac) {
+  // On Linux/Windows, always hide the menu (frameless windows have no menu bar).
+  // On macOS, hide it only when MINDS_HIDE_MENU is set (the native menu bar is
+  // visible by default with titleBarStyle: 'hiddenInset').
+  if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
     Menu.setApplicationMenu(null);
   }
 
