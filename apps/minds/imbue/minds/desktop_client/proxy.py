@@ -217,7 +217,6 @@ def generate_browser_info_bar_html(
     server_name: ServerName,
     agent_display_name: str,
     host_id: str,
-    iframe_url: str,
 ) -> str:
     """Generate an HTML wrapper page with an info bar and iframe for browser clients.
 

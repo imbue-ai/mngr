@@ -556,7 +556,6 @@ async def _handle_proxy_http(
             server_name=parsed_server,
             agent_display_name=agent_display_name,
             host_id=host_id,
-            iframe_url=f"/agents/{agent_id}/{server_name}/?_embed=1",
         )
         return HTMLResponse(content=html)
 

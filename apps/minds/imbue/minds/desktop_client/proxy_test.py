@@ -35,7 +35,6 @@ def test_generate_browser_info_bar_html_contains_info() -> None:
         server_name=_TEST_SERVER,
         agent_display_name="my-agent",
         host_id="remote-host-1",
-        iframe_url=f"/agents/{_TEST_AGENT}/{_TEST_SERVER}/?_embed=1",
     )
     assert "info-bar" in html
     assert "my-agent" in html
