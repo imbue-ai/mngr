@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, globalShortcut } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -72,10 +72,15 @@ function createWindow() {
 }
 
 function registerShortcuts() {
-  // Open DevTools: Ctrl+Shift+C on Windows/Linux, Cmd+Option+I on macOS
-  const devToolsAccelerator = isMac ? 'Cmd+Option+I' : 'Ctrl+Shift+C';
-  globalShortcut.register(devToolsAccelerator, () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
+  // Window-local shortcut: Open DevTools with Ctrl+Shift+C (Win/Linux) or Cmd+Option+I (macOS).
+  // Uses before-input-event so the shortcut only fires when the window is focused,
+  // avoiding stealing key combinations from other applications.
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.type !== 'keyDown') return;
+    const devTools =
+      (isMac && input.meta && input.alt && input.key.toLowerCase() === 'i') ||
+      (!isMac && input.control && input.shift && input.key.toLowerCase() === 'c');
+    if (devTools) {
       mainWindow.webContents.toggleDevTools();
     }
   });
@@ -223,8 +228,4 @@ app.on('before-quit', async (event) => {
     await shutdown();
     app.quit();
   }
-});
-
-app.on('will-quit', () => {
-  globalShortcut.unregisterAll();
 });
