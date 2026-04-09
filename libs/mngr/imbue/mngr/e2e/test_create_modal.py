@@ -16,7 +16,7 @@ _REMOTE_TIMEOUT = 210.0
 # All tests in this file invoke the Modal CLI indirectly (via environment_create
 # during provider initialization), so they need @pytest.mark.modal to satisfy
 # the resource guard.
-pytestmark = [pytest.mark.release, pytest.mark.timeout(120)]
+pytestmark = [pytest.mark.release, pytest.mark.timeout(240)]
 
 
 @pytest.mark.modal
