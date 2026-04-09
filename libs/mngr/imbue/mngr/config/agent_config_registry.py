@@ -5,6 +5,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import merge_cli_args
@@ -82,17 +83,18 @@ def _apply_custom_overrides_to_parent_config(
     if not explicitly_set_fields - _METADATA_FIELDS:
         return parent_config
 
+    parent_values = parent_config.model_dump()
     custom_values = custom_config.model_dump()
     updates: list[tuple[str, Any]] = []
 
     for field_name in explicitly_set_fields:
         if field_name in _METADATA_FIELDS:
             continue
-        elif field_name == "cli_args":
-            # cli_args uses merge semantics (concatenation)
-            merged_cli_args = merge_cli_args(parent_config.cli_args, custom_config.cli_args)
-            if merged_cli_args != parent_config.cli_args:
-                updates.append((field_name, merged_cli_args))
+        elif field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
+            # Tuple fields use merge semantics (concatenation)
+            merged = merge_cli_args(parent_values[field_name], custom_values[field_name])
+            if merged != parent_values[field_name]:
+                updates.append((field_name, merged))
         else:
             # All other fields: override wins
             updates.append((field_name, custom_values[field_name]))

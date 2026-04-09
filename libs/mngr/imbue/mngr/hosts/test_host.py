@@ -23,6 +23,8 @@ from pyinfra.api.command import StringCommand
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -2876,3 +2878,114 @@ def test_create_work_dir_cross_host_generates_unique_paths(
     assert str(work_dir_2).startswith(str(target_host.host_dir / "projects"))
     assert work_dir_1 != work_dir_2
     assert (work_dir_2 / "file.txt").read_text() == "content"
+
+
+# =============================================================================
+# Agent Type Provisioning Integration Tests
+# =============================================================================
+
+
+def test_provision_agent_applies_agent_type_provisioning_fields(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """Agent type provisioning fields should be applied during provision_agent.
+
+    Verifies that extra_provision_command, env, and create_directory fields
+    from an agent type config are merged into CreateAgentOptions and executed
+    during provisioning.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    agent_type_name = AgentTypeName("my-custom-type")
+    marker_file = temp_dir / "agent_type_provision" / "marker.txt"
+    env_output_file = temp_dir / "agent_type_provision" / "env_output.txt"
+
+    # Configure the agent type with provisioning fields
+    agent_type_config = AgentTypeConfig(
+        extra_provision_command=(
+            f"echo 'agent_type_ran' > {marker_file}",
+            f"echo $CUSTOM_ENV_VAR > {env_output_file}",
+        ),
+        env=("CUSTOM_ENV_VAR=from_agent_type",),
+        create_directory=(str(marker_file.parent),),
+    )
+
+    # Create a new mngr_ctx with the agent type configured
+    updated_agent_types = {**host.mngr_ctx.config.agent_types, agent_type_name: agent_type_config}
+    updated_config = host.mngr_ctx.config.model_copy_update(
+        to_update(host.mngr_ctx.config.field_ref().agent_types, updated_agent_types),
+    )
+    updated_ctx = host.mngr_ctx.model_copy_update(
+        to_update(host.mngr_ctx.field_ref().config, updated_config),
+    )
+
+    agent = _create_minimal_agent(host, temp_dir)
+
+    options = CreateAgentOptions(
+        name=AgentName("prov-agent-type"),
+        agent_type=agent_type_name,
+        command=CommandString("sleep 1"),
+    )
+
+    host.provision_agent(agent, options, updated_ctx)
+
+    # Verify agent type provisioning was applied
+    assert marker_file.exists()
+    assert "agent_type_ran" in marker_file.read_text()
+    assert env_output_file.exists()
+    assert "from_agent_type" in env_output_file.read_text()
+
+
+def test_provision_agent_type_provisioning_stacks_with_cli(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """CLI provisioning options should stack on top of agent type provisioning.
+
+    Agent type commands run first (prepended), then CLI commands.
+    CLI env vars come after agent type env vars so they can override.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    agent_type_name = AgentTypeName("stacking-type")
+    output_file = temp_dir / "stacking_test" / "order.txt"
+
+    agent_type_config = AgentTypeConfig(
+        extra_provision_command=(f"echo 'agent_type_first' > {output_file}",),
+        env=("STACKING_VAR=from_type",),
+        create_directory=(str(output_file.parent),),
+    )
+
+    updated_agent_types = {**host.mngr_ctx.config.agent_types, agent_type_name: agent_type_config}
+    updated_config = host.mngr_ctx.config.model_copy_update(
+        to_update(host.mngr_ctx.config.field_ref().agent_types, updated_agent_types),
+    )
+    updated_ctx = host.mngr_ctx.model_copy_update(
+        to_update(host.mngr_ctx.field_ref().config, updated_config),
+    )
+
+    agent = _create_minimal_agent(host, temp_dir)
+
+    options = CreateAgentOptions(
+        name=AgentName("prov-stack"),
+        agent_type=agent_type_name,
+        command=CommandString("sleep 1"),
+        environment=AgentEnvironmentOptions(
+            env_vars=(EnvVar(key="STACKING_VAR", value="from_cli"),),
+        ),
+        provisioning=AgentProvisioningOptions(
+            extra_provision_commands=(f"echo 'cli_second' >> {output_file}",),
+        ),
+    )
+
+    host.provision_agent(agent, options, updated_ctx)
+
+    assert output_file.exists()
+    lines = output_file.read_text().strip().split("\n")
+    assert lines[0] == "agent_type_first"
+    assert lines[1] == "cli_second"
+
+    # CLI env var should override agent type env var (since it comes later in the tuple,
+    # and _collect_agent_env_vars iterates env_vars in order with later values winning)
+    env_path = host.get_agent_env_path(agent)
+    env_content = env_path.read_text()
+    assert "STACKING_VAR=from_cli" in env_content

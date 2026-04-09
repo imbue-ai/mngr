@@ -146,6 +146,20 @@ class HookDefinition(FrozenModel):
 # === Config Types ===
 
 
+AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "cli_args",
+        "extra_provision_command",
+        "upload_file",
+        "append_to_file",
+        "prepend_to_file",
+        "create_directory",
+        "env",
+        "env_file",
+    }
+)
+
+
 class AgentTypeConfig(FrozenModel):
     """Defines a custom agent type that inherits from an existing type."""
 
@@ -169,6 +183,34 @@ class AgentTypeConfig(FrozenModel):
     permissions: list[Permission] = Field(
         default_factory=list,
         description="Explicit list of permissions (overrides parent type permissions)",
+    )
+    extra_provision_command: tuple[str, ...] = Field(
+        default=(),
+        description="Shell commands to run during provisioning",
+    )
+    upload_file: tuple[str, ...] = Field(
+        default=(),
+        description="LOCAL:REMOTE file upload specs",
+    )
+    append_to_file: tuple[str, ...] = Field(
+        default=(),
+        description="REMOTE:TEXT append specs",
+    )
+    prepend_to_file: tuple[str, ...] = Field(
+        default=(),
+        description="REMOTE:TEXT prepend specs",
+    )
+    create_directory: tuple[str, ...] = Field(
+        default=(),
+        description="Directories to create on the remote",
+    )
+    env: tuple[str, ...] = Field(
+        default=(),
+        description="KEY=VALUE environment variables",
+    )
+    env_file: tuple[str, ...] = Field(
+        default=(),
+        description="Paths to env files",
     )
 
     @field_validator("cli_args", mode="before")
@@ -202,12 +244,13 @@ class AgentTypeConfig(FrozenModel):
         if not explicitly_set:
             return self
 
+        base_values = self.model_dump()
         override_values = override.model_dump()
         updates: list[tuple[str, Any]] = []
 
         for field_name in explicitly_set:
-            if field_name == "cli_args":
-                updates.append((field_name, merge_cli_args(self.cli_args, override.cli_args)))
+            if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
+                updates.append((field_name, merge_cli_args(base_values[field_name], override_values[field_name])))
             elif field_name == "permissions":
                 updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
             else:

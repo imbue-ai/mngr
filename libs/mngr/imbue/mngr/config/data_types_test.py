@@ -176,6 +176,40 @@ def test_agent_type_config_merge_with_concatenates_permissions() -> None:
     assert merged.permissions == [Permission("read"), Permission("write")]
 
 
+def test_agent_type_config_merge_with_concatenates_extra_provision_command() -> None:
+    """AgentTypeConfig.merge_with should concatenate extra_provision_command."""
+    base = AgentTypeConfig(extra_provision_command=("echo base",))
+    override = AgentTypeConfig(extra_provision_command=("echo override",))
+    merged = base.merge_with(override)
+    assert merged.extra_provision_command == ("echo base", "echo override")
+
+
+def test_agent_type_config_merge_with_concatenates_env() -> None:
+    """AgentTypeConfig.merge_with should concatenate env."""
+    base = AgentTypeConfig(env=("FOO=1",))
+    override = AgentTypeConfig(env=("BAR=2",))
+    merged = base.merge_with(override)
+    assert merged.env == ("FOO=1", "BAR=2")
+
+
+def test_agent_type_config_merge_with_concatenates_upload_file() -> None:
+    """AgentTypeConfig.merge_with should concatenate upload_file."""
+    base = AgentTypeConfig(upload_file=("a.txt:/a.txt",))
+    override = AgentTypeConfig(upload_file=("b.txt:/b.txt",))
+    merged = base.merge_with(override)
+    assert merged.upload_file == ("a.txt:/a.txt", "b.txt:/b.txt")
+
+
+def test_agent_type_config_merge_with_preserves_unset_provisioning_fields() -> None:
+    """AgentTypeConfig.merge_with should preserve base provisioning fields when override doesn't set them."""
+    base = AgentTypeConfig(extra_provision_command=("echo setup",), env=("KEY=val",))
+    override = AgentTypeConfig(cli_args=("--flag",))
+    merged = base.merge_with(override)
+    assert merged.extra_provision_command == ("echo setup",)
+    assert merged.env == ("KEY=val",)
+    assert merged.cli_args == ("--flag",)
+
+
 def test_agent_type_config_merge_with_preserves_subclass_fields() -> None:
     """AgentTypeConfig.merge_with on a subclass should preserve subclass-specific fields."""
     base = _TestAgentTypeConfig.model_construct(

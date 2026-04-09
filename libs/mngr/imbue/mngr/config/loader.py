@@ -344,18 +344,44 @@ def _parse_providers(
     return providers
 
 
-def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
-    """Normalize cli_args from str or list to tuple before model_construct (which bypasses validators)."""
-    if "cli_args" not in raw_config:
-        return raw_config
-    cli_args = raw_config["cli_args"]
-    if isinstance(cli_args, str):
-        normalized = split_cli_args_string(cli_args) if cli_args else ()
-    elif isinstance(cli_args, (list, tuple)):
-        normalized = tuple(cli_args)
-    else:
-        normalized = cli_args
-    return {**raw_config, "cli_args": normalized}
+_PLAIN_TUPLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "extra_provision_command",
+        "upload_file",
+        "append_to_file",
+        "prepend_to_file",
+        "create_directory",
+        "env",
+        "env_file",
+    }
+)
+
+
+def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize tuple fields from str or list to tuple before model_construct (which bypasses validators).
+
+    cli_args gets special shell-splitting behavior for single strings.
+    All other tuple fields just convert list -> tuple.
+    """
+    result = raw_config
+    if "cli_args" in result:
+        cli_args = result["cli_args"]
+        if isinstance(cli_args, str):
+            normalized = split_cli_args_string(cli_args) if cli_args else ()
+        elif isinstance(cli_args, (list, tuple)):
+            normalized = tuple(cli_args)
+        else:
+            normalized = cli_args
+        result = {**result, "cli_args": normalized}
+
+    for field_name in _PLAIN_TUPLE_FIELDS:
+        if field_name not in result:
+            continue
+        value = result[field_name]
+        if isinstance(value, (list, tuple)):
+            result = {**result, field_name: tuple(value)}
+        # strings are not split for these fields -- each element is already a complete spec
+    return result
 
 
 def _has_disabled_ancestor(
@@ -411,7 +437,7 @@ def _parse_agent_types(
             continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
-        normalized_config = _normalize_cli_args_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types

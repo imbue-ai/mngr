@@ -20,7 +20,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _merge_command_defaults
-from imbue.mngr.config.loader import _normalize_cli_args_for_construct
+from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
 from imbue.mngr.config.loader import _parse_command_env_vars
 from imbue.mngr.config.loader import _parse_commands
@@ -1252,50 +1252,83 @@ def test_block_disabled_plugins_is_idempotent() -> None:
 
 
 # =============================================================================
-# Tests for _normalize_cli_args_for_construct
+# Tests for _normalize_tuple_fields_for_construct
 # =============================================================================
 
 
 def test_normalize_cli_args_no_cli_args_key() -> None:
-    """_normalize_cli_args_for_construct should return the input unchanged when no cli_args key."""
+    """_normalize_tuple_fields_for_construct should return the input unchanged when no cli_args key."""
     raw = {"some_key": "value"}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result == {"some_key": "value"}
 
 
 def test_normalize_cli_args_string_value() -> None:
-    """_normalize_cli_args_for_construct should split a non-empty string into a tuple."""
+    """_normalize_tuple_fields_for_construct should split a non-empty string into a tuple."""
     raw = {"cli_args": "--verbose --model opus"}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_empty_string() -> None:
-    """_normalize_cli_args_for_construct should convert an empty string to an empty tuple."""
+    """_normalize_tuple_fields_for_construct should convert an empty string to an empty tuple."""
     raw = {"cli_args": ""}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ()
 
 
 def test_normalize_cli_args_list_value() -> None:
-    """_normalize_cli_args_for_construct should convert a list to a tuple."""
+    """_normalize_tuple_fields_for_construct should convert a list to a tuple."""
     raw = {"cli_args": ["--verbose", "--model", "opus"]}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_tuple_value() -> None:
-    """_normalize_cli_args_for_construct should pass through a tuple."""
+    """_normalize_tuple_fields_for_construct should pass through a tuple."""
     raw = {"cli_args": ("--verbose",)}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose",)
 
 
 def test_normalize_cli_args_other_type_passes_through() -> None:
-    """_normalize_cli_args_for_construct should pass through unrecognized types."""
+    """_normalize_tuple_fields_for_construct should pass through unrecognized types."""
     raw = {"cli_args": 42}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == 42
+
+
+def test_normalize_tuple_fields_converts_provisioning_lists() -> None:
+    """_normalize_tuple_fields_for_construct should convert TOML lists to tuples for provisioning fields."""
+    raw = {
+        "extra_provision_command": ["echo setup", "echo done"],
+        "env": ["FOO=1"],
+        "upload_file": ["a.txt:/a.txt"],
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["extra_provision_command"] == ("echo setup", "echo done")
+    assert result["env"] == ("FOO=1",)
+    assert result["upload_file"] == ("a.txt:/a.txt",)
+
+
+def test_normalize_tuple_fields_ignores_missing_fields() -> None:
+    """_normalize_tuple_fields_for_construct should leave config unchanged when no tuple fields present."""
+    raw = {"parent_type": "claude", "command": "my-cmd"}
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result == {"parent_type": "claude", "command": "my-cmd"}
+
+
+def test_normalize_tuple_fields_handles_all_fields_together() -> None:
+    """_normalize_tuple_fields_for_construct should normalize cli_args and provisioning fields in one call."""
+    raw = {
+        "cli_args": "--verbose",
+        "extra_provision_command": ["echo hi"],
+        "create_directory": ["/tmp/test"],
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["cli_args"] == ("--verbose",)
+    assert result["extra_provision_command"] == ("echo hi",)
+    assert result["create_directory"] == ("/tmp/test",)
 
 
 # =============================================================================

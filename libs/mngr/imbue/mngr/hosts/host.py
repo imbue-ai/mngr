@@ -46,6 +46,8 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -68,11 +70,15 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.host import AgentEnvironmentOptions
+from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
+from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -88,6 +94,71 @@ from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.polling import wait_for
+
+
+@pure
+def _merge_agent_type_provisioning(
+    agent_config: AgentTypeConfig,
+    options: CreateAgentOptions,
+) -> CreateAgentOptions:
+    """Merge provisioning fields from an agent type config into CreateAgentOptions.
+
+    Parses raw string specs from AgentTypeConfig into typed specs and prepends them
+    before the CLI-provided entries so that agent type provisioning runs first and
+    CLI entries can override (e.g., env vars with the same key).
+
+    Returns the original options unchanged if the agent config has no provisioning fields.
+    """
+    if not (
+        agent_config.extra_provision_command
+        or agent_config.upload_file
+        or agent_config.append_to_file
+        or agent_config.prepend_to_file
+        or agent_config.create_directory
+        or agent_config.env
+        or agent_config.env_file
+    ):
+        return options
+
+    # Parse and prepend provisioning options
+    new_provisioning = options.provisioning
+    if (
+        agent_config.extra_provision_command
+        or agent_config.upload_file
+        or agent_config.append_to_file
+        or agent_config.prepend_to_file
+        or agent_config.create_directory
+    ):
+        new_provisioning = AgentProvisioningOptions(
+            extra_provision_commands=tuple(agent_config.extra_provision_command)
+            + options.provisioning.extra_provision_commands,
+            upload_files=tuple(UploadFileSpec.from_string(s) for s in agent_config.upload_file)
+            + options.provisioning.upload_files,
+            append_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.append_to_file)
+            + options.provisioning.append_to_files,
+            prepend_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.prepend_to_file)
+            + options.provisioning.prepend_to_files,
+            create_directories=tuple(Path(s) for s in agent_config.create_directory)
+            + options.provisioning.create_directories,
+        )
+
+    # Parse and prepend environment options
+    new_environment = options.environment
+    if agent_config.env or agent_config.env_file:
+        new_environment = AgentEnvironmentOptions(
+            env_vars=tuple(EnvVar.from_string(s) for s in agent_config.env) + options.environment.env_vars,
+            env_files=tuple(Path(s) for s in agent_config.env_file) + options.environment.env_files,
+        )
+
+    if new_provisioning is options.provisioning and new_environment is options.environment:
+        return options
+
+    updates: list[tuple[str, Any]] = []
+    if new_provisioning is not options.provisioning:
+        updates.append(("provisioning", new_provisioning))
+    if new_environment is not options.environment:
+        updates.append(("environment", new_environment))
+    return options.model_copy_update(*updates)
 
 
 def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
@@ -2204,6 +2275,12 @@ class Host(BaseHost, OnlineHostInterface):
         Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
+        # Merge agent type provisioning fields into options before any other logic
+        if options.agent_type is not None:
+            agent_config = mngr_ctx.config.agent_types.get(options.agent_type)
+            if agent_config is not None:
+                options = _merge_agent_type_provisioning(agent_config, options)
+
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
             with log_span("Calling on_before_provisioning for agent {}", agent.name):
