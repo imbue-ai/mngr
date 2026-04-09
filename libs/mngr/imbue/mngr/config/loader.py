@@ -540,9 +540,9 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
 
 _TEMPLATE_EXTRA_FIELDS: frozenset[str] = frozenset(
     {
-        # target_path was consolidated into the address :PATH suffix, but templates
-        # still support it. apply_create_template converts it by appending :PATH to
-        # the positional_name parameter.
+        # target_path is specified via the address :PATH suffix, but templates
+        # support it as a separate field. apply_create_template converts it by
+        # appending :PATH to the positional_name parameter.
         "target_path",
     }
 )
