@@ -396,12 +396,6 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--reconnect/--no-reconnect", default=True, show_default=True, help="Automatically reconnect if dropped"
 )
-@optgroup.option(
-    "--interactive/--no-interactive",
-    "interactive",
-    default=None,
-    help="Enable interactive mode [default: yes if TTY]",
-)
 @optgroup.option("--message", help="Initial message to send after the agent starts")
 @optgroup.option("--message-file", type=click.Path(exists=True), help="File containing initial message to send")
 @optgroup.option(
@@ -642,7 +636,6 @@ def _create_agent(
     # parse the connection options
     connection_opts = ConnectionOptions(
         is_reconnect=opts.reconnect,
-        is_interactive=opts.interactive,
         message=None,
         retry_count=opts.retry,
         retry_delay=opts.retry_delay,

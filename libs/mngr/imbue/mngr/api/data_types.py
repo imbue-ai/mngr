@@ -70,10 +70,6 @@ class ConnectionOptions(FrozenModel):
         default=True,
         description="Automatically reconnect if connection is dropped",
     )
-    is_interactive: bool | None = Field(
-        default=None,
-        description="Enable interactive mode (None means auto-detect TTY)",
-    )
     message: str | None = Field(
         default=None,
         description="Message to send after connecting to agent",

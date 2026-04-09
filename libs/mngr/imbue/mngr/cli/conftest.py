@@ -101,7 +101,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         build_arg=(),
         start_arg=(),
         reconnect=True,
-        interactive=None,
         message=None,
         message_file=None,
         edit_message=False,

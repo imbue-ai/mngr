@@ -173,7 +173,6 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--reconnect`, `--no-reconnect` | boolean | Automatically reconnect if dropped | `True` |
-| `--interactive`, `--no-interactive` | boolean | Enable interactive mode [default: yes if TTY] | None |
 | `--message` | text | Initial message to send after the agent starts | None |
 | `--message-file` | path | File containing initial message to send | None |
 | `--edit-message` | boolean | Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content. | `False` |

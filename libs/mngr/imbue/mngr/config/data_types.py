@@ -820,7 +820,6 @@ class CreateCliOptions(CommonCliOptions):
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
     reconnect: bool
-    interactive: bool | None
     message: str | None
     message_file: str | None
     edit_message: bool
