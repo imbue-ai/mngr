@@ -75,16 +75,11 @@ All desktop app state lives in `~/.minds/`:
 
 ```bash
 cd apps/minds
-pnpm install        # Install Electron and ToDesktop CLI (first time only)
+pnpm install        # Install Electron and ToDesktop CLI
 pnpm start          # Launch the Electron app in dev mode
-
-# Pre-fill the creation form with a template repo and agent name:
-MIND_GIT_URL=/path/to/template MIND_NAME=myagent pnpm start
 ```
 
 In dev mode, the Electron app skips `uv sync` and uses the monorepo's workspace venv directly (via `uv run --package minds` from the repo root). This means all mngr plugins (claude, modal, etc.) are available without any extra setup, and changes to the Python code are picked up immediately on restart.
-
-Backend stderr is piped to the terminal where `pnpm start` was run, with `-vv` (TRACE level) logging enabled for debugging.
 
 ### Building for distribution
 
