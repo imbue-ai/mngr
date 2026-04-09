@@ -71,7 +71,6 @@ from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
-from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import FileModificationSpec
@@ -95,6 +94,15 @@ from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.polling import wait_for
 
+# Each agent type field maps to a parser and a target field on the options sub-models.
+_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+    ("extra_provision_command", "extra_provision_commands", str),
+    ("upload_file", "upload_files", UploadFileSpec.from_string),
+    ("append_to_file", "append_to_files", FileModificationSpec.from_string),
+    ("prepend_to_file", "prepend_to_files", FileModificationSpec.from_string),
+    ("create_directory", "create_directories", Path),
+)
+
 
 @pure
 def _merge_agent_type_provisioning(
@@ -109,22 +117,12 @@ def _merge_agent_type_provisioning(
 
     Returns the original options unchanged if the agent config has no provisioning fields.
     """
-    # Parse raw strings from agent type config into typed provisioning specs.
-    # Each agent type field maps to a parser and a target field on the options sub-models.
-    _PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
-        ("extra_provision_command", "extra_provision_commands", str),
-        ("upload_file", "upload_files", UploadFileSpec.from_string),
-        ("append_to_file", "append_to_files", FileModificationSpec.from_string),
-        ("prepend_to_file", "prepend_to_files", FileModificationSpec.from_string),
-        ("create_directory", "create_directories", Path),
-    )
-
-    prov_updates: dict[str, tuple[Any, ...]] = {}
+    prov_updates: list[tuple[str, Any]] = []
     for config_field, target_field, parser in _PROVISIONING_FIELD_MAP:
-        raw_values = agent_config.model_dump()[config_field]
+        raw_values: tuple[str, ...] = getattr(agent_config, config_field)
         if raw_values:
-            existing = options.provisioning.model_dump()[target_field]
-            prov_updates[target_field] = tuple(parser(s) for s in raw_values) + tuple(existing)
+            existing: tuple[Any, ...] = getattr(options.provisioning, target_field)
+            prov_updates.append((target_field, tuple(parser(s) for s in raw_values) + existing))
 
     env_vars = tuple(EnvVar.from_string(s) for s in agent_config.env) if agent_config.env else ()
     env_files = tuple(Path(s) for s in agent_config.env_file) if agent_config.env_file else ()
@@ -137,7 +135,7 @@ def _merge_agent_type_provisioning(
         updates.append(
             (
                 "provisioning",
-                AgentProvisioningOptions(**{**options.provisioning.model_dump(), **prov_updates}),
+                options.provisioning.model_copy_update(*prov_updates),
             )
         )
     if env_vars or env_files:
