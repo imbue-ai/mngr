@@ -12,6 +12,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.rsync
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
     # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
@@ -60,6 +61,7 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.rsync
 def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
     # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
@@ -176,6 +178,7 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.rsync
 def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can create a git mirror instead of a worktree:
@@ -197,6 +200,7 @@ def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.rsync
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can disable new branch creation entirely by omitting the :NEW part (requires --transfer=none or --transfer=git-mirror due to how worktrees work, and --transfer=none implies no new branch):
