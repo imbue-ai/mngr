@@ -18,9 +18,9 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
-from imbue.mngr.config.data_types import merge_cli_args
 from imbue.mngr.config.data_types import merge_dict_fields
 from imbue.mngr.config.data_types import merge_list_fields
+from imbue.mngr.config.data_types import merge_tuples
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
@@ -247,27 +247,27 @@ def test_agent_type_config_merge_with_accepts_base_class_override() -> None:
     assert merged.custom_flag is True
 
 
-def test_merge_cli_args_concatenates_both_when_present() -> None:
-    """merge_cli_args should concatenate when both present."""
-    result = merge_cli_args(("--arg1",), ("--arg2",))
+def test_merge_tuples_concatenates_both_when_present() -> None:
+    """merge_tuples should concatenate when both present."""
+    result = merge_tuples(("--arg1",), ("--arg2",))
     assert result == ("--arg1", "--arg2")
 
 
-def test_merge_cli_args_returns_override_when_base_empty() -> None:
-    """merge_cli_args should return override when base is empty."""
-    result = merge_cli_args((), ("--arg",))
+def test_merge_tuples_returns_override_when_base_empty() -> None:
+    """merge_tuples should return override when base is empty."""
+    result = merge_tuples((), ("--arg",))
     assert result == ("--arg",)
 
 
-def test_merge_cli_args_returns_base_when_override_empty() -> None:
-    """merge_cli_args should return base when override is empty."""
-    result = merge_cli_args(("--arg",), ())
+def test_merge_tuples_returns_base_when_override_empty() -> None:
+    """merge_tuples should return base when override is empty."""
+    result = merge_tuples(("--arg",), ())
     assert result == ("--arg",)
 
 
-def test_merge_cli_args_returns_empty_when_both_empty() -> None:
-    """merge_cli_args should return empty when both empty."""
-    result = merge_cli_args((), ())
+def test_merge_tuples_returns_empty_when_both_empty() -> None:
+    """merge_tuples should return empty when both empty."""
+    result = merge_tuples((), ())
     assert result == ()
 
 

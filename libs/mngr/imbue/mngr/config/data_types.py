@@ -66,8 +66,8 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
 
 
 @pure
-def merge_cli_args(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge CLI arguments, concatenating if both present."""
+def merge_tuples(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
+    """Merge string tuples, concatenating if both present."""
     if override:
         return base + override
     return base
@@ -250,7 +250,7 @@ class AgentTypeConfig(FrozenModel):
 
         for field_name in explicitly_set:
             if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
-                updates.append((field_name, merge_cli_args(base_values[field_name], override_values[field_name])))
+                updates.append((field_name, merge_tuples(base_values[field_name], override_values[field_name])))
             elif field_name == "permissions":
                 updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
             else:

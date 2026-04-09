@@ -8,7 +8,7 @@ from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import merge_cli_args
+from imbue.mngr.config.data_types import merge_tuples
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 
@@ -92,7 +92,7 @@ def _apply_custom_overrides_to_parent_config(
             continue
         elif field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
             # Tuple fields use merge semantics (concatenation)
-            merged = merge_cli_args(parent_values[field_name], custom_values[field_name])
+            merged = merge_tuples(parent_values[field_name], custom_values[field_name])
             if merged != parent_values[field_name]:
                 updates.append((field_name, merged))
         else:
