@@ -368,6 +368,25 @@ def test_browser_navigation_serves_info_bar_wrapper(tmp_path: Path) -> None:
     assert str(DEFAULT_SERVER_NAME) in response.text
 
 
+def test_browser_navigation_info_bar_preserves_query_params(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/some/path?foo=bar",
+        headers={
+            "sec-fetch-mode": "navigate",
+            "user-agent": "Mozilla/5.0 Firefox/130.0",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "info-bar" in response.text
+    # The iframe src should include the original query params plus _embed=1
+    assert "foo=bar" in response.text
+    assert "_embed=1" in response.text
+
+
 def test_browser_navigation_with_embed_bypasses_info_bar(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)

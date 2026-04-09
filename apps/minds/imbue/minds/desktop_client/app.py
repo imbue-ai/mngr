@@ -557,6 +557,7 @@ async def _handle_proxy_http(
             agent_display_name=agent_display_name,
             host_id=host_id,
             path=path,
+            query_string=str(request.url.query) if request.url.query else "",
         )
         return HTMLResponse(content=html)
 

@@ -219,21 +219,26 @@ def generate_browser_info_bar_html(
     agent_display_name: str,
     host_id: str,
     path: str = "",
+    query_string: str = "",
 ) -> str:
     """Generate an HTML wrapper page with an info bar and iframe for browser clients.
 
     When the user accesses a forwarded agent URL in a regular browser (not the
     Electron app), this wrapper shows which agent, host, and application they are
     viewing. The actual proxied content loads inside the iframe at the same path
-    the user originally requested.
+    and query parameters the user originally requested.
     """
     prefix = _get_server_prefix(agent_id, server_name)
     safe_name = html.escape(agent_display_name)
     safe_host = html.escape(host_id)
     safe_server = html.escape(str(server_name))
-    # Build the iframe src preserving the user's requested path
+    # Build the iframe src preserving the user's requested path and query params
     iframe_path = f"{prefix}/{path}" if path else f"{prefix}/"
-    safe_iframe_src = html.escape(iframe_path)
+    if query_string:
+        iframe_url = f"{iframe_path}?{query_string}&_embed=1"
+    else:
+        iframe_url = f"{iframe_path}?_embed=1"
+    safe_iframe_src = html.escape(iframe_url)
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -284,7 +289,7 @@ body {{ display: flex; flex-direction: column; font-family: system-ui, -apple-sy
   <span class="separator"></span>
   <span><span class="label">Application: </span><span class="value">{safe_server}</span></span>
 </div>
-<iframe id="content-frame" src="{safe_iframe_src}?_embed=1"></iframe>
+<iframe id="content-frame" src="{safe_iframe_src}"></iframe>
 </body>
 </html>"""
 

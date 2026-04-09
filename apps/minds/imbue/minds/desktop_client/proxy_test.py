@@ -56,6 +56,19 @@ def test_generate_browser_info_bar_html_preserves_path() -> None:
     assert expected_src in html
 
 
+def test_generate_browser_info_bar_html_preserves_query_string() -> None:
+    html = generate_browser_info_bar_html(
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+        agent_display_name="my-agent",
+        host_id="remote-host-1",
+        path="some/path",
+        query_string="foo=bar&baz=1",
+    )
+    expected_src = f"/agents/{_TEST_AGENT}/{_TEST_SERVER}/some/path?foo=bar&amp;baz=1&amp;_embed=1"
+    assert expected_src in html
+
+
 def test_generate_bootstrap_html_contains_service_worker_registration() -> None:
     html = generate_bootstrap_html(_TEST_AGENT, _TEST_SERVER)
     assert "serviceWorker.register" in html
