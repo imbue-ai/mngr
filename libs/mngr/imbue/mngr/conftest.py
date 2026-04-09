@@ -667,13 +667,17 @@ def _ensure_dockerd_for_release() -> None:
     BASH_ENV=/ensure-dockerd.sh handles bash subprocesses, but tests that
     use the Docker Python SDK connect to the socket directly. This fixture
     ensures the daemon is running before any test code tries to connect.
+
+    Uses /usr/local/bin/docker directly to bypass the resource guard PATH
+    wrapper (which would block docker commands outside @pytest.mark.docker tests).
     """
     start_script = Path("/start-dockerd.sh")
-    if not start_script.exists():
+    docker_bin = Path("/usr/local/bin/docker")
+    if not start_script.exists() or not docker_bin.exists():
         return
     try:
         subprocess.run(
-            ["docker", "info"],
+            [str(docker_bin), "info"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=True,
