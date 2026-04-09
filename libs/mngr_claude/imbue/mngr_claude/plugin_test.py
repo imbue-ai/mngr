@@ -2301,7 +2301,7 @@ def test_register_cli_commands_returns_claude_group() -> None:
 
     assert result is not None
     assert len(result) == 1
-    assert isinstance(result[0], click.BaseCommand)
+    assert isinstance(result[0], click.Command)
     assert result[0].name == "claude"
 
 
