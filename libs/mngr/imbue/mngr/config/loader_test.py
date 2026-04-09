@@ -750,6 +750,8 @@ def test_load_config_threads_every_field_from_toml(
     assert config.is_nested_tmux_allowed is True
     assert config.is_error_reporting_enabled is False
     assert config.default_destroyed_host_persisted_seconds == 12345.0
+    assert config.retry.connect_retry_times == 5
+    assert config.retry.connect_retry_delay == "10s"
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
@@ -772,6 +774,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "create_templates": {"modal": {"new_host": "modal"}},
     "pre_command_scripts": {"create": ["echo hello"]},
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
+    "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
@@ -806,6 +809,10 @@ create = ["echo hello"]
 [work_dir_extra_paths]
 ".venv" = "SHARE"
 ".test_output" = "COPY"
+
+[retry]
+connect_retry_times = 5
+connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"

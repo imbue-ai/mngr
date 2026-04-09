@@ -38,52 +38,52 @@ def test_clone_requires_source_agent(
     assert "SOURCE_AGENT" in result.output
 
 
-def test_clone_rejects_from_agent_option(
+def test_clone_rejects_from_option(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --from-agent in remaining args."""
+    """Clone should reject --from in remaining args."""
     result = cli_runner.invoke(
         clone,
-        ["source-agent", "--from-agent", "other-agent"],
+        ["source-agent", "--from", "other-agent"],
         obj=plugin_manager,
         catch_exceptions=True,
     )
 
     assert result.exit_code != 0
-    assert "--from-agent" in result.output
+    assert "--from" in result.output
 
 
-def test_clone_rejects_source_agent_option(
+def test_clone_rejects_source_option(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --source-agent in remaining args."""
+    """Clone should reject --source in remaining args."""
     result = cli_runner.invoke(
         clone,
-        ["source-agent", "--source-agent", "other-agent"],
+        ["source-agent", "--source", "other-agent"],
         obj=plugin_manager,
         catch_exceptions=True,
     )
 
     assert result.exit_code != 0
-    assert "--source-agent" in result.output
+    assert "--source" in result.output
 
 
-def test_clone_rejects_from_agent_equals_form(
+def test_clone_rejects_from_equals_form(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --from-agent=value form in remaining args."""
+    """Clone should reject --from=value form in remaining args."""
     result = cli_runner.invoke(
         clone,
-        ["source-agent", "--from-agent=other-agent"],
+        ["source-agent", "--from=other-agent"],
         obj=plugin_manager,
         catch_exceptions=True,
     )
 
     assert result.exit_code != 0
-    assert "--from-agent" in result.output
+    assert "--from" in result.output
 
 
 # --- _build_create_args tests ---
@@ -96,7 +96,7 @@ def test_build_create_args_without_double_dash() -> None:
         remaining=["--provider", "docker"],
         original_argv=["mngr", "clone", "my-agent", "--provider", "docker"],
     )
-    assert result == ["--from-agent", "my-agent", "--provider", "docker"]
+    assert result == ["--from", "my-agent", "--provider", "docker"]
 
 
 def test_build_create_args_with_double_dash() -> None:
@@ -106,7 +106,7 @@ def test_build_create_args_with_double_dash() -> None:
         remaining=["--model", "opus"],
         original_argv=["mngr", "clone", "my-agent", "--", "--model", "opus"],
     )
-    assert result == ["--from-agent", "my-agent", "--", "--model", "opus"]
+    assert result == ["--from", "my-agent", "--", "--model", "opus"]
 
 
 def test_build_create_args_with_create_options_and_double_dash() -> None:
@@ -127,7 +127,7 @@ def test_build_create_args_with_create_options_and_double_dash() -> None:
         ],
     )
     assert result == [
-        "--from-agent",
+        "--from",
         "my-agent",
         "new-agent",
         "--provider",
@@ -145,7 +145,7 @@ def test_build_create_args_with_double_dash_and_empty_remaining() -> None:
         remaining=[],
         original_argv=["mngr", "clone", "my-agent", "--"],
     )
-    assert result == ["--from-agent", "my-agent", "--"]
+    assert result == ["--from", "my-agent", "--"]
 
 
 # --- _args_before_dd_count tests ---
@@ -177,15 +177,15 @@ def test_args_before_dd_count_trailing_dd() -> None:
 # --- _reject_source_agent_options with -- boundary tests ---
 
 
-def test_reject_source_agent_options_allows_from_agent_after_dd() -> None:
-    """--from-agent after -- should not be rejected."""
+def test_reject_source_agent_options_allows_from_after_dd() -> None:
+    """--from after -- should not be rejected."""
     ctx = click.Context(clone, info_name="clone")
-    # before_dd=0 means nothing is before --, so --from-agent is after --
-    _reject_source_agent_options(["--from-agent", "x"], ctx, before_dd=0)
+    # before_dd=0 means nothing is before --, so --from is after --
+    _reject_source_agent_options(["--from", "x"], ctx, before_dd=0)
 
 
-def test_reject_source_agent_options_rejects_from_agent_before_dd() -> None:
-    """--from-agent before -- should still be rejected."""
+def test_reject_source_agent_options_rejects_from_before_dd() -> None:
+    """--from before -- should still be rejected."""
     ctx = click.Context(clone, info_name="clone")
-    with pytest.raises(click.UsageError, match="--from-agent"):
-        _reject_source_agent_options(["--from-agent", "x", "--model", "opus"], ctx, before_dd=2)
+    with pytest.raises(click.UsageError, match="--from"):
+        _reject_source_agent_options(["--from", "x", "--model", "opus"], ctx, before_dd=2)

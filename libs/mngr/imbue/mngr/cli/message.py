@@ -306,12 +306,7 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
     see_also=(
         ("connect", "Connect to an agent interactively"),
         ("list", "List available agents"),
-    ),
-    additional_sections=(
-        (
-            "Related Documentation",
-            """- [Multi-target Options](../generic/multi_target.md) - Behavior when some agents fail to receive the message""",
-        ),
+        ("multi_target", "Behavior when some agents fail to receive the message"),
     ),
 ).register()
 

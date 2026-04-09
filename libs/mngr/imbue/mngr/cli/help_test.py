@@ -39,6 +39,36 @@ def test_get_all_topics_contains_registered_topics() -> None:
     assert "address" in topics
 
 
+def test_doc_based_topics_are_registered() -> None:
+    """Topics from generic/ and concepts/ docs directories are auto-registered."""
+    topics = get_all_topics()
+    # generic/ topics
+    assert "multi_target" in topics
+    assert "resource_cleanup" in topics
+    assert "common" in topics
+    # concepts/ topics
+    assert "idle_detection" in topics
+    assert "agents" in topics
+    assert "hosts" in topics
+    assert "providers" in topics
+
+
+def test_doc_based_topic_has_content() -> None:
+    """Doc-based topics have content loaded from the markdown file."""
+    topic = get_topic("idle_detection")
+    assert topic is not None
+    assert "idle" in topic.content.lower()
+    assert topic.docs_path is not None
+    assert topic.docs_path.endswith(".md")
+
+
+def test_doc_based_topic_has_description_from_heading() -> None:
+    """Doc-based topics extract their one-line description from the first heading."""
+    topic = get_topic("idle_detection")
+    assert topic is not None
+    assert topic.one_line_description == "Idle Detection"
+
+
 # =============================================================================
 # Topic formatting tests
 # =============================================================================
@@ -184,6 +214,28 @@ def test_help_topic_alias(
     assert "[NAME][@[HOST][.PROVIDER]]" in result.output
 
 
+def test_help_doc_based_topic(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """'mngr help multi_target' shows a doc-based topic page."""
+    result = cli_runner.invoke(cli, ["help", "multi_target"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "multi_target" in result.output
+    assert "DESCRIPTION" in result.output
+
+
+def test_help_concepts_topic(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """'mngr help idle_detection' shows a concepts topic page."""
+    result = cli_runner.invoke(cli, ["help", "idle_detection"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "idle_detection" in result.output
+    assert "idle" in result.output.lower()
+
+
 def test_help_nonexistent_topic(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -203,6 +255,34 @@ def test_help_help_shows_self(
     assert result.exit_code == 0
     assert "mngr help" in result.output
     assert "command or topic" in result.output.lower()
+
+
+def test_help_help_lists_topics_dynamically(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """'mngr help help' shows auto-generated Available Topics including doc-based topics."""
+    result = cli_runner.invoke(cli, ["help", "help"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "AVAILABLE TOPICS" in result.output
+    assert "address" in result.output
+    assert "multi_target" in result.output
+    assert "idle_detection" in result.output
+
+
+def test_command_see_also_renders_help_format(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Command see_also entries render as 'mngr help <name>' for both commands and topics."""
+    result = cli_runner.invoke(cli, ["help", "destroy"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "SEE ALSO" in result.output
+    # Command references
+    assert "mngr help create" in result.output
+    # Topic references
+    assert "mngr help resource_cleanup" in result.output
+    assert "mngr help multi_target" in result.output
 
 
 def test_help_list_alias(

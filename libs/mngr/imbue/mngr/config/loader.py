@@ -25,6 +25,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
@@ -181,6 +182,10 @@ def load_config(
     # Block disabled plugins so their hooks don't fire. This covers
     # CLI-level --disable-plugin flags that weren't known at startup.
     block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
+
+    # Include retry if not None
+    if config.retry is not None:
+        config_dict["retry"] = config.retry
 
     # Include logging if not None
     if config.logging is not None:
@@ -504,6 +509,15 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
             pm.set_blocked(name)
 
 
+def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True) -> RetryConfig:
+    """Parse retry config.
+
+    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    """
+    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict)
+    return RetryConfig.model_construct(**raw_retry)
+
+
 def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -> LoggingConfig:
     """Parse logging config.
 
@@ -613,6 +627,7 @@ def parse_config(
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
+    kwargs["retry"] = _parse_retry_config(raw.pop("retry", {}), strict=strict) if "retry" in raw else None
     kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
