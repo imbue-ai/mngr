@@ -1271,6 +1271,36 @@ def test_on_before_provisioning_raises_when_error_policy_and_untrusted(
             agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
 
 
+def test_on_before_provisioning_warns_with_ignore_policy_and_untrusted(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: "pluggy.PluginManager",
+    mngr_test_prefix: str,
+    setup_git_config: None,
+) -> None:
+    """on_before_provisioning should warn (not raise) when accept_permission_dialogs is IGNORE and source is untrusted."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        default_host_dir=temp_host_dir,
+        local_system_mutations=LocalSystemMutations(
+            accept_permission_dialogs=PermissionDialogPolicy.IGNORE,
+            install_agents=LocalInstallPolicy.ERROR,
+        ),
+    )
+    with ConcurrencyGroup(name="test-ignore-untrusted") as cg:
+        ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+        source_path, worktree_path, agent, host = _setup_worktree_agent(
+            local_provider,
+            tmp_path,
+            ctx,
+        )
+
+        # Should NOT raise -- IGNORE policy logs warnings but proceeds
+        agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=ctx)
+
+
 # =============================================================================
 # API Credential Check Tests
 # =============================================================================
