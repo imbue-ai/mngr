@@ -268,14 +268,13 @@ def test_get_git_author_info_returns_configured_values(temp_git_repo: Path, cg: 
     """Test that get_git_author_info returns name and email from a configured repo."""
     name, email = get_git_author_info(temp_git_repo, cg)
     assert name == "Test User"
-    assert email == "test@test.com"
+    assert email == "test@example.com"
 
 
 def test_get_git_author_info_returns_none_when_not_configured(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that get_git_author_info returns (None, None) for a repo without author config."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    # HOME is already set to tmp_path by autouse fixture, and no .gitconfig exists
     subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
     name, email = get_git_author_info(repo_dir, cg)
     assert name is None
