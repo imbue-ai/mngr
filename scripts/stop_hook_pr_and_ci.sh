@@ -2,7 +2,8 @@
 #
 # stop_hook_pr_and_ci.sh
 #
-# Ensures a PR is created/updated and that all CI tests pass.
+# Checks for an existing PR and polls CI tests to completion.
+# PR creation is the agent's responsibility (via CLAUDE.md instructions).
 # Launched by main_claude_stop_hook.sh with TMUX_SESSION, SCRIPT_DIR,
 # CURRENT_BRANCH, and BASE_BRANCH exported in the environment.
 
@@ -14,25 +15,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/stop_hook_common.sh"
 
 _log_to_file "INFO" "pr_and_ci started (pid=$$, ppid=$PPID)"
 
-# Helper function to create a new PR
-# Returns the PR number on success, exits with error on failure
-create_new_pr() {
-    local pr_title="$1"
-    local pr_body="Automated PR created by Claude Code session."
-
-    if gh pr create --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --title "$pr_title" --body "$pr_body" > /dev/null; then
-        # Get the PR number after creation
-        if PR_OUTPUT=$(gh pr view "$CURRENT_BRANCH" --json number --jq '.number' 2>/dev/null); then
-            echo "$PR_OUTPUT"
-            return 0
-        fi
-    fi
-    return 1
-}
-
 EXISTING_PR=""
 
-# Check if PR already exists
+# Check if PR already exists (the agent is expected to create the PR itself)
 log_info "Checking for existing PR..."
 PR_STATE=""
 if PR_INFO=$(gh pr view "$CURRENT_BRANCH" --json number,state 2>/dev/null); then
@@ -43,37 +28,18 @@ fi
 
 if [[ -z "$EXISTING_PR" ]]; then
     if [[ "${MNGR_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
-        log_info "MNGR_SKIP_STOP_HOOK_PR_CREATION=1 and no existing PR, skipping PR creation"
-        _log_to_file "INFO" "Skipped PR creation (MNGR_SKIP_STOP_HOOK_PR_CREATION=1, no existing PR)"
+        log_info "MNGR_SKIP_STOP_HOOK_PR_CREATION=1 and no existing PR, skipping"
+        _log_to_file "INFO" "Skipped (MNGR_SKIP_STOP_HOOK_PR_CREATION=1, no existing PR)"
     else
-        # No PR exists - create a new one
-        log_info "Creating new PR..."
-        if NEW_PR=$(create_new_pr "$CURRENT_BRANCH"); then
-            EXISTING_PR="$NEW_PR"
-            log_info "Created PR #$EXISTING_PR"
-        else
-            log_error "Failed to create PR"
-            exit 1
-        fi
+        log_error "No PR found for branch $CURRENT_BRANCH."
+        log_error "Please create a draft PR using: gh pr create --draft"
+        _log_to_file "ERROR" "No PR found for branch $CURRENT_BRANCH, exiting with error"
+        exit 2
     fi
 elif [[ "$PR_STATE" == "MERGED" ]]; then
-    if [[ "${MNGR_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
-        log_info "MNGR_SKIP_STOP_HOOK_PR_CREATION=1 and previous PR was merged, skipping new PR creation"
-        _log_to_file "INFO" "Skipped PR creation (MNGR_SKIP_STOP_HOOK_PR_CREATION=1, previous PR merged)"
-        EXISTING_PR=""
-    else
-        # PR was merged - need to create a new one (can't reopen merged PRs on GitHub)
-        log_info "PR #$EXISTING_PR is merged. Creating a new PR..."
-        # Use a different title to distinguish from the merged PR
-        NEW_TITLE="${CURRENT_BRANCH} (subsequent)"
-        if NEW_PR=$(create_new_pr "$NEW_TITLE"); then
-            EXISTING_PR="$NEW_PR"
-            log_info "Created new PR #$EXISTING_PR (previous PR was merged)"
-        else
-            log_error "Failed to create new PR after merge"
-            exit 1
-        fi
-    fi
+    log_info "PR #$EXISTING_PR is already merged, skipping CI polling"
+    _log_to_file "INFO" "PR #$EXISTING_PR already merged, skipping CI polling"
+    EXISTING_PR=""
 elif [[ "$PR_STATE" == "CLOSED" ]]; then
     # PR was closed but not merged - reopen it
     log_info "PR #$EXISTING_PR is closed. Reopening..."
@@ -113,7 +79,7 @@ if [[ -n "$EXISTING_PR" ]]; then
         echo "failure" > .claude/pr_status
         _log_to_file "ERROR" "poll_pr_checks.sh exited with code $POLL_EXIT"
         log_info "Wrote PR status to .claude/pr_status: failure"
-        log_error "The tests have failed for the PR that was created by this script!"
+        log_error "CI tests have failed for the PR!"
         log_error "Use the gh tool to inspect the remote test results for this branch and see what failed."
         log_error "Note that you MUST identify the issue and fix it locally before trying again!"
         log_error "NEVER just re-trigger the pipeline!"

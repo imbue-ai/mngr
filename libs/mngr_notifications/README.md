@@ -6,7 +6,7 @@ A plugin for [mngr](https://github.com/imbue-ai/mngr) that adds the `mngr notify
 
 ## Requirements
 
-- macOS: `brew install terminal-notifier`
+- macOS: `brew install vjeantet/tap/alerter`
 - Linux: `notify-send` (usually part of `libnotify`)
 
 ## Usage

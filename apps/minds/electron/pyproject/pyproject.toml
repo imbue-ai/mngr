@@ -1,0 +1,10 @@
+[project]
+name = "minds-desktop"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "minds>=0.1.0",
+]
+
+[tool.uv.sources]
+minds = { path = "../../../../apps/minds", editable = true }

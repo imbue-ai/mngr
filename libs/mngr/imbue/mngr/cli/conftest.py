@@ -56,6 +56,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         project_context_path=None,
         plugin=(),
         disable_plugin=(),
+        setting=(),
         positional_name=None,
         positional_agent_type=None,
         agent_args=(),
@@ -119,6 +120,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         upload_file=(),
         append_to_file=(),
         prepend_to_file=(),
+        update=False,
         yes=False,
     )
 
@@ -141,6 +143,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         project_context_path=None,
         plugin=(),
         disable_plugin=(),
+        setting=(),
         agent=None,
         start=True,
         reconnect=True,

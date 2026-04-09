@@ -6,7 +6,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import ColumnData
@@ -15,6 +16,8 @@ from imbue.mngr_kanpan.data_types import PrState
 from imbue.mngr_kanpan.data_types import RefreshHook
 from imbue.mngr_kanpan.fetcher import _build_hook_env
 from imbue.mngr_kanpan.fetcher import _build_pr_branch_index
+from imbue.mngr_kanpan.fetcher import _collect_local_work_dirs
+from imbue.mngr_kanpan.fetcher import _get_all_commits_ahead
 from imbue.mngr_kanpan.fetcher import _pr_priority
 from imbue.mngr_kanpan.fetcher import enrich_snapshot_with_github_data
 from imbue.mngr_kanpan.fetcher import fetch_agent_snapshot
@@ -483,7 +486,7 @@ def test_fetch_agent_snapshot_passes_labels_and_plugin_data() -> None:
 
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
-    init_git_repo_with_config(repo_dir)
+    init_git_repo(repo_dir)
 
     agent = make_agent_details(
         name="agent-1",
@@ -519,6 +522,91 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
     # When PRs failed to load, create_pr_url should be suppressed even though
     # the agent has a branch and a valid GitHub remote
     assert snapshot.entries[0].create_pr_url is None
+
+
+# === _collect_local_work_dirs ===
+
+
+def test_collect_local_work_dirs_includes_local_agents_with_existing_dirs(tmp_path: Path) -> None:
+    """Local agents whose work_dir exists are included in the result."""
+    work_dir = tmp_path / "agent-work"
+    work_dir.mkdir()
+    local_agent = make_agent_details(name="local-1", work_dir=work_dir, provider_name="local")
+    remote_agent = make_agent_details(name="remote-1", work_dir=Path("/nonexistent"), provider_name="modal")
+    result = _collect_local_work_dirs([local_agent, remote_agent])
+    assert result == {0: work_dir}
+
+
+def test_collect_local_work_dirs_excludes_nonexistent_dirs(tmp_path: Path) -> None:
+    """Local agents whose work_dir does not exist are excluded."""
+    missing_dir = tmp_path / "does-not-exist"
+    agent = make_agent_details(name="local-missing", work_dir=missing_dir, provider_name="local")
+    result = _collect_local_work_dirs([agent])
+    assert result == {}
+
+
+def test_collect_local_work_dirs_all_remote() -> None:
+    """All-remote agents produce an empty mapping."""
+    agents = [
+        make_agent_details(name="r1", provider_name="modal"),
+        make_agent_details(name="r2", provider_name="modal"),
+    ]
+    result = _collect_local_work_dirs(agents)
+    assert result == {}
+
+
+# === _get_all_commits_ahead ===
+
+
+def test_get_all_commits_ahead_empty_list() -> None:
+    """Empty work_dirs returns empty dict without creating a ConcurrencyGroup."""
+    with ConcurrencyGroup(name="test") as cg:
+        result = _get_all_commits_ahead([], cg)
+    assert result == {}
+
+
+def test_get_all_commits_ahead_returns_none_for_non_git_dir(tmp_path: Path) -> None:
+    """A directory that is not a git repo yields None."""
+    plain_dir = tmp_path / "not-a-repo"
+    plain_dir.mkdir()
+    with ConcurrencyGroup(name="test") as cg:
+        result = _get_all_commits_ahead([plain_dir], cg)
+    assert result[plain_dir] is None
+
+
+def test_get_all_commits_ahead_with_upstream(tmp_path: Path) -> None:
+    """A repo with an upstream returns the correct commits-ahead count."""
+    # Create a repo to act as the remote origin.
+    remote_repo = tmp_path / "remote.git"
+    remote_repo.mkdir()
+    init_git_repo(remote_repo)
+
+    # Clone it to create a local repo with upstream tracking.
+    local = tmp_path / "local"
+    run_git_command(tmp_path, "clone", str(remote_repo), str(local))
+    run_git_command(local, "config", "user.email", "test@example.com")
+    run_git_command(local, "config", "user.name", "Test User")
+
+    # Make two commits ahead of upstream.
+    for i in range(2):
+        (local / f"file{i}.txt").write_text(f"content-{i}")
+        run_git_command(local, "add", ".")
+        run_git_command(local, "commit", "-m", f"commit {i}")
+
+    with ConcurrencyGroup(name="test") as cg:
+        result = _get_all_commits_ahead([local], cg)
+    assert result[local] == 2
+
+
+def test_get_all_commits_ahead_deduplicates(tmp_path: Path) -> None:
+    """Duplicate paths in the input list produce a single entry in the result."""
+    plain_dir = tmp_path / "dir"
+    plain_dir.mkdir()
+    with ConcurrencyGroup(name="test") as cg:
+        result = _get_all_commits_ahead([plain_dir, plain_dir, plain_dir], cg)
+    # Only one entry in the result despite three identical inputs.
+    assert len(result) == 1
+    assert plain_dir in result
 
 
 # === _build_hook_env ===
@@ -648,6 +736,20 @@ def test_run_refresh_hooks_execute_in_order(tmp_path: Path) -> None:
     assert prefixes[:2] == ["1", "1"]
     assert prefixes[2:4] == ["2", "2"]
     assert prefixes[4:] == ["3", "3"]
+
+
+def test_run_refresh_hooks_timeout_returns_error_instead_of_raising() -> None:
+    """When a hook process times out and the concurrency group raises, the error is collected as a string."""
+    hook = RefreshHook(name="Slow hook", command="sleep 60")
+    entries = (_make_entry(name="agent-1"),)
+    with (
+        patch("imbue.mngr_kanpan.fetcher._HOOK_TIMEOUT_SECONDS", 0.5),
+        ConcurrencyGroup(name="test") as cg,
+    ):
+        errors = run_refresh_hooks(cg, [hook], entries)
+    assert len(errors) == 1
+    assert "Slow hook" in errors[0]
+    assert "timed out or failed" in errors[0]
 
 
 # === fetch_board_snapshot with hooks ===

@@ -7,6 +7,7 @@ import pytest
 
 from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
 from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
+from imbue.minds.forwarding_server.backend_resolver import ServerLogRecord
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
@@ -82,7 +83,8 @@ def make_resolver_with_data(
             records = parse_server_log_records(log_content)
             servers: dict[str, str] = {}
             for record in records:
-                servers[str(record.server)] = record.url
+                if isinstance(record, ServerLogRecord):
+                    servers[str(record.server)] = record.url
             resolver.update_servers(AgentId(agent_id_str), servers)
 
     return resolver

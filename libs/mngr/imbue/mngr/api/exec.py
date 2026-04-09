@@ -18,6 +18,7 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
@@ -72,8 +73,9 @@ def exec_command_on_agent(
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
 
     logger.debug("Executing command on agent {}: {}", agent.name, command)
+    prefixed_command = host.build_source_env_prefix(agent) + command
     result = host.execute_stateful_command(
-        command,
+        prefixed_command,
         user=user,
         cwd=effective_cwd,
         timeout_seconds=timeout_seconds,
@@ -167,25 +169,24 @@ def _execute_on_single_agent(
 ) -> bool:
     """Execute a command on a single agent. Returns True if the caller should abort."""
     try:
-        # Find the agent on the host to get its work_dir
-        agent_work_dir: Path | None = None
+        # Find the agent on the host to get its work_dir and env prefix
+        matched_agent: AgentInterface | None = None
         for agent in online_host.get_agents():
             if agent.id == match.agent_id:
-                agent_work_dir = agent.work_dir
+                matched_agent = agent
                 break
 
-        if cwd is not None:
-            effective_cwd: Path | None = Path(cwd)
-        elif agent_work_dir is not None:
-            effective_cwd = agent_work_dir
-        else:
+        if matched_agent is None:
             return _record_failure(
                 result, match.agent_name, f"Agent {match.agent_name} not found on host", on_error, error_behavior
             )
 
+        effective_cwd = Path(cwd) if cwd is not None else matched_agent.work_dir
+        prefixed_command = online_host.build_source_env_prefix(matched_agent) + command
+
         with log_span("Executing command on agent {}", match.agent_name):
             cmd_result = online_host.execute_stateful_command(
-                command,
+                prefixed_command,
                 user=user,
                 cwd=effective_cwd,
                 timeout_seconds=timeout_seconds,

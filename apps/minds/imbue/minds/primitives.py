@@ -6,6 +6,14 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 
 
+class OutputFormat(UpperCaseStrEnum):
+    """Output format for command results on stdout."""
+
+    HUMAN = auto()
+    JSON = auto()
+    JSONL = auto()
+
+
 class LaunchMode(UpperCaseStrEnum):
     """How a mind agent should be launched."""
 
