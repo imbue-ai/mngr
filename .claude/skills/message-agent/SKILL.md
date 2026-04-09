@@ -2,7 +2,7 @@
 name: message-agent
 argument-hint: <agent_name> <description of what to say>
 description: Send a message to another mngr agent. Use when you need to communicate with a peer agent.
-allowed-tools: Bash(uv run mngr message *), Bash(uv run mngr list *), Write(*)
+allowed-tools: Bash(echo *), Bash(uv run mngr message *), Bash(uv run mngr list *), Write(*)
 ---
 
 The user's message contains a target agent name (the first word) and a description of what to communicate. Extract the agent name and treat everything after it as the intent/content of the message.
