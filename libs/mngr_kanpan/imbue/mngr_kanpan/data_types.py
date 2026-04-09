@@ -158,8 +158,8 @@ class KanpanPluginConfig(PluginConfig):
     column_order: list[str] | None = Field(
         default=None,
         description="Display order for all columns (built-in and custom). "
-        "Built-in names: name, state, git, pr, ci, link. "
-        "If None, defaults to: name, state, git, pr, ci, [custom in config order], link.",
+        "Built-in names: name, state, git, pr, ci. "
+        "If None, defaults to: name, state, git, pr, [custom in config order], ci.",
     )
     refresh_interval_seconds: float = Field(
         default=600.0,

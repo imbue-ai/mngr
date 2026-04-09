@@ -34,10 +34,13 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
 class ParsedSourceLocation(FrozenModel):
-    """Parsed components of a source location string."""
+    """Parsed components of a source location string.
+
+    Produced by parse_source_string(); consumed by resolve_source_location().
+    """
 
     agent: str | None = Field(description="Agent ID or name")
-    host: str | None = Field(description="Host ID or name")
+    host: str | None = Field(description="Host ID or name (may include .PROVIDER suffix)")
     path: str | None = Field(description="File path")
 
 
@@ -59,56 +62,54 @@ def _parse_address_part(address_str: str) -> tuple[str | None, str | None]:
 
 
 @pure
-def parse_source_string(
-    source: str | None,
-    source_agent: str | None = None,
-    source_host: str | None = None,
-    source_path: str | None = None,
-) -> ParsedSourceLocation:
-    """Parse source location string into components.
+def parse_source_string(source: str) -> ParsedSourceLocation:
+    """Parse a --from/--source string into its components.
 
-    source format: [AGENT[@[HOST][.PROVIDER]]][:PATH] | PATH
+    The DSL encodes four variants:
 
-    Uses the standard agent address format (NAME@HOST.PROVIDER) for specifying
-    agent and host components. Everything after the first ':' is treated as the path.
+      1. AGENT_ADDR             agent's host + agent's work_dir
+      2. AGENT_ADDR:PATH        agent's host + explicit PATH
+      3. @HOST[.PROVIDER]:PATH  explicit host + PATH (@ without agent name)
+      4. :PATH                  local path
+
+    where AGENT_ADDR is NAME[@HOST[.PROVIDER]].
+
+    Paths starting with /, ./, ~/, or ../ are also recognized directly
+    (i.e. --from /abs/path works without requiring the : prefix).
+
+    Note: a bare name like "foo" refers to agent "foo", not a directory.
+    Use ":foo" to specify a relative directory named foo.
 
     Examples:
-      - "my-agent" -> agent="my-agent"
-      - "my-agent@my-host" -> agent="my-agent", host="my-host"
-      - "my-agent@my-host.modal" -> agent="my-agent", host="my-host.modal"
-      - "my-agent@my-host:/path" -> agent="my-agent", host="my-host", path="/path"
-      - "@my-host:/path" -> host="my-host", path="/path"
-      - "/path/to/dir" -> path="/path/to/dir"
-
-    Raises UserInputError if both source and individual parameters are specified.
+      - "my-agent"                  -> agent="my-agent"
+      - "my-agent@my-host"          -> agent="my-agent", host="my-host"
+      - "my-agent@my-host.modal"    -> agent="my-agent", host="my-host.modal"
+      - "my-agent:path"             -> agent="my-agent", path="path"
+      - "my-agent@my-host:/path"    -> agent="my-agent", host="my-host", path="/path"
+      - "@my-host:/path"            -> host="my-host", path="/path"
+      - ":/path/to/dir"             -> path="/path/to/dir"
+      - "/path/to/dir"              -> path="/path/to/dir"
     """
-    if source is not None:
-        if source_agent is not None or source_path is not None or source_host is not None:
-            raise UserInputError("Specify either --source or the individual source parameters, not both.")
+    # Recognize unambiguous path prefixes as a convenience
+    if source.startswith(("/", "./", "~/", "../")):
+        return ParsedSourceLocation(agent=None, host=None, path=source)
 
-        parsed_agent: str | None = None
-        parsed_host: str | None = None
-        parsed_path: str | None = None
+    # Split on first : to separate address from path
+    if ":" in source:
+        address_part, path_part = source.split(":", 1)
+        path = path_part or None
+    else:
+        address_part = source
+        path = None
 
-        if source.startswith(("/", "./", "~/", "../")):
-            parsed_path = source
-        elif ":" in source:
-            prefix, path_part = source.split(":", 1)
-            parsed_path = path_part
-            if prefix:
-                parsed_agent, parsed_host = _parse_address_part(prefix)
-        else:
-            parsed_agent, parsed_host = _parse_address_part(source)
+    # Empty address means local path (variant 4: ":path")
+    if not address_part:
+        return ParsedSourceLocation(agent=None, host=None, path=path)
 
-        source_agent = parsed_agent
-        source_host = parsed_host
-        source_path = parsed_path
+    # Parse the address part (variants 1-3)
+    agent, host = _parse_address_part(address_part)
 
-    return ParsedSourceLocation(
-        agent=source_agent,
-        host=source_host,
-        path=source_path,
-    )
+    return ParsedSourceLocation(agent=agent, host=host, path=path)
 
 
 @pure
@@ -239,32 +240,21 @@ class ResolvedSource(FrozenModel):
 
 @log_call
 def resolve_source_location(
-    source: str | None,
-    source_agent: str | None,
-    source_host: str | None,
-    source_path: str | None,
+    parsed: ParsedSourceLocation,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
 ) -> ResolvedSource:
-    """Parse and resolve source location to a concrete host, path, and optional agent ID.
+    """Resolve a previously-parsed source location to a concrete host, path, and optional agent.
 
-    source format: [AGENT[@[HOST][.PROVIDER]]][:PATH] | PATH
-
-    Uses the standard agent address format (NAME@HOST.PROVIDER) for specifying
-    agent and host components. Everything after the first ':' is treated as the path.
+    Takes a ParsedSourceLocation (produced by parse_source_string) and resolves
+    agent/host references against the discovered hosts and agents.
 
     If the resolved host is offline, it will be started if is_start_desired is True (the default).
     If is_start_desired is False and the host is offline, raises UserInputError.
-
-    This is useful because it allows the user to specify the source agent / location in a maximally flexible way.
-    This is important for making the CLI easy to use in a variety of scenarios.
     """
-    # Parse the source string into components
-    with log_span("Parsing source location"):
-        parsed = parse_source_string(source, source_agent, source_host, source_path)
-        logger.trace("Parsed source: agent={} host={} path={}", parsed.agent, parsed.host, parsed.path)
+    logger.trace("Resolving source: agent={} host={} path={}", parsed.agent, parsed.host, parsed.path)
 
     # Resolve host and agent references from the parsed components
     all_hosts = list(agents_by_host.keys())

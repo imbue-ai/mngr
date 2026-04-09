@@ -644,13 +644,8 @@ Supports custom format templates via --format. Available fields: name.""",
         ("create", "Create a new agent"),
         ("list", "List existing agents"),
         ("gc", "Garbage collect orphaned resources"),
-    ),
-    additional_sections=(
-        (
-            "Related Documentation",
-            """- [Resource Cleanup Options](../generic/resource_cleanup.md) - Control which associated resources are destroyed
-- [Multi-target Options](../generic/multi_target.md) - Behavior when targeting multiple agents""",
-        ),
+        ("resource_cleanup", "Control which associated resources are destroyed"),
+        ("multi_target", "Behavior when targeting multiple agents"),
     ),
 ).register()
 
