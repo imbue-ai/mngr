@@ -7,15 +7,25 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 
+from collections.abc import Callable
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
+
+
+def _log_lima_output(line: str, is_stdout: bool) -> None:
+    """Log output from limactl commands at BUILD level."""
+    line = line.strip()
+    if line:
+        logger.log(LogLevel.BUILD.value, "{}", line, source="lima")
 
 
 def check_lima_installed(provider_name: ProviderInstanceName) -> None:
@@ -78,14 +88,21 @@ def limactl_start_new(
     yaml_path: Path,
     start_args: tuple[str, ...] = (),
     timeout: float = 600.0,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Create and start a new Lima instance from a YAML config file.
 
     Runs: limactl start --name=<instance_name> <yaml_path> [start_args...]
+    Output is streamed via on_output (defaults to BUILD-level logging).
     """
-    cmd = ["limactl", "start", f"--name={instance_name}", str(yaml_path)] + list(start_args)
+    cmd = ["limactl", "--log-level=info", "start", f"--name={instance_name}", str(yaml_path)] + list(start_args)
     with log_span("Running limactl start for new instance: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(
+            cmd,
+            timeout=timeout,
+            on_output=on_output or _log_lima_output,
+            is_checked_after=False,
+        )
     if result.returncode != 0:
         raise LimaCommandError("start", result.returncode, result.stderr)
 
@@ -94,14 +111,20 @@ def limactl_start_existing(
     cg: ConcurrencyGroup,
     instance_name: str,
     timeout: float = 300.0,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Start an existing stopped Lima instance.
 
     Runs: limactl start <instance_name>
     """
-    cmd = ["limactl", "start", instance_name]
+    cmd = ["limactl", "--log-level=info", "start", instance_name]
     with log_span("Running limactl start for existing instance: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(
+            cmd,
+            timeout=timeout,
+            on_output=on_output or _log_lima_output,
+            is_checked_after=False,
+        )
     if result.returncode != 0:
         raise LimaCommandError("start", result.returncode, result.stderr)
 
