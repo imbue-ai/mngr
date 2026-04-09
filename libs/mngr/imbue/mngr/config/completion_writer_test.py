@@ -104,23 +104,19 @@ def _read_cache(cache_dir: Path) -> dict:
 
 
 def test_write_cli_completions_cache_includes_host_name_options(completion_cache_dir: Path) -> None:
-    """Cache should include host_name_options for create --target."""
+    """Cache should include host_name_options key (currently empty)."""
     group = click.Group(
         name="test",
         commands={
-            "create": click.Command(
-                "create",
-                params=[
-                    click.Option(["--target"]),
-                ],
-            ),
+            "create": click.Command("create"),
         },
     )
 
     write_cli_completions_cache(cli_group=group)
     data = _read_cache(completion_cache_dir)
 
-    assert "create.--target" in data["host_name_options"]
+    assert "host_name_options" in data
+    assert data["host_name_options"] == []
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_events(

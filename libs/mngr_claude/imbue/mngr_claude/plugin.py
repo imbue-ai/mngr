@@ -1660,7 +1660,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             # no matter what, *always* dismiss the cost popup, it's pointless
             acknowledge_cost_threshold(get_user_claude_config_path())
 
-            # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
+            # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
             if options.source_agent_state_dir is not None:

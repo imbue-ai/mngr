@@ -366,23 +366,32 @@ class _ConnectTestResult:
         self.subprocess_call_args: list[list[str]] = []
 
 
-def _run_connect_to_agent(
+def _run_connect_with_retries(
     local_provider: LocalProviderInstance,
     mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
-    ssh_exit_code: int,
+    ssh_exit_codes: list[int],
+    retry_count: int = 2,
     agent_name: str = "test-agent",
 ) -> _ConnectTestResult:
-    """Set up and run connect_to_agent with intercepted system calls."""
+    """Set up and run connect_to_agent with a sequence of SSH exit codes.
+
+    Each successive call to run_interactive_subprocess returns the next exit code
+    from the list. When the list is exhausted, the last exit code is repeated.
+    """
     host = _make_ssh_host(local_provider, mngr_ctx, ssh_known_hosts_file="/tmp/known_hosts")
     agent = _make_remote_agent(host, mngr_ctx, agent_name=agent_name)
-    opts = ConnectionOptions(is_unknown_host_allowed=False)
+    opts = ConnectionOptions(is_unknown_host_allowed=False, retry_count=retry_count, retry_delay="1s")
 
     result = _ConnectTestResult()
+    call_index = 0
 
-    def fake_run_interactive(args, **kwargs):
+    def fake_run_interactive(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal call_index
+        exit_code = ssh_exit_codes[min(call_index, len(ssh_exit_codes) - 1)]
+        call_index += 1
         result.subprocess_call_args.append(list(args))
-        return subprocess.CompletedProcess(args=args, returncode=ssh_exit_code)
+        return subprocess.CompletedProcess(args=args, returncode=exit_code)
 
     monkeypatch.setattr(
         "imbue.mngr.api.connect.run_interactive_subprocess",
@@ -396,6 +405,24 @@ def _run_connect_to_agent(
     connect_to_agent(agent, host, mngr_ctx, opts)
 
     return result
+
+
+def _run_connect_to_agent(
+    local_provider: LocalProviderInstance,
+    mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    ssh_exit_code: int,
+    agent_name: str = "test-agent",
+) -> _ConnectTestResult:
+    """Set up and run connect_to_agent with intercepted system calls (no retries)."""
+    return _run_connect_with_retries(
+        local_provider,
+        mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[ssh_exit_code],
+        retry_count=0,
+        agent_name=agent_name,
+    )
 
 
 def test_connect_to_agent_remote_destroy_signal(
@@ -443,6 +470,85 @@ def test_connect_to_agent_remote_unknown_exit_code_no_action(
     """Test that connect_to_agent does not exec into anything on unexpected SSH exit codes."""
     result = _run_connect_to_agent(local_provider, temp_mngr_ctx, monkeypatch, ssh_exit_code=255)
 
+    assert len(result.execvp_calls) == 0
+
+
+# =========================================================================
+# Tests for connect_to_agent retry behavior
+# =========================================================================
+
+
+def test_connect_to_agent_retries_on_ssh_failure(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connect_to_agent should retry up to retry_count times when SSH fails with a non-signal exit code."""
+    result = _run_connect_with_retries(
+        local_provider,
+        temp_mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[255, 255, 255],
+        retry_count=2,
+    )
+
+    # 1 initial attempt + 2 retries = 3 total calls
+    assert len(result.subprocess_call_args) == 3
+    assert len(result.execvp_calls) == 0
+
+
+def test_connect_to_agent_no_retry_on_normal_exit(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connect_to_agent should not retry when SSH exits normally (code 0)."""
+    result = _run_connect_with_retries(
+        local_provider,
+        temp_mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[0],
+        retry_count=2,
+    )
+
+    assert len(result.subprocess_call_args) == 1
+    assert len(result.execvp_calls) == 0
+
+
+def test_connect_to_agent_no_retry_on_signal_exit(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connect_to_agent should not retry on a post-disconnect signal exit code (destroy/stop)."""
+    result = _run_connect_with_retries(
+        local_provider,
+        temp_mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[SIGNAL_EXIT_CODE_DESTROY],
+        retry_count=2,
+    )
+
+    assert len(result.subprocess_call_args) == 1
+    assert len(result.execvp_calls) == 1
+
+
+def test_connect_to_agent_retries_then_succeeds(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connect_to_agent should stop retrying once SSH succeeds."""
+    result = _run_connect_with_retries(
+        local_provider,
+        temp_mngr_ctx,
+        monkeypatch,
+        ssh_exit_codes=[255, 0],
+        retry_count=2,
+    )
+
+    # First attempt fails, second succeeds -- no third attempt
+    assert len(result.subprocess_call_args) == 2
     assert len(result.execvp_calls) == 0
 
 
