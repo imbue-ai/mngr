@@ -20,7 +20,7 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import mngr_agent_cleanup
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
@@ -35,7 +35,7 @@ def sync_test_env(tmp_path: Path) -> dict[str, str]:
     The test repo path is available as tmp_path / "repo".
     """
     repo = tmp_path / "repo"
-    init_git_repo_with_config(repo)
+    init_git_repo(repo)
     return setup_claude_trust_config_for_subprocess(
         trusted_paths=[repo],
         root_name="mngr-sync-acceptance-test",
@@ -394,7 +394,7 @@ def test_pull_files_transfers_files_from_agent(
     # Pull into a fresh directory
     pull_dest = tmp_path / "pulled"
     pull_dest.mkdir()
-    init_git_repo_with_config(pull_dest)
+    init_git_repo(pull_dest)
 
     result = run_mngr_subprocess(
         "pull",
@@ -484,7 +484,7 @@ def test_push_then_pull_round_trips_files(
     # Pull into a fresh directory
     pull_dest = tmp_path / "pulled"
     pull_dest.mkdir()
-    init_git_repo_with_config(pull_dest)
+    init_git_repo(pull_dest)
 
     pull_result = run_mngr_subprocess(
         "pull",

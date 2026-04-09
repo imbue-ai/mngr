@@ -4,9 +4,11 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.events import parse_event_line
 from imbue.mngr.api.observe import get_agent_states_events_path
 from imbue.mngr.api.observe import get_default_events_base_dir
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.notifier import Notifier
@@ -20,12 +22,16 @@ def watch_for_waiting_agents(
     plugin_config: NotificationsPluginConfig,
     notifier: Notifier,
     stop_event: threading.Event | None = None,
+    observe_process: RunningProcess | None = None,
 ) -> None:
     """Watch the mngr observe event stream for RUNNING -> WAITING transitions.
 
     Tails the agent_states events file written by `mngr observe` and sends
     desktop notifications when agents transition from RUNNING to WAITING.
     Runs until stop_event is set or interrupted.
+
+    If observe_process is provided, periodically checks that it is still alive
+    and exits with a warning if it has died.
     """
     if stop_event is None:
         stop_event = threading.Event()
@@ -36,6 +42,14 @@ def watch_for_waiting_agents(
     last_size = _get_file_size(events_path)
 
     while not stop_event.is_set():
+        if observe_process is not None and observe_process.returncode is not None:
+            write_human_line("mngr observe exited unexpectedly (exit code {})", observe_process.returncode)
+            stderr = observe_process.read_stderr().strip()
+            if stderr:
+                write_human_line("observe stderr: {}", stderr)
+            write_human_line("Stopping -- restart mngr notify to try again.")
+            return
+
         current_size = _get_file_size(events_path)
         if current_size > last_size:
             new_content = _read_from_offset(events_path, last_size)
@@ -89,6 +103,7 @@ def _process_events(
         agent_name = record.data.get("agent_name", "unknown")
         agent_id = record.data.get("agent_id", "unknown")
         logger.info("{} ({}): RUNNING -> WAITING", agent_name, agent_id)
+        write_human_line("{} is now WAITING -- sending notification", agent_name)
 
         title = "Agent waiting"
         message = f"{agent_name} is waiting for input"

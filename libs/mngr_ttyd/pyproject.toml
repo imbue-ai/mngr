@@ -5,7 +5,7 @@ description = "ttyd web terminal plugin for mngr - automatically launches a ttyd
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.1.4",
+    "imbue-mngr==0.2.3",
 ]
 
 [project.entry-points.mngr]

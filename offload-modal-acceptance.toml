@@ -11,6 +11,9 @@ sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --a
 type = "modal"
 dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 
+[provider.experimental_options]
+enable_docker = true
+
 [framework]
 type = "pytest"
 paths = ["."]
@@ -26,3 +29,4 @@ filters = "-m'not release and not docker'"
 output_dir = "test-results"
 junit = true
 junit_file = "junit.xml"
+download_globs = [".test_output/**"]
