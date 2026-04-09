@@ -577,16 +577,20 @@ def _pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Ite
     Unlike the record_xml_attribute fixture, this hook runs at collection time
     before any test execution. This ensures the JUnit name attribute is set
     even for skipped tests, where fixtures do not execute.
-    """
-    from _pytest.junitxml import xml_key
 
-    xml = config.stash.get(xml_key, None)
+    Finds the JUnit XML plugin via duck typing (checking for ``node_reporter``
+    attribute) to avoid importing from pytest's private ``_pytest`` package.
+    """
+    xml = None
+    for plugin in config.pluginmanager.get_plugins():
+        if hasattr(plugin, "node_reporter"):
+            xml = plugin
+            break
     if xml is None:
         return
     for item in items:
         test_id = _compute_test_id(item.nodeid, str(item.fspath))
-        node_reporter = xml.node_reporter(item.nodeid)
-        node_reporter.add_attribute("name", test_id)
+        xml.node_reporter(item.nodeid).add_attribute("name", test_id)
 
 
 @pytest.fixture(autouse=True)
