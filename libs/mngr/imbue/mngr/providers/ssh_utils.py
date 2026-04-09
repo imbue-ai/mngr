@@ -124,6 +124,37 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
     return private_key_path, public_key_openssh
 
 
+def clear_host_from_known_hosts(
+    known_hosts_path: Path,
+    hostname: str,
+    port: int,
+) -> None:
+    """Remove all entries for a host:port from the known_hosts file.
+
+    Called before scanning a newly created host to ensure stale keys
+    from a previous VM that reused the same port are removed.
+    """
+    if not known_hosts_path.exists():
+        return
+
+    if port == 22:
+        host_pattern = hostname
+    else:
+        host_pattern = f"[{hostname}]:{port}"
+
+    with open(known_hosts_path, "a+") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.seek(0)
+        lines = f.readlines()
+        new_lines = [line for line in lines if not line.startswith(f"{host_pattern} ")]
+        if len(new_lines) != len(lines):
+            f.seek(0)
+            f.truncate()
+            f.writelines(new_lines)
+            f.flush()
+            os.fsync(f.fileno())
+
+
 def add_host_to_known_hosts(
     known_hosts_path: Path,
     hostname: str,

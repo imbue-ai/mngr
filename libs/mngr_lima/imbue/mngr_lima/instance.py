@@ -45,6 +45,7 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
+from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -256,10 +257,11 @@ class LimaProviderInstance(BaseProviderInstance):
     def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
         """Scan SSH host keys and add all of them to known_hosts.
 
-        ssh-keyscan returns multiple key types (rsa, ed25519, ecdsa). We add
-        all of them because paramiko may negotiate any key type during the SSH
-        handshake, and a mismatch causes a connection failure.
+        First removes any stale keys for this host:port (from previous VMs
+        that may have reused the same port), then adds all key types from
+        ssh-keyscan so paramiko can negotiate any of them.
         """
+        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             ["ssh-keyscan", "-p", str(port), hostname],
             timeout=10.0,

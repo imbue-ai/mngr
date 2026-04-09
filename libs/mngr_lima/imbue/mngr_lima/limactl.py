@@ -48,7 +48,10 @@ class _SerialLogTailerCallback(MutableModel):
         logger.log(LogLevel.BUILD.value, "{}", stripped, source="lima")
 
         if not self.tailer_started and "serial" in stripped and ".log" in stripped:
-            match = re.search(r'"([^"]+serial[^"]*\.log)"', stripped)
+            # Match an absolute path containing "serial" and ending with ".log".
+            # limactl escapes quotes in its log output, so we match the path
+            # directly rather than relying on surrounding quote characters.
+            match = re.search(r'(/\S+serial\S*\.log)', stripped)
             if match:
                 log_pattern = match.group(1)
                 serial_log = re.sub(r'\*', '', log_pattern)
