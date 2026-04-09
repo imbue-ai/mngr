@@ -579,7 +579,9 @@ async def _handle_proxy_http(
             None, _get_tunnel_http_client, request.app, parsed_id, resolved_backend_url, backend_resolver
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.debug("SSH tunnel setup failed for {} server {}: {}", agent_id, server_name, e)
+        logger.warning("SSH tunnel setup failed for {} server {}: {}", agent_id, server_name, e)
+        if "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(content=generate_backend_loading_html())
         return Response(status_code=502, content=f"SSH tunnel to remote backend failed: {e}")
 
     # Check if this request expects a streaming response (SSE).
@@ -608,8 +610,12 @@ async def _handle_proxy_http(
         http_client=tunnel_client,
     )
 
-    # If forwarding returned an error Response directly, return it
+    # If forwarding returned an error Response (e.g. backend not ready yet),
+    # show the auto-retrying loading page for HTML requests instead of a
+    # dead-end 502 that requires manual reload.
     if isinstance(result, Response):
+        if result.status_code >= 500 and "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(content=generate_backend_loading_html())
         return result
 
     return _build_proxy_response(
