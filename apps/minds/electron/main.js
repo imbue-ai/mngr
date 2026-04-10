@@ -66,6 +66,7 @@ const TITLEBAR_CSS = `
 #minds-titlebar .minds-wc button { border-radius: 0; width: 36px; height: ${TITLEBAR_HEIGHT}px; }
 #minds-titlebar .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
 #minds-titlebar .minds-wc #minds-close:hover { background: #dc2626; color: white; }
+:root { --minds-titlebar-height: ${TITLEBAR_HEIGHT}px; }
 body { padding-top: ${TITLEBAR_HEIGHT}px !important; }
 `;
 
