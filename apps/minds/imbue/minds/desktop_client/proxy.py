@@ -294,7 +294,7 @@ body {{ display: flex; flex-direction: column; font-family: system-ui, -apple-sy
 </head>
 <body>
 <div id="info-bar">
-  <a href="/?show_list=1" class="home-link" target="_top" title="All minds">Home</a>
+  <a href="/" class="home-link" target="_top" title="All minds">Home</a>
   <span class="separator"></span>
   <span><span class="label">Agent: </span><span class="value">{safe_name}</span></span>
   <span class="separator"></span>

@@ -274,12 +274,6 @@ def _handle_landing_page(
 
     all_agent_ids = backend_resolver.list_known_mind_ids()
 
-    # If exactly one agent, redirect directly to it (unless the user
-    # explicitly requested the list view via the home button).
-    show_list = request.query_params.get("show_list") == "1"
-    if len(all_agent_ids) == 1 and not show_list:
-        return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
-
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
