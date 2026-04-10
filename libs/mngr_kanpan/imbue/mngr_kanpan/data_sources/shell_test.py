@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import CiField
 from imbue.mngr_kanpan.data_source import CiStatus
 from imbue.mngr_kanpan.data_source import CommitsAheadField
@@ -99,7 +101,7 @@ def test_build_shell_env_with_other_field() -> None:
 # === compute ===
 
 
-def _make_mock_proc(stdout: str = "", returncode: int = 0, stderr: str = "") -> MagicMock:
+def _make_mock_proc(stdout: str = "", returncode: int | None = 0, stderr: str = "") -> MagicMock:
     proc = MagicMock()
     proc.read_stdout.return_value = stdout
     proc.read_stderr.return_value = stderr
@@ -107,7 +109,7 @@ def _make_mock_proc(stdout: str = "", returncode: int = 0, stderr: str = "") -> 
     return proc
 
 
-def _make_mock_mngr_ctx(procs: list[MagicMock]) -> object:
+def _make_mock_mngr_ctx(procs: list[MagicMock]) -> MngrContext:
     """Build a minimal mock mngr_ctx with a ConcurrencyGroup that returns the given processes."""
     child_cg = MagicMock()
     child_cg.__enter__ = MagicMock(return_value=child_cg)
@@ -117,7 +119,7 @@ def _make_mock_mngr_ctx(procs: list[MagicMock]) -> object:
     cg = MagicMock()
     cg.make_concurrency_group.return_value = child_cg
 
-    return SimpleNamespace(concurrency_group=cg)
+    return cast(MngrContext, SimpleNamespace(concurrency_group=cg))
 
 
 def test_compute_success() -> None:
@@ -128,10 +130,12 @@ def test_compute_success() -> None:
     agent = make_agent_details(name="agent-1")
     proc = _make_mock_proc(stdout="output text\n", returncode=0)
     ctx = _make_mock_mngr_ctx([proc])
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
-    assert fields[agent.name]["custom"].value == "output text"  # type: ignore[union-attr]
+    field = fields[agent.name]["custom"]
+    assert isinstance(field, StringField)
+    assert field.value == "output text"
 
 
 def test_compute_empty_stdout_not_included() -> None:
@@ -142,7 +146,7 @@ def test_compute_empty_stdout_not_included() -> None:
     agent = make_agent_details(name="agent-1")
     proc = _make_mock_proc(stdout="   \n", returncode=0)
     ctx = _make_mock_mngr_ctx([proc])
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name not in fields
 
@@ -155,7 +159,7 @@ def test_compute_nonzero_exit_produces_error() -> None:
     agent = make_agent_details(name="agent-1")
     proc = _make_mock_proc(stdout="", returncode=1, stderr="something failed")
     ctx = _make_mock_mngr_ctx([proc])
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name not in fields
     assert any("Custom" in e and "agent-1" in e for e in errors)
 
@@ -167,9 +171,9 @@ def test_compute_process_returncode_none_skipped() -> None:
         config=ShellCommandConfig(name="Custom", header="CUSTOM", command="sleep 1"),
     )
     agent = make_agent_details(name="agent-1")
-    proc = _make_mock_proc(stdout="output", returncode=None)  # type: ignore[arg-type]
+    proc = _make_mock_proc(stdout="output", returncode=None)
     ctx = _make_mock_mngr_ctx([proc])
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name not in fields
     assert errors == []
 
@@ -189,6 +193,6 @@ def test_compute_concurrency_exception_group_produces_error() -> None:
     cg = MagicMock()
     cg.make_concurrency_group.return_value = child_cg
 
-    ctx = SimpleNamespace(concurrency_group=cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert any("Custom" in e for e in errors)

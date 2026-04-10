@@ -1,9 +1,10 @@
 from types import SimpleNamespace
-from typing import Any
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CiField
@@ -204,6 +205,10 @@ class _MockDataSource:
         return self._name
 
     @property
+    def is_remote(self) -> bool:
+        return False
+
+    @property
     def columns(self) -> dict[str, str]:
         return {}
 
@@ -226,6 +231,10 @@ class _FailingDataSource:
         return "failing"
 
     @property
+    def is_remote(self) -> bool:
+        return False
+
+    @property
     def columns(self) -> dict[str, str]:
         return {}
 
@@ -243,7 +252,7 @@ class _FailingDataSource:
 
 
 def test_run_data_sources_parallel_empty() -> None:
-    results, errors = _run_data_sources_parallel([], (), {}, MagicMock())
+    results, errors = _run_data_sources_parallel([], (), {}, cast(MngrContext, MagicMock()))
     assert results == {}
     assert errors == []
 
@@ -252,7 +261,7 @@ def test_run_data_sources_parallel_single_source() -> None:
     agent = AgentName("agent-1")
     pr = _make_pr()
     source = _MockDataSource("github", {agent: {"pr": pr}})
-    results, errors = _run_data_sources_parallel([source], (), {}, MagicMock())
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
     assert "github" in results
     assert agent in results["github"]
     assert errors == []
@@ -260,13 +269,13 @@ def test_run_data_sources_parallel_single_source() -> None:
 
 def test_run_data_sources_parallel_source_with_errors() -> None:
     source = _MockDataSource("github", {}, errors=["some error"])
-    results, errors = _run_data_sources_parallel([source], (), {}, MagicMock())
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
     assert "some error" in errors
 
 
 def test_run_data_sources_parallel_source_raises_exception() -> None:
     source = _FailingDataSource()
-    results, errors = _run_data_sources_parallel([source], (), {}, MagicMock())
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
     assert any("failing" in e and "failed" in e for e in errors)
 
 
@@ -276,7 +285,7 @@ def test_run_data_sources_parallel_multiple_sources() -> None:
     ci = CiField(status=CiStatus.PASSING)
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
-    results, errors = _run_data_sources_parallel([s1, s2], (), {}, MagicMock())
+    results, errors = _run_data_sources_parallel([s1, s2], (), {}, cast(MngrContext, MagicMock()))
     assert "github" in results
     assert "git_info" in results
     assert errors == []
@@ -285,15 +294,18 @@ def test_run_data_sources_parallel_multiple_sources() -> None:
 # === collect_data_sources ===
 
 
-def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> Any:
+def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> MngrContext:
     """Build a minimal mock MngrContext for collect_data_sources tests."""
     hook = MagicMock()
     hook.kanpan_data_sources.return_value = [sources]
     pm = MagicMock()
     pm.hook = hook
-    return SimpleNamespace(
-        get_plugin_config=lambda name, cls: config,
-        pm=pm,
+    return cast(
+        MngrContext,
+        SimpleNamespace(
+            get_plugin_config=lambda name, cls: config,
+            pm=pm,
+        ),
     )
 
 
@@ -325,9 +337,12 @@ def test_collect_data_sources_skips_none_results() -> None:
     hook.kanpan_data_sources.return_value = [None]
     pm = MagicMock()
     pm.hook = hook
-    ctx: Any = SimpleNamespace(
-        get_plugin_config=lambda name, cls: KanpanPluginConfig(),
-        pm=pm,
+    ctx = cast(
+        MngrContext,
+        SimpleNamespace(
+            get_plugin_config=lambda name, cls: KanpanPluginConfig(),
+            pm=pm,
+        ),
     )
     sources = collect_data_sources(ctx)
     assert sources == []
@@ -336,13 +351,13 @@ def test_collect_data_sources_skips_none_results() -> None:
 # === plugin.kanpan_data_sources ===
 
 
-def _make_plugin_mngr_ctx(config: KanpanPluginConfig) -> Any:
-    return SimpleNamespace(get_plugin_config=lambda name, cls: config)
+def _make_plugin_mngr_ctx(config: KanpanPluginConfig) -> MngrContext:
+    return cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
 
 
 def test_plugin_kanpan_data_sources_default() -> None:
     ctx = _make_plugin_mngr_ctx(KanpanPluginConfig())
-    result = kanpan_data_sources(mngr_ctx=ctx)  # type: ignore[arg-type]
+    result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
     names = [s.name for s in result]
     assert "repo_paths" in names
@@ -355,7 +370,7 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
         shell_commands={"my_cmd": ShellCommandSourceConfig(name="My Command", header="CMD", command="echo hi")}
     )
     ctx = _make_plugin_mngr_ctx(config)
-    result = kanpan_data_sources(mngr_ctx=ctx)  # type: ignore[arg-type]
+    result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
     names = [s.name for s in result]
     assert "shell_my_cmd" in names
@@ -363,11 +378,14 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
 
 def test_plugin_kanpan_data_sources_github_config_as_dict() -> None:
     # GitHub config as a raw dict (tests the isinstance dict branch)
-    ctx = SimpleNamespace(
-        get_plugin_config=lambda name, cls: SimpleNamespace(
-            data_sources={},
-            shell_commands={},
-        )
+    ctx = cast(
+        MngrContext,
+        SimpleNamespace(
+            get_plugin_config=lambda name, cls: SimpleNamespace(
+                data_sources={},
+                shell_commands={},
+            )
+        ),
     )
-    result = kanpan_data_sources(mngr_ctx=ctx)  # type: ignore[arg-type]
+    result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None

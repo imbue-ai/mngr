@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from typing import Any
+from typing import cast
 
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
@@ -10,6 +11,8 @@ from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
 from urwid.widget.text import Text
 
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -460,6 +463,10 @@ class _MockDataSource:
         return "mock"
 
     @property
+    def is_remote(self) -> bool:
+        return False
+
+    @property
     def columns(self) -> dict[str, str]:
         return {"mock_field": "MOCK", "empty_header": ""}
 
@@ -469,10 +476,10 @@ class _MockDataSource:
 
     def compute(
         self,
-        agents: Any,
-        cached_fields: Any,
-        mngr_ctx: Any,
-    ) -> tuple[dict[Any, dict[str, FieldValue]], list[str]]:
+        agents: tuple[AgentDetails, ...],
+        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        mngr_ctx: MngrContext,
+    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
         return {}, []
 
 
@@ -701,8 +708,8 @@ def test_update_row_mark_no_entry_at_index() -> None:
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
     state.index_to_entry = idx_map
-    # Index 0 is the header row, not an agent entry
-    _update_row_mark(state, 0, "d")  # should not raise
+    # Index 0 is the header row, not an agent entry; should not raise
+    _update_row_mark(state, 0, "d")
 
 
 # =============================================================================
@@ -746,8 +753,9 @@ def test_toggle_mark_removes_existing_mark() -> None:
 
 
 def test_toggle_mark_no_walker() -> None:
+    # No walker means no-op; should not raise
     state = _make_state()
-    _toggle_mark(state, "d")  # should not raise
+    _toggle_mark(state, "d")
 
 
 # =============================================================================
@@ -770,7 +778,7 @@ def test_unmark_focused_no_mark_is_noop() -> None:
     state = _make_state_with_walker((entry,))
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
-    _unmark_focused(state)  # should not raise
+    _unmark_focused(state)
 
 
 # =============================================================================
@@ -788,7 +796,7 @@ def test_unmark_all_clears_marks() -> None:
 
 def test_unmark_all_empty_marks_noop() -> None:
     state = _make_state()
-    _unmark_all(state)  # should not raise
+    _unmark_all(state)
 
 
 # =============================================================================
@@ -820,14 +828,14 @@ def test_update_mark_count_footer_no_marks_restores_footer() -> None:
 def test_execute_marks_no_marks_does_nothing() -> None:
     state = _make_state()
     state.marks = {}
-    _execute_marks(state)  # should not raise, does nothing
+    _execute_marks(state)
 
 
 def test_execute_marks_already_executing_does_nothing() -> None:
     state = _make_state()
     state.marks = {AgentName("a"): "d"}
     state.executing = True
-    _execute_marks(state)  # should not raise
+    _execute_marks(state)
 
 
 # =============================================================================
@@ -928,42 +936,41 @@ def test_refresh_display_none_snapshot() -> None:
 def test_load_user_commands_from_custom_command_instance() -> None:
     cmd = CustomCommand(name="my-cmd", command="echo hi")
     config = KanpanPluginConfig(commands={"c": cmd})
-    ctx = SimpleNamespace(get_plugin_config=lambda name, cls: config)
-    result = _load_user_commands(ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    result = _load_user_commands(ctx)
     assert "c" in result
     assert result["c"].name == "my-cmd"
 
 
 def test_load_user_commands_from_dict() -> None:
-    config = KanpanPluginConfig(
-        commands={"c": CustomCommand(name="my-cmd", command="echo hi")}  # type: ignore[arg-type]
-    )
-    ctx = SimpleNamespace(get_plugin_config=lambda name, cls: config)
-    result = _load_user_commands(ctx)  # type: ignore[arg-type]
+    config = KanpanPluginConfig(commands={"c": CustomCommand(name="my-cmd", command="echo hi")})
+    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    result = _load_user_commands(ctx)
     assert "c" in result
 
 
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
-    ctx = SimpleNamespace(get_plugin_config=lambda name, cls: config)
-    result = _build_command_map(ctx)  # type: ignore[arg-type]
-    assert "r" in result  # builtin refresh key
-    assert "q" not in result  # q is quit, not in commands
+    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    result = _build_command_map(ctx)
+    # "r" is the builtin refresh key; "q" is quit and not a mapped command
+    assert "r" in result
+    assert "q" not in result
 
 
 def test_build_command_map_user_overrides_builtin() -> None:
     custom = CustomCommand(name="my-refresh", command="echo refresh")
     config = KanpanPluginConfig(commands={_BUILTIN_COMMAND_KEY_REFRESH: custom})
-    ctx = SimpleNamespace(get_plugin_config=lambda name, cls: config)
-    result = _build_command_map(ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    result = _build_command_map(ctx)
     assert result[_BUILTIN_COMMAND_KEY_REFRESH].name == "my-refresh"
 
 
 def test_build_command_map_excludes_disabled() -> None:
     disabled = CustomCommand(name="disabled-cmd", enabled=False)
     config = KanpanPluginConfig(commands={"z": disabled})
-    ctx = SimpleNamespace(get_plugin_config=lambda name, cls: config)
-    result = _build_command_map(ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    result = _build_command_map(ctx)
     assert "z" not in result
 
 
@@ -973,9 +980,10 @@ def test_build_command_map_excludes_disabled() -> None:
 
 
 def test_update_snapshot_mute_none_snapshot() -> None:
+    # When snapshot is None, function should return without error
     state = _make_state()
     state.snapshot = None
-    _update_snapshot_mute(state, AgentName("agent"), True)  # should not raise
+    _update_snapshot_mute(state, AgentName("agent"), True)
 
 
 # =============================================================================

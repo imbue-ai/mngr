@@ -1,9 +1,11 @@
 from pathlib import Path
 from subprocess import TimeoutExpired
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import CommitsAheadField
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
@@ -92,8 +94,8 @@ def test_compute_local_agent_with_work_dir(tmp_path: Path) -> None:
     proc = _make_mock_proc(stdout="5\n", returncode=0)
     cg = MagicMock()
     cg.run_process_in_background.return_value = proc
-    ctx = SimpleNamespace(concurrency_group=cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
     ca = fields[agent.name][FIELD_COMMITS_AHEAD]
@@ -106,8 +108,8 @@ def test_compute_remote_agent_no_work_dir() -> None:
     ds = GitInfoDataSource()
     agent = make_agent_details(name="agent-1", provider_name="modal")
     cg = MagicMock()
-    ctx = SimpleNamespace(concurrency_group=cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
     ca = fields[agent.name][FIELD_COMMITS_AHEAD]
@@ -124,10 +126,11 @@ def test_compute_nonexistent_work_dir() -> None:
         work_dir=Path("/nonexistent/dir/that/does/not/exist"),
     )
     cg = MagicMock()
-    ctx = SimpleNamespace(concurrency_group=cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # type: ignore[arg-type]
+    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     # Work dir doesn't exist, so treated as no work dir
     assert agent.name in fields
     ca = fields[agent.name][FIELD_COMMITS_AHEAD]
+    assert isinstance(ca, CommitsAheadField)
     assert ca.has_work_dir is False
