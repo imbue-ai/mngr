@@ -218,6 +218,45 @@ body {
   text-overflow: ellipsis;
 }
 
+/* ── Agents header ── */
+.sidebar-agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 20px 4px;
+}
+
+.sidebar-agents-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-faint);
+}
+
+.sidebar-agents-add-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--color-text-faint);
+  font-size: 16px;
+  font-weight: 300;
+  cursor: pointer;
+  border-radius: var(--radius-base);
+  transition:
+    background 100ms,
+    color 100ms;
+}
+
+.sidebar-agents-add-button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
 /* ── Conversation list ── */
 .conversation-selector-list {
   list-style: none;

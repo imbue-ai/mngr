@@ -23,3 +23,14 @@ export function getBasePath(): string {
 export function apiUrl(path: string): string {
   return getBasePath() + path;
 }
+
+let cachedHostname: string | null = null;
+
+export function getHostname(): string {
+  if (cachedHostname !== null) {
+    return cachedHostname;
+  }
+  const metaElement = document.querySelector('meta[name="minds-workspace-server-hostname"]');
+  cachedHostname = metaElement?.getAttribute("content") ?? "localhost";
+  return cachedHostname;
+}

@@ -1,6 +1,7 @@
 import m from "mithril";
 import { isSlotClaimed, getSlotRenderCallback } from "../slots";
 import { runHook } from "../hooks";
+import { getHostname } from "../base-path";
 import { AgentSelector } from "./ConversationSelector";
 import { getSidebarItems } from "../sidebar-items";
 import type { SidebarItemDefinition } from "../sidebar-items";
@@ -131,13 +132,25 @@ export const Sidebar: m.Component = {
                     },
                     isSlotClaimed("sidebar-branding")
                       ? null
-                      : m("span", { class: "sidebar-branding-title" }, "Claude Web Chat"),
+                      : m("span", { class: "sidebar-branding-title" }, getHostname()),
                   ),
                   inlineIconButton("Collapse sidebar", toggle, ICON_PANEL_LEFT_CLOSE),
                 ]),
                 m("div", { class: "sidebar-action-rows" }, [...getSidebarItems().map(sidebarItemActionRow)]),
               ],
         ),
+        m("div", { class: "sidebar-agents-header" }, [
+          m("span", { class: "sidebar-agents-label" }, "Agents"),
+          m(
+            "button",
+            {
+              class: "sidebar-agents-add-button",
+              title: "Create agent",
+              "aria-label": "Create agent",
+            },
+            "+",
+          ),
+        ]),
         m(AgentSelector),
       ]),
     ]);
