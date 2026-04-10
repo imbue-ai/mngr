@@ -285,12 +285,14 @@ def test_agent_package_mode_builds_correct_command() -> None:
 
 def test_agent_editable_local_mode_builds_correct_command(tmp_path: Path) -> None:
     """Editable local mode should install from the source tree with per-agent UV_TOOL_DIR/UV_TOOL_BIN_DIR."""
-    # Set up a fake monorepo structure
+    # Set up a fake monorepo structure (libs need pyproject.toml to be discovered)
     repo_root = tmp_path / "monorepo"
     libs_dir = repo_root / "libs"
     (libs_dir / "mngr").mkdir(parents=True)
     (libs_dir / "mngr_recursive").mkdir(parents=True)
+    (libs_dir / "mngr_recursive" / "pyproject.toml").touch()
     (libs_dir / "mngr_pair").mkdir(parents=True)
+    (libs_dir / "mngr_pair" / "pyproject.toml").touch()
     (libs_dir / "imbue_common").mkdir(parents=True)
 
     host_dir = Path("/tmp/mngr-test/host")
