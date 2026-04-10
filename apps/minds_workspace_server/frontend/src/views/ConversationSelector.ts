@@ -73,9 +73,7 @@ export const AgentSelector: m.Component = {
                 m(
                   "ul",
                   { class: "conversation-selector-list" },
-                  agents.map((agent) =>
-                    renderAgentItem(agent, agent.id === currentAgentId, selectorItemClaimed),
-                  ),
+                  agents.map((agent) => renderAgentItem(agent, agent.id === currentAgentId, selectorItemClaimed)),
                 ),
               ),
       ],

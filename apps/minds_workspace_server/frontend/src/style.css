@@ -1056,3 +1056,217 @@ body {
   color: var(--color-accent-hover);
   text-decoration: underline;
 }
+
+/* ── Dockview workspace ── */
+.dockview-workspace {
+  position: relative;
+}
+
+.dockview-agent-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* ── Dockview theme overrides ── */
+.dockview-theme-dark {
+  --dv-background-color: var(--color-bg);
+  --dv-paneview-header-border-color: var(--color-border);
+  --dv-tabs-and-actions-container-background-color: var(--color-bg-sidebar);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--color-bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--color-bg-sidebar);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--color-bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--color-bg-sidebar);
+  --dv-activegroup-visiblepanel-tab-color: var(--color-text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--color-text-secondary);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--color-text-primary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--color-text-secondary);
+  --dv-tab-divider-color: var(--color-border);
+  --dv-separator-border: var(--color-border);
+  --dv-group-view-background-color: var(--color-bg);
+  --dv-tabs-container-scrollbar-color: var(--color-border);
+  --dv-drag-over-background-color: var(--color-accent-light);
+  --dv-drag-over-border-color: var(--color-accent);
+}
+
+.dockview-theme-dark .dv-tabs-container {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dockview-theme-dark .dv-default-tab {
+  font-family: var(--font-family-base);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  gap: 8px;
+}
+
+.dockview-theme-dark .dv-default-tab-action svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Chat panel within dockview */
+.chat-panel {
+  background: var(--color-bg);
+}
+
+.chat-panel .app-footer {
+  border-top: none;
+}
+
+/* ── Add tab button ── */
+.dockview-add-tab-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.dockview-add-tab-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+  font-weight: 300;
+  cursor: pointer;
+  border-radius: var(--radius-base);
+  transition:
+    background 100ms,
+    color 100ms;
+}
+
+.dockview-add-tab-button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.dockview-add-tab-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  min-width: 140px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  box-shadow:
+    0 4px 16px rgba(55, 53, 47, 0.1),
+    0 1px 4px rgba(55, 53, 47, 0.06);
+  padding: 4px;
+  z-index: 1000;
+}
+
+.dockview-add-tab-dropdown-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 80ms;
+}
+
+.dockview-add-tab-dropdown-item:hover {
+  background: var(--color-bg-hover);
+}
+
+/* ── Custom URL dialog ── */
+.custom-url-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.custom-url-dialog {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 400px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.custom-url-dialog-title {
+  font-family: var(--font-family-heading);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 16px;
+}
+
+.custom-url-dialog-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+
+.custom-url-dialog-input {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: var(--font-family-base);
+  font-size: 14px;
+  color: var(--color-text-primary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  margin-bottom: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.custom-url-dialog-input:focus {
+  border-color: var(--color-accent);
+}
+
+.custom-url-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.custom-url-dialog-cancel,
+.custom-url-dialog-open {
+  padding: 6px 16px;
+  font-family: var(--font-family-base);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-base);
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  transition: background 100ms;
+}
+
+.custom-url-dialog-cancel {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+.custom-url-dialog-cancel:hover {
+  background: var(--color-bg-hover);
+}
+
+.custom-url-dialog-open {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.custom-url-dialog-open:hover {
+  background: var(--color-accent-hover);
+}

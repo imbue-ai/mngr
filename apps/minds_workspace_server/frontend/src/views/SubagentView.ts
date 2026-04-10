@@ -47,7 +47,9 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     try {
       const result = await m.request<SubagentEventsResponse>({
         method: "GET",
-        url: apiUrl(`/api/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(subagentSessionId)}/events`),
+        url: apiUrl(
+          `/api/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(subagentSessionId)}/events`,
+        ),
       });
       events = result.events;
       metadata = result.metadata ?? null;

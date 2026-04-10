@@ -10,6 +10,15 @@ import type { RouteRenderCallback, PluginRouteHandler } from "./plugin-routes";
 import { registerPluginRoute } from "./plugin-routes";
 import type { SidebarItemDefinition } from "./sidebar-items";
 import { registerSidebarItem } from "./sidebar-items";
+import { getSelectedAgentId } from "./navigation";
+import { openSubagentTab } from "./views/DockviewWorkspace";
+
+interface OpenTabOptions {
+  type: "iframe" | "subagent";
+  url?: string;
+  title?: string;
+  subagentSessionId?: string;
+}
 
 interface LlmApi {
   claim(slotName: string, renderCallback?: SlotRenderCallback): boolean;
@@ -20,6 +29,7 @@ interface LlmApi {
   insertResponse(conversationId: string, responseItem: ResponseItem): Promise<void>;
   registerSidebarItem(definition: SidebarItemDefinition): void;
   on<K extends HookName>(eventName: K, callback: HookCallback<HookDataMap[K]>): void;
+  openTab(options: OpenTabOptions): void;
 }
 
 const llmApi: LlmApi = {
@@ -61,6 +71,17 @@ const llmApi: LlmApi = {
 
   on<K extends HookName>(eventName: K, callback: HookCallback<HookDataMap[K]>): void {
     registerHook(eventName, callback);
+  },
+
+  openTab(options: OpenTabOptions): void {
+    const agentId = getSelectedAgentId();
+    if (!agentId) return;
+
+    if (options.type === "subagent" && options.subagentSessionId) {
+      openSubagentTab(agentId, options.subagentSessionId, options.title ?? "Sub-agent");
+    }
+    // iframe tabs are opened via the DockviewWorkspace internal API
+    // Plugins can extend this as needed
   },
 };
 

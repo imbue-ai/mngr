@@ -303,6 +303,45 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
     )
 
 
+def _get_layout(agent_id: str, request: Request) -> Response:
+    """Get the saved workspace layout for an agent."""
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    layout_file = agent_info.agent_state_dir / "workspace_layout" / "layout.json"
+    if not layout_file.exists():
+        return JSONResponse(content=None, status_code=404)
+
+    try:
+        layout_data = json.loads(layout_file.read_text())
+        return JSONResponse(content=layout_data)
+    except (json.JSONDecodeError, OSError):
+        return JSONResponse(content=None, status_code=404)
+
+
+async def _save_layout(agent_id: str, request: Request) -> Response:
+    """Save the workspace layout for an agent."""
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    try:
+        body = await request.body()
+        # Validate it's valid JSON
+        json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    layout_dir = agent_info.agent_state_dir / "workspace_layout"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    layout_file = layout_dir / "layout.json"
+    layout_file.write_bytes(body)
+
+    return JSONResponse(content={"status": "ok"})
+
+
 def _serve_static_file(basename: str, request: Request) -> Response:
     config: Config = request.app.state.config
     file_path_string = config.static_file_basename_to_path.get(basename)
@@ -337,6 +376,8 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/layout", _get_layout, methods=["GET"])
+    application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )

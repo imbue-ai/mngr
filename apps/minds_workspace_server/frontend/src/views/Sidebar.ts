@@ -135,9 +135,7 @@ export const Sidebar: m.Component = {
                   ),
                   inlineIconButton("Collapse sidebar", toggle, ICON_PANEL_LEFT_CLOSE),
                 ]),
-                m("div", { class: "sidebar-action-rows" }, [
-                  ...getSidebarItems().map(sidebarItemActionRow),
-                ]),
+                m("div", { class: "sidebar-action-rows" }, [...getSidebarItems().map(sidebarItemActionRow)]),
               ],
         ),
         m(AgentSelector),

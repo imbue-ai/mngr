@@ -1,12 +1,12 @@
 /**
  * Shared rendering functions for transcript events.
- * Used by both MessageList and SubagentView.
+ * Used by both ChatPanel and SubagentView.
  */
 
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
-import { getBasePath } from "../base-path";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
+import { openSubagentTab } from "./DockviewWorkspace";
 
 export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
   const metadata = toolCall.subagent_metadata;
@@ -16,8 +16,6 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
 
   const description = metadata.description || "Sub-agent";
   const agentType = metadata.agent_type || "";
-  const basePath = getBasePath();
-  const subagentUrl = `${basePath}/agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(metadata.session_id)}`;
 
   return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
@@ -28,14 +26,14 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
       "a",
       {
         class: "subagent-card-link",
-        href: subagentUrl,
-        target: "_blank",
-        rel: "noopener",
+        href: "javascript:void(0)",
         onclick(e: Event) {
+          e.preventDefault();
           e.stopPropagation();
+          openSubagentTab(agentId, metadata.session_id, description);
         },
       },
-      "View conversation \u2197",
+      "View conversation",
     ),
   ]);
 }
