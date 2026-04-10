@@ -14,6 +14,7 @@ from imbue.mngr_schedule.testing import REPO_ROOT
 from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
+from imbue.mngr_schedule.testing import resolve_modal_environment
 
 # Only schedule and modal plugins are needed for the deploy flow.
 _ENABLED_PLUGINS = frozenset({"schedule", "modal"})
@@ -70,7 +71,7 @@ def test_schedule_add_deploys_to_modal() -> None:
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
-        cleanup_modal_app(app_name, env)
+        cleanup_modal_app(app_name, env, resolve_modal_environment(result.stderr))
 
 
 @pytest.mark.release
@@ -125,7 +126,7 @@ def test_schedule_add_with_verification() -> None:
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
-        cleanup_modal_app(app_name, env)
+        cleanup_modal_app(app_name, env, resolve_modal_environment(result.stderr))
 
 
 @pytest.mark.release
@@ -211,4 +212,4 @@ def test_schedule_list_shows_deployed_schedule() -> None:
         assert record["working_directory"] != ""
         assert record["full_commandline"] != ""
     finally:
-        cleanup_modal_app(app_name, env)
+        cleanup_modal_app(app_name, env, resolve_modal_environment(add_result.stderr))
