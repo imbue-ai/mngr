@@ -1,5 +1,5 @@
 [project]
-name = "claude-web-chat"
+name = "minds-workspace-server"
 version = "0.1.0"
 description = "Web chat interface for mngr-managed Claude agents"
 readme = "README.md"
@@ -26,7 +26,7 @@ dev = [
 ]
 
 [project.scripts]
-claude-web-chat = "imbue.claude_web_chat.main:main"
+minds-workspace-server = "imbue.minds_workspace_server.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,7 +38,7 @@ imbue-mngr = { workspace = true }
 
 [tool.hatch.build]
 artifacts = [
-    "imbue/claude_web_chat/static/**",
+    "imbue/minds_workspace_server/static/**",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -56,7 +56,7 @@ testpaths = ["."]
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.claude_web_chat",
+  "--cov=imbue.minds_workspace_server",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",

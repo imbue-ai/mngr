@@ -1,4 +1,4 @@
-# Claude Web Chat
+# Minds Workspace Server
 
 Web chat interface for viewing and interacting with mngr-managed Claude agents.
 
@@ -8,7 +8,7 @@ updates via Server-Sent Events.
 ## Usage
 
 ```bash
-claude-web-chat
+minds-workspace-server
 ```
 
 Opens at http://127.0.0.1:8000 by default.
@@ -17,11 +17,11 @@ Opens at http://127.0.0.1:8000 by default.
 
 ```bash
 # Backend
-cd apps/claude_web_chat
-uv run claude-web-chat
+cd apps/minds_workspace_server
+uv run minds-workspace-server
 
 # Frontend (with hot reload)
-cd apps/claude_web_chat/frontend
+cd apps/minds_workspace_server/frontend
 npm install
 npm run dev
 ```
@@ -29,8 +29,8 @@ npm run dev
 ## Building
 
 ```bash
-cd apps/claude_web_chat/frontend
+cd apps/minds_workspace_server/frontend
 npm run build
 ```
 
-This compiles the frontend into `imbue/claude_web_chat/static/`.
+This compiles the frontend into `imbue/minds_workspace_server/static/`.

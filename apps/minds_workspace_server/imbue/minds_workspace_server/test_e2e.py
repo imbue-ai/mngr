@@ -1,4 +1,4 @@
-"""End-to-end tests for Claude Web Chat using Playwright.
+"""End-to-end tests for Minds Workspace Server using Playwright.
 
 These tests start a real FastAPI server with mocked agent discovery,
 then use Playwright to interact with the web UI.
@@ -19,9 +19,9 @@ from unittest.mock import patch
 import pytest
 import uvicorn
 
-from imbue.claude_web_chat.agent_discovery import AgentInfo
-from imbue.claude_web_chat.config import Config
-from imbue.claude_web_chat.server import create_application
+from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.server import create_application
 
 try:
     from playwright.sync_api import Page
@@ -126,15 +126,15 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
     agent_info, session_file = _make_agent_fixture(tmp_path)
     agents = [agent_info]
 
-    config = Config(claude_web_chat_host="127.0.0.1", claude_web_chat_port=_PORT)
+    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT)
     app = create_application(config)
 
     # Patch discover_agents globally to return our mock agents
-    patcher = patch("imbue.claude_web_chat.server.discover_agents", return_value=agents)
+    patcher = patch("imbue.minds_workspace_server.server.discover_agents", return_value=agents)
     patcher.start()
 
     # Patch send_message to succeed
-    send_patcher = patch("imbue.claude_web_chat.server.send_message", return_value=True)
+    send_patcher = patch("imbue.minds_workspace_server.server.send_message", return_value=True)
     send_patcher.start()
 
     server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
@@ -163,7 +163,7 @@ def test_page_loads_and_shows_title(e2e_server: tuple[str, list[AgentInfo], Path
     """The page loads and shows the app title."""
     base_url, _, _ = e2e_server
     page.goto(base_url)
-    expect(page).to_have_title("Claude Web Chat")
+    expect(page).to_have_title("Minds Workspace Server")
 
 
 def test_sidebar_shows_agent_list(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
@@ -284,12 +284,12 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
     agent_info, _ = _make_agent_fixture(tmp_path, session_events=session_events)
     agents = [agent_info]
 
-    config = Config(claude_web_chat_host="127.0.0.1", claude_web_chat_port=_PORT + 1)
+    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT + 1)
     app = create_application(config)
 
     with (
-        patch("imbue.claude_web_chat.server.discover_agents", return_value=agents),
-        patch("imbue.claude_web_chat.server.send_message", return_value=True),
+        patch("imbue.minds_workspace_server.server.discover_agents", return_value=agents),
+        patch("imbue.minds_workspace_server.server.send_message", return_value=True),
     ):
         server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 1, log_level="error"))
         thread = threading.Thread(target=server.run, daemon=True)
@@ -356,12 +356,12 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
 
 def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
     """When there are no agents, the sidebar shows an empty message."""
-    config = Config(claude_web_chat_host="127.0.0.1", claude_web_chat_port=_PORT + 2)
+    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT + 2)
     app = create_application(config)
 
     with (
-        patch("imbue.claude_web_chat.server.discover_agents", return_value=[]),
-        patch("imbue.claude_web_chat.server.send_message", return_value=True),
+        patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]),
+        patch("imbue.minds_workspace_server.server.send_message", return_value=True),
     ):
         server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 2, log_level="error"))
         thread = threading.Thread(target=server.run, daemon=True)

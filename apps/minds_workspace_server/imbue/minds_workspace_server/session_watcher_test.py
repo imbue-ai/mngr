@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from imbue.claude_web_chat.session_watcher import AgentSessionWatcher
+from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 
 
 def _write_session_file(projects_dir: Path, session_id: str, events: list[dict[str, Any]]) -> Path:

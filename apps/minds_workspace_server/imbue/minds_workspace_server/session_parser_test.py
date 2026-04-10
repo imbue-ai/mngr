@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from imbue.claude_web_chat.session_parser import parse_session_lines
+from imbue.minds_workspace_server.session_parser import parse_session_lines
 
 
 def _make_user_line(uuid: str, timestamp: str, content: str) -> str:

@@ -20,7 +20,7 @@ from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from imbue.claude_web_chat.session_parser import parse_session_lines
+from imbue.minds_workspace_server.session_parser import parse_session_lines
 
 logger = _loguru_logger
 

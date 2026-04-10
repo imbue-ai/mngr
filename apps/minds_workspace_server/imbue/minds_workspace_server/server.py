@@ -18,18 +18,18 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger as _loguru_logger
 
-from imbue.claude_web_chat.agent_discovery import AgentInfo
-from imbue.claude_web_chat.agent_discovery import discover_agents
-from imbue.claude_web_chat.agent_discovery import send_message
-from imbue.claude_web_chat.config import Config
-from imbue.claude_web_chat.event_queues import AgentEventQueues
-from imbue.claude_web_chat.models import AgentListItem
-from imbue.claude_web_chat.models import AgentListResponse
-from imbue.claude_web_chat.models import ErrorResponse
-from imbue.claude_web_chat.models import SendMessageRequest
-from imbue.claude_web_chat.models import SendMessageResponse
-from imbue.claude_web_chat.plugins import get_plugin_manager
-from imbue.claude_web_chat.session_watcher import AgentSessionWatcher
+from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import send_message
+from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.models import AgentListItem
+from imbue.minds_workspace_server.models import AgentListResponse
+from imbue.minds_workspace_server.models import ErrorResponse
+from imbue.minds_workspace_server.models import SendMessageRequest
+from imbue.minds_workspace_server.models import SendMessageResponse
+from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 
 logger = _loguru_logger
 
@@ -106,7 +106,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
 
 
 def _inject_base_path_meta_tag(html_content: str, root_path: str) -> str:
-    meta_tag = f'<meta name="claude-web-chat-base-path" content="{root_path}">'
+    meta_tag = f'<meta name="minds-workspace-server-base-path" content="{root_path}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from imbue.claude_web_chat.agent_discovery import _read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import _read_claude_config_dir_from_env_file
 
 
 def test_reads_claude_config_dir_from_env_file(tmp_path: Path) -> None:

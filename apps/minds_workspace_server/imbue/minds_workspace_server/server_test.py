@@ -9,8 +9,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from imbue.claude_web_chat.config import Config
-from imbue.claude_web_chat.server import create_application
+from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.server import create_application
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def test_index_returns_html_when_static_exists(client: TestClient, tmp_path: Pat
     static_dir.mkdir()
     (static_dir / "index.html").write_text("<html><body>test</body></html>")
 
-    with patch("imbue.claude_web_chat.server.STATIC_DIRECTORY", static_dir):
+    with patch("imbue.minds_workspace_server.server.STATIC_DIRECTORY", static_dir):
         test_app = create_application()
         test_client = TestClient(test_app)
         response = test_client.get("/")
@@ -48,7 +48,7 @@ def test_index_returns_not_built_when_no_static(client: TestClient, tmp_path: Pa
     empty_dir = tmp_path / "static"
     empty_dir.mkdir()
 
-    with patch("imbue.claude_web_chat.server.STATIC_DIRECTORY", empty_dir):
+    with patch("imbue.minds_workspace_server.server.STATIC_DIRECTORY", empty_dir):
         test_app = create_application()
         test_client = TestClient(test_app)
         response = test_client.get("/")
@@ -58,8 +58,8 @@ def test_index_returns_not_built_when_no_static(client: TestClient, tmp_path: Pa
 
 def test_list_agents_endpoint(client: TestClient) -> None:
     """The agents endpoint returns agent data."""
-    with patch("imbue.claude_web_chat.server.discover_agents") as mock_discover:
-        from imbue.claude_web_chat.agent_discovery import AgentInfo
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        from imbue.minds_workspace_server.agent_discovery import AgentInfo
 
         mock_discover.return_value = [
             AgentInfo(
@@ -81,14 +81,14 @@ def test_list_agents_endpoint(client: TestClient) -> None:
 
 def test_get_events_for_unknown_agent(client: TestClient) -> None:
     """Getting events for a nonexistent agent returns 404."""
-    with patch("imbue.claude_web_chat.server.discover_agents", return_value=[]):
+    with patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]):
         response = client.get("/api/agents/nonexistent/events")
     assert response.status_code == 404
 
 
 def test_send_message_for_unknown_agent(client: TestClient) -> None:
     """Sending a message to a nonexistent agent returns 404."""
-    with patch("imbue.claude_web_chat.server.discover_agents", return_value=[]):
+    with patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]):
         response = client.post("/api/agents/nonexistent/message", json={"message": "hello"})
     assert response.status_code == 404
 
@@ -136,8 +136,8 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     # Write session history
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
 
-    with patch("imbue.claude_web_chat.server.discover_agents") as mock_discover:
-        from imbue.claude_web_chat.agent_discovery import AgentInfo
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        from imbue.minds_workspace_server.agent_discovery import AgentInfo
 
         mock_discover.return_value = [
             AgentInfo(
@@ -162,10 +162,10 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
 def test_send_message_success(client: TestClient) -> None:
     """Sending a message to a known agent succeeds."""
     with (
-        patch("imbue.claude_web_chat.server.discover_agents") as mock_discover,
-        patch("imbue.claude_web_chat.server.send_message", return_value=True) as mock_send,
+        patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover,
+        patch("imbue.minds_workspace_server.server.send_message", return_value=True) as mock_send,
     ):
-        from imbue.claude_web_chat.agent_discovery import AgentInfo
+        from imbue.minds_workspace_server.agent_discovery import AgentInfo
 
         mock_discover.return_value = [
             AgentInfo(

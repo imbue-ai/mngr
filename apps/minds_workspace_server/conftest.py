@@ -1,6 +1,6 @@
-"""Project-level conftest for claude-web-chat.
+"""Project-level conftest for minds-workspace-server.
 
-When running tests from apps/claude_web_chat/, this conftest provides the common pytest hooks
+When running tests from apps/minds_workspace_server/, this conftest provides the common pytest hooks
 that would otherwise come from the monorepo root conftest.py (which is not discovered
 when pytest runs from a subdirectory).
 

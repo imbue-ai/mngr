@@ -3,7 +3,7 @@ import threading
 from collections import defaultdict
 from typing import Any
 
-from imbue.claude_web_chat.events import BufferBehavior
+from imbue.minds_workspace_server.events import BufferBehavior
 
 
 class AgentEventQueues:

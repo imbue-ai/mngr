@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -9,7 +9,6 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "claude-web-chat",
     "cloudflare-forwarding",
     "concurrency-group",
     "flexmux",
@@ -38,6 +37,7 @@ members = [
     "imbue-mngr-vultr",
     "imbue-mngr-wait",
     "minds",
+    "minds-workspace-server",
     "modal-proxy",
     "resource-guards",
     "skitwright",
@@ -470,45 +470,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/51/8ade005e5ca5b0d80fb4aff72a3775b325bdc3d27408c8113811a7cbe640/charset_normalizer-3.4.4-cp314-cp314-win_amd64.whl", hash = "sha256:8a6562c3700cce886c5be75ade4a5db4214fda19fede41d9792d100288d8f94c", size = 107104, upload-time = "2025-10-14T04:41:51.051Z" },
     { url = "https://files.pythonhosted.org/packages/da/5f/6b8f83a55bb8278772c5ae54a577f3099025f9ade59d0136ac24a0df4bde/charset_normalizer-3.4.4-cp314-cp314-win_arm64.whl", hash = "sha256:de00632ca48df9daf77a2c65a484531649261ec9f25489917f09e455cb09ddb2", size = 100743, upload-time = "2025-10-14T04:41:52.122Z" },
     { url = "https://files.pythonhosted.org/packages/0a/4c/925909008ed5a988ccbb72dcc897407e5d6d3bd72410d69e051fc0c14647/charset_normalizer-3.4.4-py3-none-any.whl", hash = "sha256:7a32c560861a02ff789ad905a2fe94e3f840803362c84fecf1851cb4cf3dc37f", size = 53402, upload-time = "2025-10-14T04:42:31.76Z" },
-]
-
-[[package]]
-name = "claude-web-chat"
-version = "0.1.0"
-source = { editable = "apps/claude_web_chat" }
-dependencies = [
-    { name = "fastapi" },
-    { name = "imbue-common" },
-    { name = "imbue-mngr" },
-    { name = "pluggy" },
-    { name = "pydantic-settings" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-    { name = "watchdog" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "playwright" },
-    { name = "pytest-playwright" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "imbue-common", editable = "libs/imbue_common" },
-    { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "pluggy", specifier = ">=1.5" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
-    { name = "starlette", specifier = ">=0.45" },
-    { name = "uvicorn", specifier = ">=0.34" },
-    { name = "watchdog", specifier = ">=4.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "playwright", specifier = ">=1.40" },
-    { name = "pytest-playwright", specifier = ">=0.4" },
 ]
 
 [[package]]
@@ -2326,6 +2287,45 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=13.0" },
+]
+
+[[package]]
+name = "minds-workspace-server"
+version = "0.1.0"
+source = { editable = "apps/minds_workspace_server" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "pluggy" },
+    { name = "pydantic-settings" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+    { name = "watchdog" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "playwright" },
+    { name = "pytest-playwright" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "pluggy", specifier = ">=1.5" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "starlette", specifier = ">=0.45" },
+    { name = "uvicorn", specifier = ">=0.34" },
+    { name = "watchdog", specifier = ">=4.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "playwright", specifier = ">=1.40" },
+    { name = "pytest-playwright", specifier = ">=0.4" },
 ]
 
 [[package]]

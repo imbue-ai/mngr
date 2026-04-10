@@ -31,7 +31,7 @@ class AgentInfo(FrozenModel):
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
-    cg = ConcurrencyGroup(name="claude-web-chat")
+    cg = ConcurrencyGroup(name="minds-workspace-server")
     cg.__enter__()
     try:
         pm = get_or_create_plugin_manager()

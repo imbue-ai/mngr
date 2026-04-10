@@ -1,6 +1,6 @@
-# Claude Web Chat
+# Minds Workspace Server
 
-Migrate ~/project/llm-webchat into apps/claude_web_chat, replacing the LLM backend with live views of mngr-managed Claude agent sessions.
+Migrate ~/project/llm-webchat into apps/minds_workspace_server, replacing the LLM backend with live views of mngr-managed Claude agent sessions.
 
 ## Overview
 
@@ -57,9 +57,9 @@ Migrate ~/project/llm-webchat into apps/claude_web_chat, replacing the LLM backe
 
 ## Changes
 
-### New: `apps/claude_web_chat/`
+### New: `apps/minds_workspace_server/`
 
-- New standalone app under `imbue/claude_web_chat/` namespace, structured like `apps/minds/`
+- New standalone app under `imbue/minds_workspace_server/` namespace, structured like `apps/minds/`
 - `pyproject.toml` with dependency on `imbue-mngr` (not `imbue-mngr-claude`) and `watchdog`
 - CLI entry point for starting the server (FastAPI + Uvicorn, same as llm-webchat)
 

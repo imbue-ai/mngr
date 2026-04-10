@@ -2,13 +2,13 @@ import argparse
 
 import uvicorn
 
-from imbue.claude_web_chat.config import load_config
-from imbue.claude_web_chat.server import create_application
+from imbue.minds_workspace_server.config import load_config
+from imbue.minds_workspace_server.server import create_application
 
 
 def main() -> None:
-    """Run the claude-web-chat server."""
-    parser = argparse.ArgumentParser(description="Claude Web Chat")
+    """Run the minds-workspace-server server."""
+    parser = argparse.ArgumentParser(description="Minds Workspace Server")
     parser.add_argument("--provider", action="append", default=[], help="Filter agents by provider name (repeatable)")
     parser.add_argument("--include", action="append", default=[], help="CEL include filter for agents (repeatable)")
     parser.add_argument("--exclude", action="append", default=[], help="CEL exclude filter for agents (repeatable)")
@@ -21,7 +21,7 @@ def main() -> None:
         include_filters=tuple(args.include),
         exclude_filters=tuple(args.exclude),
     )
-    uvicorn.run(application, host=config.claude_web_chat_host, port=config.claude_web_chat_port)
+    uvicorn.run(application, host=config.minds_workspace_server_host, port=config.minds_workspace_server_port)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ export default defineConfig({
   publicDir: "media",
   root: ".",
   build: {
-    outDir: path.resolve(__dirname, "../imbue/claude_web_chat/static"),
+    outDir: path.resolve(__dirname, "../imbue/minds_workspace_server/static"),
     emptyOutDir: true,
   },
   server: {
