@@ -15,7 +15,7 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 
 ### App shell
 
-The Electron window uses a frameless window (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` on macOS). A custom title bar is injected into every backend page via `webContents.insertCSS()` and `webContents.executeJavaScript()` on the `dom-ready` event. The title bar provides:
+The Electron window uses a frameless window (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` with `trafficLightPosition` on macOS). A custom title bar is injected into every backend page via `webContents.insertCSS()` and `webContents.executeJavaScript()` on the `dom-ready` event. The title bar uses `-webkit-app-region: drag` so the entire bar acts as a window drag handle, with buttons opted out via `no-drag`. The title bar provides:
 
 - **Navigation**: Back/forward buttons using `history.back()`/`history.forward()`
 - **Page title**: Tracks `document.title` via MutationObserver

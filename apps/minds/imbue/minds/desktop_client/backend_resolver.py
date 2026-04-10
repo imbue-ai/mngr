@@ -96,6 +96,15 @@ class BackendResolverInterface(MutableModel, ABC):
             return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
         return None
 
+    def has_completed_initial_discovery(self) -> bool:
+        """Whether any agent discovery data has been received.
+
+        Before this returns True, the agent list may be incomplete. The landing
+        page uses this to distinguish "still discovering" from "no agents exist."
+        Default implementation returns True (appropriate for static resolvers).
+        """
+        return True
+
 
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.
@@ -258,12 +267,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _servers_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _initial_discovery_done: bool = PrivateAttr(default=False)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe."""
         with self._lock:
             self._agents_result = result
+            self._initial_discovery_done = True
 
     def update_servers(self, agent_id: AgentId, servers: dict[str, str]) -> None:
         """Replace the known servers for a single agent. Thread-safe."""
@@ -304,6 +315,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
                         host_id=str(agent.host_id),
                     )
             return None
+
+    def has_completed_initial_discovery(self) -> bool:
+        with self._lock:
+            return self._initial_discovery_done
 
 
 # -- MngrStreamManager --

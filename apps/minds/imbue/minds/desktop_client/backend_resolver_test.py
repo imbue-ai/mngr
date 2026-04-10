@@ -255,6 +255,15 @@ def test_mngr_cli_resolver_update_agents_replaces_state() -> None:
     assert resolver.list_known_agent_ids() == (_AGENT_A,)
 
 
+def test_mngr_cli_resolver_has_completed_initial_discovery() -> None:
+    """has_completed_initial_discovery returns False until update_agents is called."""
+    resolver = MngrCliBackendResolver()
+    assert not resolver.has_completed_initial_discovery()
+
+    resolver.update_agents(ParsedAgentsResult(agent_ids=()))
+    assert resolver.has_completed_initial_discovery()
+
+
 def test_mngr_cli_resolver_update_servers_replaces_state() -> None:
     """Calling update_servers replaces the server map for that agent."""
     resolver = MngrCliBackendResolver()

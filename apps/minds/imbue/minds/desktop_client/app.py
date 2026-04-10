@@ -285,17 +285,17 @@ def _handle_landing_page(
         )
         return HTMLResponse(content=html)
 
-    # No agents discovered yet. On first run (no ~/.minds existed at startup),
-    # go straight to the create form. Otherwise, show the agent list page with
-    # an auto-refresh so it updates once the stream manager discovers agents.
-    is_first_run: bool = request.app.state.is_first_run
-    if is_first_run:
-        git_url = request.query_params.get("git_url", "")
-        branch = request.query_params.get("branch", "")
-        html = render_create_form(git_url=git_url, branch=branch)
+    # No agents discovered yet. If discovery is still in progress, show a
+    # "Discovering agents..." page with auto-refresh. Once discovery has
+    # completed with no agents found, show the create form so the user can
+    # create their first agent instead of polling forever.
+    if not backend_resolver.has_completed_initial_discovery():
+        html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
         return HTMLResponse(content=html)
 
-    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
+    git_url = request.query_params.get("git_url", "")
+    branch = request.query_params.get("branch", "")
+    html = render_create_form(git_url=git_url, branch=branch)
     return HTMLResponse(content=html)
 
 
@@ -1092,7 +1092,6 @@ def create_desktop_client(
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
-    is_first_run: bool = False,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1127,7 +1126,6 @@ def create_desktop_client(
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
-    app.state.is_first_run = is_first_run
     app.state.telegram_orchestrator = telegram_orchestrator
     if http_client is not None:
         app.state.http_client = http_client

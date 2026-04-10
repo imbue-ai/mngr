@@ -78,7 +78,6 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
-    is_first_run: bool = False,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -89,7 +88,6 @@ def _create_test_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
-        is_first_run=is_first_run,
     )
     client = TestClient(app)
 
@@ -942,14 +940,13 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
 # -- Landing page agent creation tests --
 
 
-def test_landing_page_shows_discovering_when_no_agents_yet(tmp_path: Path) -> None:
-    """When not first run and no agents discovered yet, show discovering state with auto-refresh."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path: Path) -> None:
+    """Before initial discovery completes, show discovering state with auto-refresh."""
+    backend_resolver = MngrCliBackendResolver()
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
-        is_first_run=False,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -959,14 +956,13 @@ def test_landing_page_shows_discovering_when_no_agents_yet(tmp_path: Path) -> No
     assert "reload" in response.text
 
 
-def test_landing_page_shows_create_form_on_first_run(tmp_path: Path) -> None:
-    """On first run with no agents, show the create form directly."""
+def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path: Path) -> None:
+    """After discovery completes with no agents, show the create form."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
-        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -977,13 +973,12 @@ def test_landing_page_shows_create_form_on_first_run(tmp_path: Path) -> None:
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
-    """The create form pre-fills the git URL from a query parameter on first run."""
+    """The create form pre-fills the git URL from a query parameter."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
-        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
