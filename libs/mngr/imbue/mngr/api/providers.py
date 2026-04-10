@@ -23,15 +23,11 @@ def _close_all_provider_instances() -> None:
 
     Called via atexit to ensure proper cleanup of resources like Modal app contexts.
     """
-    # Deduplicate: the same instance may appear under multiple cache keys
-    seen_ids: set[int] = set()
     for instance in _instance_cache.values():
-        if id(instance) not in seen_ids:
-            seen_ids.add(id(instance))
-            try:
-                instance.close()
-            except (MngrError, OSError) as e:
-                logger.warning("Error closing provider instance {}: {}", instance.name, e)
+        try:
+            instance.close()
+        except (MngrError, OSError) as e:
+            logger.warning("Error closing provider instance {}: {}", instance.name, e)
     _instance_cache.clear()
 
 
