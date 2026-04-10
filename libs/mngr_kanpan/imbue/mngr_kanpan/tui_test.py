@@ -616,43 +616,50 @@ def test_field_cell_url_fn_call() -> None:
 
 
 # =============================================================================
-# CI field markup special handling
+# CI field markup - color is always provided by CiField.display()
 # =============================================================================
 
 
-def test_field_cell_markup_ci_failing_no_color_in_cell() -> None:
-    """The check_failing attr is used when CI cell has no color but field has FAILING status."""
+def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
+    """CI FAILING cell has color='light red', so markup uses field_ci_light red attr."""
     ci = CiField(status=CiStatus.FAILING)
-    # Manually create a CellDisplay without color to exercise the special CI path
+    cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
-        cells={FIELD_CI: CellDisplay(text="failing", color=None)},
+        cells={FIELD_CI: cell},
     )
     markup = _field_cell_markup(entry, FIELD_CI)
     assert isinstance(markup, tuple)
-    assert markup[0] == "check_failing"
+    assert markup[0] == f"field_{FIELD_CI}_light red"
+    assert markup[1] == cell.text
 
 
-def test_field_cell_markup_ci_pending_no_color_in_cell() -> None:
+def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
+    """CI PENDING cell has color='yellow', so markup uses field_ci_yellow attr."""
     ci = CiField(status=CiStatus.PENDING)
+    cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
-        cells={FIELD_CI: CellDisplay(text="pending", color=None)},
+        cells={FIELD_CI: cell},
     )
     markup = _field_cell_markup(entry, FIELD_CI)
     assert isinstance(markup, tuple)
-    assert markup[0] == "check_pending"
+    assert markup[0] == f"field_{FIELD_CI}_yellow"
+    assert markup[1] == cell.text
 
 
-def test_field_cell_markup_ci_passing_no_check_attr() -> None:
-    """PASSING has no entry in _CHECK_STATUS_ATTR so returns plain text."""
+def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
+    """CI PASSING cell has color='light green', so markup uses field_ci_light green attr."""
     ci = CiField(status=CiStatus.PASSING)
+    cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
-        cells={FIELD_CI: CellDisplay(text="passing", color=None)},
+        cells={FIELD_CI: cell},
     )
     markup = _field_cell_markup(entry, FIELD_CI)
-    assert isinstance(markup, str)
+    assert isinstance(markup, tuple)
+    assert markup[0] == f"field_{FIELD_CI}_light green"
+    assert markup[1] == cell.text
 
 
 # =============================================================================

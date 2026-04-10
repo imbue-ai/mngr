@@ -33,9 +33,6 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
-from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
@@ -121,11 +118,6 @@ _SECTION_ATTR: dict[BoardSection, str] = {
     BoardSection.STILL_COOKING: "section_in_progress",
     BoardSection.PRS_FAILED: "section_prs_failed",
     BoardSection.MUTED: "section_muted",
-}
-
-_CHECK_STATUS_ATTR: dict[CiStatus, str] = {
-    CiStatus.FAILING: "check_failing",
-    CiStatus.PENDING: "check_pending",
 }
 
 # Builtin commands. Users can override these by defining a command with the same key.
@@ -1070,13 +1062,6 @@ def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Ha
         return ""
     if cell.color is not None:
         return (f"field_{field_key}_{cell.color}", cell.text)
-    # Special handling for CI status colors using the existing palette
-    if field_key == FIELD_CI:
-        ci_field = entry.fields.get(FIELD_CI)
-        if isinstance(ci_field, CiField):
-            check_attr = _CHECK_STATUS_ATTR.get(ci_field.status)
-            if check_attr is not None:
-                return (check_attr, cell.text)
     return cell.text
 
 
