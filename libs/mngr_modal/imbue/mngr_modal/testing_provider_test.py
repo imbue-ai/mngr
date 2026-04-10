@@ -1859,6 +1859,20 @@ def test_create_environment_allows_timestamped_mngr_test_prefix(tmp_path: Path, 
     assert env_name in modal._environments
 
 
+def test_create_environment_rejects_mngr_test_without_timestamp(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """mngr_test- prefix without timestamp format is rejected."""
+    modal = make_testing_modal_interface(tmp_path, cg)
+    with pytest.raises(MngrError, match="test environments must match"):
+        _create_environment("mngr_test-abc123", modal)
+
+
+def test_create_environment_allows_production_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Production-style names (mngr-{user_id}) are allowed -- the guard only applies to mngr_ prefix."""
+    modal = make_testing_modal_interface(tmp_path, cg)
+    _create_environment("mngr-dde9fc2844ec435f9f0a4acb93471f42", modal)
+    assert "mngr-dde9fc2844ec435f9f0a4acb93471f42" in modal._environments
+
+
 def test_lookup_persistent_app_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
     modal.environment_create("env1")

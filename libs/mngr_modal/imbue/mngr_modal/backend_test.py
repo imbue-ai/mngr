@@ -1,13 +1,7 @@
 from pathlib import Path
 
-import pytest
-
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
-from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import get_files_for_deploy
-from imbue.modal_proxy.testing import TestingModalInterface
 
 # =============================================================================
 # get_files_for_deploy Tests
@@ -63,37 +57,3 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
     assert len(result) == 1
     matched_values = list(result.values())
     assert matched_values[0] == config_file
-
-
-# =============================================================================
-# _create_environment name validation Tests
-# =============================================================================
-
-
-@pytest.fixture
-def modal_interface(tmp_path: Path, cg: ConcurrencyGroup) -> TestingModalInterface:
-    root = tmp_path / "modal_testing"
-    root.mkdir()
-    return TestingModalInterface(root_dir=root, concurrency_group=cg)
-
-
-def test_create_environment_accepts_timestamped_name(modal_interface: TestingModalInterface) -> None:
-    """Valid timestamped test environment names are accepted."""
-    _create_environment("mngr_test-2026-03-27-02-02-17-ae01ccb71e", modal_interface)
-
-
-def test_create_environment_rejects_uuid_prefix(modal_interface: TestingModalInterface) -> None:
-    """UUID-based test prefixes (mngr_{uuid}-) are rejected."""
-    with pytest.raises(MngrError, match="test environments must match"):
-        _create_environment("mngr_6419f5b122464f3f8963c7302a75dfab-user123", modal_interface)
-
-
-def test_create_environment_rejects_mngr_test_without_timestamp(modal_interface: TestingModalInterface) -> None:
-    """mngr_test- prefix without timestamp format is rejected."""
-    with pytest.raises(MngrError, match="test environments must match"):
-        _create_environment("mngr_test-abc123", modal_interface)
-
-
-def test_create_environment_allows_production_prefix(modal_interface: TestingModalInterface) -> None:
-    """Production-style names (mngr-{user_id}) are allowed -- the guard only applies to mngr_ prefix."""
-    _create_environment("mngr-dde9fc2844ec435f9f0a4acb93471f42", modal_interface)
