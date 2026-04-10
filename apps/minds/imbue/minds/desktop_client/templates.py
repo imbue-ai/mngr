@@ -143,9 +143,14 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
   }
   </script>
   {% else %}
+    {% if is_discovering %}
+  <p class="empty-state">Discovering agents...</p>
+  <script>setTimeout(function() { location.reload(); }, 2000);</script>
+    {% else %}
   <p class="empty-state">
     No minds are accessible. Use a login link to authenticate with a mind.
   </p>
+    {% endif %}
   {% endif %}
 </body>
 </html>"""
@@ -344,17 +349,23 @@ _AUTH_ERROR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     telegram_status_by_agent_id: dict[str, bool] | None = None,
+    is_discovering: bool = False,
 ) -> str:
     """Render the landing page listing accessible minds.
 
     telegram_status_by_agent_id maps agent ID strings to whether they have
     active Telegram bot credentials. When None, no telegram buttons are shown.
+
+    When is_discovering is True, the page shows a "Discovering agents..." message
+    with auto-refresh instead of the empty state. This is used when the stream
+    manager hasn't completed initial agent discovery yet.
     """
     template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
     return template.render(
         agent_ids=accessible_agent_ids,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
+        is_discovering=is_discovering,
     )
 
 

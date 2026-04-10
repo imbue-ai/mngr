@@ -3,7 +3,6 @@ import json
 import os
 import queue
 import socket as socket_module
-import urllib.parse
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -60,36 +59,6 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
-
-_DISCOVERY_LOADING_HTML: Final[str] = """<!DOCTYPE html>
-<html>
-<head>
-<title>Minds</title>
-<style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{
-  font-family: system-ui, -apple-system, sans-serif;
-  display: flex; justify-content: center; align-items: center;
-  height: 100vh; background: whitesmoke; color: rgb(60, 60, 80);
-}}
-.container {{ text-align: center; }}
-.spinner {{
-  display: inline-block; width: 24px; height: 24px;
-  border: 3px solid rgb(200, 200, 210); border-top: 3px solid rgb(26, 26, 46);
-  border-radius: 50%; animation: spin 1s linear infinite;
-  margin-bottom: 16px;
-}}
-@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="spinner"></div>
-  <p>Discovering agents...</p>
-</div>
-<script>setTimeout(function() {{ location.href = {redirect_url_js}; }}, 1500);</script>
-</body>
-</html>"""
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -320,33 +289,17 @@ def _handle_landing_page(
         )
         return HTMLResponse(content=html)
 
-    # No agents discovered yet. The stream manager may still be starting up,
-    # so retry a few times before falling through to the create form. The
-    # _discovery_wait counter tracks how many retries have happened.
-    try:
-        discovery_wait = int(request.query_params.get("_discovery_wait", "0"))
-    except ValueError:
-        discovery_wait = 0
-    if discovery_wait < 3:
-        # Preserve existing query params (git_url, branch, etc.) through the
-        # redirect chain so they are available when the create form is shown.
-        preserved_params: dict[str, str] = {
-            k: v
-            for k, v in request.query_params.items()
-            if k != "_discovery_wait"
-        }
-        preserved_params["_discovery_wait"] = str(discovery_wait + 1)
-        redirect_url = "/?" + urllib.parse.urlencode(preserved_params)
-        return HTMLResponse(
-            content=_DISCOVERY_LOADING_HTML.format(
-                redirect_url_js=json.dumps(redirect_url),
-            ),
-        )
+    # No agents discovered yet. On first run (no ~/.minds existed at startup),
+    # go straight to the create form. Otherwise, show the agent list page with
+    # an auto-refresh so it updates once the stream manager discovers agents.
+    is_first_run: bool = request.app.state.is_first_run
+    if is_first_run:
+        git_url = request.query_params.get("git_url", "")
+        branch = request.query_params.get("branch", "")
+        html = render_create_form(git_url=git_url, branch=branch)
+        return HTMLResponse(content=html)
 
-    # After retries, no agents found: show the create form
-    git_url = request.query_params.get("git_url", "")
-    branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     return HTMLResponse(content=html)
 
 
@@ -1143,6 +1096,7 @@ def create_desktop_client(
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
+    is_first_run: bool = False,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1177,6 +1131,7 @@ def create_desktop_client(
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
+    app.state.is_first_run = is_first_run
     app.state.telegram_orchestrator = telegram_orchestrator
     if http_client is not None:
         app.state.http_client = http_client

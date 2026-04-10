@@ -78,6 +78,7 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
+    is_first_run: bool = False,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -88,6 +89,7 @@ def _create_test_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        is_first_run=is_first_run,
     )
     client = TestClient(app)
 
@@ -940,69 +942,52 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
 # -- Landing page agent creation tests --
 
 
-def test_landing_page_shows_discovery_loading_when_no_agents_yet(tmp_path: Path) -> None:
-    """When authenticated and no agents exist, the landing page first shows a discovery loading page."""
+def test_landing_page_shows_discovering_when_no_agents_yet(tmp_path: Path) -> None:
+    """When not first run and no agents discovered yet, show discovering state with auto-refresh."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
+        is_first_run=False,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/")
     assert response.status_code == 200
     assert "Discovering agents" in response.text
+    assert "reload" in response.text
 
 
-def test_landing_page_discovery_preserves_query_params(tmp_path: Path) -> None:
-    """The discovery loading page preserves git_url and branch params in the redirect URL."""
+def test_landing_page_shows_create_form_on_first_run(tmp_path: Path) -> None:
+    """On first run with no agents, show the create form directly."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
+        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", params={"git_url": "https://example.com/repo.git", "branch": "main"})
-    assert response.status_code == 200
-    assert "Discovering agents" in response.text
-    # The redirect URL should include the original query params
-    assert "git_url=" in response.text
-    assert "branch=main" in response.text
-    # The redirect URL is inside a <script> tag where HTML entities are NOT
-    # decoded. Verify '&' separators are NOT mangled to '&amp;'.
-    assert "&amp;" not in response.text
-
-
-def test_landing_page_shows_create_form_after_discovery_retries(tmp_path: Path) -> None:
-    """After discovery retries complete with no agents, the create form is shown."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/", params={"_discovery_wait": "3"})
+    response = client.get("/")
     assert response.status_code == 200
     assert "Create a Mind" in response.text
     assert "git_url" in response.text
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
-    """The create form pre-fills the git URL from a query parameter."""
+    """The create form pre-fills the git URL from a query parameter on first run."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
+        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", params={"git_url": "file:///nonexistent-repo", "_discovery_wait": "3"})
+    response = client.get("/", params={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
     assert "file:///nonexistent-repo" in response.text
 
