@@ -45,6 +45,20 @@ class ITermApp(TerminalApp):
             " -e 'end run'"
         )
 
+        # AppleScript to get all iTerm tab TTYs (space-separated)
+        get_iterm_ttys = (
+            "osascript"
+            " -e 'tell app \"iTerm2\"'"
+            " -e 'set r to \"\"'"
+            " -e 'repeat with w in windows'"
+            " -e 'repeat with t in tabs of w'"
+            " -e 'set r to r & (tty of current session of t) & \" \"'"
+            " -e 'end repeat'"
+            " -e 'end repeat'"
+            " -e 'return r'"
+            " -e 'end tell'"
+        )
+
         create_tab_script = (
             "osascript"
             " -e 'tell app \"iTerm2\"'"
@@ -62,8 +76,7 @@ class ITermApp(TerminalApp):
             " -e 'end tell'"
         )
 
-        # terminal-notifier runs with a bare system PATH (/usr/bin:/bin:/usr/sbin:/sbin),
-        # so we resolve the user's real PATH from their login shell first.
+        # alerter runs with a bare system PATH, so resolve the user's real PATH first.
         resolve_path = "export PATH=$($SHELL -lc 'echo $PATH' 2>/dev/null || echo $PATH)"
 
         # Find the tmux session containing this agent name
@@ -71,12 +84,17 @@ class ITermApp(TerminalApp):
             f"SESSION=$(tmux list-sessions -F '#{{session_name}}' 2>/dev/null | grep -F {quoted_agent} | head -1)"
         )
 
-        # Loop through attached tmux clients and try to find a matching iTerm tab by TTY
+        # Get all iTerm tab TTYs and check which one has tmux attached to our session.
+        # This approach works even when tmux is nested inside another tmux session,
+        # because we check the process tree on each iTerm tab's TTY rather than
+        # matching tmux client TTYs (which may be nested PTYs, not iTerm TTYs).
         find_existing_tab = (
             'if [ -n "$SESSION" ]; then'
-            " for CLIENT_TTY in $(tmux list-clients -t \"$SESSION\" -F '#{client_tty}' 2>/dev/null); do"
-            f' FOUND=$({activate_script} -- "$CLIENT_TTY" 2>/dev/null);'
-            ' if [ "$FOUND" = "found" ]; then exit 0; fi;'
+            f" for TTY in $({get_iterm_ttys} 2>/dev/null); do"
+            ' SHORT_TTY=$(echo "$TTY" | sed "s|/dev/||");'
+            ' if ps -t "$SHORT_TTY" -o command= 2>/dev/null | grep -qF "tmux attach -t =$SESSION"; then'
+            f' {activate_script} -- "$TTY" 2>/dev/null;'
+            " exit 0; fi;"
             " done; fi"
         )
 

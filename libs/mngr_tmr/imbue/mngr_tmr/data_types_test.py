@@ -1,5 +1,7 @@
 """Unit tests for test-mapreduce data types."""
 
+from pathlib import Path
+
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_tmr.data_types import Change
@@ -86,6 +88,7 @@ def test_test_agent_info_construction() -> None:
         test_node_id="tests/test_foo.py::test_bar",
         agent_id=AgentId.generate(),
         agent_name=AgentName("tmr-test-bar"),
+        work_dir=Path("/tmp/work"),
         created_at=0.0,
     )
     assert info.test_node_id == "tests/test_foo.py::test_bar"

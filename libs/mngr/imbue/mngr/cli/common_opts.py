@@ -1,7 +1,9 @@
+import json
 import string
 import sys
 import uuid
 from collections.abc import Callable
+from collections.abc import Sequence
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
@@ -54,25 +57,23 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - -v, --verbose: Increase verbosity
     - --log-file: Override log file path
     - --log-commands: Log executed commands
-    - --log-command-output: Log command output
-    - --log-env-vars: Log environment variables
     - --headless: Disable all interactive behavior
-    - --context: Project context directory
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
+    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated paths)
     """
     # Apply decorators in reverse order (bottom to top)
     # These are wrapped in the "Common" option group
+    command = optgroup.option(
+        "-S",
+        "--setting",
+        multiple=True,
+        help="Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable]",
+    )(command)
     command = optgroup.option("--disable-plugin", multiple=True, help="Disable a plugin [repeatable]")(command)
     command = optgroup.option("--plugin", "--enable-plugin", multiple=True, help="Enable a plugin [repeatable]")(
         command
     )
-    command = optgroup.option(
-        "--context",
-        "project_context_path",
-        type=click.Path(exists=True),
-        help="Project context directory (for build context and loading project-specific config) [default: local .git root]",
-    )(command)
     command = optgroup.option(
         "--safe",
         is_flag=True,
@@ -85,12 +86,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
         is_flag=True,
         default=False,
         help="Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key.",
-    )(command)
-    command = optgroup.option(
-        "--log-env-vars/--no-log-env-vars", default=None, help="Log environment variables (security risk)"
-    )(command)
-    command = optgroup.option(
-        "--log-command-output/--no-log-command-output", default=None, help="Log stdout/stderr from commands"
     )(command)
     command = optgroup.option(
         "--log-commands/--no-log-commands", default=None, help="Log commands that were executed"
@@ -155,12 +150,10 @@ def setup_command_context(
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
     # Load config (is_interactive will be resolved below)
-    context_dir = Path(initial_opts.project_context_path) if initial_opts.project_context_path else None
     pm = ctx.obj
     mngr_ctx = load_config(
         pm,
         cg,
-        context_dir=context_dir,
         enabled_plugins=initial_opts.plugin,
         disabled_plugins=initial_opts.disable_plugin,
         is_interactive=False,
@@ -183,6 +176,17 @@ def setup_command_context(
         to_update(mngr_ctx.field_ref().is_interactive, is_interactive),
         to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
+
+    # Apply --setting overrides to config (right before CLI defaults are applied)
+    if initial_opts.setting:
+        updated_config = apply_settings_to_config(
+            mngr_ctx.config,
+            initial_opts.setting,
+            mngr_ctx.config.disabled_plugins,
+        )
+        mngr_ctx = mngr_ctx.model_copy_update(
+            to_update(mngr_ctx.field_ref().config, updated_config),
+        )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
     updated_params = apply_config_defaults(ctx, mngr_ctx.config, command_name)
@@ -210,8 +214,6 @@ def setup_command_context(
         verbose=opts.verbose,
         log_file=opts.log_file,
         log_commands=opts.log_commands,
-        log_command_output=opts.log_command_output,
-        log_env_vars=opts.log_env_vars,
         config=mngr_ctx.config,
     )
 
@@ -259,8 +261,6 @@ def parse_output_options(
     verbose: int,
     log_file: str | None,
     log_commands: bool | None,
-    log_command_output: bool | None,
-    log_env_vars: bool | None,
     config: MngrConfig,
 ) -> tuple[OutputOptions, LoggingConfig]:
     """Parse output-related CLI options. CLI flags can override config values.
@@ -305,12 +305,6 @@ def parse_output_options(
     # Use CLI overrides if provided, otherwise use config
     is_log_commands = log_commands if log_commands is not None else config.logging.is_logging_commands
 
-    is_log_command_output = (
-        log_command_output if log_command_output is not None else config.logging.is_logging_command_output
-    )
-
-    is_log_env_vars = log_env_vars if log_env_vars is not None else config.logging.is_logging_env_vars
-
     # Build the resolved logging config with CLI overrides applied to TOML defaults
     resolved_logging_config = LoggingConfig(
         file_level=config.logging.file_level,
@@ -319,8 +313,8 @@ def parse_output_options(
         console_level=console_level,
         log_file_path=log_file_path,
         is_logging_commands=is_log_commands,
-        is_logging_command_output=is_log_command_output,
-        is_logging_env_vars=is_log_env_vars,
+        is_logging_command_output=config.logging.is_logging_command_output,
+        is_logging_env_vars=config.logging.is_logging_env_vars,
     )
 
     output_opts = OutputOptions(
@@ -355,6 +349,65 @@ def _process_template_escapes(template: str) -> str:
         result.append(char)
         idx += 1
     return "".join(result)
+
+
+@pure
+def _parse_setting_value(value_str: str) -> Any:
+    """Parse a setting value string into the appropriate Python type.
+
+    Tries JSON first (for booleans, numbers, arrays, objects), then falls back
+    to treating the value as a plain string.
+    """
+    try:
+        return json.loads(value_str)
+    except json.JSONDecodeError:
+        return value_str
+
+
+def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> None:
+    """Set a value in a nested dict using dot-separated key path, creating intermediate dicts as needed."""
+    keys = key_path.split(".")
+    current = data
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    current[keys[-1]] = value
+
+
+@pure
+def apply_settings_to_config(
+    config: MngrConfig,
+    settings: Sequence[str],
+    disabled_plugins: frozenset[str],
+) -> MngrConfig:
+    """Apply --setting KEY=VALUE overrides to a loaded config.
+
+    Parses each setting string, builds a raw config dict, parses it through the
+    config system, and merges it with the existing config. This gives --setting
+    the same semantics as config file values but at a higher precedence.
+    """
+    if not settings:
+        return config
+
+    # Build a raw config dict from the setting strings
+    raw: dict[str, Any] = {}
+    for setting_str in settings:
+        if "=" not in setting_str:
+            raise UserInputError(
+                f"Invalid --setting format: '{setting_str}'. "
+                "Expected KEY=VALUE (e.g., '--setting commands.create.connect=false')"
+            )
+        key_path, value_str = setting_str.split("=", 1)
+        key_path = key_path.strip()
+        if not key_path:
+            raise UserInputError("Invalid --setting: key cannot be empty")
+        parsed_value = _parse_setting_value(value_str)
+        _set_nested_dict_value(raw, key_path, parsed_value)
+
+    # Parse through the config system and merge with the existing config
+    settings_config = parse_config(raw, disabled_plugins=disabled_plugins, strict=True)
+    return config.merge_with(settings_config)
 
 
 def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: str) -> dict[str, Any]:

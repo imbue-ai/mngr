@@ -5,7 +5,6 @@ which ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
 
-import sys
 from typing import Any
 from typing import Final
 
@@ -33,6 +32,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -298,9 +298,10 @@ def install_wizard_impl() -> None:
         write_human_line("All plugins are already installed.")
         return
 
-    # Guard against non-interactive contexts (CI, cron, curl|bash without /dev/tty redirect).
-    # urwid requires a real terminal on stdin; without one it raises RuntimeError.
-    if not sys.stdin.isatty():
+    # Guard against non-interactive contexts (CI, cron, headless containers).
+    # has_interactive_terminal() checks stdin first, then /dev/tty as a
+    # fallback for cases where stdin is piped (e.g. via ``uv run``).
+    if not has_interactive_terminal():
         write_human_line("No interactive terminal detected; skipping plugin install wizard.")
         write_human_line(_RELAUNCH_HINT)
         return

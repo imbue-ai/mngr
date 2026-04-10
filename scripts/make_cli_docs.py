@@ -16,13 +16,20 @@ All content comes from two sources:
 - CommandHelpMetadata (description, synopsis, examples, see also, etc.)
 """
 
+import os
 import re
 from pathlib import Path
+
+# Force all plugins to load regardless of local config so generated docs
+# always reflect every provider (docker, modal, etc.).  Must be set before
+# importing main, which triggers plugin-manager creation at import time.
+os.environ["MNGR_LOAD_ALL_PLUGINS"] = "1"
 
 import click
 from click_option_group import GroupedOption
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
+from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.main import BUILTIN_COMMANDS
@@ -376,18 +383,25 @@ def get_command_category(command_name: str) -> str | None:
     return None
 
 
-def get_relative_link(from_command: str, to_command: str) -> str:
-    """Get the relative markdown link path from one command's doc to another."""
+def get_relative_link(from_command: str, to_name: str) -> str:
+    """Get the relative markdown link path from one command's doc to another command or topic."""
     from_category = get_command_category(from_command)
-    to_category = get_command_category(to_command)
 
-    if to_category is None:
-        return f"mngr {to_command}"
+    # Check if the target is a command
+    to_category = get_command_category(to_name)
+    if to_category is not None:
+        if from_category == to_category:
+            return f"./{to_name}.md"
+        else:
+            return f"../{to_category}/{to_name}.md"
 
-    if from_category == to_category:
-        return f"./{to_command}.md"
-    else:
-        return f"../{to_category}/{to_command}.md"
+    # Check if the target is a topic with a docs path
+    topic = get_topic(to_name)
+    if topic is not None and topic.docs_path is not None:
+        from_dir = f"commands/{from_category}" if from_category else "commands"
+        return os.path.relpath(topic.docs_path, from_dir)
+
+    return f"mngr help {to_name}"
 
 
 def format_see_also_section(command_name: str, metadata: CommandHelpMetadata) -> str:
@@ -396,9 +410,14 @@ def format_see_also_section(command_name: str, metadata: CommandHelpMetadata) ->
         return ""
 
     lines = ["", "## See Also", ""]
-    for ref_command, description in metadata.see_also:
-        link = get_relative_link(command_name, ref_command)
-        lines.append(f"- [mngr {ref_command}]({link}) - {description}")
+    for ref_name, description in metadata.see_also:
+        link = get_relative_link(command_name, ref_name)
+        # Use "mngr <name>" for commands, "mngr help <name>" for topics
+        if get_command_category(ref_name) is not None:
+            link_text = f"mngr {ref_name}"
+        else:
+            link_text = f"mngr help {ref_name}"
+        lines.append(f"- [{link_text}]({link}) - {description}")
 
     lines.append("")
     return "\n".join(lines)

@@ -10,13 +10,20 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _create_agent
+from imbue.mngr.cli.create import _resolve_transfer_mode
 from imbue.mngr.cli.create import _setup_create
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
@@ -155,7 +162,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
 
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().command, "sleep 397265"),
-        to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
+        to_update(default_create_cli_opts.field_ref().source, str(temp_work_dir)),
         to_update(default_create_cli_opts.field_ref().transfer, "none"),
         to_update(default_create_cli_opts.field_ref().connect, True),
         to_update(default_create_cli_opts.field_ref().ensure_clean, False),
@@ -813,13 +820,12 @@ ensure_clean = false
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
-                "--context",
-                str(config_dir),
                 "--template",
                 "mytemplate",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
+            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -869,8 +875,6 @@ ensure_clean = false
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
-                "--context",
-                str(config_dir),
                 "--template",
                 "mytemplate",
                 "--message",
@@ -878,6 +882,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
+            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -928,12 +933,11 @@ ensure_clean = false
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
-            "--context",
-            str(config_dir),
             "--template",
             "nonexistent",
         ],
         obj=plugin_manager,
+        env={"MNGR_PROJECT_DIR": str(mngr_dir)},
     )
 
     assert result.exit_code != 0
@@ -1188,6 +1192,25 @@ def test_transfer_none_with_different_target_path_rejected(
 
     assert result.exit_code != 0
     assert "incompatible" in result.output.lower()
+
+
+def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
+    default_create_cli_opts: CreateCliOptions,
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When targeting an existing host on a non-local provider, default should be git-mirror."""
+    address = AgentAddress(
+        agent_name=None,
+        host_name=HostName("myhost"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+    source_location = HostLocation(host=local_host, path=temp_git_repo)
+
+    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx)
+
+    assert result == TransferMode.GIT_MIRROR
 
 
 def test_create_with_invalid_provider_name(

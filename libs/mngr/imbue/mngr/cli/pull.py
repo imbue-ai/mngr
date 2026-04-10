@@ -341,18 +341,12 @@ If no source is specified, shows an interactive selector to choose an agent.""",
         ("Preview what would be transferred", "mngr pull my-agent --dry-run"),
         ("Pull git commits", "mngr pull my-agent --sync-mode=git"),
     ),
-    additional_sections=(
-        (
-            "Multi-target Behavior",
-            "See [multi_target](../generic/multi_target.md) for options controlling behavior "
-            "when some agents cannot be processed.",
-        ),
-    ),
     see_also=(
         ("create", "Create a new agent"),
         ("list", "List agents to find one to pull from"),
         ("connect", "Connect to an agent interactively"),
         ("push", "Push files or git commits to an agent"),
+        ("multi_target", "Behavior when some agents cannot be processed"),
     ),
 ).register()
 

@@ -28,6 +28,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -44,8 +45,6 @@ class ConnectCliOptions(CommonCliOptions):
     agent: str | None
     start: bool
     reconnect: bool
-    retry: int
-    retry_delay: str
     attach_command: str | None
     allow_unknown_host: bool
 
@@ -317,12 +316,12 @@ def select_agent_interactively(agents: list[AgentDetails]) -> AgentDetails | Non
 
 
 @pure
-def _build_connection_options(opts: ConnectCliOptions) -> ConnectionOptions:
-    """Build ConnectionOptions from CLI options."""
+def _build_connection_options(opts: ConnectCliOptions, mngr_ctx: MngrContext) -> ConnectionOptions:
+    """Build ConnectionOptions from CLI options and config."""
     return ConnectionOptions(
         is_reconnect=opts.reconnect,
-        retry_count=opts.retry,
-        retry_delay=opts.retry_delay,
+        retry_count=mngr_ctx.config.retry.connect_retry_times,
+        retry_delay=mngr_ctx.config.retry.connect_retry_delay,
         attach_command=opts.attach_command,
         is_unknown_host_allowed=opts.allow_unknown_host,
     )
@@ -345,8 +344,6 @@ def _build_connection_options(opts: ConnectCliOptions) -> ConnectionOptions:
     show_default=True,
     help="Automatically reconnect if dropped [future]",
 )
-@optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries [future]")
-@optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries [future]")
 @optgroup.option("--attach-command", help="Command to run instead of attaching to main session [future]")
 @optgroup.option(
     "--allow-unknown-host/--no-allow-unknown-host",
@@ -363,14 +360,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         command_name="connect",
         command_class=ConnectCliOptions,
     )
-
-    # Number of times to retry connection on failure before giving up
-    if opts.retry != 3:
-        raise NotImplementedError("--retry with non-default value is not implemented yet")
-
-    # Delay between connection retries (supports durations like "5s", "1m")
-    if opts.retry_delay != "5s":
-        raise NotImplementedError("--retry-delay with non-default value is not implemented yet")
 
     # Run this command instead of the default tmux attach
     # Useful for running a different shell or command in the agent's environment
@@ -428,7 +417,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         )
 
     # Build connection options
-    connection_opts = _build_connection_options(opts)
+    connection_opts = _build_connection_options(opts, mngr_ctx)
 
     logger.info("Connecting to agent: {}", agent.name)
     connect_to_agent(agent, host, mngr_ctx, connection_opts)

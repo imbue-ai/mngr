@@ -15,52 +15,11 @@ Minds are built on top of `mngr` and should interact with it exclusively through
 
 # Architecture for mind agents
 
-Each mind has its own repo stored at `~/.minds/<agent-id>/`. This repo is created by cloning from a git remote when the user creates a mind via the forwarding server. The agent runs directly in this directory (via `mngr create --transfer=none`) and should make commits there if it changes anything.
+Each mind is created from a template repository (or local directory). The repo's own `.mngr/settings.toml` drives all configuration -- agent types, templates, environment variables, and other settings. There is no `minds.toml`, vendoring, or parent tracking.
 
-## Agent type
+## Configuration
 
-The agent type is passed directly to `mngr create --type <type>` during creation. The type is resolved from (in order of precedence):
-
-1. The `agent_type` field in `minds.toml` in the cloned repo
-2. The default type: `claude-mind`
-
-```toml
-# minds.toml
-agent_type = "elena-code"
-```
-
-## Vendor repos
-
-During agent creation, external repositories can be added as git subtrees under `vendor/` in the mind's directory. This is configured via `[[vendor]]` entries in `minds.toml`. Each entry must specify either a remote `url` or a local `path`, and can optionally pin a specific git `ref` (defaults to the current HEAD).
-
-Local repos must be "clean" (no uncommitted changes or untracked files) before they can be vendored.
-
-When no `[[vendor]]` section exists, the system falls back to vendoring the `mngr` repo from its public GitHub URL.
-
-For development, the `MINDS_VENDOR_PATH` environment variable can override vendor sources with local paths. Format: `name@/path/to/repo:other@/another/path`. Each entry overrides (or adds) a vendor config to use a local path instead of whatever was configured.
-
-```toml
-# minds.toml
-
-# Vendor the mngr repo from GitHub at a specific commit
-[[vendor]]
-name = "mngr"
-url = "https://github.com/imbue-ai/mngr.git"
-ref = "abc123"
-
-# Vendor a local repo (must be clean)
-[[vendor]]
-name = "my-lib"
-path = "/path/to/local/repo"
-```
-
-## Settings
-
-Minds read per-mind settings from `minds.toml` in the agent work directory (`$MNGR_AGENT_WORK_DIR/minds.toml`). This file is optional -- if it does not exist, all settings use their built-in defaults.
-
-The settings are modeled by `ClaudeMindSettings` in `imbue.mngr_claude_mind.data_types`.
-
-Bash scripts read settings via python3 one-liners with fallback defaults. Python tool scripts (deployed as standalone files to the agent host) read the TOML file directly at module load time.
+All configuration lives in the template repository's `.mngr/settings.toml`. The forwarding server passes `--template main` plus a mode-specific template (`--template dev` for DEV mode, `--template docker` for LOCAL mode) when running `mngr create`. The template's settings file defines everything the agent needs.
 
 ## Data and servers
 
@@ -76,21 +35,24 @@ See [the forwarding server design doc](../imbue/minds/forwarding_server/README.m
 
 ## Agent creation
 
-When a user visits the forwarding server and no agents exist, they are shown a creation form where they can provide a git repository URL. The forwarding server:
+When a user visits the forwarding server and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The forwarding server:
 
-1. Clones the repository to `~/.minds/<agent-id>/`
-2. Loads settings from `minds.toml` (agent type, vendor repos, etc.)
-3. Adds configured vendor repos as git subtrees (or defaults to vendoring mngr)
-4. Runs `mngr create --type <type> --id <id> --transfer=none --label mind=true` to start the agent
+1. Clones the repository to a temp directory (if a URL) or uses the local path directly
+2. Runs `mngr create <name> --id <id> --no-connect --label mind=<name> --template main --template <mode>` to create the agent
+3. Creates a Cloudflare tunnel (if configured) and injects the tunnel token into the agent via `mngr exec`
 4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 
-Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.
+Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` (a URL or local path) and returns the agent ID for status polling.
+
+### Cloudflare tunnel integration
+
+When the forwarding server is configured with Cloudflare credentials (via `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, and `OWNER_EMAIL` environment variables), it creates a Cloudflare tunnel for each new agent. The tunnel provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
+
+The per-agent servers page shows both local forwarding links and global Cloudflare links, with toggle controls for enabling/disabling global forwarding per service.
 
 # Command line interface
 
 - `mind forward` (starts the local forwarding server for accessing and creating minds)
-
-[future] Additional commands for managing minds (stop, start, destroy, logs, etc.)
 
 # Deferred items
 

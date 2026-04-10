@@ -25,7 +25,7 @@ from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
-from imbue.mngr.cli.create import _parse_source_string
+from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -36,7 +36,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -454,7 +456,7 @@ def test_resolve_source_location_with_auto_start_enabled(
 ) -> None:
     """_resolve_source_location returns an online host when is_start_desired=True."""
     opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
+        to_update(default_create_cli_opts.field_ref().source, f":{temp_work_dir}"),
     )
 
     result = _resolve_source_location(
@@ -957,47 +959,6 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
 
 
 # =============================================================================
-# Tests for _parse_source_string
-# =============================================================================
-
-
-def test_parse_source_string_plain_path() -> None:
-    """A plain path without @ or : is treated as a filesystem path."""
-    result = _parse_source_string("./some/dir")
-
-    assert result.path == Path("./some/dir")
-    assert result.agent_name is None
-    assert result.host_name is None
-
-
-def test_parse_source_string_agent_at_host_without_colon() -> None:
-    """AGENT@HOST without a colon parses as an address with no path."""
-    result = _parse_source_string("my-agent@my-host")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host"
-    assert result.path is None
-
-
-def test_parse_source_string_agent_at_host_with_provider_without_colon() -> None:
-    """AGENT@HOST.PROVIDER without a colon parses as an address with no path."""
-    result = _parse_source_string("my-agent@my-host.modal")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host.modal"
-    assert result.path is None
-
-
-def test_parse_source_string_agent_at_host_with_colon_path() -> None:
-    """AGENT@HOST:PATH parses all three components."""
-    result = _parse_source_string("my-agent@my-host:/path/to/dir")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host"
-    assert result.path == Path("/path/to/dir")
-
-
-# =============================================================================
 # Tests for parse_agent_address
 # =============================================================================
 
@@ -1100,6 +1061,62 @@ def test_is_creating_new_host() -> None:
     assert _is_creating_new_host(addr, new_host_flag=False) is False
 
 
+def test_parse_target_host_local_provider_uses_fixed_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None (use fixed localhost) when provider is local."""
+    address = parse_agent_address("foo@.local")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    # None means "use the local provider's default host" in _resolve_target_host
+    assert result is None
+
+
+def test_parse_target_host_local_provider_with_new_host_flag(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None for local provider even with --new-host flag."""
+    address = parse_agent_address("foo@myhost.local")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().new_host, True),
+    )
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert result is None
+
+
+def test_parse_target_host_non_local_provider_creates_new_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns NewHostOptions for non-local providers."""
+    address = parse_agent_address("foo@.modal")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provider == ProviderInstanceName("modal")
+
+
 def test_parse_agent_address_rejects_multiple_dots() -> None:
     """Addresses with more than one dot in the host part are invalid."""
     with pytest.raises(UserInputError, match="more than one dot"):
@@ -1128,6 +1145,26 @@ def test_parse_agent_address_bare_dot_means_nothing() -> None:
     assert result.agent_name == AgentName("foo")
     assert result.host_name is None
     assert result.provider_name is None
+
+
+# =============================================================================
+# Tests for --update / --reuse validation
+# =============================================================================
+
+
+def test_create_rejects_update_without_reuse(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--update without --reuse should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--update", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--update requires --reuse" in result.output
 
 
 # =============================================================================
@@ -1187,7 +1224,7 @@ def test_create_accepts_name_flag_alone(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1218,7 +1255,7 @@ def test_create_provider_flag_sets_provider(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1259,7 +1296,7 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1439,7 +1476,7 @@ def test_resolve_source_location_raises_outside_git_repo(
 
     with pytest.raises(UserInputError, match="Not inside a git repository"):
         _resolve_source_location(
-            default_create_cli_opts,
+            opts=default_create_cli_opts,
             agent_and_host_loader=lambda: {},
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,

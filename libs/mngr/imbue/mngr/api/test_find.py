@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.api.find import ParsedSourceLocation
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import resolve_source_location
 from imbue.mngr.config.data_types import MngrContext
@@ -79,11 +80,13 @@ def test_resolve_source_location_resolves_host_and_path(
 
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: []}
 
+    parsed = ParsedSourceLocation(
+        agent=None,
+        host=str(host_id),
+        path=str(temp_work_dir),
+    )
     result = resolve_source_location(
-        source=None,
-        source_agent=None,
-        source_host=str(host_id),
-        source_path=str(temp_work_dir),
+        parsed,
         agents_by_host=agents_by_host,
         mngr_ctx=temp_mngr_ctx,
     )

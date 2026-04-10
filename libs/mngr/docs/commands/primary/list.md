@@ -73,13 +73,11 @@ mngr list [OPTIONS]
 | `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
 | `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
 | `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
-| `--log-command-output`, `--no-log-command-output` | boolean | Log stdout/stderr from commands | None |
-| `--log-env-vars`, `--no-log-env-vars` | boolean | Log environment variables (security risk) | None |
 | `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
-| `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## CEL Filter Examples
@@ -174,17 +172,13 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - You can use Python-style list slicing for list fields (e.g., `host.snapshots[0]` for the first snapshot, `host.snapshots[:3]` for the first 3)
 
 
-
-## Related Documentation
-
-- [Multi-target Options](../generic/multi_target.md) - Behavior when some agents cannot be accessed
-- [Common Options](../generic/common.md) - Common CLI options for output format, logging, etc.
-
 ## See Also
 
 - [mngr create](./create.md) - Create a new agent
 - [mngr connect](./connect.md) - Connect to an existing agent
 - [mngr destroy](./destroy.md) - Destroy agents
+- [mngr help multi_target](../generic/multi_target.md) - Behavior when some agents cannot be accessed
+- [mngr help common](../generic/common.md) - Common CLI options for output format, logging, etc.
 
 ## Examples
 

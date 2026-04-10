@@ -85,7 +85,12 @@ def generate_html_report(
     agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
     if test_artifacts_dir is not None:
         for r in results:
-            runs = _find_test_artifact_runs(test_artifacts_dir, r.agent_name, r.test_runs)
+            try:
+                runs = _find_test_artifact_runs(test_artifacts_dir, r.agent_name, r.test_runs)
+            except OSError as exc:
+                if "Too many open files" in str(exc):
+                    logger.warning("FD exhaustion while scanning artifacts for '{}': {}", r.agent_name, exc)
+                raise
             if runs:
                 agent_artifact_runs[str(r.agent_name)] = runs
 
