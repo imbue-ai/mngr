@@ -9,13 +9,14 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 # Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
-# Default image URLs for Lima VMs (Ubuntu 24.04 LTS cloud images).
-# The cloud-init provisioning script installs any missing mngr dependencies.
+# Default image URLs for Lima VMs (Alpine 3.23 cloud images).
+# Alpine is minimal and boots fast. The cloud-init provisioning script
+# installs any missing mngr dependencies via apk.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-aarch64-uefi-cloudinit-r0.qcow2"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-x86_64-uefi-cloudinit-r0.qcow2"
 )
 
 # Default host directory inside the VM

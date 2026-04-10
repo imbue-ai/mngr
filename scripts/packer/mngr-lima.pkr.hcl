@@ -7,11 +7,6 @@ packer {
   }
 }
 
-variable "ubuntu_version" {
-  type    = string
-  default = "24.04"
-}
-
 variable "arch" {
   type    = string
   default = "amd64"
@@ -40,8 +35,9 @@ variable "iso_checksum" {
 locals {
   output_name = "mngr-lima-${var.arch == "arm64" ? "aarch64" : "x86_64"}"
 
-  default_iso_url_amd64 = "https://cloud-images.ubuntu.com/releases/${var.ubuntu_version}/release/ubuntu-${var.ubuntu_version}-server-cloudimg-amd64.img"
-  default_iso_url_arm64 = "https://cloud-images.ubuntu.com/releases/${var.ubuntu_version}/release/ubuntu-${var.ubuntu_version}-server-cloudimg-arm64.img"
+  # Alpine 3.23 cloud images (matches Lima's own Alpine template)
+  default_iso_url_amd64 = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-x86_64-uefi-cloudinit-r0.qcow2"
+  default_iso_url_arm64 = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-aarch64-uefi-cloudinit-r0.qcow2"
 
   resolved_iso_url = var.iso_url != "" ? var.iso_url : (
     var.arch == "arm64" ? local.default_iso_url_arm64 : local.default_iso_url_amd64
@@ -65,10 +61,10 @@ source "qemu" "mngr-lima" {
   accelerator  = var.accelerator
   qemu_binary  = local.resolved_qemu_binary
 
-  ssh_username = "ubuntu"
+  ssh_username = "alpine"
   ssh_timeout  = "10m"
 
-  shutdown_command = "sudo shutdown -P now"
+  shutdown_command = "sudo poweroff"
 
   headless = true
 }

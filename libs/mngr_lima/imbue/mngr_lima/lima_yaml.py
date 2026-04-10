@@ -82,24 +82,34 @@ def generate_default_lima_yaml(
 
 
 def _build_provisioning_script() -> str:
-    """Build the cloud-init provisioning script that ensures required packages are installed."""
+    """Build the cloud-init provisioning script that ensures required packages are installed.
+
+    Supports both Alpine (apk) and Debian/Ubuntu (apt-get) based images.
+    """
     return """\
-#!/bin/bash
-set -eux -o pipefail
+#!/bin/sh
+set -eux
 
-# Install required packages if missing
-PKGS_TO_INSTALL=""
-command -v tmux >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL tmux"
-command -v git >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL git"
-command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
-command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
-command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
-command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
-test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
-
-if [ -n "$PKGS_TO_INSTALL" ]; then
-    apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
+# Detect package manager and install missing dependencies
+if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache \
+        bash tmux git git-lfs jq rsync curl xxd openssh-server \
+        ca-certificates build-base python3 py3-pip \
+        ripgrep fd less nano sqlite procps unison wget \
+        nodejs npm shadow sudo
+elif command -v apt-get >/dev/null 2>&1; then
+    PKGS_TO_INSTALL=""
+    command -v tmux >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL tmux"
+    command -v git >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL git"
+    command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
+    command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
+    command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
+    command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
+    test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
+    test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"
+    if [ -n "$PKGS_TO_INSTALL" ]; then
+        apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
+    fi
 fi
 
 mkdir -p /run/sshd
@@ -111,14 +121,13 @@ mkdir -p /code && chmod 777 /code
 # Increase SSH limits so pyinfra can open enough concurrent channels and
 # connections. The defaults (MaxSessions=10, MaxStartups=10:30:100) cause
 # "channel open FAILED" and "no more sessions" errors during provisioning.
-# Docker and Modal providers pass -o MaxSessions=100 when starting sshd
-# directly; Lima VMs run sshd via systemd so we configure sshd_config.
 if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
     cat >> /etc/ssh/sshd_config <<SSHD_EOF
 MaxSessions 100
 MaxStartups 100:30:200
 SSHD_EOF
-    systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+    # Restart sshd (systemd or OpenRC)
+    systemctl restart sshd 2>/dev/null || rc-service sshd restart 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 """
 
