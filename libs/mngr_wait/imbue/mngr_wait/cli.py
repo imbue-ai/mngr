@@ -166,7 +166,8 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
 @optgroup.option(
     "--event",
     default=None,
-    help="Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). Mutually exclusive with state args.",
+    help="Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). "
+    "Mutually exclusive with state args. Note: AGENT_READY is only emitted by 'mngr create', not 'mngr start'.",
 )
 @optgroup.option(
     "--timeout",
@@ -332,6 +333,7 @@ all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED
 
 Use --event to wait for a lifecycle event instead of a state. Valid events: AGENT_READY, AGENT_STARTING.
 --event is mutually exclusive with state arguments and requires an agent target.
+Note: AGENT_READY is only emitted by 'mngr create' (which verifies readiness), not by 'mngr start'.
 
 If no states or event are specified, waits for any terminal state (the target stops running).
 
