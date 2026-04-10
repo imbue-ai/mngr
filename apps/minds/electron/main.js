@@ -67,7 +67,7 @@ const TITLEBAR_CSS = `
 #minds-titlebar .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
 #minds-titlebar .minds-wc #minds-close:hover { background: #dc2626; color: white; }
 html { overflow: hidden !important; }
-body { overflow: auto !important; height: 100vh !important; padding-top: ${TITLEBAR_HEIGHT}px !important; box-sizing: border-box !important; }
+#minds-spacer { height: ${TITLEBAR_HEIGHT}px; flex-shrink: 0; }
 `;
 
 // On macOS: hide custom window controls (native traffic lights handle it),
@@ -112,6 +112,12 @@ const TITLEBAR_JS = `(function() {
   bar.id = 'minds-titlebar';
   bar.innerHTML = ${JSON.stringify(TITLEBAR_HTML)};
   document.body.insertBefore(bar, document.body.firstChild);
+
+  // Insert a spacer div after the title bar to push content down without
+  // modifying body CSS (which breaks pages using height:100vh on children).
+  var spacer = document.createElement('div');
+  spacer.id = 'minds-spacer';
+  document.body.insertBefore(spacer, bar.nextSibling);
 
   var titleEl = document.getElementById('minds-title');
   titleEl.textContent = document.title || 'Minds';
