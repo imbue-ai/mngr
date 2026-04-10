@@ -11,9 +11,10 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_kanpan.data_types import CheckStatus
-from imbue.mngr_kanpan.data_types import PrInfo
-from imbue.mngr_kanpan.data_types import PrState
+from imbue.mngr_kanpan.data_source import CiField
+from imbue.mngr_kanpan.data_source import CiStatus
+from imbue.mngr_kanpan.data_source import PrField
+from imbue.mngr_kanpan.data_source import PrState
 
 
 def make_host_details(provider_name: str = "local") -> HostDetails:
@@ -51,19 +52,25 @@ def make_agent_details(
     )
 
 
-def make_pr_info(
+def make_pr_field(
     number: int = 1,
     head_branch: str = "mngr/test",
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
-) -> PrInfo:
-    """Create a minimal PrInfo for testing."""
-    return PrInfo(
+) -> PrField:
+    """Create a minimal PrField for testing."""
+    return PrField(
         number=number,
         title=f"PR #{number}",
         state=state,
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
-        check_status=CheckStatus.PASSING,
         is_draft=is_draft,
     )
+
+
+def make_ci_field(
+    status: CiStatus = CiStatus.PASSING,
+) -> CiField:
+    """Create a minimal CiField for testing."""
+    return CiField(status=status)

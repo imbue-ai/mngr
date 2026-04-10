@@ -1,18 +1,12 @@
-import os
 import time
+from collections.abc import Sequence
+from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from subprocess import TimeoutExpired
 from typing import Any
 from urllib.parse import urlparse
 
 from loguru import logger
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.concurrency_group.local_process import RunningProcess
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
@@ -21,32 +15,45 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
+from imbue.mngr_kanpan.data_source import BoolField
+from imbue.mngr_kanpan.data_source import CiField
+from imbue.mngr_kanpan.data_source import CiStatus
+from imbue.mngr_kanpan.data_source import FIELD_CI
+from imbue.mngr_kanpan.data_source import FIELD_MUTED
+from imbue.mngr_kanpan.data_source import FIELD_PR
+from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
+from imbue.mngr_kanpan.data_source import PrField
+from imbue.mngr_kanpan.data_source import PrState
+from imbue.mngr_kanpan.data_source import deserialize_fields
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
+from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-from imbue.mngr_kanpan.data_types import ColumnData
-from imbue.mngr_kanpan.data_types import GitHubData
-from imbue.mngr_kanpan.data_types import PrInfo
-from imbue.mngr_kanpan.data_types import PrState
-from imbue.mngr_kanpan.data_types import RefreshHook
-from imbue.mngr_kanpan.github import FetchPrsResult
-from imbue.mngr_kanpan.github import fetch_all_prs
+from imbue.mngr_kanpan.data_types import DataSourceConfig
+from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
 PLUGIN_NAME = "kanpan"
 
 
-def fetch_agent_snapshot(
+def fetch_board_snapshot(
     mngr_ctx: MngrContext,
+    data_sources: Sequence[KanpanDataSource],
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
 ) -> BoardSnapshot:
-    """Fetch agent state: agents, git branches, commits ahead, mute state.
+    """Full fetch: list agents, run data sources in parallel, build board entries.
 
-    Entries have pr=None and create_pr_url=None (no GitHub API calls).
+    1. List agents
+    2. Load cached fields per source (only enabled sources)
+    3. Merge cached fields into flat dict
+    4. Run ALL data sources in parallel
+    5. Persist per-source fields
+    6. Compute board sections from typed fields
+    7. Build AgentBoardEntry with pre-computed CellDisplay
     """
     start_time = time.monotonic()
     errors: list[str] = []
-    cg = mngr_ctx.concurrency_group
 
     result = list_agents(
         mngr_ctx,
@@ -58,29 +65,53 @@ def fetch_agent_snapshot(
     for error in result.errors:
         errors.append(f"{error.exception_type}: {error.message}")
 
+    agents = tuple(result.agents)
+
+    # Load muted state from certified data
     muted_agents = _load_muted_agents(mngr_ctx)
 
-    agent_work_dirs = _collect_local_work_dirs(result.agents)
-    commits_ahead_map = _get_all_commits_ahead(list(agent_work_dirs.values()), cg)
+    # Load cached fields per source (only for enabled sources)
+    cached_by_source = _load_cached_fields(mngr_ctx, data_sources, agents)
 
+    # Merge all cached fields into flat dict: dict[AgentName, dict[str, FieldValue]]
+    merged_cached = _merge_cached_fields(cached_by_source)
+
+    # Run all data sources in parallel
+    new_fields_by_source, source_errors = _run_data_sources_parallel(data_sources, agents, merged_cached, mngr_ctx)
+    errors.extend(source_errors)
+
+    # Persist per-source fields
+    _persist_fields(mngr_ctx, new_fields_by_source, agents)
+
+    # Merge new fields into final flat dict
+    all_fields: dict[AgentName, dict[str, FieldValue]] = {}
+    for _source_name, source_fields in new_fields_by_source.items():
+        for agent_name, agent_fields in source_fields.items():
+            if agent_name not in all_fields:
+                all_fields[agent_name] = {}
+            all_fields[agent_name].update(agent_fields)
+
+    # Build board entries
     entries: list[AgentBoardEntry] = []
-    for i, agent in enumerate(result.agents):
-        branch = agent.initial_branch
-        local_work_dir = agent_work_dirs.get(i)
-        commits_ahead = commits_ahead_map.get(local_work_dir) if local_work_dir is not None else None
+    for agent in agents:
+        agent_fields = dict(all_fields.get(agent.name, {}))
+        is_muted = agent.name in muted_agents
+        agent_fields[FIELD_MUTED] = BoolField(value=is_muted)
+
+        # Compute cell displays from fields
+        cells = {key: field.display() for key, field in agent_fields.items()}
+
+        section = compute_section(agent_fields)
         entries.append(
             AgentBoardEntry(
                 name=agent.name,
                 state=agent.state,
                 provider_name=agent.host.provider_name,
-                work_dir=local_work_dir,
-                branch=branch,
-                commits_ahead=commits_ahead,
-                is_muted=agent.name in muted_agents,
-                column_data=ColumnData(
-                    labels=agent.labels,
-                    plugin_data=agent.plugin,
-                ),
+                branch=agent.initial_branch,
+                is_muted=is_muted,
+                fields=agent_fields,
+                cells=cells,
+                section=section,
             )
         )
 
@@ -88,238 +119,201 @@ def fetch_agent_snapshot(
     return BoardSnapshot(
         entries=tuple(entries),
         errors=tuple(errors),
-        repo_pr_loaded={},
         fetch_time_seconds=elapsed,
     )
 
 
-def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, FetchPrsResult]:
-    """Fetch PRs for a single repo. Designed for use with ThreadPoolExecutor."""
-    return repo_path, fetch_all_prs(cg, repo=repo_path)
-
-
-def fetch_github_data(mngr_ctx: MngrContext, agents: list[AgentDetails]) -> GitHubData:
-    """Fetch GitHub PR data from all unique repos and build the PR-to-branch index.
-
-    Discovers repos from each agent's 'remote' label (set at creation time).
-    Fetches PRs once per unique repo via gh --repo (no local cwd needed).
-    Agents without the 'remote' label are skipped.
-    """
-    cg = mngr_ctx.concurrency_group
-    errors: list[str] = []
-
-    # Collect unique repos from agent labels.
-    all_repos: set[str] = set()
-    for agent in agents:
-        repo_path = _get_agent_repo_path(agent)
-        if repo_path is not None:
-            all_repos.add(repo_path)
-
-    if not all_repos:
-        return GitHubData(repo_pr_loaded={})
-
-    # Fetch PRs for all unique repos in parallel via gh --repo.
-    pr_by_repo_branch: dict[str, dict[str, PrInfo]] = {}
-    repo_pr_loaded: dict[str, bool] = {}
-
-    with ThreadPoolExecutor(max_workers=min(len(all_repos), 8)) as executor:
-        for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp), all_repos):
-            if pr_result.error is None:
-                repo_index = _build_pr_branch_index(pr_result.prs)
-                if repo_index:
-                    pr_by_repo_branch[repo_path] = repo_index
-                repo_pr_loaded[repo_path] = True
-            else:
-                repo_pr_loaded[repo_path] = False
-                errors.append(pr_result.error)
-
-    return GitHubData(
-        pr_by_repo_branch=pr_by_repo_branch,
-        repo_pr_loaded=repo_pr_loaded,
-        errors=tuple(errors),
-    )
-
-
-@pure
-def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData) -> BoardSnapshot:
-    """Enrich a local-only snapshot with GitHub PR data.
-
-    For each entry, looks up PR by branch name and attaches pr and create_pr_url.
-    create_pr_url is only generated for agents whose repo had a successful PR fetch.
-    """
-    enriched_entries: list[AgentBoardEntry] = []
-    for entry in snapshot.entries:
-        agent_repo = repo_path_from_labels(entry.column_data.labels)
-        pr = _lookup_pr(remote, agent_repo, entry.branch)
-        agent_prs_loaded = agent_repo is not None and remote.repo_pr_loaded.get(agent_repo) is True
-        create_pr_url = (
-            _build_create_pr_url(agent_repo, entry.branch)
-            if agent_prs_loaded and entry.branch and pr is None
-            else None
-        )
-        enriched_entry = entry.model_copy_update(
-            to_update(entry.field_ref().pr, pr),
-            to_update(entry.field_ref().create_pr_url, create_pr_url),
-        )
-        enriched_entries.append(enriched_entry)
-
-    return BoardSnapshot(
-        entries=tuple(enriched_entries),
-        errors=(*snapshot.errors, *remote.errors),
-        repo_pr_loaded=remote.repo_pr_loaded,
-        fetch_time_seconds=snapshot.fetch_time_seconds,
-    )
-
-
-def fetch_board_snapshot(
+def fetch_local_snapshot(
     mngr_ctx: MngrContext,
-    include_filters: tuple[str, ...],
-    exclude_filters: tuple[str, ...],
-    on_before_refresh: list[RefreshHook] | None,
-    on_after_refresh: list[RefreshHook] | None,
-    prev_snapshot: BoardSnapshot | None,
+    data_sources: Sequence[KanpanDataSource],
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
 ) -> BoardSnapshot:
-    """Full fetch: local snapshot enriched with GitHub PR data, with optional refresh hooks.
+    """Local-only snapshot: runs only non-remote data sources (repo_paths, git_info).
 
-    Lists agents once and uses the result for both local and remote fetching.
-    Before-hooks run against the previous snapshot's entries (skipped when prev_snapshot is None).
-    After-hooks run against the new snapshot's entries.
-    Hook errors are appended to the snapshot's errors but do not block the refresh.
+    Skips GitHub and shell data sources for speed.
     """
-    start_time = time.monotonic()
-    errors: list[str] = []
-    cg = mngr_ctx.concurrency_group
-
-    if prev_snapshot is not None and on_before_refresh:
-        errors.extend(run_refresh_hooks(cg, on_before_refresh, prev_snapshot.entries))
-
-    result = list_agents(
+    local_sources = [s for s in data_sources if s.name in ("repo_paths", "git_info")]
+    return fetch_board_snapshot(
         mngr_ctx,
-        is_streaming=False,
-        error_behavior=ErrorBehavior.CONTINUE,
+        local_sources,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
     )
-    for error in result.errors:
-        errors.append(f"{error.exception_type}: {error.message}")
-
-    muted_agents = _load_muted_agents(mngr_ctx)
-
-    # Fetch remote data (GitHub PRs)
-    remote = fetch_github_data(mngr_ctx, result.agents)
-
-    agent_work_dirs = _collect_local_work_dirs(result.agents)
-    commits_ahead_map = _get_all_commits_ahead(list(agent_work_dirs.values()), cg)
-
-    # Build board entries with both local and remote info
-    entries: list[AgentBoardEntry] = []
-    for i, agent in enumerate(result.agents):
-        branch = agent.initial_branch
-        local_work_dir = agent_work_dirs.get(i)
-        commits_ahead = commits_ahead_map.get(local_work_dir) if local_work_dir is not None else None
-        agent_repo = _get_agent_repo_path(agent)
-        pr = _lookup_pr(remote, agent_repo, branch)
-        agent_prs_loaded = agent_repo is not None and remote.repo_pr_loaded.get(agent_repo) is True
-        create_pr_url = (
-            _build_create_pr_url(agent_repo, branch) if agent_prs_loaded and branch and pr is None else None
-        )
-        entries.append(
-            AgentBoardEntry(
-                name=agent.name,
-                state=agent.state,
-                provider_name=agent.host.provider_name,
-                work_dir=local_work_dir,
-                branch=branch,
-                pr=pr,
-                commits_ahead=commits_ahead,
-                create_pr_url=create_pr_url,
-                is_muted=agent.name in muted_agents,
-                column_data=ColumnData(
-                    labels=agent.labels,
-                    plugin_data=agent.plugin,
-                ),
-            )
-        )
-
-    # fetch_time_seconds captures before-hooks + data fetch but not after-hooks,
-    # because the snapshot (and its displayed timing) is constructed before
-    # after-hooks run. Before-hooks are included since they can mutate state
-    # that the fetch reads (e.g. clearing labels before re-fetching).
-    snapshot = BoardSnapshot(
-        entries=tuple(entries),
-        errors=(*errors, *remote.errors),
-        repo_pr_loaded=remote.repo_pr_loaded,
-        fetch_time_seconds=time.monotonic() - start_time,
-    )
-
-    if on_after_refresh:
-        after_errors = run_refresh_hooks(cg, on_after_refresh, snapshot.entries)
-        if after_errors:
-            snapshot = snapshot.model_copy_update(
-                to_update(snapshot.field_ref().errors, (*snapshot.errors, *after_errors)),
-            )
-
-    return snapshot
 
 
-_HOOK_TIMEOUT_SECONDS = 30.0
+def _load_cached_fields(
+    mngr_ctx: MngrContext,
+    data_sources: Sequence[KanpanDataSource],
+    agents: tuple[AgentDetails, ...],
+) -> dict[str, dict[AgentName, dict[str, FieldValue]]]:
+    """Load per-source cached fields from agent plugin data.
 
-
-def run_refresh_hooks(
-    cg: ConcurrencyGroup,
-    hooks: list[RefreshHook],
-    entries: tuple[AgentBoardEntry, ...],
-) -> list[str]:
-    """Run refresh hook commands for each agent in parallel. Returns list of error messages.
-
-    Hook failures (including timeouts) are collected as error strings and never propagate
-    as exceptions -- callers always get their snapshot back.
+    Only loads for currently enabled data sources. Returns dict[source_name -> agent_name -> fields].
     """
-    errors: list[str] = []
-    for hook in hooks:
-        processes: list[tuple[AgentBoardEntry, RunningProcess]] = []
-        try:
-            with cg.make_concurrency_group(
-                name=f"hook-{hook.name}",
-                exit_timeout_seconds=_HOOK_TIMEOUT_SECONDS,
-            ) as child_cg:
-                for entry in entries:
-                    env = _build_hook_env(entry)
-                    proc = child_cg.run_process_in_background(
-                        ["sh", "-c", hook.command],
-                        timeout=_HOOK_TIMEOUT_SECONDS,
-                        is_checked_by_group=False,
-                        env=env,
-                    )
-                    processes.append((entry, proc))
-        except ConcurrencyExceptionGroup as exc:
-            n_failed = len(exc.exceptions)
-            errors.append(f"Hook '{hook.name}': {n_failed} process(es) timed out or failed")
-            logger.debug("Hook '{}' concurrency group error: {}", hook.name, exc)
-            continue
-        for entry, proc in processes:
-            rc = proc.returncode
-            if rc is not None and rc != 0:
-                stderr = proc.read_stderr().strip()
-                msg = f"Hook '{hook.name}' failed for {entry.name} (exit {rc})"
-                if stderr:
-                    msg = f"{msg}: {stderr}"
-                errors.append(msg)
-    return errors
+    cached_by_source: dict[str, dict[AgentName, dict[str, FieldValue]]] = {}
+
+    # Build type map for all sources
+    source_field_types: dict[str, dict[str, type[FieldValue]]] = {}
+    for source in data_sources:
+        source_field_types[source.name] = source.field_types
+
+    # Load cached data from agent plugin data
+    try:
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+        for _host_ref, agent_refs in agents_by_host.items():
+            for agent_ref in agent_refs:
+                agent_name = agent_ref.agent_name
+                kanpan_data = agent_ref.certified_data.get("plugin", {}).get(PLUGIN_NAME, {})
+                sources_data = kanpan_data.get("data_sources", {})
+
+                for source_name, field_types in source_field_types.items():
+                    source_data = sources_data.get(source_name, {})
+                    if source_data:
+                        deserialized = deserialize_fields(source_data, field_types)
+                        if deserialized:
+                            if source_name not in cached_by_source:
+                                cached_by_source[source_name] = {}
+                            cached_by_source[source_name][agent_name] = deserialized
+    except Exception as e:
+        logger.debug("Failed to load cached fields: {}", e)
+
+    return cached_by_source
 
 
-def _build_hook_env(entry: AgentBoardEntry) -> dict[str, str]:
-    """Build environment variables for a hook command from an agent board entry."""
-    return {
-        **os.environ,
-        "MNGR_AGENT_NAME": str(entry.name),
-        "MNGR_AGENT_BRANCH": entry.branch or "",
-        "MNGR_AGENT_STATE": str(entry.state),
-        "MNGR_AGENT_PROVIDER": str(entry.provider_name),
-        "MNGR_AGENT_PR_NUMBER": str(entry.pr.number) if entry.pr else "",
-        "MNGR_AGENT_PR_URL": entry.pr.url if entry.pr else "",
-        "MNGR_AGENT_PR_STATE": str(entry.pr.state) if entry.pr else "",
-    }
+def _merge_cached_fields(
+    cached_by_source: dict[str, dict[AgentName, dict[str, FieldValue]]],
+) -> dict[AgentName, dict[str, FieldValue]]:
+    """Merge per-source cached fields into a single flat dict per agent."""
+    merged: dict[AgentName, dict[str, FieldValue]] = {}
+    for _source_name, source_fields in cached_by_source.items():
+        for agent_name, agent_fields in source_fields.items():
+            if agent_name not in merged:
+                merged[agent_name] = {}
+            merged[agent_name].update(agent_fields)
+    return merged
+
+
+def _run_data_sources_parallel(
+    data_sources: Sequence[KanpanDataSource],
+    agents: tuple[AgentDetails, ...],
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    mngr_ctx: MngrContext,
+) -> tuple[dict[str, dict[AgentName, dict[str, FieldValue]]], list[str]]:
+    """Run all data sources in parallel. Returns (results_by_source_name, errors)."""
+    all_errors: list[str] = []
+    results: dict[str, dict[AgentName, dict[str, FieldValue]]] = {}
+
+    if not data_sources:
+        return results, all_errors
+
+    with ThreadPoolExecutor(max_workers=min(len(data_sources), 8)) as executor:
+        futures: dict[str, Future[tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]]] = {}
+        for source in data_sources:
+            futures[source.name] = executor.submit(source.compute, agents, cached_fields, mngr_ctx)
+
+        for source_name, future in futures.items():
+            try:
+                source_fields, source_errors = future.result()
+                results[source_name] = source_fields
+                all_errors.extend(source_errors)
+            except Exception as e:
+                all_errors.append(f"Data source '{source_name}' failed: {e}")
+                logger.debug("Data source '{}' failed: {}", source_name, e)
+
+    return results, all_errors
+
+
+def _persist_fields(
+    mngr_ctx: MngrContext,
+    fields_by_source: dict[str, dict[AgentName, dict[str, FieldValue]]],
+    agents: tuple[AgentDetails, ...],
+) -> None:
+    """Persist per-source fields to agent plugin data."""
+    try:
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+
+        # Build agent interface lookup
+        agent_interfaces: dict[AgentName, Any] = {}
+        for _host_ref, agent_refs in agents_by_host.items():
+            for agent_ref in agent_refs:
+                agent_interfaces[agent_ref.agent_name] = agent_ref
+
+        for agent in agents:
+            agent_ref = agent_interfaces.get(agent.name)
+            if agent_ref is None:
+                continue
+
+            plugin_data = agent_ref.certified_data.get("plugin", {}).get(PLUGIN_NAME, {})
+            sources_data = dict(plugin_data.get("data_sources", {}))
+
+            # Update with new fields from each source
+            for source_name, source_fields in fields_by_source.items():
+                agent_fields = source_fields.get(agent.name, {})
+                if agent_fields:
+                    sources_data[source_name] = {key: field.model_dump() for key, field in agent_fields.items()}
+                elif source_name in sources_data:
+                    # Source ran but produced no fields for this agent -- clear stale data
+                    del sources_data[source_name]
+
+            # Write back
+            new_plugin_data = dict(plugin_data)
+            new_plugin_data["data_sources"] = sources_data
+            agent_ref.set_plugin_data(PLUGIN_NAME, new_plugin_data)
+
+    except Exception as e:
+        logger.debug("Failed to persist fields: {}", e)
+
+
+@pure
+def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
+    """Compute the board section for an agent based on its typed fields."""
+    muted = fields.get(FIELD_MUTED)
+    if muted is not None:
+        if not isinstance(muted, BoolField):
+            raise KanpanFieldTypeError(f"Expected BoolField for 'muted', got {type(muted).__name__}")
+        if muted.value:
+            return BoardSection.MUTED
+
+    pr = fields.get(FIELD_PR)
+    if pr is None:
+        return BoardSection.STILL_COOKING
+    if not isinstance(pr, PrField):
+        raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
+
+    if pr.is_draft:
+        return BoardSection.STILL_COOKING
+    match pr.state:
+        case PrState.MERGED:
+            return BoardSection.PR_MERGED
+        case PrState.CLOSED:
+            return BoardSection.PR_CLOSED
+        case PrState.OPEN:
+            ci = fields.get(FIELD_CI)
+            match ci:
+                case None:
+                    return BoardSection.PR_BEING_REVIEWED
+                case CiField():
+                    pass
+                case _:
+                    raise KanpanFieldTypeError(f"Expected CiField for 'ci', got {type(ci).__name__}")
+            match ci.status:
+                case CiStatus.FAILING:
+                    return BoardSection.PRS_FAILED
+                case CiStatus.PASSING | CiStatus.PENDING | CiStatus.UNKNOWN:
+                    return BoardSection.PR_BEING_REVIEWED
 
 
 def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
@@ -370,63 +364,6 @@ def _is_agent_muted(certified_data: Any) -> bool:
     return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
 
 
-def _collect_local_work_dirs(agents: list[AgentDetails]) -> dict[int, Path]:
-    """Map agent index to work_dir for local agents with existing work directories."""
-    work_dirs: dict[int, Path] = {}
-    for i, agent in enumerate(agents):
-        if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists():
-            work_dirs[i] = agent.work_dir
-    return work_dirs
-
-
-def _get_all_commits_ahead(
-    work_dirs: list[Path],
-    cg: ConcurrencyGroup,
-) -> dict[Path, int | None]:
-    """Get commits-ahead counts for multiple work dirs in parallel.
-
-    Launches all git rev-list processes concurrently, then collects results.
-    Returns a dict mapping work_dir to commits-ahead count (None on failure).
-    """
-    if not work_dirs:
-        return {}
-
-    unique_dirs = set(work_dirs)
-    result: dict[Path, int | None] = {}
-    processes: list[tuple[Path, RunningProcess]] = []
-    for work_dir in unique_dirs:
-        try:
-            proc = cg.run_process_in_background(
-                ["git", "rev-list", "--count", "@{upstream}..HEAD"],
-                cwd=work_dir,
-                timeout=10.0,
-                is_checked_by_group=False,
-            )
-        except (ConcurrencyGroupError, OSError) as exc:
-            logger.debug("Failed to launch git rev-list in {}: {}", work_dir, exc)
-            result[work_dir] = None
-            continue
-        processes.append((work_dir, proc))
-
-    for work_dir, proc in processes:
-        try:
-            proc.wait()
-        except (ConcurrencyGroupError, TimeoutExpired) as exc:
-            logger.debug("git rev-list failed in {}: {}", work_dir, exc)
-            result[work_dir] = None
-            continue
-        if proc.returncode == 0:
-            try:
-                result[work_dir] = int(proc.read_stdout().strip())
-            except ValueError as exc:
-                logger.debug("Unparseable git rev-list output in {}: {}", work_dir, exc)
-                result[work_dir] = None
-        else:
-            logger.debug("git rev-list exited with code {} in {}", proc.returncode, work_dir)
-            result[work_dir] = None
-    return result
-
-
 @pure
 def _parse_github_repo_path(remote_url: str) -> str | None:
     """Extract owner/repo from a GitHub remote URL.
@@ -453,23 +390,6 @@ def _parse_github_repo_path(remote_url: str) -> str | None:
 
 
 @pure
-def _build_create_pr_url(repo_path: str | None, branch: str | None) -> str | None:
-    """Build a GitHub URL for creating a new PR from the given branch.
-
-    Returns None if repo_path or branch is not available.
-    """
-    if repo_path is None or branch is None:
-        return None
-    return f"https://github.com/{repo_path}/compare/{branch}?expand=1"
-
-
-@pure
-def _get_agent_repo_path(agent: AgentDetails) -> str | None:
-    """Get the GitHub repo path for an agent from its 'remote' label."""
-    return repo_path_from_labels(agent.labels)
-
-
-@pure
 def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     """Extract GitHub 'owner/repo' from a labels dict's 'remote' entry."""
     remote_url = labels.get("remote")
@@ -478,37 +398,38 @@ def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     return _parse_github_repo_path(remote_url)
 
 
-@pure
-def _lookup_pr(remote: GitHubData, agent_repo: str | None, branch: str | None) -> PrInfo | None:
-    """Look up the PR for an agent by its repo and branch."""
-    if not branch or agent_repo is None:
-        return None
-    repo_prs = remote.pr_by_repo_branch.get(agent_repo)
-    return repo_prs.get(branch) if repo_prs is not None else None
+def collect_data_sources(
+    mngr_ctx: MngrContext,
+) -> list[KanpanDataSource]:
+    """Collect all data sources from plugins and config.
 
-
-@pure
-def _build_pr_branch_index(prs: tuple[PrInfo, ...]) -> dict[str, PrInfo]:
-    """Build a lookup dict from branch name to the most relevant PR.
-
-    If multiple PRs share the same branch, prefers OPEN > MERGED > CLOSED.
+    Calls pm.hook.kanpan_data_sources() to get plugin-registered sources,
+    then filters by enabled status from config.
     """
-    result: dict[str, PrInfo] = {}
-    for pr in prs:
-        existing = result.get(pr.head_branch)
-        if existing is None or _pr_priority(pr) > _pr_priority(existing):
-            result[pr.head_branch] = pr
-    return result
+    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
 
+    # Collect sources from hooks
+    raw_results = mngr_ctx.pm.hook.kanpan_data_sources(mngr_ctx=mngr_ctx)
 
-@pure
-def _pr_priority(pr: PrInfo) -> int:
-    """Return priority for PR selection when multiple PRs share a branch.
+    all_sources: list[KanpanDataSource] = []
+    for result in raw_results:
+        if result is None:
+            continue
+        for source in result:
+            all_sources.append(source)
 
-    Higher value means higher priority. OPEN > MERGED > CLOSED.
-    """
-    if pr.state == PrState.OPEN:
-        return 2
-    if pr.state == PrState.MERGED:
-        return 1
-    return 0
+    # Filter by enabled status in config
+    enabled_sources: list[KanpanDataSource] = []
+    for source in all_sources:
+        source_config = config.data_sources.get(source.name)
+        if source_config is not None:
+            if isinstance(source_config, DataSourceConfig):
+                if not source_config.enabled:
+                    continue
+            elif isinstance(source_config, dict):
+                ds_config = DataSourceConfig(**source_config)
+                if not ds_config.enabled:
+                    continue
+        enabled_sources.append(source)
+
+    return enabled_sources
