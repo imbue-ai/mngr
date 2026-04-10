@@ -65,7 +65,6 @@ const TITLEBAR_CSS = `
 #minds-titlebar .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
 #minds-titlebar .minds-wc #minds-close:hover { background: #dc2626; color: white; }
 body { padding-top: ${TITLEBAR_HEIGHT}px !important; }
-body > *:not(#minds-titlebar) { max-height: calc(100vh - ${TITLEBAR_HEIGHT}px) !important; }
 `;
 
 const TITLEBAR_CSS_MAC = `
