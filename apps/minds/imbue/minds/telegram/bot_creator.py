@@ -66,9 +66,7 @@ def auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
         raise TelegramCredentialError(f"auth_key is not valid hex: {exc}") from exc
 
     if len(auth_key_bytes) != _AUTH_KEY_BYTE_LENGTH:
-        raise TelegramCredentialError(
-            f"auth_key must be {_AUTH_KEY_BYTE_LENGTH} bytes, got {len(auth_key_bytes)}"
-        )
+        raise TelegramCredentialError(f"auth_key must be {_AUTH_KEY_BYTE_LENGTH} bytes, got {len(auth_key_bytes)}")
 
     fmt = f">B{len(ip_packed)}sH{_AUTH_KEY_BYTE_LENGTH}s"
     packed = struct.pack(fmt, dc_id, ip_packed, _DEFAULT_PORT, auth_key_bytes)
@@ -187,17 +185,13 @@ def _converse_with_botfather(
         conv.send_message("/newbot")
         resp = conv.get_response()
         if "choose a name" not in resp.text.lower():
-            raise TelegramBotCreationError(
-                f"Unexpected BotFather response to /newbot:\n{resp.text}"
-            )
+            raise TelegramBotCreationError(f"Unexpected BotFather response to /newbot:\n{resp.text}")
 
         # Step 2: send the display name
         conv.send_message(bot_display_name)
         resp = conv.get_response()
         if "username" not in resp.text.lower():
-            raise TelegramBotCreationError(
-                f"Unexpected BotFather response to bot name:\n{resp.text}"
-            )
+            raise TelegramBotCreationError(f"Unexpected BotFather response to bot name:\n{resp.text}")
 
         # Step 3: send the username
         conv.send_message(bot_username)
@@ -205,16 +199,12 @@ def _converse_with_botfather(
         response_text = resp.text
 
         if "sorry" in response_text.lower() or "error" in response_text.lower():
-            raise TelegramBotCreationError(
-                f"BotFather rejected the username:\n{response_text}"
-            )
+            raise TelegramBotCreationError(f"BotFather rejected the username:\n{response_text}")
 
         # Extract the bot token from the response
         token_match = _BOT_TOKEN_PATTERN.search(response_text)
         if not token_match:
-            raise TelegramBotCreationError(
-                f"Could not extract bot token from BotFather response:\n{response_text}"
-            )
+            raise TelegramBotCreationError(f"Could not extract bot token from BotFather response:\n{response_text}")
 
         bot_token = token_match.group(1)
 

@@ -62,6 +62,7 @@ from imbue.mngr_vps_docker.host_store import ensure_state_container
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 
+
 def _remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: int) -> None:
     """Remove a host entry from the known_hosts file."""
     if not known_hosts_path.exists():
@@ -100,10 +101,7 @@ def _parse_build_args(
             elif arg.startswith("--vps-os="):
                 os_id = int(arg.split("=", 1)[1])
             elif arg.startswith("--vps-"):
-                raise MngrError(
-                    f"Unknown VPS build arg: {arg}. "
-                    "Valid VPS args: --vps-region=, --vps-plan=, --vps-os="
-                )
+                raise MngrError(f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=")
             else:
                 docker_build_args.append(arg)
 
@@ -275,9 +273,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self._host_by_id_cache[host_id] = offline
         return offline
 
-    def _on_certified_host_data_updated(
-        self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str
-    ) -> None:
+    def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
         """Callback when host data.json is updated -- sync to state volume."""
         try:
             docker_ssh = self._make_docker_ssh(vps_ip)
@@ -304,8 +300,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 return
             time.sleep(5.0)
         raise DockerNotReadyError(
-            f"Cloud-init did not complete within {timeout_seconds}s. "
-            "Docker may not be installed on the VPS."
+            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
         )
 
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
@@ -738,9 +733,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
-    def _parse_build_args(
-        self, build_args: Sequence[str] | None
-    ) -> tuple[str, str, int, tuple[str, ...]]:
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> tuple[str, str, int, tuple[str, ...]]:
         """Parse build args, separating VPS provisioning args from Docker build args.
 
         VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).

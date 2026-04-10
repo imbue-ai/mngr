@@ -173,9 +173,7 @@ class VultrVpsClient(VpsClientInterface):
                     pass
             time.sleep(5.0)
 
-        raise VpsProvisioningError(
-            f"Vultr instance {instance_id} did not become active within {timeout_seconds}s"
-        )
+        raise VpsProvisioningError(f"Vultr instance {instance_id} did not become active within {timeout_seconds}s")
 
     def get_instance_info(self, instance_id: VpsInstanceId) -> dict[str, Any]:
         """Get full instance info from the API."""
@@ -250,7 +248,4 @@ class VultrVpsClient(VpsClientInterface):
         result = self._get("/ssh-keys")
         if result is None or "ssh_keys" not in result:
             return []
-        return [
-            VpsSshKeyInfo(id=k["id"], name=k["name"])
-            for k in result["ssh_keys"]
-        ]
+        return [VpsSshKeyInfo(id=k["id"], name=k["name"]) for k in result["ssh_keys"]]

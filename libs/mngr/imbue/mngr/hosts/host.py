@@ -1521,7 +1521,7 @@ class Host(BaseHost, OnlineHostInterface):
                     raise MngrError("Cannot determine SSH connection info for remote source host")
                 user, hostname, port, key_path = source_ssh_info
                 with log_span("Fetching from remote source to local target"):
-                    git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+                    git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
                     env = {"GIT_SSH_COMMAND": git_ssh_cmd}
                     remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
                     try:
@@ -1541,7 +1541,7 @@ class Host(BaseHost, OnlineHostInterface):
         env: dict[str, str] = {}
         if target_ssh_info is not None:
             user, hostname, port, key_path = target_ssh_info
-            git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+            git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
             env["GIT_SSH_COMMAND"] = git_ssh_cmd
 
         # Don't bother pushing LFS objects - they can be transferred later as needed,
@@ -1835,7 +1835,7 @@ class Host(BaseHost, OnlineHostInterface):
             target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
             user, hostname, port, key_path = target_ssh_info
-            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
+            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"])
             rsync_args.extend([source_path_str, f"{user}@{hostname}:{target_path_str}"])
             rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
         elif not source_host.is_local and self.is_local:
@@ -1843,7 +1843,7 @@ class Host(BaseHost, OnlineHostInterface):
             source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
             user, hostname, port, key_path = source_ssh_info
-            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
+            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"])
             rsync_args.extend([f"{user}@{hostname}:{source_path_str}", target_path_str])
             rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
         else:
@@ -1871,7 +1871,7 @@ class Host(BaseHost, OnlineHostInterface):
                     # Step 1: pull from source remote to local temp
                     pull_args = list(rsync_args)
                     pull_args.extend(
-                        ["-e", f"ssh -i {shlex.quote(str(src_key_path))} -p {src_port} -o StrictHostKeyChecking=no"]
+                        ["-e", f"ssh -i {shlex.quote(str(src_key_path))} -p {src_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"]
                     )
                     pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
                     try:
@@ -1888,7 +1888,7 @@ class Host(BaseHost, OnlineHostInterface):
                     if extra_args:
                         push_args.extend(shlex.split(extra_args))
                     push_args.extend(
-                        ["-e", f"ssh -i {shlex.quote(str(tgt_key_path))} -p {tgt_port} -o StrictHostKeyChecking=no"]
+                        ["-e", f"ssh -i {shlex.quote(str(tgt_key_path))} -p {tgt_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"]
                     )
                     push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
                     try:

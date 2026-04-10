@@ -41,7 +41,9 @@ def _find_free_port() -> int:
 def test_sse_redirect_on_done(tmp_path: Path) -> None:
     """Test that the creating page SSE stream delivers the done event and the browser redirects."""
     logger.remove()
-    logger.add(sys.stderr, level="DEBUG", format="{time:HH:mm:ss.SSS} | {level:<7} | {name}:{function}:{line} - {message}")
+    logger.add(
+        sys.stderr, level="DEBUG", format="{time:HH:mm:ss.SSS} | {level:<7} | {name}:{function}:{line} - {message}"
+    )
 
     host = "127.0.0.1"
     port = _find_free_port()

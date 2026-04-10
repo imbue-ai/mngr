@@ -1712,17 +1712,24 @@ def _create_minimal_agent(host: Host, temp_dir: Path, work_dir: Path | None = No
 
 
 def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
-    """Helper to initialize a git repo.
+    """Helper to initialize a git repo from pre-existing files.
 
-    Requires the setup_git_config fixture to have created .gitconfig in the fake HOME.
+    Expects git user config to be available (provided by the
+    setup_git_config fixture). Adds all files in the directory and
+    commits them.
     """
-    subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
-    subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
+    # Inline GIT_CONFIG_NOSYSTEM to prevent reading /etc/gitconfig under
+    # parallel execution. We don't import run_git_command from testing.py
+    # because the type checker cannot resolve that module.
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True, env=env)
+    subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True, env=env)
     subprocess.run(
         ["git", "commit", "-m", commit_message],
         cwd=path,
         capture_output=True,
         check=True,
+        env=env,
     )
 
 

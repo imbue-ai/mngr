@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 from pydantic import ConfigDict
+from urwid.canvas import TextCanvas
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -152,6 +153,110 @@ _AGENT_LINE_ATTRS = (
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
+
+
+def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
+    """Wrap each row of canvas content with OSC 8 open/close escape sequences.
+
+    Only wraps the visible text, not trailing whitespace padding, so the
+    terminal hyperlink underline doesn't extend across the full column width.
+
+    Sets the charset to "U" on modified segments so that urwid's Screen skips
+    the UNPRINTABLE_TRANS_TABLE translation (which would replace ESC bytes with
+    '?'). On UTF-8 terminals the "U" charset flag has no other effect.
+    """
+    for row in inner_content:
+        if not row:
+            yield row
+            continue
+        new_row = [*row]
+        # Insert osc_close before trailing padding in the last segment
+        last = new_row[-1]
+        last_text: Any = last[2]
+        stripped = last_text.rstrip(b" ")
+        padding = last_text[len(stripped) :]
+        new_row[-1] = (last[0], "U", stripped + osc_close + padding)
+        # Prepend osc_open to the first segment
+        first = new_row[0]
+        new_row[0] = (first[0], "U", osc_open + first[2])
+        yield new_row
+
+
+class _HyperlinkCanvas(MutableModel):
+    """Canvas wrapper that injects OSC 8 terminal hyperlink escape sequences.
+
+    Wraps a TextCanvas and modifies content() to add OSC 8 open/close sequences
+    around each row's text bytes. These are zero-width escape sequences interpreted
+    by modern terminal emulators (iTerm2, Windows Terminal, GNOME Terminal, etc.)
+    to make text clickable.
+
+    Implements the urwid Canvas protocol so it can be used in place of TextCanvas
+    within the urwid rendering pipeline.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    inner: TextCanvas
+    url: str
+    _widget_info: Any = None
+    cacheable: bool = False
+
+    @property
+    def widget_info(self) -> Any:
+        return self._widget_info
+
+    @property
+    def coords(self) -> dict[str, Any]:
+        return self.inner.coords
+
+    @property
+    def shortcuts(self) -> dict[str, str]:
+        return self.inner.shortcuts
+
+    @property
+    def text(self) -> list[bytes]:
+        return self.inner.text
+
+    @property
+    def cursor(self) -> tuple[int, int] | None:
+        return None
+
+    def finalize(self, widget: Any, size: Any, focus: bool) -> None:
+        self._widget_info = (widget, size, focus)
+
+    def rows(self) -> int:
+        return self.inner.rows()
+
+    def cols(self) -> int:
+        return self.inner.cols()
+
+    def translate_coords(self, dx: int, dy: int) -> dict[str, Any]:
+        return self.inner.translate_coords(dx, dy)
+
+    def content(
+        self, trim_left: int = 0, trim_top: int = 0, cols: int | None = 0, rows: int | None = 0, attr: Any = None
+    ) -> Any:
+        osc_open = f"\033]8;;{self.url}\033\\".encode()
+        osc_close = b"\033]8;;\033\\"
+        return _osc8_wrap_content(self.inner.content(trim_left, trim_top, cols, rows, attr), osc_open, osc_close)
+
+    def content_delta(self, other: Any) -> Any:
+        return self.content()
+
+
+class _HyperlinkText(Text):
+    """Text widget that wraps its rendered content in an OSC 8 terminal hyperlink.
+
+    Set ``_hyperlink_url`` after construction to activate hyperlinking.
+    """
+
+    _hyperlink_url: str = ""
+
+    def render(self, size: tuple[int] | tuple[()], focus: bool = False) -> Any:
+        canvas = super().render(size, focus)
+        if not self._hyperlink_url:
+            return canvas
+        return _HyperlinkCanvas(inner=canvas, url=self._hyperlink_url)
 
 
 class _SelectableRow(Columns):
@@ -1061,11 +1166,13 @@ def _get_pr_cell_text(entry: AgentBoardEntry) -> str:
     """Get plain text for the PR column cell."""
     if entry.pr is not None:
         return f"#{entry.pr.number}"
+    if entry.create_pr_url is not None:
+        return "+PR"
     return ""
 
 
-def _get_link_cell_text(entry: AgentBoardEntry) -> str:
-    """Get plain text for the link column cell."""
+def _get_pr_url(entry: AgentBoardEntry) -> str:
+    """Get the URL for the PR column hyperlink (PR URL or create-PR URL)."""
     if entry.pr is not None:
         return entry.pr.url
     if entry.create_pr_url is not None:
@@ -1081,6 +1188,7 @@ class _ColumnDef(FrozenModel):
     text_fn: Callable[[AgentBoardEntry], str]
     markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
     flexible: bool
+    url_fn: Callable[[AgentBoardEntry], str] | None = None
 
 
 def _custom_col_text(
@@ -1215,9 +1323,15 @@ _BOARD_COLUMN_DEFS: list[_ColumnDef] = [
         name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
     ),
     _ColumnDef(name="git", header="GIT", text_fn=_get_push_cell_text, markup_fn=_get_push_cell_text, flexible=False),
-    _ColumnDef(name="pr", header="PR", text_fn=_get_pr_cell_text, markup_fn=_get_pr_cell_text, flexible=False),
+    _ColumnDef(
+        name="pr",
+        header="PR",
+        text_fn=_get_pr_cell_text,
+        markup_fn=_get_pr_cell_text,
+        flexible=False,
+        url_fn=_get_pr_url,
+    ),
     _ColumnDef(name="ci", header="CI", text_fn=_get_check_cell_text, markup_fn=_get_check_cell_markup, flexible=False),
-    _ColumnDef(name="link", header="LINK", text_fn=_get_link_cell_text, markup_fn=_get_link_cell_text, flexible=True),
 ]
 
 
@@ -1278,7 +1392,13 @@ def _build_agent_row(
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
-        widget = Text(cell_markup[defn.name])
+        if defn.url_fn is not None:
+            url = defn.url_fn(entry)
+            hyperlink_widget = _HyperlinkText(cell_markup[defn.name])
+            hyperlink_widget._hyperlink_url = url
+            widget = hyperlink_widget
+        else:
+            widget = Text(cell_markup[defn.name])
         if defn.flexible:
             cols.append(widget)
         else:

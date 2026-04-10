@@ -22,7 +22,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -514,6 +514,6 @@ def minimal_install_env(
     }
 
     repo_dir = tmp_path / "repo"
-    init_git_repo_with_config(repo_dir)
+    init_git_repo(repo_dir)
 
     return MinimalInstallEnv(venv_dir=isolated_mngr_venv, env=env, repo_dir=repo_dir)

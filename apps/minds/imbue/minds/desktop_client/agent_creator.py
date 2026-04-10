@@ -187,9 +187,10 @@ def _build_mngr_create_command(
 
     DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
+    LIMA mode: --template main --template lima (runs in Lima VM)
     CLOUD mode: not yet supported
 
-    For modes that create a separate host (LOCAL, CLOUD), the agent address
+    For modes that create a separate host (LOCAL, LIMA, CLOUD), the agent address
     uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
     ``--reuse`` and ``--update`` are passed so re-deploying resets the agent
     on the same host instead of failing.
@@ -199,6 +200,8 @@ def _build_mngr_create_command(
             address = str(agent_name)
         case LaunchMode.LOCAL:
             address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
+        case LaunchMode.LIMA:
+            address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
         case LaunchMode.CLOUD:
             address = f"{agent_name}@{_make_host_name(agent_name)}"
         case _ as unreachable:
@@ -224,6 +227,8 @@ def _build_mngr_create_command(
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
             mngr_command.extend(["--new-host", "--template", "docker"])
+        case LaunchMode.LIMA:
+            mngr_command.extend(["--new-host", "--template", "lima"])
         case LaunchMode.CLOUD:
             raise NotImplementedError("Cloud launch mode is not yet supported")
         case _ as unreachable:
@@ -431,9 +436,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.CREATING
 
                 parsed_name = AgentName(agent_name)
-                log_queue.put(
-                    "[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value)
-                )
+                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
                 run_mngr_create(
                     launch_mode=launch_mode,
                     mind_dir=mind_dir,

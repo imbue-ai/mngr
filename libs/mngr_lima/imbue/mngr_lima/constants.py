@@ -9,13 +9,14 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 # Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
-# Default image URLs for the pre-built mngr Lima image (Ubuntu LTS with mngr deps)
-# These are hosted on GitHub Releases and downloaded on first use.
+# Default image URLs for Lima VMs (Alpine 3.23 cloud images).
+# Alpine is minimal and boots fast. The cloud-init provisioning script
+# installs any missing mngr dependencies via apk.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://github.com/imbue-ai/mngr/releases/download/lima-image-v0.1.0/mngr-lima-aarch64.qcow2"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-aarch64-uefi-cloudinit-r0.qcow2"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://github.com/imbue-ai/mngr/releases/download/lima-image-v0.1.0/mngr-lima-x86_64.qcow2"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.3-x86_64-uefi-cloudinit-r0.qcow2"
 )
 
 # Default host directory inside the VM

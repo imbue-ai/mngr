@@ -85,6 +85,24 @@ jobs:
       - name: Build imbue-mngr-tutor
         run: pyproject-build libs/mngr_tutor -o dist/
 
+      - name: Build imbue-mngr-notifications
+        run: pyproject-build libs/mngr_notifications -o dist/
+
+      - name: Build imbue-mngr-file
+        run: pyproject-build libs/mngr_file -o dist/
+
+      - name: Build imbue-mngr-pi-coding
+        run: pyproject-build libs/mngr_pi_coding -o dist/
+
+      - name: Build imbue-mngr-recursive
+        run: pyproject-build libs/mngr_recursive -o dist/
+
+      - name: Build imbue-mngr-ttyd
+        run: pyproject-build libs/mngr_ttyd -o dist/
+
+      - name: Build imbue-mngr-wait
+        run: pyproject-build libs/mngr_wait -o dist/
+
       - name: Publish packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

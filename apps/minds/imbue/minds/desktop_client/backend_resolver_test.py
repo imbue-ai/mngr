@@ -567,8 +567,14 @@ def _make_host_ssh_info_line(host_id: str, ssh_data: Mapping[str, object]) -> st
     )
 
 
-def _make_agent_discovered_line(agent_id: str, host_id: str, event_id: str = "evt-test-disc-001") -> str:
+def _make_agent_discovered_line(
+    agent_id: str,
+    host_id: str,
+    event_id: str = "evt-test-disc-001",
+    labels: dict[str, str] | None = None,
+) -> str:
     """Build an AGENT_DISCOVERED event JSON line."""
+    effective_labels = labels if labels is not None else {"mind": "true"}
     return json.dumps(
         {
             "type": "AGENT_DISCOVERED",
@@ -580,7 +586,7 @@ def _make_agent_discovered_line(agent_id: str, host_id: str, event_id: str = "ev
                 "agent_id": agent_id,
                 "agent_name": f"agent-{agent_id[-4:]}",
                 "provider_name": "local",
-                "certified_data": {"labels": {"mind": "true"}},
+                "certified_data": {"labels": effective_labels},
             },
         }
     )
@@ -744,7 +750,7 @@ def test_stream_manager_agent_discovered_adds_agent() -> None:
     host_id = "host-00000000000000000000000000000001"
 
     with manager._cg:
-        line = _make_agent_discovered_line(str(_AGENT_A), host_id)
+        line = _make_agent_discovered_line(str(_AGENT_A), host_id, labels={})
         manager._handle_discovery_line(line)
 
     ids = manager.resolver.list_known_agent_ids()
@@ -758,8 +764,12 @@ def test_stream_manager_agent_discovered_updates_existing_agent() -> None:
     host_id_2 = "host-00000000000000000000000000000002"
 
     with manager._cg:
-        manager._handle_discovery_line(_make_agent_discovered_line(str(_AGENT_A), host_id_1, event_id="evt-1"))
-        manager._handle_discovery_line(_make_agent_discovered_line(str(_AGENT_A), host_id_2, event_id="evt-2"))
+        manager._handle_discovery_line(
+            _make_agent_discovered_line(str(_AGENT_A), host_id_1, event_id="evt-1", labels={})
+        )
+        manager._handle_discovery_line(
+            _make_agent_discovered_line(str(_AGENT_A), host_id_2, event_id="evt-2", labels={})
+        )
 
     ids = manager.resolver.list_known_agent_ids()
     # Should appear exactly once

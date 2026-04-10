@@ -80,9 +80,7 @@ class TestVultrVpsClientRequest:
 
 class TestVultrVpsClientInstances:
     def test_create_instance(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"id": "inst-abc123", "status": "pending"}}
-        )
+        response = _mock_response(json_data={"instance": {"id": "inst-abc123", "status": "pending"}})
         with patch("requests.request", return_value=response):
             instance_id = client.create_instance(
                 label="test",
@@ -110,25 +108,19 @@ class TestVultrVpsClientInstances:
                 )
 
     def test_get_instance_status_active_running(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"status": "active", "power_status": "running"}}
-        )
+        response = _mock_response(json_data={"instance": {"status": "active", "power_status": "running"}})
         with patch("requests.request", return_value=response):
             status = client.get_instance_status(VpsInstanceId("inst-123"))
             assert status == VpsInstanceStatus.ACTIVE
 
     def test_get_instance_status_active_stopped(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"status": "active", "power_status": "stopped"}}
-        )
+        response = _mock_response(json_data={"instance": {"status": "active", "power_status": "stopped"}})
         with patch("requests.request", return_value=response):
             status = client.get_instance_status(VpsInstanceId("inst-123"))
             assert status == VpsInstanceStatus.HALTED
 
     def test_get_instance_status_pending(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"status": "pending", "power_status": "off"}}
-        )
+        response = _mock_response(json_data={"instance": {"status": "pending", "power_status": "off"}})
         with patch("requests.request", return_value=response):
             status = client.get_instance_status(VpsInstanceId("inst-123"))
             assert status == VpsInstanceStatus.PENDING
@@ -140,25 +132,19 @@ class TestVultrVpsClientInstances:
             assert status == VpsInstanceStatus.UNKNOWN
 
     def test_get_instance_ip(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"main_ip": "1.2.3.4"}}
-        )
+        response = _mock_response(json_data={"instance": {"main_ip": "1.2.3.4"}})
         with patch("requests.request", return_value=response):
             ip = client.get_instance_ip(VpsInstanceId("inst-123"))
             assert ip == "1.2.3.4"
 
     def test_get_instance_ip_not_ready(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instance": {"main_ip": "0.0.0.0"}}
-        )
+        response = _mock_response(json_data={"instance": {"main_ip": "0.0.0.0"}})
         with patch("requests.request", return_value=response):
             with pytest.raises(VpsProvisioningError):
                 client.get_instance_ip(VpsInstanceId("inst-123"))
 
     def test_list_instances(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"instances": [{"id": "i1"}, {"id": "i2"}]}
-        )
+        response = _mock_response(json_data={"instances": [{"id": "i1"}, {"id": "i2"}]})
         with patch("requests.request", return_value=response):
             instances = client.list_instances()
             assert len(instances) == 2
@@ -166,9 +152,7 @@ class TestVultrVpsClientInstances:
 
 class TestVultrVpsClientSshKeys:
     def test_upload_ssh_key(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"ssh_key": {"id": "key-123", "name": "test"}}
-        )
+        response = _mock_response(json_data={"ssh_key": {"id": "key-123", "name": "test"}})
         with patch("requests.request", return_value=response):
             key_id = client.upload_ssh_key("test", "ssh-ed25519 AAAA test")
             assert key_id == "key-123"
@@ -180,9 +164,7 @@ class TestVultrVpsClientSshKeys:
                 client.upload_ssh_key("test", "ssh-ed25519 AAAA test")
 
     def test_list_ssh_keys(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"ssh_keys": [{"id": "k1", "name": "key1"}, {"id": "k2", "name": "key2"}]}
-        )
+        response = _mock_response(json_data={"ssh_keys": [{"id": "k1", "name": "key1"}, {"id": "k2", "name": "key2"}]})
         with patch("requests.request", return_value=response):
             keys = client.list_ssh_keys()
             assert len(keys) == 2
@@ -191,9 +173,7 @@ class TestVultrVpsClientSshKeys:
 
 class TestVultrVpsClientSnapshots:
     def test_create_snapshot(self, client: VultrVpsClient) -> None:
-        response = _mock_response(
-            json_data={"snapshot": {"id": "snap-123"}}
-        )
+        response = _mock_response(json_data={"snapshot": {"id": "snap-123"}})
         with patch("requests.request", return_value=response):
             snap_id = client.create_snapshot(VpsInstanceId("inst-123"), "test snapshot")
             assert str(snap_id) == "snap-123"

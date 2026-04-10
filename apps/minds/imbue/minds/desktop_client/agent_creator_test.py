@@ -1,32 +1,33 @@
 import queue as queue_mod
 import threading
 from pathlib import Path
+
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import MindPaths
-from imbue.minds.errors import GitCloneError
-from imbue.minds.errors import GitOperationError
-from imbue.minds.errors import MngrCommandError
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import checkout_branch
-from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import checkout_branch
+from imbue.minds.desktop_client.agent_creator import clone_git_repo
+from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import make_log_callback
+from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
 from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
 from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
-from imbue.minds.desktop_client.agent_creator import extract_repo_name
-from imbue.minds.desktop_client.agent_creator import make_log_callback
-from imbue.minds.desktop_client.agent_creator import run_mngr_create
+from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AgentName
-from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mngr.primitives import AgentId
@@ -121,6 +122,22 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert "--new-host" in cmd
     # LOCAL mode: address includes host name with docker provider suffix
     assert cmd[2] == "test-agent@test-agent-host.docker"
+
+
+def test_build_mngr_create_command_lima_mode() -> None:
+    cmd = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--template" in cmd
+    assert "lima" in cmd
+    assert "main" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
+    assert "--new-host" in cmd
+    # LIMA mode: address includes host name with lima provider suffix
+    assert cmd[2] == "test-agent@test-agent-host.lima"
 
 
 def test_build_mngr_create_command_cloud_mode_raises() -> None:

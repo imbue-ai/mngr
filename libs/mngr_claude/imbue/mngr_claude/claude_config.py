@@ -621,8 +621,8 @@ def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
                             "type": "command",
                             "command": (
                                 "echo "
-                                "'{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\","
-                                "\"decision\":{\"behavior\":\"allow\"}}}'"
+                                '\'{"hookSpecificOutput":{"hookEventName":"PermissionRequest",'
+                                '"decision":{"behavior":"allow"}}}\''
                             ),
                             "timeout": 5,
                         }

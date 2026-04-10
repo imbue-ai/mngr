@@ -14,9 +14,12 @@ from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsConnectionError
 
 _SSH_BASE_OPTIONS: Final[tuple[str, ...]] = (
-    "-o", "StrictHostKeyChecking=yes",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=15",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=15",
 )
 
 
@@ -33,8 +36,10 @@ class DockerOverSsh(MutableModel):
         return [
             "ssh",
             *_SSH_BASE_OPTIONS,
-            "-i", str(self.ssh_key_path),
-            "-o", f"UserKnownHostsFile={self.known_hosts_path}",
+            "-i",
+            str(self.ssh_key_path),
+            "-o",
+            f"UserKnownHostsFile={self.known_hosts_path}",
             f"{self.ssh_user}@{self.vps_ip}",
             remote_command,
         ]
@@ -130,9 +135,7 @@ class DockerOverSsh(MutableModel):
     def container_is_running(self, container_id_or_name: str) -> bool:
         """Check if a container is running."""
         try:
-            output = self.run_docker(
-                ["inspect", "--format", "{{.State.Running}}", container_id_or_name]
-            )
+            output = self.run_docker(["inspect", "--format", "{{.State.Running}}", container_id_or_name])
             return output.strip().lower() == "true"
         except ContainerSetupError as e:
             logger.debug("Container {} not running or not found: {}", container_id_or_name, e)
@@ -179,8 +182,11 @@ class DockerOverSsh(MutableModel):
         )
         local_str = str(local_path).rstrip("/") + "/"
         cmd = [
-            "rsync", "-az", "--delete",
-            "-e", ssh_cmd,
+            "rsync",
+            "-az",
+            "--delete",
+            "-e",
+            ssh_cmd,
             local_str,
             f"{self.ssh_user}@{self.vps_ip}:{remote_path}/",
         ]
@@ -192,7 +198,9 @@ class DockerOverSsh(MutableModel):
         if result.returncode != 0:
             raise ContainerSetupError(f"Upload failed: {result.stderr.strip()}")
 
-    def build_image(self, tag: str, build_context_path: str, docker_build_args: Sequence[str], timeout_seconds: float = 600.0) -> str:
+    def build_image(
+        self, tag: str, build_context_path: str, docker_build_args: Sequence[str], timeout_seconds: float = 600.0
+    ) -> str:
         """Build a Docker image on the VPS from a remote build context. Returns the image tag."""
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
         self.run_docker(args, timeout_seconds=timeout_seconds)

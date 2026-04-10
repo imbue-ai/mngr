@@ -1187,7 +1187,7 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
     walker, _ = _build_board_widgets(carried, _BOARD_COLUMN_DEFS)
 
     texts = _extract_text(list(walker))
-    assert _text_contains(texts, "github.com/org/repo/pull/42")
+    assert _text_contains(texts, "#42")
     assert not _text_contains(texts, "PRs not loaded")
     assert not _text_contains(texts, "no PR yet")
     assert not _text_contains(texts, "create PR")
@@ -1607,12 +1607,12 @@ def test_assemble_column_defs_no_custom_no_order_returns_builtins() -> None:
     assert result == _BOARD_COLUMN_DEFS
 
 
-def test_assemble_column_defs_custom_inserted_before_link() -> None:
+def test_assemble_column_defs_custom_inserted_before_last() -> None:
     config = {"blocked": CustomColumnConfig(header="BLOCKED")}
     custom = _build_custom_column_defs(config)
     result = _assemble_column_defs(_BOARD_COLUMN_DEFS, custom, None)
     names = [d.name for d in result]
-    assert names[-1] == "link"
+    assert names[-1] == "ci"
     assert names[-2] == "custom_blocked"
     assert result[-1].flexible is True
 
@@ -1620,17 +1620,17 @@ def test_assemble_column_defs_custom_inserted_before_link() -> None:
 def test_assemble_column_defs_explicit_order() -> None:
     config = {"blocked": CustomColumnConfig(header="BLOCKED")}
     custom = _build_custom_column_defs(config)
-    result = _assemble_column_defs(_BOARD_COLUMN_DEFS, custom, ["name", "custom_blocked", "state", "link"])
+    result = _assemble_column_defs(_BOARD_COLUMN_DEFS, custom, ["name", "custom_blocked", "state", "ci"])
     names = [d.name for d in result]
-    assert names == ["name", "custom_blocked", "state", "link"]
+    assert names == ["name", "custom_blocked", "state", "ci"]
     assert result[-1].flexible is True
     assert all(not d.flexible for d in result[:-1])
 
 
 def test_assemble_column_defs_explicit_order_skips_unknown() -> None:
-    result = _assemble_column_defs(_BOARD_COLUMN_DEFS, [], ["name", "nonexistent", "link"])
+    result = _assemble_column_defs(_BOARD_COLUMN_DEFS, [], ["name", "nonexistent", "ci"])
     names = [d.name for d in result]
-    assert names == ["name", "link"]
+    assert names == ["name", "ci"]
 
 
 def test_assemble_column_defs_empty_order_falls_back_to_builtins() -> None:

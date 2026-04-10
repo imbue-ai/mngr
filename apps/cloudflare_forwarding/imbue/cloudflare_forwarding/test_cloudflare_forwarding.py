@@ -23,7 +23,13 @@ from imbue.cloudflare_forwarding.app import web_app
 
 
 def _skip_if_missing_env() -> None:
-    required = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "CLOUDFLARE_DOMAIN", "USER_CREDENTIALS"]
+    required = [
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_ZONE_ID",
+        "CLOUDFLARE_DOMAIN",
+        "USER_CREDENTIALS",
+    ]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         pytest.skip(f"Missing env vars: {', '.join(missing)}")

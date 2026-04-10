@@ -74,8 +74,7 @@ class InvalidTunnelComponentError(ValueError):
         self.value = value
         self.forbidden = forbidden
         super().__init__(
-            f"{component_name} '{value}' must not contain '{forbidden}' "
-            f"(used as the tunnel name separator)"
+            f"{component_name} '{value}' must not contain '{forbidden}' (used as the tunnel name separator)"
         )
 
 
@@ -90,7 +89,9 @@ class AuthPolicy(BaseModel):
 
 class CreateTunnelRequest(BaseModel):
     agent_id: str = Field(description="The mngr agent ID for this tunnel")
-    default_auth_policy: AuthPolicy | None = Field(default=None, description="Optional default auth policy for new services")
+    default_auth_policy: AuthPolicy | None = Field(
+        default=None, description="Optional default auth policy for new services"
+    )
 
 
 class AddServiceRequest(BaseModel):
@@ -167,6 +168,7 @@ def cf_list_all_pages(client: httpx.Client, url: str, params: dict[str, str]) ->
 
 # --- Tunnel operations ---
 
+
 def cf_create_tunnel(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
     response = client.post(f"/accounts/{account_id}/cfd_tunnel", json={"name": name, "config_src": "cloudflare"})
     return cf_check(response)["result"]
@@ -219,6 +221,7 @@ def cf_put_tunnel_config(client: httpx.Client, account_id: str, tunnel_id: str, 
 
 # --- DNS operations ---
 
+
 def cf_create_cname(client: httpx.Client, zone_id: str, name: str, target: str) -> dict[str, Any]:
     response = client.post(
         f"/zones/{zone_id}/dns_records",
@@ -239,6 +242,7 @@ def cf_delete_dns_record(client: httpx.Client, zone_id: str, record_id: str) -> 
 
 
 # --- Access operations ---
+
 
 def cf_create_access_app(
     client: httpx.Client,
@@ -300,6 +304,7 @@ def cf_delete_access_policy(client: httpx.Client, account_id: str, app_id: str, 
 
 # --- Service token operations ---
 
+
 def cf_create_service_token(
     client: httpx.Client, account_id: str, name: str, duration: str = "8760h"
 ) -> dict[str, Any]:
@@ -320,6 +325,7 @@ def cf_delete_service_token(client: httpx.Client, account_id: str, token_id: str
 
 
 # --- Workers KV operations ---
+
 
 def cf_kv_list_namespaces(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
     response = client.get(f"/accounts/{account_id}/storage/kv/namespaces")
@@ -384,7 +390,7 @@ def extract_agent_id(tunnel_name: str, username: str) -> str:
     prefix = f"{username}{TUNNEL_NAME_SEP}"
     if not tunnel_name.startswith(prefix):
         raise TunnelOwnershipError(tunnel_name, username)
-    return tunnel_name[len(prefix):]
+    return tunnel_name[len(prefix) :]
 
 
 def extract_service_name(hostname: str, agent_id: str, username: str, domain: str) -> str | None:
@@ -422,12 +428,14 @@ def policy_to_cf_rules(policy: AuthPolicy) -> list[dict[str, Any]]:
     """Convert our AuthPolicy format to Cloudflare Access policy create/update format."""
     cf_policies = []
     for rule in policy.rules:
-        cf_policies.append({
-            "name": "Policy rule",
-            "decision": rule.get("action", "allow"),
-            "include": rule.get("include", []),
-            "precedence": len(cf_policies) + 1,
-        })
+        cf_policies.append(
+            {
+                "name": "Policy rule",
+                "decision": rule.get("action", "allow"),
+                "include": rule.get("include", []),
+                "precedence": len(cf_policies) + 1,
+            }
+        )
     return cf_policies
 
 
@@ -435,10 +443,12 @@ def cf_policies_to_auth_policy(cf_policies: list[dict[str, Any]]) -> AuthPolicy:
     """Convert Cloudflare Access policies back to our AuthPolicy format."""
     rules = []
     for p in cf_policies:
-        rules.append({
-            "action": p.get("decision", "allow"),
-            "include": p.get("include", []),
-        })
+        rules.append(
+            {
+                "action": p.get("decision", "allow"),
+                "include": p.get("include", []),
+            }
+        )
     return AuthPolicy(rules=rules)
 
 
@@ -461,7 +471,9 @@ class CloudflareOps(Protocol):
     def create_cname(self, name: str, target: str) -> dict[str, Any]: ...
     def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
     def delete_dns_record(self, record_id: str) -> None: ...
-    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]: ...
+    def create_access_app(
+        self, hostname: str, app_name: str, allowed_idps: list[str] | None = None
+    ) -> dict[str, Any]: ...
     def delete_access_app(self, app_id: str) -> None: ...
     def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None: ...
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]: ...
@@ -785,12 +797,15 @@ class ForwardingCtx:
             try:
                 access_app = self.ops.get_access_app_by_domain(hostname)
                 if access_app is not None:
-                    self.ops.create_access_policy(access_app["id"], {
-                        "name": f"Service token: {name}",
-                        "decision": "non_identity",
-                        "include": [{"service_token": {"token_id": token_id}}],
-                        "precedence": 10,
-                    })
+                    self.ops.create_access_policy(
+                        access_app["id"],
+                        {
+                            "name": f"Service token: {name}",
+                            "decision": "non_identity",
+                            "include": [{"service_token": {"token_id": token_id}}],
+                            "precedence": 10,
+                        },
+                    )
             except (CloudflareApiError, httpx.HTTPError) as exc:
                 logger.warning("Failed to add service token policy for %s: %s", hostname, exc)
 

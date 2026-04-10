@@ -96,14 +96,22 @@ def test_cf_list_all_pages_paginates() -> None:
         call_count += 1
         page = int(dict(request.url.params).get("page", "1"))
         if page == 1:
-            return httpx.Response(200, json={
-                "success": True, "result": [{"id": "1"}, {"id": "2"}],
-                "result_info": {"total_count": 3, "page": 1, "per_page": 2, "count": 2},
-            })
-        return httpx.Response(200, json={
-            "success": True, "result": [{"id": "3"}],
-            "result_info": {"total_count": 3, "page": 2, "per_page": 2, "count": 1},
-        })
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "result": [{"id": "1"}, {"id": "2"}],
+                    "result_info": {"total_count": 3, "page": 1, "per_page": 2, "count": 2},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": [{"id": "3"}],
+                "result_info": {"total_count": 3, "page": 2, "per_page": 2, "count": 1},
+            },
+        )
 
     client = httpx.Client(base_url="https://test.example.com", transport=httpx.MockTransport(handler))
     results = cf_list_all_pages(client, "/test", {})

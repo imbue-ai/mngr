@@ -97,22 +97,16 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
     try:
         dc_id = int(dc_str)
     except ValueError as exc:
-        raise TelegramCredentialExtractionError(
-            f"Invalid data center ID in localStorage: {dc_str!r}"
-        ) from exc
+        raise TelegramCredentialExtractionError(f"Invalid data center ID in localStorage: {dc_str!r}") from exc
 
     try:
         user_auth = json.loads(user_auth_str)
     except json.JSONDecodeError as exc:
-        raise TelegramCredentialExtractionError(
-            f"Could not parse user_auth from localStorage: {exc}"
-        ) from exc
+        raise TelegramCredentialExtractionError(f"Could not parse user_auth from localStorage: {exc}") from exc
 
     user_id = str(user_auth.get("id", ""))
     if not user_id:
-        raise TelegramCredentialExtractionError(
-            "user_auth in localStorage does not contain a user ID"
-        )
+        raise TelegramCredentialExtractionError("user_auth in localStorage does not contain a user ID")
 
     # Extract the auth_key for the active DC
     dc_key_name = f"dc{dc_id}_auth_key"
@@ -128,16 +122,13 @@ def _extract_credentials_from_page(page: Page) -> TelegramUserCredentials:
         try:
             auth_key_hex = json.loads(auth_key_raw)
         except json.JSONDecodeError as exc:
-            raise TelegramCredentialExtractionError(
-                f"Could not parse auth_key for DC {dc_id}: {exc}"
-            ) from exc
+            raise TelegramCredentialExtractionError(f"Could not parse auth_key for DC {dc_id}: {exc}") from exc
     else:
         auth_key_hex = auth_key_raw
 
     if len(auth_key_hex) != _AUTH_KEY_HEX_LENGTH:
         raise TelegramCredentialExtractionError(
-            f"Auth key has unexpected length: {len(auth_key_hex)} hex chars "
-            f"(expected {_AUTH_KEY_HEX_LENGTH})"
+            f"Auth key has unexpected length: {len(auth_key_hex)} hex chars (expected {_AUTH_KEY_HEX_LENGTH})"
         )
 
     # Extract first name from account data

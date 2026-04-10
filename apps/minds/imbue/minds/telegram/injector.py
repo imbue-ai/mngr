@@ -43,8 +43,6 @@ def inject_telegram_bot_token(
 
         if result.returncode != 0:
             error_detail = result.stderr.strip() if result.stderr.strip() else result.stdout.strip()
-            raise MngrCommandError(
-                f"Failed to inject Telegram bot token into agent {agent_id}: {error_detail}"
-            )
+            raise MngrCommandError(f"Failed to inject Telegram bot token into agent {agent_id}: {error_detail}")
 
     logger.debug("Injected Telegram bot token into agent {}", agent_id)

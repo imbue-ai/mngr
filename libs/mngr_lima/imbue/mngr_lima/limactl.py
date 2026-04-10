@@ -1,6 +1,7 @@
 import json
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -8,14 +9,88 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
+
+
+def _log_lima_output(line: str, is_stdout: bool) -> None:
+    """Log output from limactl commands at BUILD level."""
+    line = line.strip()
+    if line:
+        logger.log(LogLevel.BUILD.value, "{}", line, source="lima")
+
+
+class _SerialLogTailerCallback(MutableModel):
+    """Output callback that logs limactl output and tails the VM serial log.
+
+    When limactl prints a line mentioning the serial log path, this
+    starts a background ``tail -f`` on that file so boot progress
+    is visible alongside limactl output.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    cg: ConcurrencyGroup = Field(frozen=True, description="Concurrency group for the tail process")
+    tailer_started: bool = Field(default=False, description="Whether the serial log tailer has been started")
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        logger.log(LogLevel.BUILD.value, "{}", stripped, source="lima")
+
+        if not self.tailer_started and "serial" in stripped and ".log" in stripped:
+            # Match an absolute path containing "serial" and ending with ".log".
+            # limactl escapes quotes in its log output, so we match the path
+            # directly rather than relying on surrounding quote characters.
+            match = re.search(r'(/\S+serial\S*\.log)', stripped)
+            if match:
+                log_pattern = match.group(1)
+                serial_log = re.sub(r'\*', '', log_pattern)
+                self.tailer_started = True
+                _start_serial_tailer(self.cg, serial_log)
+
+
+def _log_boot_output(line: str, is_stdout: bool) -> None:
+    """Log serial/boot output at BUILD level with boot source tag."""
+    stripped = line.strip()
+    if stripped:
+        logger.log(LogLevel.BUILD.value, "{}", stripped, source="boot")
+
+
+_active_serial_tailer: RunningProcess | None = None
+
+
+def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
+    """Start tailing a serial log file in the background.
+
+    Uses ``run_process_in_background`` with ``is_checked_by_group=False``
+    so the ConcurrencyGroup won't wait for it on exit. The process is
+    terminated explicitly via ``_stop_serial_tailer``.
+    """
+    global _active_serial_tailer
+    _active_serial_tailer = cg.run_process_in_background(
+        ["tail", "--follow=name", "--retry", serial_log_path],
+        is_checked_by_group=False,
+        on_output=_log_boot_output,
+    )
+
+
+def _stop_serial_tailer() -> None:
+    """Kill the serial log tailer process if running."""
+    global _active_serial_tailer
+    if _active_serial_tailer is not None:
+        _active_serial_tailer.terminate(force_kill_seconds=2.0)
+        _active_serial_tailer = None
 
 
 def check_lima_installed(provider_name: ProviderInstanceName) -> None:
@@ -78,14 +153,25 @@ def limactl_start_new(
     yaml_path: Path,
     start_args: tuple[str, ...] = (),
     timeout: float = 600.0,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Create and start a new Lima instance from a YAML config file.
 
     Runs: limactl start --name=<instance_name> <yaml_path> [start_args...]
+    Output is streamed via on_output (defaults to BUILD-level logging).
     """
-    cmd = ["limactl", "start", f"--name={instance_name}", str(yaml_path)] + list(start_args)
-    with log_span("Running limactl start for new instance: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    cmd = ["limactl", "--log-level=info", "start", f"--name={instance_name}", str(yaml_path)] + list(start_args)
+    effective_callback = on_output or _SerialLogTailerCallback(cg=cg)
+    try:
+        with log_span("Running limactl start for new instance: {}", instance_name):
+            result = cg.run_process_to_completion(
+                cmd,
+                timeout=timeout,
+                on_output=effective_callback,
+                is_checked_after=False,
+            )
+    finally:
+        _stop_serial_tailer()
     if result.returncode != 0:
         raise LimaCommandError("start", result.returncode, result.stderr)
 
@@ -94,14 +180,20 @@ def limactl_start_existing(
     cg: ConcurrencyGroup,
     instance_name: str,
     timeout: float = 300.0,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Start an existing stopped Lima instance.
 
     Runs: limactl start <instance_name>
     """
-    cmd = ["limactl", "start", instance_name]
+    cmd = ["limactl", "--log-level=info", "start", instance_name]
     with log_span("Running limactl start for existing instance: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(
+            cmd,
+            timeout=timeout,
+            on_output=on_output or _log_lima_output,
+            is_checked_after=False,
+        )
     if result.returncode != 0:
         raise LimaCommandError("start", result.returncode, result.stderr)
 

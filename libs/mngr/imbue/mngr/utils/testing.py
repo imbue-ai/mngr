@@ -182,6 +182,50 @@ def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
+# Environment variables that isolate git from system-level config and
+# interactive prompts.  Applied via monkeypatch in isolate_git() and via
+# explicit env dict in _git_isolation_env() (used by run_git_command).
+_GIT_ISOLATION_ENV: Final[dict[str, str]] = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def _git_isolation_env() -> dict[str, str]:
+    """Return env dict for subprocess git calls with system config isolation.
+
+    Merges the current os.environ with GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT.  Used by run_git_command() to ensure every
+    subprocess git call skips /etc/gitconfig and never prompts
+    interactively, regardless of whether an isolate_git() context is
+    active.
+    """
+    return {**os.environ, **_GIT_ISOLATION_ENV}
+
+
+@contextmanager
+def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git from system config and provide default user config.
+
+    Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
+    prevent interactive credential prompts, and writes a .gitconfig in the
+    fake HOME (set by isolate_home) with default user info and
+    ``init.defaultBranch``.
+
+    Tests that create git repos should use a subdirectory of tmp_path rather
+    than tmp_path itself, so that .gitconfig does not appear as an untracked
+    file in ``git status --porcelain``.
+    """
+    for key, value in _GIT_ISOLATION_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    gitconfig = Path.home() / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+
+    yield
+
+
 def assert_home_is_temp_directory() -> None:
     """Assert that Path.home() is in a temp directory.
 
@@ -686,31 +730,16 @@ def make_test_agent_details(
     )
 
 
-def init_git_repo(path: Path, initial_commit: bool = True) -> None:
-    """Initialize a git repo at the given path.
-
-    If initial_commit is True, creates a README.md and commits it.
-    Requires setup_git_config fixture to have created .gitconfig in the fake HOME
-    (or temp_git_repo fixture, which depends on it).
-    """
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    if initial_commit:
-        (path / "README.md").write_text("Test repository")
-        subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Initial commit"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-        )
-
-
 def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
 def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the given directory.
+    """Run a git command in the given directory with system config isolation.
+
+    Uses _git_isolation_env() to set GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT, preventing reads of /etc/gitconfig and interactive
+    prompts that can cause flakes under parallel execution.
 
     Raises an exception if the command fails.
     """
@@ -719,29 +748,34 @@ def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=_git_isolation_env(),
     )
     if result.returncode != 0:
         raise MngrError(f"git {' '.join(args)} failed: {result.stderr}")
     return result
 
 
-def init_git_repo_with_config(path: Path) -> None:
-    """Initialize a git repository with an initial commit and local git config.
+def init_git_repo(path: Path, initial_commit: bool = True) -> None:
+    """Initialize a git repository with local git config.
 
-    Creates the directory if it doesn't exist, initializes git, sets local
-    user.email and user.name config, and creates an initial commit with a
-    README.md file.
+    Creates the directory if it doesn't exist, initializes git with branch
+    "main", and sets local user.email and user.name config.
 
-    Use this variant when you don't have a global .gitconfig (e.g., in
-    subprocess tests without the setup_git_config fixture).
+    If initial_commit is True (the default), also creates a README.md and
+    commits it.
+
+    Self-contained: does not require any global gitconfig or the
+    setup_git_config fixture. Subprocess calls use _git_isolation_env()
+    to set GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT.
     """
     path.mkdir(parents=True, exist_ok=True)
     run_git_command(path, "init", "-b", "main")
     run_git_command(path, "config", "user.email", "test@example.com")
     run_git_command(path, "config", "user.name", "Test User")
-    (path / "README.md").write_text("Initial content")
-    run_git_command(path, "add", "README.md")
-    run_git_command(path, "commit", "-m", "Initial commit")
+    if initial_commit:
+        (path / "README.md").write_text("Initial content")
+        run_git_command(path, "add", "README.md")
+        run_git_command(path, "commit", "-m", "Initial commit")
 
 
 def get_stash_count(path: Path) -> int:

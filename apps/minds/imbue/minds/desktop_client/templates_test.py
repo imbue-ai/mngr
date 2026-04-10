@@ -84,9 +84,7 @@ def test_render_agent_servers_page_has_back_link() -> None:
 def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
     server_names = (ServerName("web"), ServerName("terminal"))
     cf_services = {"web": "web--agent-123--josh.forward.example.com"}
-    html = render_agent_servers_page(
-        agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services
-    )
+    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services)
     assert "Global" in html
     assert "web--agent-123--josh.forward.example.com" in html
     assert "Disable global" in html

@@ -45,6 +45,7 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
+from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -60,6 +61,7 @@ from imbue.mngr_lima.host_store import LimaHostStore
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
+from imbue.mngr_lima.lima_yaml import parse_build_args_for_image_url
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
@@ -239,6 +241,7 @@ class LimaProviderInstance(BaseProviderInstance):
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
             known_hosts_path=self._known_hosts_path,
+            ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
 
@@ -253,21 +256,28 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan the SSH host key and add it to known_hosts."""
+        """Scan SSH host keys and add all of them to known_hosts.
+
+        First removes any stale keys for this host:port (from previous VMs
+        that may have reused the same port), then adds all key types from
+        ssh-keyscan so paramiko can negotiate any of them.
+        """
+        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-p", str(port), hostname],
+            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
             timeout=10.0,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Parse the first key line from ssh-keyscan output
+            added_any = False
             for line in result.stdout.strip().splitlines():
                 if line and not line.startswith("#"):
-                    # Extract just the key type and key data
                     parts = line.split(None, 2)
                     if len(parts) >= 3:
                         key_type_and_data = f"{parts[1]} {parts[2]}"
                         add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        return
+                        added_any = True
+            if added_any:
+                return
         logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
@@ -387,18 +397,21 @@ sudo poweroff
         volume_dir = self._ensure_host_volume_dir(host_id)
 
         # Generate or load Lima YAML config
-        yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
+        effective_build_args = tuple(build_args or ())
+        yaml_path_from_build_args = parse_build_args_for_yaml_path(effective_build_args)
+        image_url_from_build_args = parse_build_args_for_image_url(effective_build_args)
         if yaml_path_from_build_args is not None:
             user_config = load_user_lima_yaml(yaml_path_from_build_args)
             base_config = generate_default_lima_yaml(
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),
+                custom_image_url=image_url_from_build_args,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
-            image_url = str(image) if image else None
+            image_url = image_url_from_build_args or (str(image) if image else None)
             lima_config = generate_default_lima_yaml(
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),
@@ -441,7 +454,9 @@ sudo poweroff
             try:
                 limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
             except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
+                logger.debug(
+                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
+                )
             self._save_failed_host_record(
                 host_id=host_id,
                 host_name=name,
@@ -564,7 +579,9 @@ sudo poweroff
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
             try:
-                limactl_stop(self.mngr_ctx.concurrency_group, host_record.config.instance_name, timeout=timeout_seconds)
+                limactl_stop(
+                    self.mngr_ctx.concurrency_group, host_record.config.instance_name, timeout=timeout_seconds
+                )
             except LimaCommandError as e:
                 logger.warning("Error stopping Lima VM: {}", e)
         else:

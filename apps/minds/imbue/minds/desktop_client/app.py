@@ -26,11 +26,11 @@ from loguru import logger
 from websockets import ClientConnection
 
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -280,10 +280,7 @@ def _handle_landing_page(
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
-            telegram_status = {
-                str(aid): telegram_orchestrator.agent_has_telegram(aid)
-                for aid in all_agent_ids
-            }
+            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             telegram_status_by_agent_id=telegram_status,
@@ -326,9 +323,7 @@ async def _handle_agent_servers_page(
     cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
     cf_services: dict[str, str] | None = None
     if cf_client is not None:
-        cf_services = await asyncio.get_running_loop().run_in_executor(
-            None, cf_client.list_services, parsed_id
-        )
+        cf_services = await asyncio.get_running_loop().run_in_executor(None, cf_client.list_services, parsed_id)
 
     html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names, cf_services=cf_services)
     return HTMLResponse(content=html)
@@ -371,13 +366,9 @@ async def _handle_toggle_global(
                 content='{"error": "Server not found locally"}',
                 media_type="application/json",
             )
-        success = await loop.run_in_executor(
-            None, cf_client.add_service, parsed_id, server_name, backend_url
-        )
+        success = await loop.run_in_executor(None, cf_client.add_service, parsed_id, server_name, backend_url)
     else:
-        success = await loop.run_in_executor(
-            None, cf_client.remove_service, parsed_id, server_name
-        )
+        success = await loop.run_in_executor(None, cf_client.remove_service, parsed_id, server_name)
 
     if success:
         return Response(content='{"ok": true}', media_type="application/json")

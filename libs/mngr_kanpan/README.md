@@ -78,14 +78,16 @@ PERMISSIONS = "light red"
 END_OF_TURN = "light green"
 ```
 
-By default, custom columns appear after the built-in columns (before LINK). To control the order of all columns, set `column_order`:
+By default, custom columns appear after the built-in columns (before CI). To control the order of all columns, set `column_order`:
 
 ```toml
 [plugins.kanpan]
-column_order = ["name", "state", "custom_blocked", "git", "pr", "ci", "link"]
+column_order = ["name", "state", "custom_blocked", "git", "pr", "ci"]
 ```
 
-Built-in column names are: `name`, `state`, `git`, `pr`, `ci`, `link`. Custom columns use `custom_<key>` (e.g. `custom_blocked` for a column defined under `[plugins.kanpan.columns.blocked]`). Columns not listed in `column_order` are omitted.
+Built-in column names are: `name`, `state`, `git`, `pr`, `ci`. Custom columns use `custom_<key>` (e.g. `custom_blocked` for a column defined under `[plugins.kanpan.columns.blocked]`). Columns not listed in `column_order` are omitted.
+
+The PR column displays clickable hyperlinks (OSC 8) in terminals that support them. When an agent has a PR, the column shows `#<number>` linked to the PR URL. When no PR exists but the branch is pushable, it shows `+PR` linked to the create-PR URL.
 
 When no label or plugin data is present for an agent, the column shows an empty cell.
 

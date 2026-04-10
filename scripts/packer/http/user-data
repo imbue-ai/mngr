@@ -1,0 +1,9 @@
+#cloud-config
+# Enable root login with password for packer provisioning.
+# The provisioning script runs as root, so no sudo needed.
+chpasswd:
+  list: |
+    root:packer
+  expire: false
+ssh_pwauth: true
+disable_root: false
