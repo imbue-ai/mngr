@@ -16,7 +16,6 @@ import { ChatPanel } from "./ChatPanel";
 import { IframePanel } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { apiUrl } from "../base-path";
-import { getAgents, getAgentsLoaded } from "../models/Conversation";
 
 const TERMINAL_URL = "http://localhost:7681";
 const AUTOSAVE_DEBOUNCE_MS = 1500;
@@ -47,13 +46,6 @@ interface AgentDockviewState {
 const agentDockviews: Map<string, AgentDockviewState> = new Map();
 let currentAgentId: string | null = null;
 let wrapperElement: HTMLElement | null = null;
-
-function getAgentName(agentId: string): string {
-  const agents = getAgents();
-  const agent = agents.find((a) => a.id === agentId);
-  if (agent?.name) return agent.name;
-  return getAgentsLoaded() ? "Unknown agent" : "Loading...";
-}
 
 function createMithrilRenderer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -155,7 +147,9 @@ function focusOrCreateChatPanel(agentId: string, state: AgentDockviewState): voi
     return params?.panelType === "chat";
   });
   if (existingPanel) {
-    state.component.setActivePanel(existingPanel);
+    if (existingPanel !== state.component.activePanel) {
+      state.component.setActivePanel(existingPanel);
+    }
     return;
   }
   // Should not normally happen since chat is created on init and unclosable
@@ -169,7 +163,7 @@ function addChatPanel(agentId: string, state: AgentDockviewState): void {
   state.component.addPanel({
     id: panelId,
     component: "chat",
-    title: getAgentName(agentId),
+    title: "Chat",
     params,
   });
 }
@@ -366,7 +360,7 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
           return createMithrilRenderer(ChatPanel, { agentId });
       }
     },
-    createRightHeaderActionComponent() {
+    createLeftHeaderActionComponent() {
       return createAddTabButton(agentId, state);
     },
     createTabComponent(options) {
@@ -441,13 +435,6 @@ async function initializeAgentDockview(agentId: string, parentElement: HTMLEleme
     }
     try {
       state.component.fromJSON(saved.dockview);
-      // Update chat tab title in case agent name changed
-      for (const panel of state.component.panels) {
-        const params = state.panelParams.get(panel.id);
-        if (params?.panelType === "chat") {
-          panel.api.setTitle(getAgentName(agentId));
-        }
-      }
       return;
     } catch {
       // If restore fails, fall through to default layout
@@ -490,21 +477,6 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
   onupdate(vnode: m.VnodeDOM<{ agentId: string | null }>) {
     const agentId = vnode.attrs.agentId;
     if (agentId === currentAgentId) {
-      // Update chat tab title if agent name might have changed
-      if (agentId) {
-        const state = agentDockviews.get(agentId);
-        if (state) {
-          for (const panel of state.component.panels) {
-            const params = state.panelParams.get(panel.id);
-            if (params?.panelType === "chat") {
-              const name = getAgentName(agentId);
-              if (panel.api.title !== name) {
-                panel.api.setTitle(name);
-              }
-            }
-          }
-        }
-      }
       return;
     }
     currentAgentId = agentId;
