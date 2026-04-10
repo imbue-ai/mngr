@@ -213,6 +213,10 @@ function createWindow() {
     mainWindow = null;
   });
 
+  setupTitleBarInjection();
+}
+
+function setupTitleBarInjection() {
   // Inject the custom title bar into every backend page after it loads.
   // Skip file:// pages (loading/error screens).
   mainWindow.webContents.on('dom-ready', () => {
