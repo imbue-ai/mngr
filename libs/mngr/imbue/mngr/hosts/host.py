@@ -1877,9 +1877,7 @@ class Host(BaseHost, OnlineHostInterface):
                     # Step 1: pull from source remote to local temp
                     pull_args = list(rsync_args)
                     src_known_hosts = get_ssh_known_hosts_file(source_host)
-                    pull_args.extend(
-                        ["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)]
-                    )
+                    pull_args.extend(["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)])
                     pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
@@ -1895,9 +1893,7 @@ class Host(BaseHost, OnlineHostInterface):
                     if extra_args:
                         push_args.extend(shlex.split(extra_args))
                     tgt_known_hosts = get_ssh_known_hosts_file(self)
-                    push_args.extend(
-                        ["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)]
-                    )
+                    push_args.extend(["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)])
                     push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
