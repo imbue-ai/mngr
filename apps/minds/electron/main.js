@@ -282,7 +282,7 @@ async function startBackendWithRetry() {
       }
     });
 
-    // Navigate directly to the login URL (same origin = cookies work)
+    // Navigate to the login URL (same origin = cookies work)
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadURL(loginUrl);
     }
