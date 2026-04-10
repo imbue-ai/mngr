@@ -45,7 +45,7 @@ def _ensure_atexit_registered() -> None:
 def reset_provider_instances() -> None:
     """Reset the provider instances tracking.
 
-    Closes all tracked provider instances and clears the tracking list.
+    Closes all cached provider instances and clears the instance cache.
     This is primarily used for test isolation to ensure a clean state between tests.
     """
     _close_all_provider_instances()
