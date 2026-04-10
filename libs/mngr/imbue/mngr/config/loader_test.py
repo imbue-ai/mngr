@@ -273,6 +273,35 @@ def test_parse_providers_unknown_backend_mentions_disabled_plugins() -> None:
         _parse_providers(raw, disabled_plugins=frozenset({"modal"}))
 
 
+def test_parse_providers_skips_disabled_provider_with_unknown_backend() -> None:
+    """_parse_providers should skip providers with is_enabled=false when backend is unknown."""
+    raw = {"my-cloud": {"backend": "nonexistent", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert len(result) == 0
+
+
+def test_parse_providers_preserves_disabled_provider_with_known_backend() -> None:
+    """_parse_providers should preserve is_enabled=false when backend is known (for merge)."""
+    raw = {"my-local": {"backend": "local", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert ProviderInstanceName("my-local") in result
+    assert result[ProviderInstanceName("my-local")].is_enabled is False
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_enabled() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not false."""
+    raw = {"my-provider": {"backend": "nonexistent", "is_enabled": True}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_is_enabled_unset() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not set."""
+    raw = {"my-provider": {"backend": "nonexistent"}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
 # =============================================================================
 # Tests for _parse_agent_types
 # =============================================================================
