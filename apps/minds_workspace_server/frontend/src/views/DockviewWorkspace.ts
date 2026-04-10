@@ -187,6 +187,12 @@ function openIframeTab(
   });
 }
 
+export function openIframeTabForAgent(agentId: string, url: string, title: string): void {
+  const state = agentDockviews.get(agentId);
+  if (!state) return;
+  openIframeTab(agentId, state, url, title);
+}
+
 export function openSubagentTab(agentId: string, subagentSessionId: string, description: string): void {
   const state = agentDockviews.get(agentId);
   if (!state) return;

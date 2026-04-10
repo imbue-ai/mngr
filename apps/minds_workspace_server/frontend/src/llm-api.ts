@@ -11,7 +11,7 @@ import { registerPluginRoute } from "./plugin-routes";
 import type { SidebarItemDefinition } from "./sidebar-items";
 import { registerSidebarItem } from "./sidebar-items";
 import { getSelectedAgentId } from "./navigation";
-import { openSubagentTab } from "./views/DockviewWorkspace";
+import { openIframeTabForAgent, openSubagentTab } from "./views/DockviewWorkspace";
 
 interface OpenTabOptions {
   type: "iframe" | "subagent";
@@ -79,9 +79,9 @@ const llmApi: LlmApi = {
 
     if (options.type === "subagent" && options.subagentSessionId) {
       openSubagentTab(agentId, options.subagentSessionId, options.title ?? "Sub-agent");
+    } else if (options.type === "iframe" && options.url) {
+      openIframeTabForAgent(agentId, options.url, options.title ?? options.url);
     }
-    // iframe tabs are opened via the DockviewWorkspace internal API
-    // Plugins can extend this as needed
   },
 };
 
