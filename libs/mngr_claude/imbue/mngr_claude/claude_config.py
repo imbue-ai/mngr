@@ -605,6 +605,31 @@ def build_readiness_hooks_config() -> dict[str, Any]:
 
 
 @pure
+def build_credential_sync_hooks_config() -> dict[str, Any]:
+    """Build the hooks configuration for credential sync on macOS.
+
+    Installs a Notification:auth_success hook that propagates keychain
+    credentials from the current agent to all other per-agent keychain entries
+    after a successful login.
+    """
+    return {
+        "hooks": {
+            "Notification": [
+                {
+                    "matcher": "auth_success",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'python3 "$MNGR_AGENT_STATE_DIR/commands/sync_keychain_credentials.py"',
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+
+
+@pure
 def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str, Any]) -> bool:
     """Check if a hook with the same command already exists in the list.
 

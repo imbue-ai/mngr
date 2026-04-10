@@ -47,6 +47,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -67,6 +68,7 @@ from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _preserve_session_files
 from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
+from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
@@ -141,7 +143,7 @@ def _setup_git_worktree(tmp_path: Path) -> tuple[Path, Path]:
     source.mkdir()
     init_git_repo(source, initial_commit=True)
 
-    # Add .gitignore (needed by _configure_readiness_hooks in provision)
+    # Add .gitignore (needed by _configure_agent_hooks in provision)
     (source / ".gitignore").write_text(".claude/settings.local.json\n")
     subprocess.run(["git", "-C", str(source), "add", ".gitignore"], check=True, capture_output=True)
     subprocess.run(
@@ -644,6 +646,21 @@ def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> No
                 )
 
 
+def test_build_credential_sync_hooks_config_structure() -> None:
+    """build_credential_sync_hooks_config should return a Notification:auth_success hook."""
+    config = build_credential_sync_hooks_config()
+
+    assert "hooks" in config
+    assert "Notification" in config["hooks"]
+    assert len(config["hooks"]["Notification"]) == 1
+    hook_group = config["hooks"]["Notification"][0]
+    assert hook_group["matcher"] == "auth_success"
+    hook = hook_group["hooks"][0]
+    assert hook["type"] == "command"
+    assert "sync_keychain_credentials.py" in hook["command"]
+    assert "MNGR_AGENT_STATE_DIR" in hook["command"]
+
+
 def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -875,10 +892,10 @@ def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
     _check_settings_local_gitignored(host, repo_dir)
 
 
-def test_configure_readiness_hooks_raises_when_not_gitignored(
+def test_configure_agent_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should raise when .claude/settings.local.json is not gitignored."""
+    """_configure_agent_hooks should raise when .claude/settings.local.json is not gitignored."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -899,13 +916,13 @@ def test_configure_readiness_hooks_raises_when_not_gitignored(
     )
 
     with pytest.raises(PluginMngrError, match="not gitignored"):
-        agent._configure_readiness_hooks(host)
+        agent._configure_agent_hooks(host)
 
 
-def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
+def test_configure_agent_hooks_skips_gitignore_check_when_not_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should skip gitignore check when the work_dir is not a git repo."""
+    """_configure_agent_hooks should skip gitignore check when the work_dir is not a git repo."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -924,7 +941,7 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     )
 
     # Should succeed without raising (no gitignore check needed for non-git dirs)
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the hooks file was still created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -934,10 +951,10 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     assert "SessionStart" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_creates_settings_file(
+def test_configure_agent_hooks_creates_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should create .claude/settings.local.json."""
+    """_configure_agent_hooks should create .claude/settings.local.json."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -955,7 +972,7 @@ def test_configure_readiness_hooks_creates_settings_file(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the file was actually created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -969,10 +986,10 @@ def test_configure_readiness_hooks_creates_settings_file(
     assert "Notification" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_merges_with_existing_settings(
+def test_configure_agent_hooks_merges_with_existing_settings(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should merge with existing settings."""
+    """_configure_agent_hooks should merge with existing settings."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -996,7 +1013,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Read the file and verify it was merged
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -1012,10 +1029,137 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     assert "Notification" in settings["hooks"]
 
 
-def test_provision_configures_readiness_hooks(
+def test_configure_agent_hooks_adds_credential_sync_on_macos(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should configure readiness hooks."""
+    """_configure_agent_hooks should add credential sync hooks on macOS when sync_credentials_on_login is True."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should have credential sync hook under Notification with auth_success matcher
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 1
+    assert "sync_keychain_credentials.py" in auth_hooks[0]["hooks"][0]["command"]
+
+
+def test_configure_agent_hooks_skips_credential_sync_when_disabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should not add credential sync hooks when sync_credentials_on_login is False."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should NOT have credential sync hook
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 0
+
+
+def test_provision_local_credentials_symlink(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials with symlink=True should create a symlink to the source credentials."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    (source_dir / ".credentials.json").write_text('{"token": "test"}')
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=True)
+
+    dest = config_dir / ".credentials.json"
+    assert dest.is_symlink()
+    assert dest.resolve() == (source_dir / ".credentials.json").resolve()
+
+
+def test_provision_local_credentials_copy(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials with symlink=False should copy the credentials file."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    (source_dir / ".credentials.json").write_text('{"token": "test"}')
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=False)
+
+    dest = config_dir / ".credentials.json"
+    assert dest.exists()
+    assert not dest.is_symlink()
+    assert dest.read_text() == '{"token": "test"}'
+    assert oct(dest.stat().st_mode & 0o777) == oct(0o600)
+
+
+def test_provision_local_credentials_missing_source(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials should be a no-op when the source credentials file does not exist."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    # Deliberately do NOT create .credentials.json
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=True)
+
+    assert not (config_dir / ".credentials.json").exists()
+
+
+def test_provision_configures_agent_hooks(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """provision should configure agent hooks."""
     # check_installation=False avoids running `claude --version` which would fail in test env
     agent, host = make_claude_agent(
         local_provider,
