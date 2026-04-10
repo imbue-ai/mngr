@@ -33,8 +33,6 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
-from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
-from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -1137,7 +1135,6 @@ def _build_data_source_column_defs(
             # Skip empty headers (infrastructure columns like create_pr_url)
             if not header:
                 continue
-            has_url = field_key in (FIELD_PR, FIELD_CREATE_PR_URL)
             defs.append(
                 _ColumnDef(
                     name=field_key,
@@ -1145,7 +1142,7 @@ def _build_data_source_column_defs(
                     text_fn=_FieldCellTextFn(field_key=field_key),
                     markup_fn=_FieldCellMarkupFn(field_key=field_key),
                     flexible=False,
-                    url_fn=_FieldCellUrlFn(field_key=field_key) if has_url else None,
+                    url_fn=_FieldCellUrlFn(field_key=field_key),
                 )
             )
     return defs
