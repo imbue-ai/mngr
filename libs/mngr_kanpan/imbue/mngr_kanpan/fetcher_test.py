@@ -377,15 +377,32 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
 
 
 def test_plugin_kanpan_data_sources_github_config_as_dict() -> None:
-    # GitHub config as a raw dict (tests the isinstance dict branch)
+    # GitHub config as a raw dict (tests the isinstance dict branch in plugin.py)
     ctx = cast(
         MngrContext,
         SimpleNamespace(
             get_plugin_config=lambda name, cls: SimpleNamespace(
-                data_sources={},
+                data_sources={"github": {"enabled": True, "pr": True}},
                 shell_commands={},
             )
         ),
     )
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
+
+
+def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
+    # Shell command config as a raw dict (tests the isinstance dict branch for shell)
+    ctx = cast(
+        MngrContext,
+        SimpleNamespace(
+            get_plugin_config=lambda name, cls: SimpleNamespace(
+                data_sources={},
+                shell_commands={"my_cmd": {"name": "My Command", "header": "CMD", "command": "echo hi"}},
+            )
+        ),
+    )
+    result = kanpan_data_sources(mngr_ctx=ctx)
+    assert result is not None
+    names = [s.name for s in result]
+    assert "shell_my_cmd" in names
