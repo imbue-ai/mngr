@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 import types
 from datetime import datetime
@@ -355,8 +356,6 @@ def test_build_ssh_transport_command_quotes_known_hosts_path_with_spaces() -> No
     )
     assert "'/path with spaces/known_hosts'" in result
     # Verify the full command parses correctly when split
-    import shlex
-
     parsed = shlex.split(result)
     assert any("UserKnownHostsFile=/path with spaces/known_hosts" in arg for arg in parsed)
 
