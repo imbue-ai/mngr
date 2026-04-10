@@ -61,6 +61,7 @@ from imbue.mngr_lima.host_store import LimaHostStore
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
+from imbue.mngr_lima.lima_yaml import parse_build_args_for_image_url
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
@@ -396,18 +397,21 @@ sudo poweroff
         volume_dir = self._ensure_host_volume_dir(host_id)
 
         # Generate or load Lima YAML config
-        yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
+        effective_build_args = tuple(build_args or ())
+        yaml_path_from_build_args = parse_build_args_for_yaml_path(effective_build_args)
+        image_url_from_build_args = parse_build_args_for_image_url(effective_build_args)
         if yaml_path_from_build_args is not None:
             user_config = load_user_lima_yaml(yaml_path_from_build_args)
             base_config = generate_default_lima_yaml(
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),
+                custom_image_url=image_url_from_build_args,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
-            image_url = str(image) if image else None
+            image_url = image_url_from_build_args or (str(image) if image else None)
             lima_config = generate_default_lima_yaml(
                 volume_host_path=volume_dir,
                 host_dir=str(self.host_dir),

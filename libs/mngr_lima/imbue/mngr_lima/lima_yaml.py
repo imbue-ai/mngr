@@ -185,3 +185,25 @@ def parse_build_args_for_yaml_path(build_args: tuple[str, ...]) -> Path | None:
         if arg.startswith("--file="):
             return Path(arg.split("=", 1)[1])
     return None
+
+
+def parse_build_args_for_image_url(build_args: tuple[str, ...]) -> str | None:
+    """Parse --image from build_args to extract a custom VM image URL.
+
+    Supports URLs (https://, file://) and local file paths (converted
+    to file:// URLs automatically). Returns None if not specified.
+    """
+    raw: str | None = None
+    for i, arg in enumerate(build_args):
+        if arg == "--image" and i + 1 < len(build_args):
+            raw = build_args[i + 1]
+            break
+        if arg.startswith("--image="):
+            raw = arg.split("=", 1)[1]
+            break
+    if raw is None:
+        return None
+    if "://" in raw:
+        return raw
+    # Convert local path to file:// URL
+    return f"file://{Path(raw).resolve()}"

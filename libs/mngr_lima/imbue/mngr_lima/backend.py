@@ -45,6 +45,8 @@ Supported build arguments for the lima provider:
   --file PATH           Path to a Lima YAML config file for full VM customization.
                         When not specified, a default config is generated with the
                         mngr pre-built image.
+  --image URL           URL or path to a custom qcow2 VM image. Supports https://,
+                        file://, or local paths. Overrides the default Alpine image.
 """
 
     @staticmethod
