@@ -82,6 +82,10 @@ def _list_agents_thread_target(
         result_holder[0] = None
 
 
+# Temporary: using the in-process threaded implementation instead of the CLI-based
+# cli_list_agents wrapper. The in-process path exercises provider instances directly,
+# which has been a fruitful source of leaked-resource bugs (FD leaks, unclosed gevent
+# hubs, etc.). Keeping it lets us validate FD-leak fixes under realistic conditions.
 def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
     """List agents with a timeout to prevent hanging on unresponsive providers."""
     result_holder: list[ListResult | None] = [None]
