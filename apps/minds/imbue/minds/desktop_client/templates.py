@@ -204,7 +204,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
         <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
         {% endfor %}
       </select>
-      <p class="help-text">Local: run in a Docker container. Cloud: run on a cloud provider. Dev: run directly on this host.</p>
+      <p class="help-text">Local: run in a Docker container. Lima: run in a Lima VM. Dev: run directly on this host. Cloud: run on a cloud provider (not yet supported).</p>
     </div>
     <button type="submit" class="btn">Create</button>
   </form>

@@ -124,6 +124,22 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert cmd[2] == "test-agent@test-agent-host.docker"
 
 
+def test_build_mngr_create_command_lima_mode() -> None:
+    cmd = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--template" in cmd
+    assert "lima" in cmd
+    assert "main" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
+    assert "--new-host" in cmd
+    # LIMA mode: address includes host name with lima provider suffix
+    assert cmd[2] == "test-agent@test-agent-host.lima"
+
+
 def test_build_mngr_create_command_cloud_mode_raises() -> None:
     with pytest.raises(NotImplementedError, match="Cloud launch mode"):
         _build_mngr_create_command(

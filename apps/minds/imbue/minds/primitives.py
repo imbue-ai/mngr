@@ -20,6 +20,7 @@ class LaunchMode(UpperCaseStrEnum):
     LOCAL = auto()
     CLOUD = auto()
     DEV = auto()
+    LIMA = auto()
 
 
 class AgentName(NonEmptyStr):
