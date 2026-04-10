@@ -15,6 +15,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
+from imbue.mngr.utils.testing import build_test_known_hosts_file
 from imbue.mngr.utils.testing import generate_ssh_keypair
 from imbue.mngr.utils.testing import local_sshd
 
@@ -30,11 +31,7 @@ def ssh_provider(
     public_key_content = public_key.read_text()
 
     with local_sshd(public_key_content, tmp_path) as (port, host_key_path):
-        # Build a known_hosts file from the sshd's host key so that
-        # StrictHostKeyChecking=yes can verify the connection
-        host_pub_key = host_key_path.with_suffix(".pub").read_text().strip()
-        known_hosts_path = tmp_path / "known_hosts"
-        known_hosts_path.write_text(f"[127.0.0.1]:{port} {host_pub_key}\n")
+        known_hosts_path = build_test_known_hosts_file(host_key_path, port, tmp_path / "known_hosts")
 
         current_user = os.environ.get("USER", "root")
         provider = SSHProviderInstance(
