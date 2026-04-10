@@ -1,7 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
 from typing import assert_never
-from uuid import uuid4
 
 import click
 from click_option_group import optgroup
@@ -16,8 +15,6 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
-from imbue.mngr.api.lifecycle_events import LifecycleEventType
-from imbue.mngr.api.lifecycle_events import emit_agent_lifecycle_event
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -182,11 +179,8 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
-        # Emit AGENT_STARTING lifecycle events, then start agents
+        # Start each agent on this host
         agent_ids_to_start = [match.agent_id for match in agent_list]
-        for agent_id in agent_ids_to_start:
-            start_id = f"start-{uuid4().hex}"
-            emit_agent_lifecycle_event(online_host, agent_id, LifecycleEventType.AGENT_STARTING, start_id)
         online_host.start_agents(agent_ids_to_start)
 
         # Emit discovery events for started agents and host
