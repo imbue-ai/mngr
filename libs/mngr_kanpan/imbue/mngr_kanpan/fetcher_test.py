@@ -37,7 +37,9 @@ from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
+from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import repo_path_from_labels
+from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.plugin import kanpan_data_sources
 from imbue.mngr_kanpan.testing import make_agent_details
 
@@ -679,3 +681,92 @@ def test_load_muted_agents_returns_empty_on_exception() -> None:
     ):
         muted = _load_muted_agents(ctx)
     assert muted == set()
+
+
+# === save_field_cache / load_field_cache ===
+
+
+def _make_cache_ctx(profile_dir: Path) -> MngrContext:
+    ctx = MagicMock(spec=MngrContext)
+    ctx.profile_dir = profile_dir
+    return cast(MngrContext, ctx)
+
+
+def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> object:
+    return SimpleNamespace(
+        field_types={field_key: field_type},
+    )
+
+
+def test_save_field_cache_writes_json(tmp_path: Path) -> None:
+    """save_field_cache creates a JSON file under profile_dir/kanpan/."""
+    ctx = _make_cache_ctx(tmp_path)
+    agent_name = AgentName("agent-1")
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent_name: {"pr_count": StringField(value="3")},
+    }
+    data_sources = [_make_mock_data_source("pr_count", StringField)]
+    save_field_cache(ctx, cached, data_sources)
+    cache_file = tmp_path / "kanpan" / "field_cache.json"
+    assert cache_file.exists()
+
+
+def test_load_field_cache_returns_empty_when_no_file(tmp_path: Path) -> None:
+    """load_field_cache returns empty dict when the cache file does not exist."""
+    ctx = _make_cache_ctx(tmp_path)
+    result = load_field_cache(ctx, [])
+    assert result == {}
+
+
+def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
+    """Fields saved with save_field_cache are correctly restored by load_field_cache."""
+    ctx = _make_cache_ctx(tmp_path)
+    agent_name = AgentName("agent-1")
+    original: dict[AgentName, dict[str, FieldValue]] = {
+        agent_name: {"status": StringField(value="hello")},
+    }
+    data_sources = [_make_mock_data_source("status", StringField)]
+    save_field_cache(ctx, original, data_sources)
+    loaded = load_field_cache(ctx, data_sources)
+    assert agent_name in loaded
+    field = loaded[agent_name]["status"]
+    assert isinstance(field, StringField)
+    assert field.value == "hello"
+
+
+def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:
+    """load_field_cache returns empty dict when the cache file contains invalid JSON."""
+    cache_dir = tmp_path / "kanpan"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "field_cache.json").write_text("not valid json {{{")
+    ctx = _make_cache_ctx(tmp_path)
+    result = load_field_cache(ctx, [])
+    assert result == {}
+
+
+def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
+    """load_field_cache skips field entries whose type is not in the type registry."""
+    ctx = _make_cache_ctx(tmp_path)
+    agent_name = AgentName("agent-1")
+    original: dict[AgentName, dict[str, FieldValue]] = {
+        agent_name: {"status": StringField(value="hello")},
+    }
+    data_sources = [_make_mock_data_source("status", StringField)]
+    save_field_cache(ctx, original, data_sources)
+    # Load with no data sources (empty type registry) -- field should be skipped
+    loaded = load_field_cache(ctx, [])
+    assert loaded == {}
+
+
+def test_save_field_cache_swallows_errors(tmp_path: Path) -> None:
+    """save_field_cache does not raise even when the write fails."""
+    ctx = _make_cache_ctx(tmp_path / "nonexistent_but_readonly")
+    # Make a non-writable parent directory to force mkdir to fail
+    readonly_dir = tmp_path / "readonly"
+    readonly_dir.mkdir()
+    readonly_dir.chmod(0o444)
+    ctx2 = _make_cache_ctx(readonly_dir / "subdir_that_cannot_exist")
+    try:
+        save_field_cache(ctx2, {}, [])  # should not raise
+    finally:
+        readonly_dir.chmod(0o755)
