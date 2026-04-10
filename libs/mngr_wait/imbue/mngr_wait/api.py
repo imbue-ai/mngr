@@ -1,3 +1,5 @@
+import json
+import shlex
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -11,6 +13,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
+from imbue.mngr.api.lifecycle_events import get_lifecycle_events_path
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
@@ -345,3 +348,83 @@ def _detect_state_changes(
         )
         if on_state_change is not None:
             on_state_change(change)
+
+
+def _check_latest_lifecycle_event(
+    host: OnlineHostInterface,
+    events_file_str: str,
+    event_type: str,
+) -> bool:
+    """Check if the most recent event in the lifecycle file matches event_type.
+
+    Reads only the last line of the events file to determine the latest event.
+    Returns False if the file doesn't exist, is empty, or the last event doesn't match.
+    """
+    result = host.execute_idempotent_command(f"tail -1 {shlex.quote(events_file_str)} 2>/dev/null || true")
+    last_line = result.stdout.strip()
+    if not last_line:
+        return False
+    try:
+        data = json.loads(last_line)
+        return data.get("type") == event_type
+    except json.JSONDecodeError:
+        return False
+
+
+def wait_for_event(
+    resolved: ResolvedTarget,
+    event_type: str,
+    timeout_seconds: float | None,
+    interval_seconds: float,
+) -> WaitResult:
+    """Poll until the agent's lifecycle event stream contains the target event type.
+
+    Checks the last line of the agent's mngr/lifecycle/events.jsonl file each
+    iteration. The match requires the most recent event's type field to equal
+    event_type, so an AGENT_STARTING event invalidates a previous AGENT_READY.
+    """
+    if resolved.agent_id is None:
+        raise UserInputError("--event requires an agent target, not a host target")
+
+    start_time = time.monotonic()
+    host_interface = resolved.provider.get_host(resolved.host_id)
+
+    if not isinstance(host_interface, OnlineHostInterface):
+        raise UserInputError("Cannot wait for events on an offline host")
+
+    events_file = get_lifecycle_events_path(host_interface.host_dir, resolved.agent_id)
+    events_file_str = str(events_file)
+
+    is_waiting = True
+    while is_waiting:
+        elapsed = time.monotonic() - start_time
+
+        try:
+            if _check_latest_lifecycle_event(host_interface, events_file_str, event_type):
+                return WaitResult(
+                    target=resolved.target,
+                    is_matched=True,
+                    is_timed_out=False,
+                    final_state=CombinedState(),
+                    matched_state=event_type,
+                    elapsed_seconds=time.monotonic() - start_time,
+                    state_changes=(),
+                )
+        except HostConnectionError as exc:
+            logger.debug("Host unreachable while checking lifecycle events: {}", exc)
+
+        if timeout_seconds is not None and elapsed >= timeout_seconds:
+            is_waiting = False
+        else:
+            time.sleep(interval_seconds)
+
+    final_elapsed = time.monotonic() - start_time
+    return WaitResult(
+        target=resolved.target,
+        is_matched=False,
+        is_timed_out=True,
+        final_state=CombinedState(),
+        matched_state=None,
+        elapsed_seconds=final_elapsed,
+        state_changes=(),
+    )
