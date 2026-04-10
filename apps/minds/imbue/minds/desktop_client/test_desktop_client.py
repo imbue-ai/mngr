@@ -78,6 +78,7 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     agent_creator: AgentCreator | None = None,
+    is_first_run: bool = False,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -88,6 +89,7 @@ def _create_test_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        is_first_run=is_first_run,
     )
     client = TestClient(app)
 
@@ -221,14 +223,14 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     assert second_response.status_code == 403
 
 
-def test_landing_page_redirects_when_single_agent_known(tmp_path: Path) -> None:
-    """When authenticated and exactly one agent is known, the landing page redirects to it."""
+def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
+    """When authenticated and exactly one agent is known, the landing page lists it."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == "/agents/{}/".format(agent_id)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
 
 
 # -- Agent default redirect tests --
@@ -339,11 +341,70 @@ def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> Non
 
     response = client.get(
         f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
-        headers={"sec-fetch-mode": "navigate"},
+        headers={
+            "sec-fetch-mode": "navigate",
+            "user-agent": "Mozilla/5.0 Electron/32.0.0",
+        },
     )
 
     assert response.status_code == 200
     assert "serviceWorker.register" in response.text
+
+
+def test_browser_navigation_serves_info_bar_wrapper(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        headers={
+            "sec-fetch-mode": "navigate",
+            "user-agent": "Mozilla/5.0 Firefox/130.0",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "info-bar" in response.text
+    assert "?_embed=1" in response.text
+    assert str(agent_id) in response.text
+    assert str(DEFAULT_SERVER_NAME) in response.text
+
+
+def test_browser_navigation_info_bar_preserves_query_params(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/some/path?foo=bar",
+        headers={
+            "sec-fetch-mode": "navigate",
+            "user-agent": "Mozilla/5.0 Firefox/130.0",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "info-bar" in response.text
+    # The iframe src should include the original query params plus _embed=1
+    assert "foo=bar" in response.text
+    assert "_embed=1" in response.text
+
+
+def test_browser_navigation_with_embed_bypasses_info_bar(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/?_embed=1",
+        headers={
+            "sec-fetch-mode": "navigate",
+            "user-agent": "Mozilla/5.0 Firefox/130.0",
+        },
+    )
+
+    assert response.status_code == 200
+    # With _embed=1, should get the bootstrap page (SW registration), not the info bar
+    assert "serviceWorker.register" in response.text
+    assert "info-bar" not in response.text
 
 
 def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
@@ -681,8 +742,8 @@ def test_mngr_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_pat
     assert "location.reload()" in response.text
 
 
-def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
-    """When a single agent is discovered and authenticated, the landing page redirects to it."""
+def test_mngr_cli_resolver_landing_page_lists_single_discovered_agent(tmp_path: Path) -> None:
+    """When a single agent is discovered and authenticated, the landing page lists it."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
@@ -698,9 +759,9 @@ def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_pa
 
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == "/agents/{}/".format(agent_id)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
 
 
 def test_mngr_cli_resolver_agent_servers_page_via_mngr_cli(tmp_path: Path) -> None:
@@ -881,13 +942,31 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
 # -- Landing page agent creation tests --
 
 
-def test_landing_page_shows_create_form_when_no_agents_exist(tmp_path: Path) -> None:
-    """When authenticated and no agents exist, the landing page shows the agent creation form."""
+def test_landing_page_shows_discovering_when_no_agents_yet(tmp_path: Path) -> None:
+    """When not first run and no agents discovered yet, show discovering state with auto-refresh."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
+        is_first_run=False,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Discovering agents" in response.text
+    assert "reload" in response.text
+
+
+def test_landing_page_shows_create_form_on_first_run(tmp_path: Path) -> None:
+    """On first run with no agents, show the create form directly."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -898,12 +977,13 @@ def test_landing_page_shows_create_form_when_no_agents_exist(tmp_path: Path) -> 
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
-    """The create form pre-fills the git URL from a query parameter."""
+    """The create form pre-fills the git URL from a query parameter on first run."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
+        is_first_run=True,
     )
     _authenticate_client(client=client, auth_store=auth_store)
 

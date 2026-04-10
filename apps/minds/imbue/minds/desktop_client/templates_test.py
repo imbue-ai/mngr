@@ -28,6 +28,13 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
     assert "No minds are accessible" in html
+
+
+def test_render_landing_page_discovering_shows_auto_refresh() -> None:
+    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
+    assert "Discovering agents" in html
+    assert "reload" in html
+    assert "No minds are accessible" not in html
     assert "/agents/" not in html
 
 

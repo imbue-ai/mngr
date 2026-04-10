@@ -36,7 +36,9 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
+from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
+from imbue.minds.desktop_client.proxy import is_electron_client
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -272,10 +274,6 @@ def _handle_landing_page(
 
     all_agent_ids = backend_resolver.list_known_mind_ids()
 
-    # If exactly one agent, redirect directly to it
-    if len(all_agent_ids) == 1:
-        return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
-
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
@@ -287,10 +285,17 @@ def _handle_landing_page(
         )
         return HTMLResponse(content=html)
 
-    # No agents exist: show the create form
-    git_url = request.query_params.get("git_url", "")
-    branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    # No agents discovered yet. On first run (no ~/.minds existed at startup),
+    # go straight to the create form. Otherwise, show the agent list page with
+    # an auto-refresh so it updates once the stream manager discovers agents.
+    is_first_run: bool = request.app.state.is_first_run
+    if is_first_run:
+        git_url = request.query_params.get("git_url", "")
+        branch = request.query_params.get("branch", "")
+        html = render_create_form(git_url=git_url, branch=branch)
+        return HTMLResponse(content=html)
+
+    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     return HTMLResponse(content=html)
 
 
@@ -537,6 +542,28 @@ async def _handle_proxy_http(
             media_type="application/javascript",
         )
 
+    # For non-Electron browsers, wrap the agent content in an info bar iframe on
+    # the initial navigation (when _embed is not in the query params). The iframe
+    # loads the same URL with _embed=1, which bypasses this check and serves the
+    # normal proxied content.
+    user_agent = request.headers.get("user-agent", "")
+    is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
+    is_embed = request.query_params.get("_embed") == "1"
+
+    if is_navigation and not is_electron_client(user_agent) and not is_embed:
+        agent_info = backend_resolver.get_agent_display_info(parsed_id)
+        agent_display_name = agent_info.agent_name if agent_info else str(parsed_id)
+        host_id = agent_info.host_id if agent_info else "localhost"
+        html = generate_browser_info_bar_html(
+            agent_id=parsed_id,
+            server_name=parsed_server,
+            agent_display_name=agent_display_name,
+            host_id=host_id,
+            path=path,
+            query_string=str(request.url.query) if request.url.query else "",
+        )
+        return HTMLResponse(content=html)
+
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
         # Return immediately instead of holding the connection open.
@@ -557,7 +584,6 @@ async def _handle_proxy_http(
 
     # Check if SW is installed via cookie (scoped per server)
     sw_cookie = request.cookies.get(f"sw_installed_{agent_id}_{server_name}")
-    is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
 
     # First HTML navigation without SW -> serve bootstrap
     if is_navigation and not sw_cookie:
@@ -1066,6 +1092,7 @@ def create_desktop_client(
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
+    is_first_run: bool = False,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1100,6 +1127,7 @@ def create_desktop_client(
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
+    app.state.is_first_run = is_first_run
     app.state.telegram_orchestrator = telegram_orchestrator
     if http_client is not None:
         app.state.http_client = http_client

@@ -43,6 +43,11 @@ def start_desktop_client(
     format (human-readable text or JSONL event). Unless --no-browser is
     set, the URL is opened in the system browser.
     """
+    # Detect first run before creating any directories. If the data directory
+    # does not yet exist, this is a fresh install and we should default to
+    # showing the agent creation page instead of the (empty) agent list.
+    is_first_run = not data_directory.exists()
+
     paths = MindPaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     backend_resolver = MngrCliBackendResolver()
@@ -79,6 +84,7 @@ def start_desktop_client(
         agent_creator=agent_creator,
         cloudflare_client=cloudflare_client,
         telegram_orchestrator=telegram_orchestrator,
+        is_first_run=is_first_run,
     )
 
     if not is_no_browser:

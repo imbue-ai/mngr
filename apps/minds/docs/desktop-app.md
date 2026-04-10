@@ -13,14 +13,27 @@ The Electron shell is deliberately thin. It handles four things:
 
 Everything else -- agent creation, discovery, proxying, authentication, the web UI -- remains in the Python backend, unchanged. See [overview.md](./overview.md) for details on the desktop client architecture.
 
+### App shell
+
+The Electron window uses a frameless window (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` on macOS). A custom title bar is injected into every backend page via `webContents.insertCSS()` and `webContents.executeJavaScript()` on the `dom-ready` event. The title bar provides:
+
+- **Navigation**: Back/forward buttons using `history.back()`/`history.forward()`
+- **Page title**: Tracks `document.title` via MutationObserver
+- **Open in browser**: Opens the current URL in the system browser
+- **Window controls**: Minimize/maximize/close buttons (on Linux/Windows; macOS uses native traffic lights)
+
+A separate `shell.html` page handles the loading spinner and error screen during startup.
+
+When accessing an agent URL in a regular browser (not the Electron app), the Python backend wraps the content in a lightweight info bar showing the agent name, host, and application name.
+
 ### Startup sequence
 
-1. Electron creates a window showing a loading screen
+1. Electron creates a frameless window showing a loading screen (`shell.html`)
 2. `uv sync` runs using the bundled `uv` binary and the packaged `pyproject.toml` + lockfile
 3. Electron finds an available port and spawns: `uv run mind --format jsonl --log-file <path> forward --host 127.0.0.1 --port <port> --no-browser`
 4. The backend emits a JSONL event `{"event": "login_url", "login_url": "..."}` on stdout
-5. Electron waits for the port to accept TCP connections, then navigates to the login URL
-6. Auth completes (one-time code consumed, session cookie set), user sees the web UI
+5. Electron waits for the port to accept TCP connections, then navigates directly to the login URL
+6. Auth completes (one-time code consumed, session cookie set), the custom title bar is injected, user sees the web UI
 
 ### Shutdown
 
@@ -29,6 +42,14 @@ When the user closes the window, Electron sends SIGTERM to the backend process a
 ### Crash recovery
 
 If the backend exits unexpectedly, Electron shows an error screen with the last lines from the log file and a "Retry" button that restarts the backend.
+
+### Keyboard shortcuts
+
+- **Open DevTools**: `Ctrl+Shift+C` (Windows/Linux) or `Cmd+Option+I` (macOS)
+
+### Environment variables
+
+- `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
 
 ## Output and logging conventions
 
@@ -112,8 +133,7 @@ apps/minds/
     paths.js                # Platform-aware path resolution
     env-setup.js            # uv sync runner with progress reporting
     backend.js              # Python backend process manager
-    loading.html            # Loading/setup screen
-    error.html              # Error screen with retry
+    shell.html              # Loading and error screens (title bar is injected at runtime)
     assets/
       icon.svg              # App icon (SVG source)
       icon.png              # App icon (PNG for Electron)
