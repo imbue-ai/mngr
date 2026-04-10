@@ -1,4 +1,6 @@
 import contextlib
+import os
+import re
 from contextlib import AbstractContextManager
 from io import StringIO
 from pathlib import Path
@@ -48,6 +50,31 @@ from imbue.modal_proxy.testing import TestingModalInterface
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
+
+# Pattern for valid test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS followed by anything.
+# This mirrors TEST_ENV_PATTERN in testing.py but is defined here to avoid importing test utilities
+# in production code.
+_TEST_ENV_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}")
+
+
+def _validate_test_environment_name(environment_name: str) -> None:
+    """Validate that Modal environment names in tests follow the timestamped pattern.
+
+    When running inside a test (detected via the _PYTEST_GUARD_PHASE env var set by the
+    resource guard system), environment names must match mngr_test-YYYY-MM-DD-HH-MM-SS-*
+    so that leaked environments can be identified and cleaned up by CI.
+
+    Outside of tests (_PYTEST_GUARD_PHASE not set), this is a no-op.
+    """
+    if os.environ.get("_PYTEST_GUARD_PHASE") != "call":
+        return
+    if not _TEST_ENV_NAME_RE.match(environment_name):
+        raise MngrError(
+            f"Modal environment name '{environment_name}' does not match the required test pattern "
+            f"'mngr_test-YYYY-MM-DD-HH-MM-SS-*'. Use the modal_mngr_ctx fixture or "
+            f"generate_test_environment_name() to generate the prefix. "
+            f"This ensures test environments can be identified and cleaned up."
+        )
 
 
 def _create_environment(environment_name: str, modal_interface: ModalInterface) -> None:
@@ -442,6 +469,12 @@ Supported build arguments for the modal provider:
         user_id = config.user_id if config.user_id is not None else mngr_ctx.get_profile_user_id()
         environment_name = f"{prefix}{user_id}"
         default_app_name = f"{prefix}{name}"
+
+        # During tests with real Modal (DIRECT mode), validate that the environment name
+        # follows the timestamped pattern required for CI cleanup. TESTING mode is excluded
+        # because it uses a fake Modal interface that never creates real environments.
+        if config.mode == ModalMode.DIRECT:
+            _validate_test_environment_name(environment_name)
 
         # Truncate environment_name if needed to fit Modal's 64 char limit
         if len(environment_name) > MODAL_NAME_MAX_LENGTH:
