@@ -317,7 +317,7 @@ def _install_mngr_editable_remote(
             lib_names = ls_result.stdout.strip().split()
             install_parts = [f"{_UV_PATH_PREFIX}{uv_env}cd {remote_repo_dir} && uv tool install -e libs/mngr"]
             for lib_name in lib_names:
-                if lib_name != "imbue-mngr":
+                if lib_name != "imbue-mngr" and lib_name.startswith("mngr_"):
                     install_parts.append(f"--with-editable libs/{lib_name}")
 
             install_cmd = " ".join(install_parts)
