@@ -67,6 +67,12 @@ def generate_default_lima_yaml(
                 "writable": True,
             },
         ],
+        # Disable containerd/nerdctl -- we don't run containers in the VM.
+        # This also avoids the "systemd must be available" error on Alpine.
+        "containerd": {
+            "system": False,
+            "user": False,
+        },
         # Disable port forwarding -- use SSH for everything
         "portForwards": [],
         # Provision required packages if not in the image
