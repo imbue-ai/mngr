@@ -1,4 +1,5 @@
 import subprocess
+import types
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -11,10 +12,12 @@ from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
+from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_descendant_process_names
+from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -305,3 +308,73 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: N
 
     safe_dirs = _get_safe_directories()
     assert str(target_path) not in safe_dirs
+
+
+# =========================================================================
+# build_ssh_transport_command tests
+# =========================================================================
+
+
+def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> None:
+    result = build_ssh_transport_command(
+        key_path=Path("/tmp/test_key"),
+        port=2222,
+        known_hosts_file=Path("/tmp/known_hosts"),
+    )
+    assert "ssh" in result
+    assert "-i /tmp/test_key" in result
+    assert "-p 2222" in result
+    assert "-o UserKnownHostsFile=/tmp/known_hosts" in result
+    assert "-o StrictHostKeyChecking=yes" in result
+
+
+def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() -> None:
+    result = build_ssh_transport_command(
+        key_path=Path("/tmp/test_key"),
+        port=22,
+        known_hosts_file=None,
+    )
+    assert "-o StrictHostKeyChecking=yes" in result
+    assert "UserKnownHostsFile" not in result
+
+
+def test_build_ssh_transport_command_quotes_key_path_with_spaces() -> None:
+    result = build_ssh_transport_command(
+        key_path=Path("/path with spaces/key"),
+        port=22,
+        known_hosts_file=None,
+    )
+    assert "'/path with spaces/key'" in result
+
+
+# =========================================================================
+# get_ssh_known_hosts_file tests
+# =========================================================================
+
+
+def _make_host_with_known_hosts(known_hosts_file: str | None) -> OnlineHostInterface:
+    """Create a minimal host-like object with the connector data needed for get_ssh_known_hosts_file."""
+    data: dict[str, str] = {}
+    if known_hosts_file is not None:
+        data["ssh_known_hosts_file"] = known_hosts_file
+    pyinfra_host = types.SimpleNamespace(data=data)
+    connector = types.SimpleNamespace(host=pyinfra_host)
+    return cast(OnlineHostInterface, types.SimpleNamespace(connector=connector))
+
+
+def test_get_ssh_known_hosts_file_returns_path_when_configured() -> None:
+    host = _make_host_with_known_hosts("/tmp/known_hosts")
+    result = get_ssh_known_hosts_file(host)
+    assert result == Path("/tmp/known_hosts")
+
+
+def test_get_ssh_known_hosts_file_returns_none_when_not_configured() -> None:
+    host = _make_host_with_known_hosts(None)
+    result = get_ssh_known_hosts_file(host)
+    assert result is None
+
+
+def test_get_ssh_known_hosts_file_returns_none_for_dev_null() -> None:
+    host = _make_host_with_known_hosts("/dev/null")
+    result = get_ssh_known_hosts_file(host)
+    assert result is None
