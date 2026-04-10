@@ -312,7 +312,7 @@ def test_wait_cli_event_flag_times_out_when_event_missing(
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Test that `mngr wait <agent> --event AGENT_READY --timeout 0.1s` returns 2 on timeout."""
+    """Test that `mngr wait <agent> --event AGENT_READY --timeout 1s` returns 2 on timeout."""
     agent_id = AgentId.generate()
     _create_local_agent_dir(temp_host_dir, agent_id)
 
