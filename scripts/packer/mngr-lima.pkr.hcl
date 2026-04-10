@@ -32,6 +32,12 @@ variable "iso_checksum" {
   default = ""
 }
 
+variable "seed_iso" {
+  type        = string
+  default     = ""
+  description = "Path to pre-built cloud-init seed ISO. Built by the build script."
+}
+
 locals {
   output_name = "mngr-lima-${var.arch == "arm64" ? "aarch64" : "x86_64"}"
 
@@ -50,7 +56,7 @@ locals {
 
 source "qemu" "mngr-lima" {
   iso_url      = local.resolved_iso_url
-  iso_checksum = var.iso_checksum
+  iso_checksum = var.iso_checksum != "" ? var.iso_checksum : "none"
   disk_image   = true
 
   output_directory = "output-${local.output_name}"
@@ -61,7 +67,19 @@ source "qemu" "mngr-lima" {
   accelerator  = var.accelerator
   qemu_binary  = local.resolved_qemu_binary
 
-  ssh_username = "alpine"
+  # Serve cloud-init data via packer's built-in HTTP server.
+  # The QEMU SMBIOS setting tells cloud-init where to find it.
+  http_directory = "${path.root}/http"
+
+  # UEFI firmware required by Alpine cloud images.
+  machine_type = "q35"
+  qemuargs = [
+    ["-bios", "/usr/share/OVMF/OVMF_CODE.fd"],
+    ["-smbios", "type=1,serial=ds=nocloud-net;s=http://{{ .HTTPIP }}:{{ .HTTPPort }}/"],
+  ]
+
+  ssh_username = "root"
+  ssh_password = "packer"
   ssh_timeout  = "10m"
 
   shutdown_command = "sudo poweroff"
@@ -74,5 +92,14 @@ build {
 
   provisioner "shell" {
     script = "${path.root}/provision.sh"
+  }
+
+  # Clean up cloud-init artifacts so the image is ready for Lima's
+  # own cloud-init to run on first boot.
+  provisioner "shell" {
+    inline = [
+      "cloud-init clean --logs 2>/dev/null || true",
+      "passwd -l root",
+    ]
   }
 }

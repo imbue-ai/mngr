@@ -1,10 +1,10 @@
-#!/bin/bash
+#!/bin/sh
 # Provision script for the mngr Lima base image.
 # Installs all packages required by mngr hosts and the forever-claude-template.
 # Supports both Alpine (apk) and Debian/Ubuntu (apt-get).
 #
-# On Alpine, bash may not be installed yet. If running under a non-bash shell,
-# install bash first and re-exec this script.
+# Runs as root (packer connects as root). Uses #!/bin/sh because bash
+# is not pre-installed on Alpine. Installs bash then re-execs for strict mode.
 if [ -z "${BASH_VERSION:-}" ]; then
     if command -v apk >/dev/null 2>&1; then
         apk add --no-cache bash
@@ -51,8 +51,8 @@ SSHD_EOF
 
 elif command -v apt-get >/dev/null 2>&1; then
     # Debian/Ubuntu
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq --no-install-recommends \
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends \
         bash build-essential ca-certificates curl fd-find git git-lfs jq \
         less nano openssh-server procps ripgrep rsync sqlite3 \
         tmux unison wget xxd
@@ -89,9 +89,9 @@ MaxSessions 100
 MaxStartups 100:30:200
 SSHD_EOF
 
-    sudo mkdir -p /run/sshd
+    mkdir -p /run/sshd
     mkdir -p /code && chmod 777 /code
 
-    sudo apt-get clean
-    sudo rm -rf /var/lib/apt/lists/*
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
 fi
