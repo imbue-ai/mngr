@@ -51,8 +51,8 @@ STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
 
 # Pattern for valid test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS followed by anything.
-# This mirrors TEST_ENV_PATTERN in testing.py but is defined here to avoid importing test utilities
-# in production code.
+# This mirrors TEST_ENV_PATTERN in imbue.mngr.utils.testing but is defined here to avoid importing
+# test utilities in production code.
 _TEST_ENV_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}")
 
 
