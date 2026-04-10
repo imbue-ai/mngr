@@ -1118,12 +1118,9 @@ def test_get_focused_entry_with_focus() -> None:
     assert result.name == AgentName("agent-a")
 
 
-def test_get_focused_entry_no_entry_at_index() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    state = _make_state_with_walker((entry,))
-    state.list_walker.set_focus(0)
-    if not state.index_to_entry.get(0):
-        assert _get_focused_entry(state) is None
+def test_get_focused_entry_no_focus() -> None:
+    state = _make_state()
+    assert _get_focused_entry(state) is None
 
 
 # =============================================================================
@@ -1358,7 +1355,6 @@ def test_run_shell_command_submits_future() -> None:
     state.list_walker.set_focus(a_idx)
     cmd = CustomCommand(name="say-hi", command="true")
     _run_shell_command(state, cmd)
-    assert state.executor is not None
     assert state.executor is not None
     state.executor.shutdown(wait=True)
 
