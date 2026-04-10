@@ -1,8 +1,17 @@
-#!/bin/sh
+#!/bin/bash
 # Provision script for the mngr Lima base image.
 # Installs all packages required by mngr hosts and the forever-claude-template.
 # Supports both Alpine (apk) and Debian/Ubuntu (apt-get).
-set -eux
+#
+# On Alpine, bash may not be installed yet. If running under a non-bash shell,
+# install bash first and re-exec this script.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache bash
+    fi
+    exec bash "$0" "$@"
+fi
+set -euo pipefail
 
 if command -v apk >/dev/null 2>&1; then
     # Alpine
