@@ -347,6 +347,20 @@ def test_build_ssh_transport_command_quotes_key_path_with_spaces() -> None:
     assert "'/path with spaces/key'" in result
 
 
+def test_build_ssh_transport_command_quotes_known_hosts_path_with_spaces() -> None:
+    result = build_ssh_transport_command(
+        key_path=Path("/tmp/key"),
+        port=22,
+        known_hosts_file=Path("/path with spaces/known_hosts"),
+    )
+    assert "'/path with spaces/known_hosts'" in result
+    # Verify the full command parses correctly when split
+    import shlex
+
+    parsed = shlex.split(result)
+    assert any("UserKnownHostsFile=/path with spaces/known_hosts" in arg for arg in parsed)
+
+
 # =========================================================================
 # get_ssh_known_hosts_file tests
 # =========================================================================

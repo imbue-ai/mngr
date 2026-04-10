@@ -48,7 +48,7 @@ def build_ssh_transport_command(
     """
     parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
     if known_hosts_file is not None:
-        parts.extend(["-o", f"UserKnownHostsFile={known_hosts_file}", "-o", "StrictHostKeyChecking=yes"])
+        parts.extend(["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"])
     else:
         parts.extend(["-o", "StrictHostKeyChecking=yes"])
     return " ".join(parts)
