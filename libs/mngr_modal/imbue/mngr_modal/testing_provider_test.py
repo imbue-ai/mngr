@@ -1848,14 +1848,15 @@ def test_create_environment(tmp_path: Path, cg: ConcurrencyGroup) -> None:
 
 def test_create_environment_rejects_bad_mngr_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    with pytest.raises(MngrError, match="Refusing to create"):
+    with pytest.raises(MngrError, match="test environments must match"):
         _create_environment("mngr_bad-name", modal)
 
 
-def test_create_environment_allows_mngr_test_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_create_environment_allows_timestamped_mngr_test_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    _create_environment("mngr_test-good-name", modal)
-    assert "mngr_test-good-name" in modal._environments
+    env_name = "mngr_test-2026-03-27-02-02-17-ae01ccb71e"
+    _create_environment(env_name, modal)
+    assert env_name in modal._environments
 
 
 def test_lookup_persistent_app_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:
