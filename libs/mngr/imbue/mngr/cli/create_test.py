@@ -29,6 +29,7 @@ from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
+from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
@@ -1481,3 +1482,27 @@ def test_resolve_source_location_raises_outside_git_repo(
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,
         )
+
+
+# =============================================================================
+# Tests for _split_address_and_target_path
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_addr", "expected_path"),
+    [
+        pytest.param("foo", "foo", None, id="no_colon"),
+        pytest.param("", "", None, id="empty_string"),
+        pytest.param("foo:/tmp/work", "foo", Path("/tmp/work"), id="absolute_path"),
+        pytest.param(":./rel/path", "", Path("./rel/path"), id="relative_path"),
+        pytest.param("foo@host.modal:/root/work", "foo@host.modal", Path("/root/work"), id="full_address_with_path"),
+        pytest.param(":/tmp/work", "", Path("/tmp/work"), id="path_only"),
+        pytest.param("foo:", "foo", None, id="trailing_colon"),
+    ],
+)
+def test_split_address_and_target_path(raw: str, expected_addr: str, expected_path: Path | None) -> None:
+    """_split_address_and_target_path parses address and optional :PATH suffix."""
+    addr, path = _split_address_and_target_path(raw)
+    assert addr == expected_addr
+    assert path == expected_path

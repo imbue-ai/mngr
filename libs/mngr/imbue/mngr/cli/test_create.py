@@ -1167,23 +1167,20 @@ def test_transfer_none_with_different_target_path_rejected(
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--transfer=none with --target-path pointing to a different directory should be rejected."""
+    """--transfer=none with :PATH pointing to a different directory should be rejected."""
     different_dir = tmp_path / "different_target"
     different_dir.mkdir()
 
     result = cli_runner.invoke(
         create,
         [
-            "--name",
-            "test-none-diff-target",
+            f"test-none-diff-target:{different_dir}",
             "--command",
             "sleep 1",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "none",
-            "--target-path",
-            str(different_dir),
             "--no-connect",
             "--no-ensure-clean",
         ],
@@ -1192,6 +1189,102 @@ def test_transfer_none_with_different_target_path_rejected(
 
     assert result.exit_code != 0
     assert "incompatible" in result.output.lower()
+
+
+def test_conflicting_target_path_in_address_and_flag_rejected(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Specifying different :PATH in address and --target-path should be rejected."""
+    dir_a = tmp_path / "dir_a"
+    dir_a.mkdir()
+    dir_b = tmp_path / "dir_b"
+    dir_b.mkdir()
+
+    result = cli_runner.invoke(
+        create,
+        [
+            f"test-conflict:{dir_a}",
+            "--target-path",
+            str(dir_b),
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "conflicting target paths" in result.output.lower()
+
+
+@pytest.mark.tmux
+def test_same_target_path_in_address_and_flag_accepted(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Specifying the same path in :PATH and --target-path should not conflict."""
+    agent_name = f"test-same-tp-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = cli_runner.invoke(
+            create,
+            [
+                f"{agent_name}:{temp_work_dir}",
+                "--target-path",
+                str(temp_work_dir),
+                "--command",
+                "sleep 958374",
+                "--source",
+                str(temp_work_dir),
+                "--transfer=none",
+                "--no-connect",
+                "--no-ensure-clean",
+            ],
+            obj=plugin_manager,
+        )
+
+        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+
+
+@pytest.mark.tmux
+def test_target_path_flag_works_standalone(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--target-path without :PATH in the address should still work."""
+    agent_name = f"test-standalone-tp-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = cli_runner.invoke(
+            create,
+            [
+                agent_name,
+                "--target-path",
+                str(temp_work_dir),
+                "--command",
+                "sleep 958374",
+                "--source",
+                str(temp_work_dir),
+                "--transfer=none",
+                "--no-connect",
+                "--no-ensure-clean",
+            ],
+            obj=plugin_manager,
+        )
+
+        assert result.exit_code == 0, f"CLI failed with: {result.output}"
 
 
 def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
@@ -1208,7 +1301,7 @@ def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
     )
     source_location = HostLocation(host=local_host, path=temp_git_repo)
 
-    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx)
+    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx, target_path=None)
 
     assert result == TransferMode.GIT_MIRROR
 
