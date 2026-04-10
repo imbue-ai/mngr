@@ -1,7 +1,7 @@
 """Repro script: call list_agents repeatedly and monitor FD count.
 
 Usage:
-    uv run python scripts/qi/repro_list_agents_fd_leak.py [--interval SECS] [--iterations N]
+    uv run python scripts/qi/fd_leak/repro_list_agents_fd_leak.py [--interval SECS] [--iterations N]
 """
 
 import argparse

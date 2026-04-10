@@ -1,7 +1,7 @@
 """Repro: test discover_hosts_and_agents for each provider individually.
 
 Usage:
-    uv run python scripts/qi/repro_fd_leak_discover_only.py
+    uv run python scripts/qi/fd_leak/repro_fd_leak_discover_only.py
 """
 
 import gc
