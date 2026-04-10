@@ -133,7 +133,7 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
         case OutputFormat.HUMAN:
             if result.is_matched:
                 write_human_line(
-                    "Target '{}' reached state {} (after {:.1f}s)",
+                    "Target '{}' matched {} (after {:.1f}s)",
                     result.target.identifier,
                     result.matched_state,
                     result.elapsed_seconds,
