@@ -305,7 +305,7 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
     """Test that agent creation with git repo source succeeds on Modal.
 
     This tests that the file transfer flow completes without error:
-    1. Git repository is pushed via git push --mirror
+    1. All local branches and tags are pushed via git
     2. Untracked files are transferred via rsync
     3. Agent is created successfully
 
@@ -354,7 +354,7 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
     """Test that git transfer creates a new branch on the remote.
 
     This tests the git branch creation functionality during transfer:
-    1. Git repository is pushed via git push --mirror
+    1. All local branches and tags are pushed via git
     2. A new branch is created with the specified prefix
     """
     agent_name = f"test-modal-branch-{get_short_random_string()}"
