@@ -185,17 +185,18 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Title bar injection temporarily disabled for debugging.
-  // Uncomment to re-enable:
-  // mainWindow.webContents.on('dom-ready', () => {
-  //   const url = mainWindow.webContents.getURL();
-  //   if (url.startsWith('file://')) return;
-  //   const css = TITLEBAR_CSS + (isMac ? TITLEBAR_CSS_MAC : '');
-  //   mainWindow.webContents.insertCSS(css);
-  //   mainWindow.webContents.executeJavaScript(TITLEBAR_JS).catch((err) => {
-  //     console.error('Failed to inject title bar JS:', err);
-  //   });
-  // });
+  // Inject the custom title bar into every backend page.
+  // Skip file:// pages (loading/error screens).
+  mainWindow.webContents.on('dom-ready', () => {
+    const url = mainWindow.webContents.getURL();
+    if (url.startsWith('file://')) return;
+
+    const css = TITLEBAR_CSS + (isMac ? TITLEBAR_CSS_MAC : '');
+    mainWindow.webContents.insertCSS(css);
+    mainWindow.webContents.executeJavaScript(TITLEBAR_JS).catch((err) => {
+      console.error('Failed to inject title bar JS:', err);
+    });
+  });
 }
 
 function registerShortcuts() {
