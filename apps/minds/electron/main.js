@@ -81,10 +81,8 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  mainWindow.contentView.addChildView(titleBarView);
-  titleBarView.webContents.loadFile(path.join(__dirname, 'titlebar.html'));
-
-  // Content view (loads shell.html initially, then navigates to backend)
+  // Content view (loads shell.html initially, then navigates to backend).
+  // Added FIRST so it has lower z-order (title bar sits on top).
   contentView = new WebContentsView({
     webPreferences: {
       preload: preloadPath,
@@ -94,8 +92,11 @@ function createWindow() {
   });
   mainWindow.contentView.addChildView(contentView);
 
-  // Set initial bounds and update on resize
-  updateViewBounds();
+  // Title bar view (added SECOND so it has higher z-order and receives
+  // click events in its 38px area without blocking the content view below).
+  mainWindow.contentView.addChildView(titleBarView);
+  titleBarView.webContents.loadFile(path.join(__dirname, 'titlebar.html'));
+
   mainWindow.on('resize', updateViewBounds);
 
   // Forward page title changes from content view to title bar view
@@ -105,11 +106,12 @@ function createWindow() {
     }
   });
 
-  // BaseWindow doesn't emit ready-to-show (no built-in webContents),
-  // so show the window once the content view finishes its initial load.
+  // Show the window once the content view finishes its initial load,
+  // then set view bounds (getContentBounds is reliable after show).
   contentView.webContents.once('did-finish-load', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
+      updateViewBounds();
     }
   });
 
