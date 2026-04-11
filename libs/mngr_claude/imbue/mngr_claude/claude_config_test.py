@@ -22,6 +22,7 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_path
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
+from imbue.mngr_claude.claude_config import warn_undismissed_claude_dialogs
 
 
 def test_get_claude_config_path_returns_home_dot_claude_json() -> None:
@@ -752,3 +753,108 @@ def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
     result = get_user_claude_config_path()
     assert result == custom_dir / ".claude.json"
+
+
+# =============================================================================
+# Tests for warn_undismissed_claude_dialogs
+# =============================================================================
+
+_FIX_COMMAND = "mngr config set local_system_mutations.accept_permission_dialogs YES"
+
+
+def test_warn_undismissed_claude_dialogs_returns_empty_when_all_dismissed(tmp_path: Path) -> None:
+    """warn_undismissed_claude_dialogs returns [] when trust, effort, and onboarding are all set."""
+    config_file = get_claude_config_path()
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+
+    config = {
+        "effortCalloutDismissed": True,
+        "hasCompletedOnboarding": True,
+        "projects": {
+            str(source_path): {"hasTrustDialogAccepted": True},
+        },
+    }
+    config_file.write_text(json.dumps(config, indent=2))
+
+    warnings = warn_undismissed_claude_dialogs(config_file, source_path)
+
+    assert warnings == []
+
+
+def test_warn_undismissed_claude_dialogs_warns_when_source_not_trusted(tmp_path: Path) -> None:
+    """warn_undismissed_claude_dialogs returns a warning when source is not trusted."""
+    config_file = get_claude_config_path()
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+
+    config = {
+        "effortCalloutDismissed": True,
+        "hasCompletedOnboarding": True,
+        "projects": {},
+    }
+    config_file.write_text(json.dumps(config, indent=2))
+
+    warnings = warn_undismissed_claude_dialogs(config_file, source_path)
+
+    assert len(warnings) == 1
+    assert str(source_path) in warnings[0]
+    assert _FIX_COMMAND in warnings[0]
+
+
+def test_warn_undismissed_claude_dialogs_warns_when_effort_callout_not_dismissed(tmp_path: Path) -> None:
+    """warn_undismissed_claude_dialogs returns a warning when effort callout is not dismissed."""
+    config_file = get_claude_config_path()
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+
+    config = {
+        "effortCalloutDismissed": False,
+        "hasCompletedOnboarding": True,
+        "projects": {
+            str(source_path): {"hasTrustDialogAccepted": True},
+        },
+    }
+    config_file.write_text(json.dumps(config, indent=2))
+
+    warnings = warn_undismissed_claude_dialogs(config_file, source_path)
+
+    assert len(warnings) == 1
+    assert _FIX_COMMAND in warnings[0]
+
+
+def test_warn_undismissed_claude_dialogs_warns_when_onboarding_not_completed(tmp_path: Path) -> None:
+    """warn_undismissed_claude_dialogs returns a warning when onboarding is not completed."""
+    config_file = get_claude_config_path()
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+
+    config = {
+        "effortCalloutDismissed": True,
+        "hasCompletedOnboarding": False,
+        "projects": {
+            str(source_path): {"hasTrustDialogAccepted": True},
+        },
+    }
+    config_file.write_text(json.dumps(config, indent=2))
+
+    warnings = warn_undismissed_claude_dialogs(config_file, source_path)
+
+    assert len(warnings) == 1
+    assert _FIX_COMMAND in warnings[0]
+
+
+def test_warn_undismissed_claude_dialogs_returns_multiple_warnings(tmp_path: Path) -> None:
+    """warn_undismissed_claude_dialogs returns one warning per undismissed dialog."""
+    config_file = get_claude_config_path()
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+
+    # No trust, no effort callout dismissed, no onboarding
+    config_file.write_text(json.dumps({}, indent=2))
+
+    warnings = warn_undismissed_claude_dialogs(config_file, source_path)
+
+    assert len(warnings) == 3
+    for warning in warnings:
+        assert _FIX_COMMAND in warning
