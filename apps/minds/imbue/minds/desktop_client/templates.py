@@ -47,8 +47,8 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .create-btn:hover { background: #334155; }
     table { width: 100%; border-collapse: collapse; }
     thead th {
-      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 600;
-      color: #64748b; border-bottom: 1px solid #e2e8f0;
+      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 400;
+      color: #94a3b8; border-bottom: 1px solid #e2e8f0;
     }
     thead th:last-child { text-align: right; }
     tbody tr { cursor: pointer; transition: background 0.1s; }
@@ -63,10 +63,11 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .menu-wrapper { position: relative; display: inline-block; }
     .menu-btn {
       background: none; border: 1px solid transparent; border-radius: 4px;
-      cursor: pointer; padding: 4px 8px; font-size: 18px; color: #64748b;
-      line-height: 1;
+      cursor: pointer; padding: 4px 6px; color: #94a3b8; line-height: 1;
+      display: flex; align-items: center;
     }
-    .menu-btn:hover { background: #e2e8f0; border-color: #cbd5e1; }
+    .menu-btn:hover { background: #e2e8f0; border-color: #cbd5e1; color: #64748b; }
+    .menu-btn svg { width: 16px; height: 16px; }
     .menu-dropdown {
       display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
       background: white; border: 1px solid #e2e8f0; border-radius: 6px;
@@ -107,7 +108,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
           <td><span class="shared-with">No one</span></td>
           <td>
             <div class="menu-wrapper">
-              <button class="menu-btn" onclick="event.stopPropagation(); toggleMenu('{{ agent_id }}')">&middot;&middot;&middot;</button>
+              <button class="menu-btn" onclick="event.stopPropagation(); toggleMenu('{{ agent_id }}')"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
               <div class="menu-dropdown" id="menu-{{ agent_id }}">
                 {% if telegram_enabled %}
                   {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
