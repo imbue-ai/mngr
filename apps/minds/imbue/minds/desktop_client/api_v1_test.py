@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from starlette.testclient import TestClient
@@ -11,6 +10,8 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.primitives import ServerName
+from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.mngr.primitives import AgentId
 
 
@@ -187,3 +188,110 @@ def test_notification_defaults_urgency_to_normal(tmp_path: Path) -> None:
         headers=_auth_headers(api_key),
     )
     assert response.status_code == 200
+
+
+def test_api_v1_rejects_empty_bearer_token(tmp_path: Path) -> None:
+    client, _agent_id, _api_key, _paths = _create_test_api_client(tmp_path)
+    response = client.post(
+        "/api/v1/notifications",
+        json={"message": "test"},
+        headers={"Authorization": "Bearer "},
+    )
+    assert response.status_code == 401
+
+
+# -- Telegram routes with orchestrator --
+
+
+def _create_test_api_client_with_telegram(
+    tmp_path: Path,
+) -> tuple[TestClient, AgentId, str, WorkspacePaths]:
+    """Create a client with a TelegramSetupOrchestrator."""
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    auth_store = FileAuthStore(data_directory=paths.auth_dir)
+
+    agent_id = AgentId()
+    api_key = generate_api_key()
+    save_api_key_hash(paths.data_dir, agent_id, hash_api_key(api_key))
+
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    notification_dispatcher = NotificationDispatcher(is_electron=True)
+    telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        notification_dispatcher=notification_dispatcher,
+        paths=paths,
+        telegram_orchestrator=telegram_orchestrator,
+    )
+    client = TestClient(app)
+    return client, agent_id, api_key, paths
+
+
+def test_telegram_setup_starts_with_orchestrator(tmp_path: Path) -> None:
+    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    response = client.post(
+        f"/api/v1/agents/{agent_id}/telegram",
+        json={"agent_name": "test-bot"},
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == str(agent_id)
+    assert data["status"] == "CHECKING_CREDENTIALS"
+
+
+def test_telegram_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
+    client, _agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    unknown_id = AgentId()
+    response = client.get(
+        f"/api/v1/agents/{unknown_id}/telegram",
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 404
+
+
+# -- Cloudflare enable with backend resolver --
+
+
+def _create_test_api_client_with_backend(
+    tmp_path: Path,
+    agent_id: AgentId,
+    server_name: str = "web",
+    backend_url: str = "http://127.0.0.1:9000",
+) -> tuple[TestClient, str, WorkspacePaths]:
+    """Create a client with a backend resolver that has a known agent/server."""
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    auth_store = FileAuthStore(data_directory=paths.auth_dir)
+
+    api_key = generate_api_key()
+    save_api_key_hash(paths.data_dir, agent_id, hash_api_key(api_key))
+
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {server_name: backend_url}},
+    )
+    notification_dispatcher = NotificationDispatcher(is_electron=True)
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        notification_dispatcher=notification_dispatcher,
+        paths=paths,
+    )
+    client = TestClient(app)
+    return client, api_key, paths
+
+
+def test_cloudflare_enable_returns_404_for_unknown_server(tmp_path: Path) -> None:
+    """Cloudflare enable without a configured cloudflare client still returns 501."""
+    agent_id = AgentId()
+    client, api_key, _paths = _create_test_api_client_with_backend(tmp_path, agent_id)
+    response = client.put(
+        f"/api/v1/agents/{agent_id}/servers/unknown/cloudflare",
+        headers=_auth_headers(api_key),
+    )
+    # No cloudflare client configured, so returns 501
+    assert response.status_code == 501
