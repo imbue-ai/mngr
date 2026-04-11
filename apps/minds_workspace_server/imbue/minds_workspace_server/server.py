@@ -394,9 +394,9 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
     """Create a new worktree agent."""
     agent_manager: AgentManager = request.app.state.agent_manager
     body = await request.json()
-    create_request = CreateWorktreeRequest(**body)
 
     try:
+        create_request = CreateWorktreeRequest(**body)
         agent_name = create_request.name
         selected_agent_id = create_request.selected_agent_id or agent_manager.get_own_agent_id()
         agent_id = agent_manager.create_worktree_agent(agent_name, selected_agent_id)
@@ -404,7 +404,7 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
         )
-    except (AgentCreationError, OSError) as e:
+    except (AgentCreationError, OSError, ValueError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=400)
 
@@ -413,9 +413,9 @@ async def _create_chat_agent(request: Request) -> JSONResponse:
     """Create a new chat agent in the same work directory."""
     agent_manager: AgentManager = request.app.state.agent_manager
     body = await request.json()
-    create_request = CreateChatRequest(**body)
 
     try:
+        create_request = CreateChatRequest(**body)
         agent_id = agent_manager.create_chat_agent(
             create_request.name, create_request.parent_agent_id
         )
@@ -423,7 +423,7 @@ async def _create_chat_agent(request: Request) -> JSONResponse:
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
         )
-    except (AgentCreationError, OSError) as e:
+    except (AgentCreationError, OSError, ValueError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=400)
 
