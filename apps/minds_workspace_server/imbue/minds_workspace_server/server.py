@@ -18,19 +18,28 @@ from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger as _loguru_logger
+from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import send_message
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
+from imbue.minds_workspace_server.models import CreateAgentResponse
+from imbue.minds_workspace_server.models import CreateChatRequest
+from imbue.minds_workspace_server.models import CreateWorktreeRequest
 from imbue.minds_workspace_server.models import ErrorResponse
+from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
+from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 logger = _loguru_logger
 
@@ -50,6 +59,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.event_queues = event_queues
     application.state.watchers = {}
 
+    broadcaster = WebSocketBroadcaster()
+    agent_manager = AgentManager(broadcaster)
+    application.state.broadcaster = broadcaster
+    application.state.agent_manager = agent_manager
+    agent_manager.start()
+
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.register_event_broadcaster(broadcaster=event_queues.broadcast)
 
@@ -61,6 +76,8 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
         def _graceful_shutdown_handler(signum: int, frame: object) -> None:
             event_queues.shutdown()
+            broadcaster.shutdown()
+            agent_manager.stop()
             _stop_all_watchers(application)
             handler = original_sigint_handler
             if callable(handler):
@@ -71,6 +88,8 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     yield
 
     event_queues.shutdown()
+    broadcaster.shutdown()
+    agent_manager.stop()
     _stop_all_watchers(application)
     if is_main_thread and original_sigint_handler is not None:
         signal.signal(signal.SIGINT, original_sigint_handler)
@@ -363,6 +382,127 @@ def _serve_static_file(basename: str, request: Request) -> Response:
     return FileResponse(file_path)
 
 
+def _random_name_endpoint(request: Request) -> JSONResponse:
+    """Generate a random agent name."""
+    agent_manager: AgentManager = request.app.state.agent_manager
+    name = agent_manager.generate_random_name()
+    return JSONResponse(content=RandomNameResponse(name=name).model_dump())
+
+
+async def _create_worktree_agent(request: Request) -> JSONResponse:
+    """Create a new worktree agent."""
+    agent_manager: AgentManager = request.app.state.agent_manager
+    body = await request.json()
+    create_request = CreateWorktreeRequest(**body)
+
+    try:
+        agent_name = create_request.name
+        selected_agent_id = body.get("selected_agent_id", agent_manager._own_agent_id)
+        agent_id = agent_manager.create_worktree_agent(agent_name, selected_agent_id)
+        return JSONResponse(
+            content=CreateAgentResponse(agent_id=agent_id).model_dump(),
+            status_code=201,
+        )
+    except (ValueError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+
+async def _create_chat_agent(request: Request) -> JSONResponse:
+    """Create a new chat agent in the same work directory."""
+    agent_manager: AgentManager = request.app.state.agent_manager
+    body = await request.json()
+    create_request = CreateChatRequest(**body)
+
+    try:
+        agent_id = agent_manager.create_chat_agent(
+            create_request.name, create_request.parent_agent_id
+        )
+        return JSONResponse(
+            content=CreateAgentResponse(agent_id=agent_id).model_dump(),
+            status_code=201,
+        )
+    except (ValueError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+
+async def _ws_endpoint(websocket: WebSocket) -> None:
+    """Unified WebSocket for agent state and application updates."""
+    await websocket.accept()
+    agent_manager: AgentManager = websocket.app.state.agent_manager
+    ws_broadcaster: WebSocketBroadcaster = websocket.app.state.broadcaster
+
+    client_queue = ws_broadcaster.register()
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "agents_updated",
+                    "agents": agent_manager.get_agents_serialized(),
+                }
+            )
+        )
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "applications_updated",
+                    "applications": agent_manager.get_applications_serialized(),
+                }
+            )
+        )
+
+        for proto in agent_manager.get_proto_agents():
+            await websocket.send_text(
+                json.dumps({"type": "proto_agent_created", **proto})
+            )
+
+        shutdown = False
+        while not shutdown:
+            try:
+                message = await run_in_threadpool(client_queue.get, timeout=30.0)
+                if message is None:
+                    shutdown = True
+                else:
+                    await websocket.send_text(message)
+            except queue.Empty:
+                continue
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_broadcaster.unregister(client_queue)
+
+
+async def _proto_agent_logs_endpoint(websocket: WebSocket, agent_id: str) -> None:
+    """WebSocket for streaming proto-agent creation logs."""
+    await websocket.accept()
+    agent_manager: AgentManager = websocket.app.state.agent_manager
+
+    log_queue = agent_manager.get_log_queue(agent_id)
+    if log_queue is None:
+        await websocket.send_text(
+            json.dumps(
+                {"done": True, "success": False, "error": "Proto-agent not found"}
+            )
+        )
+        await websocket.close()
+        return
+
+    try:
+        finished = False
+        while not finished:
+            try:
+                message = await run_in_threadpool(log_queue.get, timeout=1.0)
+                if message is None:
+                    finished = True
+                else:
+                    await websocket.send_text(message)
+            except queue.Empty:
+                continue
+    except WebSocketDisconnect:
+        pass
+
+
 def create_application(
     config: Config | None = None,
     provider_names: tuple[str, ...] | None = None,
@@ -381,6 +521,9 @@ def create_application(
     application.add_api_route("/", _index, methods=["GET"])
     application.add_api_route("/favicon.ico", _favicon, methods=["GET"])
     application.add_api_route("/api/agents", _list_agents_endpoint, methods=["GET"])
+    application.add_api_route("/api/agents/create-worktree", _create_worktree_agent, methods=["POST"])
+    application.add_api_route("/api/agents/create-chat", _create_chat_agent, methods=["POST"])
+    application.add_api_route("/api/random-name", _random_name_endpoint, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
@@ -392,6 +535,8 @@ def create_application(
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/stream", _stream_subagent_events, methods=["GET"]
     )
+    application.add_websocket_route("/api/ws", _ws_endpoint)
+    application.add_websocket_route("/api/proto-agents/{agent_id}/logs", _proto_agent_logs_endpoint)
     application.add_api_route("/plugins/{basename}", _serve_static_file, methods=["GET"])
 
     assets_directory = STATIC_DIRECTORY / "assets"

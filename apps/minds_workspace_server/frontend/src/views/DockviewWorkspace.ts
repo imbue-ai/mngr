@@ -8,27 +8,38 @@ import {
   DockviewComponent,
   themeLight,
   type IContentRenderer,
-  type GroupPanelPartInitParameters,
   type IHeaderActionsRenderer,
   type SerializedDockview,
 } from "dockview-core";
 import { ChatPanel } from "./ChatPanel";
 import { IframePanel } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
-import { apiUrl } from "../base-path";
+import { ProtoAgentLogView } from "./ProtoAgentLogView";
+import { CreateAgentModal } from "./CreateAgentModal";
+import { apiUrl, getBasePath } from "../base-path";
+import {
+  getAgentById,
+  getChatAgentsForParent,
+  getApplicationsForAgent,
+  getChatProtoAgentsForParent,
+} from "../models/AgentManager";
+import { selectAgent } from "../navigation";
 
-const TERMINAL_URL = "http://localhost:7681";
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-type PanelType = "chat" | "terminal" | "iframe" | "subagent";
+type PanelType = "chat" | "terminal" | "iframe" | "subagent" | "proto-agent";
 
 interface PanelParams {
   panelType: PanelType;
   agentId: string;
+  chatAgentId?: string;
   url?: string;
   title?: string;
   subagentSessionId?: string;
 }
+
+let showNewChatModal = false;
+let newChatParentAgentId: string | null = null;
 
 interface SavedLayout {
   dockview: SerializedDockview;
@@ -69,6 +80,69 @@ function createMithrilRenderer(
   };
 }
 
+function buildDropdownItems(
+  agentId: string,
+  dockviewState: AgentDockviewState,
+): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
+  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
+
+  // Section 1: Chat entries -- one per agent in this worktree
+  const selectedAgent = getAgentById(agentId);
+  if (selectedAgent) {
+    items.push({
+      label: `Chat (${selectedAgent.name})`,
+      action: () => focusOrCreateChatPanelForAgent(agentId, agentId, selectedAgent.name, dockviewState),
+    });
+  }
+  const chatAgents = getChatAgentsForParent(agentId);
+  for (const chatAgent of chatAgents) {
+    items.push({
+      label: `Chat (${chatAgent.name})`,
+      action: () => focusOrCreateChatPanelForAgent(agentId, chatAgent.id, chatAgent.name, dockviewState),
+    });
+  }
+  const chatProtos = getChatProtoAgentsForParent(agentId);
+  for (const proto of chatProtos) {
+    items.push({
+      label: `Chat (${proto.name}) - creating...`,
+      action: () => addProtoAgentPanel(agentId, proto.agent_id, proto.name, dockviewState),
+    });
+  }
+
+  // "New Chat" entry
+  items.push({
+    label: "New Chat",
+    action: () => {
+      showNewChatModal = true;
+      newChatParentAgentId = agentId;
+      m.redraw();
+    },
+    dividerAfter: true,
+  });
+
+  // Section 2: Applications from runtime/applications.toml
+  const apps = getApplicationsForAgent(agentId);
+  if (apps.length > 0) {
+    for (const app of apps) {
+      const basePath = getBasePath();
+      const proxyUrl = `${basePath.replace(/\/web\/?$/, "")}/../${app.name}/`.replace(/\/\.\.\//g, "/");
+      items.push({
+        label: app.name,
+        action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
+      });
+    }
+    items[items.length - 1].dividerAfter = true;
+  }
+
+  // Section 3: Custom URL
+  items.push({
+    label: "Custom URL",
+    action: () => showCustomUrlDialog(agentId, dockviewState),
+  });
+
+  return items;
+}
+
 function createAddTabButton(agentId: string, dockviewState: AgentDockviewState): IHeaderActionsRenderer {
   const element = document.createElement("div");
   element.className = "dockview-add-tab-wrapper";
@@ -83,45 +157,38 @@ function createAddTabButton(agentId: string, dockviewState: AgentDockviewState):
   dropdown.className = "dockview-add-tab-dropdown";
   dropdown.style.display = "none";
 
-  const items: Array<{ label: string; action: () => void }> = [
-    {
-      label: "Chat",
-      action: () => {
-        focusOrCreateChatPanel(agentId, dockviewState);
-      },
-    },
-    {
-      label: "Terminal",
-      action: () => {
-        openIframeTab(agentId, dockviewState, TERMINAL_URL, "Terminal", "terminal");
-      },
-    },
-    {
-      label: "Custom URL",
-      action: () => {
-        showCustomUrlDialog(agentId, dockviewState);
-      },
-    },
-  ];
-
-  for (const item of items) {
-    const menuItem = document.createElement("div");
-    menuItem.className = "dockview-add-tab-dropdown-item";
-    menuItem.textContent = item.label;
-    menuItem.addEventListener("click", (e) => {
-      e.stopPropagation();
-      dropdown.style.display = "none";
-      item.action();
-    });
-    dropdown.appendChild(menuItem);
-  }
-
   element.appendChild(dropdown);
 
   button.addEventListener("click", (e) => {
     e.stopPropagation();
     const isVisible = dropdown.style.display !== "none";
-    dropdown.style.display = isVisible ? "none" : "block";
+    if (isVisible) {
+      dropdown.style.display = "none";
+    } else {
+      // Rebuild dropdown items each time (dynamic content)
+      dropdown.innerHTML = "";
+      const items = buildDropdownItems(agentId, dockviewState);
+      for (const item of items) {
+        const menuItem = document.createElement("div");
+        menuItem.className = "dockview-add-tab-dropdown-item";
+        menuItem.textContent = item.label;
+        menuItem.addEventListener("click", (clickEvent) => {
+          clickEvent.stopPropagation();
+          dropdown.style.display = "none";
+          item.action();
+        });
+        dropdown.appendChild(menuItem);
+
+        if (item.dividerAfter) {
+          const divider = document.createElement("div");
+          divider.className = "dockview-add-tab-dropdown-divider";
+          divider.style.borderTop = "1px solid #e5e7eb";
+          divider.style.margin = "4px 0";
+          dropdown.appendChild(divider);
+        }
+      }
+      dropdown.style.display = "block";
+    }
   });
 
   // Close dropdown when clicking outside
@@ -141,32 +208,65 @@ function createAddTabButton(agentId: string, dockviewState: AgentDockviewState):
   };
 }
 
-function focusOrCreateChatPanel(agentId: string, state: AgentDockviewState): void {
-  // Chat is singleton -- focus if it exists
-  const existingPanel = state.component.panels.find((p) => {
-    const params = state.panelParams.get(p.id);
-    return params?.panelType === "chat";
-  });
+function focusOrCreateChatPanelForAgent(
+  agentId: string,
+  chatAgentId: string,
+  chatAgentName: string,
+  state: AgentDockviewState,
+): void {
+  const panelId = `chat-${chatAgentId}`;
+  const existingPanel = state.component.panels.find((p) => p.id === panelId);
   if (existingPanel) {
     if (!existingPanel.api.isActive) {
       state.component.setActivePanel(existingPanel);
     }
     return;
   }
-  // Should not normally happen since chat is created on init and unclosable
-  addChatPanel(agentId, state);
+  addChatPanel(agentId, chatAgentId, chatAgentName, state);
 }
 
-function addChatPanel(agentId: string, state: AgentDockviewState): void {
-  const panelId = `chat-${agentId}`;
-  const params: PanelParams = { panelType: "chat", agentId };
+function addChatPanel(
+  agentId: string,
+  chatAgentId: string,
+  chatAgentName: string,
+  state: AgentDockviewState,
+): void {
+  const panelId = `chat-${chatAgentId}`;
+  const title = chatAgentId === agentId ? "Chat" : `Chat (${chatAgentName})`;
+  const params: PanelParams = { panelType: "chat", agentId, chatAgentId };
   state.panelParams.set(panelId, params);
   state.component.addPanel({
     id: panelId,
     component: "chat",
-    title: "Chat",
+    title,
     params,
     renderer: "always",
+  });
+}
+
+function addProtoAgentPanel(
+  agentId: string,
+  protoAgentId: string,
+  name: string,
+  state: AgentDockviewState,
+): void {
+  const panelId = `proto-agent-${protoAgentId}`;
+  const existingPanel = state.component.panels.find((p) => p.id === panelId);
+  if (existingPanel) {
+    state.component.setActivePanel(existingPanel);
+    return;
+  }
+  const params: PanelParams = {
+    panelType: "proto-agent",
+    agentId: protoAgentId,
+    title: `Creating: ${name}`,
+  };
+  state.panelParams.set(panelId, params);
+  state.component.addPanel({
+    id: panelId,
+    component: "proto-agent",
+    title: `Creating: ${name}`,
+    params,
   });
 }
 
@@ -351,7 +451,9 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
 
       switch (options.name) {
         case "chat":
-          return createMithrilRenderer(ChatPanel, { agentId: params?.agentId ?? agentId });
+          return createMithrilRenderer(ChatPanel, {
+            agentId: params?.chatAgentId ?? params?.agentId ?? agentId,
+          });
 
         case "iframe":
           return createMithrilRenderer(IframePanel, {
@@ -365,20 +467,17 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
             subagentSessionId: params?.subagentSessionId ?? "",
           });
 
+        case "proto-agent":
+          return createMithrilRenderer(ProtoAgentLogView, {
+            agentId: params?.agentId ?? agentId,
+          });
+
         default:
           return createMithrilRenderer(ChatPanel, { agentId });
       }
     },
     createLeftHeaderActionComponent() {
       return createAddTabButton(agentId, state);
-    },
-    createTabComponent(options) {
-      const params = panelParams.get(options.id);
-      if (params?.panelType === "chat") {
-        // Custom tab without close button for chat
-        return createUnclosableTab();
-      }
-      return undefined; // Use default tab (with close button)
     },
   });
 
@@ -395,40 +494,6 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
   });
 
   return state;
-}
-
-function createUnclosableTab(): {
-  element: HTMLElement;
-  init: (params: GroupPanelPartInitParameters) => void;
-  dispose?: () => void;
-} {
-  const element = document.createElement("div");
-  element.className = "dv-default-tab";
-
-  const content = document.createElement("div");
-  content.className = "dv-default-tab-content";
-  element.appendChild(content);
-
-  // No action/close button
-
-  let disposables: Array<{ dispose: () => void }> = [];
-
-  return {
-    element,
-    init(params: GroupPanelPartInitParameters) {
-      content.textContent = params.title ?? "";
-      const sub = params.api.onDidTitleChange((event) => {
-        content.textContent = event.title;
-      });
-      disposables.push(sub);
-    },
-    dispose() {
-      for (const d of disposables) {
-        d.dispose();
-      }
-      disposables = [];
-    },
-  };
 }
 
 async function initializeAgentDockview(agentId: string, parentElement: HTMLElement): Promise<void> {
@@ -458,8 +523,9 @@ async function initializeAgentDockview(agentId: string, parentElement: HTMLEleme
     }
   }
 
-  // Default layout: single chat tab
-  addChatPanel(agentId, state);
+  // Default layout: single chat tab for this agent
+  const agent = getAgentById(agentId);
+  addChatPanel(agentId, agentId, agent?.name ?? "Chat", state);
 }
 
 function showAgentDockview(agentId: string): void {
@@ -528,6 +594,23 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
     return m("div", {
       class: "dockview-workspace",
       style: "width: 100%; height: 100%;",
-    });
+    }, [
+      showNewChatModal && newChatParentAgentId
+        ? m(CreateAgentModal, {
+            mode: "chat",
+            parentAgentId: newChatParentAgentId,
+            onCreated(newAgentId: string) {
+              showNewChatModal = false;
+              const state = agentDockviews.get(agentId);
+              if (state) {
+                addProtoAgentPanel(agentId, newAgentId, "new chat", state);
+              }
+            },
+            onCancel() {
+              showNewChatModal = false;
+            },
+          })
+        : null,
+    ]);
   },
 };

@@ -3,6 +3,7 @@ import type { LlmApi } from "./llm-api";
 import { runHook } from "./hooks";
 import { getPluginRouteMithrilComponents } from "./plugin-routes";
 import { getBasePath } from "./base-path";
+import { initAgentManager } from "./models/AgentManager";
 import m from "mithril";
 import "./style.css";
 import { App } from "./views/App";
@@ -18,6 +19,7 @@ window.$llm = llmApi;
 
 async function bootstrap(): Promise<void> {
   m.route.prefix = getBasePath();
+  initAgentManager();
   const rootElement = document.getElementById("app");
   if (rootElement) {
     const pluginRoutes = getPluginRouteMithrilComponents();
