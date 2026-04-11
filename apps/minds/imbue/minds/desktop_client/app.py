@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
@@ -1095,7 +1096,7 @@ def create_desktop_client(
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
-    paths: "WorkspacePaths | None" = None,
+    paths: WorkspacePaths | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1114,8 +1115,6 @@ def create_desktop_client(
     When notification_dispatcher and paths are provided, the /api/v1/ REST API
     router is mounted with API key authentication and notification support.
     """
-    from imbue.minds.config.data_types import WorkspacePaths as _WorkspacePaths
-
     is_externally_managed_client = http_client is not None
 
     @asynccontextmanager

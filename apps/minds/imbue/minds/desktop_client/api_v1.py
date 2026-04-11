@@ -5,12 +5,12 @@ Telegram bot setup, and user notifications. Authentication uses
 per-agent API keys (Bearer tokens) with SHA-256 hash lookup.
 """
 
-import asyncio
 import json
 from typing import Annotated
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import Response
 
@@ -45,8 +45,6 @@ def _authenticate_api_key(request: Request) -> AgentId:
     Returns the AgentId of the caller. Raises HTTPException with 401 if the
     token is missing, malformed, or does not match any stored API key hash.
     """
-    from fastapi import HTTPException
-
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
@@ -110,17 +108,14 @@ async def _handle_cloudflare_enable(
             return _json_error("Server not found locally", 404)
         service_url = backend_url
 
-    loop = asyncio.get_running_loop()
-    is_success = await loop.run_in_executor(
-        None, cf_client.add_service, parsed_id, server_name, service_url
-    )
+    is_success = cf_client.add_service(parsed_id, server_name, service_url)
 
     if is_success:
         return _json_response({"ok": True})
     return _json_error("Cloudflare API call failed", 502)
 
 
-async def _handle_cloudflare_disable(
+def _handle_cloudflare_disable(
     agent_id: str,
     server_name: str,
     request: Request,
@@ -133,10 +128,7 @@ async def _handle_cloudflare_disable(
 
     parsed_id = AgentId(agent_id)
 
-    loop = asyncio.get_running_loop()
-    is_success = await loop.run_in_executor(
-        None, cf_client.remove_service, parsed_id, server_name
-    )
+    is_success = cf_client.remove_service(parsed_id, server_name)
 
     if is_success:
         return _json_response({"ok": True})
@@ -161,7 +153,8 @@ async def _handle_telegram_setup(
     agent_name = str(parsed_id)[:8]
     try:
         body = await request.json()
-        agent_name = str(body.get("agent_name", agent_name)).strip() or agent_name
+        raw_name = body.get("agent_name", agent_name)
+        agent_name = str(raw_name).strip() if raw_name else agent_name
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -194,7 +187,7 @@ def _handle_telegram_status(
             })
         return _json_error("No Telegram setup in progress for this agent", 404)
 
-    result: dict[str, str | None] = {
+    result: dict[str, object] = {
         "agent_id": str(info.agent_id),
         "status": str(info.status),
     }

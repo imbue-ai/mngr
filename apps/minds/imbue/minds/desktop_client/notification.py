@@ -5,18 +5,17 @@ toast popup depending on whether the server is running inside the
 Electron desktop app.
 """
 
-import json
-import sys
 import threading
 import tkinter as tk
 from enum import auto
-from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.output import emit_event
 
 
 class NotificationUrgency(UpperCaseStrEnum):
@@ -50,16 +49,101 @@ def _dispatch_electron_notification(
     agent_display_name: str,
 ) -> None:
     """Write notification as JSONL to stdout for the Electron main process."""
-    event = {
-        "event": "notification",
+    data: dict[str, str] = {
         "message": request.message,
         "urgency": str(request.urgency),
         "agent_name": agent_display_name,
     }
     if request.title is not None:
-        event["title"] = request.title
-    sys.stdout.write(json.dumps(event) + "\n")
-    sys.stdout.flush()
+        data["title"] = request.title
+    emit_event("notification", data, OutputFormat.JSONL)
+
+
+def _run_tkinter_toast(
+    title: str,
+    message: str,
+    urgency: NotificationUrgency,
+    agent_display_name: str,
+) -> None:
+    """Create and display a tkinter toast window. Runs on a background thread."""
+    try:
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+
+        urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
+
+        frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # Urgency indicator bar
+        indicator = tk.Frame(frame, bg=urgency_color, width=4)
+        indicator.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        content = tk.Frame(frame, bg="#1e293b")
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Agent name
+        tk.Label(
+            content,
+            text=f"From: {agent_display_name}",
+            fg="#94a3b8",
+            bg="#1e293b",
+            font=("sans-serif", 9),
+            anchor="w",
+        ).pack(fill=tk.X)
+
+        # Title
+        tk.Label(
+            content,
+            text=title,
+            fg="#f1f5f9",
+            bg="#1e293b",
+            font=("sans-serif", 11, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+
+        # Message
+        tk.Label(
+            content,
+            text=message,
+            fg="#cbd5e1",
+            bg="#1e293b",
+            font=("sans-serif", 10),
+            anchor="w",
+            wraplength=280,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(4, 0))
+
+        # Dismiss hint
+        tk.Label(
+            content,
+            text="Click to dismiss",
+            fg="#64748b",
+            bg="#1e293b",
+            font=("sans-serif", 8),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 0))
+
+        # Position in bottom-right corner
+        root.update_idletasks()
+        width = 320
+        height = root.winfo_reqheight()
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        x_position = screen_width - width - 20
+        y_position = screen_height - height - 60
+        root.geometry(f"{width}x{height}+{x_position}+{y_position}")
+
+        # Click anywhere to dismiss
+        root.bind("<Button-1>", lambda _event: root.destroy())
+        frame.bind("<Button-1>", lambda _event: root.destroy())
+        for child in content.winfo_children():
+            child.bind("<Button-1>", lambda _event: root.destroy())
+
+        root.mainloop()
+    except tk.TclError as e:
+        logger.warning("Failed to show tkinter notification: {}", e)
 
 
 def _show_tkinter_toast(
@@ -67,89 +151,13 @@ def _show_tkinter_toast(
     agent_display_name: str,
 ) -> None:
     """Show a small always-on-top toast window in the bottom-right corner."""
-
-    def _run_toast() -> None:
-        try:
-            root = tk.Tk()
-            root.overrideredirect(True)
-            root.attributes("-topmost", True)
-
-            urgency_color = _URGENCY_COLOR_BY_LEVEL.get(request.urgency, "#eab308")
-
-            frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
-            frame.pack(fill=tk.BOTH, expand=True)
-
-            # Urgency indicator bar
-            indicator = tk.Frame(frame, bg=urgency_color, width=4)
-            indicator.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
-
-            content = tk.Frame(frame, bg="#1e293b")
-            content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-            # Agent name
-            tk.Label(
-                content,
-                text=f"From: {agent_display_name}",
-                fg="#94a3b8",
-                bg="#1e293b",
-                font=("sans-serif", 9),
-                anchor="w",
-            ).pack(fill=tk.X)
-
-            # Title
-            display_title = request.title or "Notification"
-            tk.Label(
-                content,
-                text=display_title,
-                fg="#f1f5f9",
-                bg="#1e293b",
-                font=("sans-serif", 11, "bold"),
-                anchor="w",
-            ).pack(fill=tk.X)
-
-            # Message
-            tk.Label(
-                content,
-                text=request.message,
-                fg="#cbd5e1",
-                bg="#1e293b",
-                font=("sans-serif", 10),
-                anchor="w",
-                wraplength=280,
-                justify=tk.LEFT,
-            ).pack(fill=tk.X, pady=(4, 0))
-
-            # Dismiss hint
-            tk.Label(
-                content,
-                text="Click to dismiss",
-                fg="#64748b",
-                bg="#1e293b",
-                font=("sans-serif", 8),
-                anchor="w",
-            ).pack(fill=tk.X, pady=(4, 0))
-
-            # Position in bottom-right corner
-            root.update_idletasks()
-            width = 320
-            height = root.winfo_reqheight()
-            screen_width = root.winfo_screenwidth()
-            screen_height = root.winfo_screenheight()
-            x_position = screen_width - width - 20
-            y_position = screen_height - height - 60
-            root.geometry(f"{width}x{height}+{x_position}+{y_position}")
-
-            # Click anywhere to dismiss
-            root.bind("<Button-1>", lambda _event: root.destroy())
-            frame.bind("<Button-1>", lambda _event: root.destroy())
-            for child in content.winfo_children():
-                child.bind("<Button-1>", lambda _event: root.destroy())
-
-            root.mainloop()
-        except tk.TclError as e:
-            logger.warning("Failed to show tkinter notification: {}", e)
-
-    thread = threading.Thread(target=_run_toast, daemon=True, name="tkinter-toast")
+    display_title = request.title or "Notification"
+    thread = threading.Thread(
+        target=_run_tkinter_toast,
+        args=(display_title, request.message, request.urgency, agent_display_name),
+        daemon=True,
+        name="tkinter-toast",
+    )
     thread.start()
 
 
