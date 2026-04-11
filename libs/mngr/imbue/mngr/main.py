@@ -8,6 +8,7 @@ import pluggy
 import setproctitle
 from click_option_group import OptionGroup
 
+from imbue.concurrency_group.executor import set_default_on_thread_exit
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
@@ -58,6 +59,7 @@ from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.click_utils import detect_aliases_by_command
 from imbue.mngr.utils.env_utils import parse_bool_env
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 
 # Module-level container for the plugin manager singleton, created lazily.
 # Using a dict avoids the need for the 'global' keyword while still allowing module-level state.
@@ -264,6 +266,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     This should only really be called once from the main command (or during testing).
     """
+    # Register thread cleanup to prevent FD leaks from thread-local gevent Hubs
+    # in ConcurrencyGroupExecutor threads (pyinfra uses gevent greenlets for I/O).
+    set_default_on_thread_exit(cleanup_thread_local_resources)
+
     # Create plugin manager and load registries first (needed for config parsing)
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)

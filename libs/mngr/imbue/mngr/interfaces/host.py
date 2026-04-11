@@ -164,6 +164,13 @@ class HostInterface(MutableModel, ABC):
         """Return the build log if this host failed during creation, or None."""
         ...
 
+    def disconnect(self) -> None:
+        """Disconnect from this host, releasing any held connections.
+
+        Online host implementations should override this to close SSH or other
+        network connections. The default is a no-op for offline hosts.
+        """
+
 
 class OnlineHostInterface(HostInterface, ABC):
     """Interface for hosts that are currently online and accessible for operations."""

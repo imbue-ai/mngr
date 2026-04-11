@@ -2643,6 +2643,7 @@ log "=== Shutdown script completed ==="
             with trace_span("Reading host record for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_record = self._read_host_record(host_ref.host_id)
 
+            host: HostInterface | None = None
             try:
                 with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     host = self._get_host(host_ref.host_id, host_record)
@@ -2669,6 +2670,9 @@ log "=== Shutdown script completed ==="
                     e,
                 )
                 return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            finally:
+                if host is not None:
+                    host.disconnect()
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):

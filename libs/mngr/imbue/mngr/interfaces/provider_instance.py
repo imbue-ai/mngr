@@ -224,6 +224,18 @@ def _build_agent_details_from_offline_ref(
     )
 
 
+def _discover_agents_and_disconnect(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> list[DiscoveredAgent]:
+    """Discover agents on a host, then disconnect to release the connection."""
+    host = provider.get_host(host_id)
+    try:
+        return host.discover_agents()
+    finally:
+        host.disconnect()
+
+
 class ProviderInstanceInterface(MutableModel, ABC):
     """A ProviderInstance is a configured endpoint that creates and manages hosts.
 
@@ -398,7 +410,9 @@ class ProviderInstanceInterface(MutableModel, ABC):
         with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
-                    self.get_host(host_ref.host_id).discover_agents,
+                    _discover_agents_and_disconnect,
+                    self,
+                    host_ref.host_id,
                 )
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
@@ -427,8 +441,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         operation (e.g., one SSH command) instead of making many individual calls.
         """
         is_authentication_failure = False
+        initial_host: HostInterface | None = None
         try:
             host = self.get_host(host_ref.host_id)
+            initial_host = host
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
 
@@ -490,6 +506,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
             agent_details_list = [
                 _build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
             ]
+
+        finally:
+            if initial_host is not None:
+                initial_host.disconnect()
 
         return host_details, agent_details_list
 

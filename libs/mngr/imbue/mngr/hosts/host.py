@@ -213,6 +213,7 @@ class Host(BaseHost, OnlineHostInterface):
         This should be called before destroying or stopping a host to cleanly
         close the SSH connection. Failure to disconnect can lead to stale
         socket state causing "Socket is closed" errors in subsequent operations.
+
         """
         if self.connector.host.connected:
             self.connector.host.disconnect()

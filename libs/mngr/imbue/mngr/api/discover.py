@@ -75,12 +75,15 @@ def _run_discovery(
     provider_names: tuple[str, ...] | None,
     include_destroyed: bool,
     reset_caches: bool,
+    existing_providers: list[BaseProviderInstance] | None = None,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
     """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents."""
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     results_lock = Lock()
 
-    providers = get_all_provider_instances(mngr_ctx, provider_names)
+    providers = (
+        existing_providers if existing_providers is not None else get_all_provider_instances(mngr_ctx, provider_names)
+    )
     logger.trace("Found {} provider instances", len(providers))
 
     if reset_caches:
@@ -175,5 +178,8 @@ def discover_hosts_and_agents(
         if _all_identifiers_found(agent_identifiers, agents_by_host):
             return agents_by_host, providers
 
+        # Fall back to a full scan, reusing the already-created provider instances
+        # to avoid leaking resources (each new provider instance holds gRPC connections).
         logger.debug("Event stream was stale (not all identifiers found), falling back to full scan")
-        return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+        all_providers = get_all_provider_instances(mngr_ctx, None)
+        return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches, existing_providers=all_providers)

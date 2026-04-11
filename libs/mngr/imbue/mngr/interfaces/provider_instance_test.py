@@ -1,4 +1,4 @@
-"""Tests for ProviderInstanceInterface.get_host_and_agent_details."""
+"""Tests for ProviderInstanceInterface default method implementations."""
 
 from datetime import datetime
 from datetime import timezone
@@ -11,7 +11,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import _discover_agents_and_disconnect
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -95,6 +97,52 @@ def provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> MockProviderIns
     )
 
 
+def test_get_host_and_agent_details_disconnects_host(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """get_host_and_agent_details disconnects the host after collecting details."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.return_value = []
+
+    provider.mock_hosts = [online_host]
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_id = AgentId.generate()
+    agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
+
+    provider.get_host_and_agent_details(host_ref, [agent_ref])
+
+    online_host.disconnect.assert_called_once()
+
+
+def test_get_host_and_agent_details_disconnects_on_connection_error(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """get_host_and_agent_details disconnects the host even when HostConnectionError occurs."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostConnectionError("SSH error")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_id = AgentId.generate()
+    agent_ref = _make_agent_ref(host_id, agent_id, provider.name)
+
+    provider.get_host_and_agent_details(host_ref, [agent_ref])
+
+    online_host.disconnect.assert_called_once()
+
+
 def test_connection_error_during_get_agents_falls_back_to_offline(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -162,3 +210,39 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     assert len(agent_details_list) == 1
     assert agent_details_list[0].name == "test-agent"
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
+
+
+# =============================================================================
+# discover_hosts_and_agents disconnect tests
+# =============================================================================
+
+
+def test_discover_agents_and_disconnect_helper(host_id: HostId, provider: MockProviderInstance) -> None:
+    """_discover_agents_and_disconnect calls discover_agents then disconnect."""
+    mock_host = MagicMock(spec=HostInterface)
+    mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
+    mock_host.discover_agents.return_value = []
+
+    provider.mock_hosts = [mock_host]
+
+    result = _discover_agents_and_disconnect(provider, host_id)
+
+    assert result == []
+    mock_host.disconnect.assert_called_once()
+
+
+def test_discover_hosts_and_agents_disconnects_hosts(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """discover_hosts_and_agents disconnects each host after fetching agents."""
+    mock_host = MagicMock(spec=HostInterface)
+    mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
+    mock_host.discover_agents.return_value = []
+
+    provider.mock_hosts = [mock_host]
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    mock_host.disconnect.assert_called_once()

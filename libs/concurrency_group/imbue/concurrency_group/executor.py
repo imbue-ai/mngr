@@ -9,9 +9,31 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 
 T = TypeVar("T")
 
+# Global default callback invoked in each worker thread after its task completes.
+# Libraries should set this early at startup (e.g. in their plugin_manager setup)
+# to clean up thread-local resources that would otherwise leak file descriptors.
+_default_on_thread_exit: Callable[[], None] | None = None
+
+
+def set_default_on_thread_exit(callback: Callable[[], None] | None) -> None:
+    """Set a global default thread-exit callback for all ConcurrencyGroupExecutor instances.
+
+    This is intended to be called once at application startup. The callback
+    is invoked in each worker thread after its submitted callable completes,
+    and should clean up any thread-local resources (e.g. gevent Hubs) that
+    hold OS-level file descriptors.
+    """
+    global _default_on_thread_exit
+    _default_on_thread_exit = callback
+
 
 class ConcurrencyGroupExecutor(AbstractContextManager):
-    """Executor that runs callables in threads managed by a ConcurrencyGroup."""
+    """Executor that runs callables in threads managed by a ConcurrencyGroup.
+
+    After each submitted callable completes, the global default thread-exit
+    callback (set via ``set_default_on_thread_exit``) is invoked to clean up
+    thread-local resources.
+    """
 
     def __init__(
         self,
@@ -49,6 +71,9 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
                     future.set_exception(e)
                 else:
                     future.set_result(result)
+                finally:
+                    if _default_on_thread_exit is not None:
+                        _default_on_thread_exit()
 
         self._cg.start_new_thread(
             target=_run,

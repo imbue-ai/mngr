@@ -11,22 +11,26 @@ from imbue.mngr.providers.registry import build_provider_instance
 from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
 
-# Track all created provider instances for cleanup at exit
-_created_instances: list[BaseProviderInstance] = []
+# Cache of provider instances by name. Reusing instances avoids leaking
+# resources (gRPC connections, SSH connections) that accumulate when new
+# instances are created on every call. The cache is invalidated when the
+# MngrContext changes (tracked by _cache_ctx_id).
+_instance_cache: dict[ProviderInstanceName, BaseProviderInstance] = {}
+_cache_ctx_id: int | None = None
 _atexit_registered: dict[str, bool] = {"registered": False}
 
 
 def _close_all_provider_instances() -> None:
-    """Close all created provider instances.
+    """Close all cached provider instances.
 
     Called via atexit to ensure proper cleanup of resources like Modal app contexts.
     """
-    for instance in _created_instances:
+    for instance in _instance_cache.values():
         try:
             instance.close()
         except (MngrError, OSError) as e:
             logger.warning("Error closing provider instance {}: {}", instance.name, e)
-    _created_instances.clear()
+    _instance_cache.clear()
 
 
 def _ensure_atexit_registered() -> None:
@@ -39,10 +43,12 @@ def _ensure_atexit_registered() -> None:
 def reset_provider_instances() -> None:
     """Reset the provider instances tracking.
 
-    Closes all tracked provider instances and clears the tracking list.
+    Closes all cached provider instances and clears the cache.
     This is primarily used for test isolation to ensure a clean state between tests.
     """
+    global _cache_ctx_id
     _close_all_provider_instances()
+    _cache_ctx_id = None
     _atexit_registered["registered"] = False
 
 
@@ -52,9 +58,19 @@ def get_provider_instance(
 ) -> BaseProviderInstance:
     """Get or create a provider instance by name.
 
+    Returns the cached instance if one already exists for this name. Otherwise
+    creates a new one, caches it, and registers it for cleanup at process exit.
+
     Resolution order: check config.providers, then try as backend name with defaults.
-    The returned instance is tracked for cleanup at process exit via atexit.
     """
+    global _cache_ctx_id
+    if id(mngr_ctx) != _cache_ctx_id:
+        _close_all_provider_instances()
+        _cache_ctx_id = id(mngr_ctx)
+
+    if name in _instance_cache:
+        return _instance_cache[name]
+
     _ensure_atexit_registered()
 
     # Check if there's a configured provider instance with this name
@@ -67,22 +83,21 @@ def get_provider_instance(
             mngr_ctx=mngr_ctx,
         )
         logger.trace("Built provider instance {} from config with backend {}", name, provider_config.backend)
-        _created_instances.append(instance)
-        return instance
+    else:
+        # Otherwise, treat the name as a backend name and use defaults
+        # This supports the common case of just specifying "--provider local" or "--provider docker"
+        backend_name = ProviderBackendName(str(name))
+        config_class = get_config_class(backend_name)
+        default_config = config_class(backend=backend_name)
+        instance = build_provider_instance(
+            instance_name=name,
+            backend_name=backend_name,
+            config=default_config,
+            mngr_ctx=mngr_ctx,
+        )
+        logger.trace("Built provider instance {} using backend name as default", name)
 
-    # Otherwise, treat the name as a backend name and use defaults
-    # This supports the common case of just specifying "--provider local" or "--provider docker"
-    backend_name = ProviderBackendName(str(name))
-    config_class = get_config_class(backend_name)
-    default_config = config_class(backend=backend_name)
-    instance = build_provider_instance(
-        instance_name=name,
-        backend_name=backend_name,
-        config=default_config,
-        mngr_ctx=mngr_ctx,
-    )
-    logger.trace("Built provider instance {} using backend name as default", name)
-    _created_instances.append(instance)
+    _instance_cache[name] = instance
     return instance
 
 
