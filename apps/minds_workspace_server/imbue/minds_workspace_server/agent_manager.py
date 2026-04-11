@@ -242,7 +242,8 @@ class AgentManager:
             parent_agent_id=None,
         )
 
-        self._launch_creation_thread(agent_id, cmd, Path(work_dir), log_queue)
+        labels = {"user_created": "true"}
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
@@ -298,21 +299,27 @@ class AgentManager:
             parent_agent_id=parent_agent_id,
         )
 
-        self._launch_creation_thread(agent_id, cmd, Path(work_dir), log_queue)
+        labels = {"chat_parent_id": parent_agent_id}
+        for key in ("workspace", "project"):
+            if key in parent_labels:
+                labels[key] = parent_labels[key]
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
     def _launch_creation_thread(
         self,
         agent_id: str,
+        agent_name: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
+        labels: dict[str, str],
     ) -> None:
         """Start a background thread to run agent creation and stream logs."""
         self._creation_cg.start_new_thread(
             target=self._run_creation,
-            args=(agent_id, cmd, work_dir, log_queue),
+            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels),
             name=f"create-{agent_id[:8]}",
             is_checked=False,
         )
@@ -338,9 +345,11 @@ class AgentManager:
     def _run_creation(
         self,
         agent_id: str,
+        agent_name: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
+        labels: dict[str, str],
     ) -> None:
         """Run mngr create in the background and capture output."""
         cmd_str = shlex.join(cmd)
@@ -375,12 +384,21 @@ class AgentManager:
             self._proto_agents.pop(agent_id, None)
             self._log_queues.pop(agent_id, None)
 
+            if success:
+                self._agents[agent_id] = AgentStateItem(
+                    id=agent_id,
+                    name=agent_name,
+                    state="RUNNING",
+                    labels=labels,
+                    work_dir=str(work_dir),
+                )
+
+        if success:
+            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
         self._broadcaster.broadcast_proto_agent_completed(
             agent_id=agent_id, success=success, error=error
         )
-
-        if success:
-            self._refresh_agents()
 
     def _initial_discover(self) -> None:
         """Perform initial agent discovery and start application watchers."""
