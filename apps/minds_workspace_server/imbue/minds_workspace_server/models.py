@@ -62,6 +62,10 @@ class CreateWorktreeRequest(FrozenModel):
     """Request body for creating a worktree agent."""
 
     name: str = Field(description="Name for the new worktree agent")
+    selected_agent_id: str = Field(
+        default="",
+        description="ID of the agent whose work dir to create the worktree from",
+    )
 
 
 class CreateChatRequest(FrozenModel):
