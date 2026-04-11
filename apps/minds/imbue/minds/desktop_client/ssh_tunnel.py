@@ -243,15 +243,18 @@ class SSHTunnelManager(MutableModel):
         try:
             _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
             _stdin.close()
-            exit_status = stdout.channel.recv_exit_status()
-            if exit_status != 0:
-                error_output = stderr.read().decode().strip()
-                logger.warning(
-                    "Failed to write API URL to remote {}: exit={}, stderr={}",
-                    ssh_info.host,
-                    exit_status,
-                    error_output,
-                )
+            try:
+                exit_status = stdout.channel.recv_exit_status()
+                if exit_status != 0:
+                    error_output = stderr.read().decode().strip()
+                    logger.warning(
+                        "Failed to write API URL to remote {}: exit={}, stderr={}",
+                        ssh_info.host,
+                        exit_status,
+                        error_output,
+                    )
+            finally:
+                stdout.channel.close()
         except (paramiko.SSHException, OSError) as e:
             logger.warning("Failed to write API URL to remote {}: {}", ssh_info.host, e)
 
