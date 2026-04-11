@@ -46,6 +46,8 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -73,6 +75,7 @@ from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -89,6 +92,50 @@ from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.polling import wait_for
+
+
+@pure
+def _merge_agent_type_provisioning(
+    agent_config: AgentTypeConfig,
+    options: CreateAgentOptions,
+) -> CreateAgentOptions:
+    """Merge provisioning fields from an agent type config into CreateAgentOptions.
+
+    Parses raw string specs from AgentTypeConfig into typed specs and prepends them
+    before the CLI-provided entries so that agent type provisioning runs first and
+    CLI entries can override (e.g., env vars with the same key).
+
+    Returns the original options unchanged if the agent config has no provisioning fields.
+    """
+    prov_updates: list[tuple[str, Any]] = []
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
+        raw_values: tuple[str, ...] = getattr(agent_config, config_field)
+        if raw_values:
+            existing: tuple[Any, ...] = getattr(options.provisioning, target_field)
+            prov_updates.append((target_field, tuple(parser(s) for s in raw_values) + existing))
+
+    env_vars = tuple(EnvVar.from_string(s) for s in agent_config.env) if agent_config.env else ()
+    env_files = tuple(Path(s) for s in agent_config.env_file) if agent_config.env_file else ()
+
+    if not prov_updates and not env_vars and not env_files:
+        return options
+
+    updates: list[tuple[str, Any]] = []
+    if prov_updates:
+        updates.append(
+            (
+                "provisioning",
+                options.provisioning.model_copy_update(*prov_updates),
+            )
+        )
+    env_updates: list[tuple[str, Any]] = []
+    if env_vars:
+        env_updates.append(("env_vars", env_vars + options.environment.env_vars))
+    if env_files:
+        env_updates.append(("env_files", env_files + options.environment.env_files))
+    if env_updates:
+        updates.append(("environment", options.environment.model_copy_update(*env_updates)))
+    return options.model_copy_update(*updates)
 
 
 def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
@@ -2214,6 +2261,13 @@ class Host(BaseHost, OnlineHostInterface):
         Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
+        # Merge agent type provisioning fields into options before any other logic.
+        # Use resolve_agent_type to get the parent-merged config so that
+        # provisioning fields defined on a parent type are inherited by children.
+        if options.agent_type is not None:
+            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+            options = _merge_agent_type_provisioning(resolved.agent_config, options)
+
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
             with log_span("Calling on_before_provisioning for agent {}", agent.name):
