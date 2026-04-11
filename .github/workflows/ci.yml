@@ -66,6 +66,7 @@ jobs:
         run: just test-offload
 
       - name: Combine coverage and check threshold
+        if: always()
         run: |
           i=0; for f in $(find test-results/ -name ".coverage"); do cp "$f" ".coverage.$i"; i=$((i+1)); done
           uv run coverage combine .coverage.*
