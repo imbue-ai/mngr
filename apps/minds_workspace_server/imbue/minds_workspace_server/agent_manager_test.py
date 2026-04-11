@@ -8,6 +8,13 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.primitives import AgentId as MngrAgentId
+from imbue.mngr.primitives import AgentName as MngrAgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
@@ -258,18 +265,14 @@ def test_handle_agent_discovered(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
     """Agent discovered events update the agent list and broadcast."""
-    from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
-    from imbue.mngr.primitives import AgentId as MngrAgentId
-    from imbue.mngr.primitives import AgentName as MngrAgentName
-    from imbue.mngr.primitives import DiscoveredAgent
-    from imbue.mngr.primitives import HostId
-    from imbue.mngr.primitives import ProviderInstanceName
+    test_host_id = HostId()
 
     q = broadcaster.register()
 
+    test_agent_id = MngrAgentId()
     agent = DiscoveredAgent(
-        host_id=HostId("host-1"),
-        agent_id=MngrAgentId("agent-discovered-1"),
+        host_id=test_host_id,
+        agent_id=test_agent_id,
         agent_name=MngrAgentName("discovered-agent"),
         provider_name=ProviderInstanceName("local"),
         certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
@@ -286,7 +289,7 @@ def test_handle_agent_discovered(
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
-    assert agents[0].id == "agent-discovered-1"
+    assert agents[0].id == str(test_agent_id)
     assert agents[0].name == "discovered-agent"
 
     raw = q.get_nowait()
@@ -299,15 +302,14 @@ def test_handle_agent_destroyed(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
     """Agent destroyed events remove the agent and broadcast."""
-    from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-    from imbue.mngr.primitives import AgentId as MngrAgentId
-    from imbue.mngr.primitives import HostId
+    test_host_id = HostId()
+    test_agent_id = MngrAgentId()
 
     q = broadcaster.register()
 
     with agent_manager._lock:
-        agent_manager._agents["agent-to-destroy"] = AgentStateItem(
-            id="agent-to-destroy",
+        agent_manager._agents[str(test_agent_id)] = AgentStateItem(
+            id=str(test_agent_id),
             name="doomed",
             state="RUNNING",
             labels={},
@@ -319,8 +321,8 @@ def test_handle_agent_destroyed(
         event_id="evt-2",
         source="test",
         type="AGENT_DESTROYED",
-        agent_id=MngrAgentId("agent-to-destroy"),
-        host_id=HostId("host-1"),
+        agent_id=test_agent_id,
+        host_id=test_host_id,
     )
 
     agent_manager._handle_agent_destroyed(event)
