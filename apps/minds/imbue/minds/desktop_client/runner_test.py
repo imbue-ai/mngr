@@ -100,9 +100,6 @@ class _FakeTunnelManager(SSHTunnelManager):
     _reverse_tunnel_calls: list[tuple[RemoteSSHInfo, int, str]] = PrivateAttr(default_factory=list)
     _write_remote_calls: list[tuple[RemoteSSHInfo, str, str]] = PrivateAttr(default_factory=list)
 
-    def model_post_init(self, __context: object) -> None:
-        super().model_post_init(__context)
-
     @classmethod
     def create(cls, remote_port: int = 55000, fail: bool = False) -> "_FakeTunnelManager":
         mgr = cls()
