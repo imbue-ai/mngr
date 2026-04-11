@@ -1,11 +1,9 @@
 /**
- * Agent discovery -- replaces the conversation model.
- * Fetches mngr-managed agents from the backend on page load.
+ * Agent discovery -- compatibility layer.
+ * Delegates to AgentManager for state, kept for plugin/hook backward compatibility.
  */
 
-import m from "mithril";
-import { getSelectedAgentId, selectAgent } from "../navigation";
-import { apiUrl } from "../base-path";
+import { getAgents as getAgentManagerAgents, type AgentState } from "./AgentManager";
 
 export interface Agent {
   id: string;
@@ -21,49 +19,29 @@ export interface Conversation {
   latest_response_datetime_utc: string | null;
 }
 
-interface AgentListResponse {
-  agents: Agent[];
+function toAgent(a: AgentState): Agent {
+  return { id: a.id, name: a.name, state: a.state };
 }
 
-let agents: Agent[] = [];
-let loadingError: string | null = null;
-let agentsLoaded = false;
-
 export function getAgents(): Agent[] {
-  return agents;
+  return getAgentManagerAgents().map(toAgent);
 }
 
 export function getAgentsLoaded(): boolean {
-  return agentsLoaded;
+  return true;
 }
 
 export function getLoadingError(): string | null {
-  return loadingError;
+  return null;
 }
 
 export async function fetchAgents(): Promise<void> {
-  try {
-    const response = await m.request<AgentListResponse>({
-      method: "GET",
-      url: apiUrl("/api/agents"),
-    });
-    agents = response.agents;
-    loadingError = null;
-    agentsLoaded = true;
-    if (!getSelectedAgentId()) {
-      if (agents.length > 0) {
-        selectAgent(agents[0].id);
-      }
-    }
-  } catch (error) {
-    loadingError = (error as Error).message;
-    agentsLoaded = true;
-  }
+  // No-op: agent state comes from the WebSocket via AgentManager
 }
 
 // Compatibility shim for hooks/slots that expect conversations
 export function getConversations(): Conversation[] {
-  return agents.map((a) => ({
+  return getAgentManagerAgents().map((a) => ({
     id: a.id,
     name: a.name,
     model: a.state,

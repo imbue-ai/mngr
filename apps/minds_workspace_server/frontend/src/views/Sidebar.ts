@@ -4,6 +4,8 @@ import { runHook } from "../hooks";
 import { getHostname } from "../base-path";
 import { AgentSelector } from "./ConversationSelector";
 import { getSidebarItems } from "../sidebar-items";
+import { CreateAgentModal } from "./CreateAgentModal";
+import { selectAgent, getSelectedAgentId } from "../navigation";
 import type { SidebarItemDefinition } from "../sidebar-items";
 
 function invokeSlotRendered(slotName: string, container: HTMLElement): void {
@@ -82,6 +84,8 @@ function inlineIconButton(label: string, onclick: () => void, svgPath: string): 
   );
 }
 
+let showCreateModal = false;
+
 export const Sidebar: m.Component = {
   view() {
     const sidebarClass = ["app-sidebar", collapsed ? "app-sidebar--collapsed" : ""].filter(Boolean).join(" ");
@@ -147,11 +151,27 @@ export const Sidebar: m.Component = {
               class: "sidebar-agents-add-button",
               title: "Create agent",
               "aria-label": "Create agent",
+              onclick() {
+                showCreateModal = true;
+              },
             },
             "+",
           ),
         ]),
         m(AgentSelector),
+        showCreateModal
+          ? m(CreateAgentModal, {
+              mode: "worktree",
+              parentAgentId: getSelectedAgentId() ?? undefined,
+              onCreated(agentId: string, _agentName: string) {
+                showCreateModal = false;
+                selectAgent(agentId);
+              },
+              onCancel() {
+                showCreateModal = false;
+              },
+            })
+          : null,
       ]),
     ]);
   },

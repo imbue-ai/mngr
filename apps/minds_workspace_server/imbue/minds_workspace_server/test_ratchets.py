@@ -209,7 +209,8 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    excluded = TEST_FILE_PATTERNS + ("testing.py",)
+    # conftest.py is test infrastructure (fixtures), same category as *_test.py
+    excluded = TEST_FILE_PATTERNS + ("testing.py", "conftest.py")
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 

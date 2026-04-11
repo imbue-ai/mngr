@@ -1,6 +1,10 @@
 /**
  * Chat panel for dockview. Contains the main message list and message input
  * for an agent, mounted as a tab within the dockview workspace.
+ *
+ * If the agent is still being created (a proto-agent), shows the creation
+ * log stream instead. Automatically switches to the chat view when creation
+ * completes.
  */
 
 import m from "mithril";
@@ -15,6 +19,8 @@ import {
   type TranscriptEvent,
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
+import { getProtoAgents } from "../models/AgentManager";
+import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
@@ -29,6 +35,10 @@ function scrollToBottom(element: HTMLElement): void {
   element.scrollTop = element.scrollHeight;
 }
 
+function isProtoAgent(agentId: string): boolean {
+  return getProtoAgents().some((p) => p.agent_id === agentId);
+}
+
 export function ChatPanel(): m.Component<{ agentId: string }> {
   let loading = false;
   let loadingError: string | null = null;
@@ -36,6 +46,92 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let userScrolledUp = false;
   let previousScrollTop = 0;
   let backfillStarted = false;
+
+  // Proto-agent log state
+  let logWs: WebSocket | null = null;
+  let logLines: string[] = [];
+  let logDone = false;
+  let logSuccess = false;
+  let logError: string | null = null;
+  let logAgentId: string | null = null;
+
+  function connectLogWs(agentId: string): void {
+    if (logWs !== null) {
+      logWs.close();
+    }
+    logLines = [];
+    logDone = false;
+    logSuccess = false;
+    logError = null;
+    logAgentId = agentId;
+
+    const base = apiUrl(`/api/proto-agents/${encodeURIComponent(agentId)}/logs`);
+    const loc = window.location;
+    const protocol = loc.protocol === "https:" ? "wss:" : "ws:";
+    let url: string;
+    if (base.startsWith("http")) {
+      url = base.replace(/^http/, "ws");
+    } else {
+      url = `${protocol}//${loc.host}${base}`;
+    }
+
+    logWs = new WebSocket(url);
+
+    logWs.onmessage = (event: MessageEvent) => {
+      const data = JSON.parse(event.data as string) as
+        | { line: string }
+        | { done: true; success: boolean; error: string | null };
+
+      if ("line" in data) {
+        logLines.push(data.line);
+      } else if ("done" in data) {
+        logDone = true;
+        logSuccess = data.success;
+        logError = data.error;
+      }
+      m.redraw();
+    };
+
+    logWs.onclose = () => {
+      logWs = null;
+    };
+
+    logWs.onerror = () => {
+      logWs?.close();
+    };
+  }
+
+  function disconnectLogWs(): void {
+    if (logWs !== null) {
+      logWs.close();
+      logWs = null;
+    }
+    logAgentId = null;
+  }
+
+  function renderBuildLog(agentId: string): m.Vnode {
+    if (logAgentId !== agentId) {
+      connectLogWs(agentId);
+    }
+
+    return m("div", { style: "display: flex; flex-direction: column; height: 100%; padding: 16px;" }, [
+      m("div", { style: "font-weight: 600; margin-bottom: 8px; font-size: 0.9em; color: #666;" },
+        logDone
+          ? (logSuccess ? "Agent created successfully" : "Agent creation failed")
+          : "Creating agent..."
+      ),
+      logError ? m("div", { style: "color: red; margin-bottom: 8px; font-size: 0.85em;" }, logError) : null,
+      m("div", {
+        style: "flex: 1; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8em; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all;",
+        onupdate(vnode: m.VnodeDOM) {
+          const el = vnode.dom as HTMLElement;
+          el.scrollTop = el.scrollHeight;
+        },
+      }, logLines.map((line, i) =>
+        m("div", { key: i, style: "line-height: 1.5;" }, line),
+      )),
+    ]);
+  }
 
   async function loadAgent(agentId: string): Promise<void> {
     loading = true;
@@ -137,6 +233,16 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   }
 
   function renderMessages(agentId: string): m.Vnode {
+    // If this agent is still being created, show the build log
+    if (isProtoAgent(agentId)) {
+      return renderBuildLog(agentId);
+    }
+
+    // Agent finished creating -- disconnect log WebSocket if it was open
+    if (logAgentId === agentId) {
+      disconnectLogWs();
+    }
+
     ensureAgentLoaded(agentId);
     manageStreamConnection(agentId);
 
@@ -201,6 +307,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   }
 
   return {
+    onremove() {
+      disconnectLogWs();
+    },
+
     view(vnode) {
       const agentId = vnode.attrs.agentId;
 
@@ -219,7 +329,8 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           },
           isSlotClaimed("conversation-content") ? null : renderMessages(agentId),
         ),
-        m("footer", { class: "app-footer" }, [
+        // Only show message input when not in proto-agent mode
+        isProtoAgent(agentId) ? null : m("footer", { class: "app-footer" }, [
           m(EmptySlot, { name: "conversation-before-input" }),
           m(MessageInput, { agentId }),
         ]),

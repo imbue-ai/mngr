@@ -296,9 +296,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return self._agents_result.agent_ids
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the workspace label set."""
+        """Return agent IDs that are primary workspace agents.
+
+        Filters for agents with both ``workspace`` and ``is_primary`` labels.
+        """
         with self._lock:
-            return tuple(agent.agent_id for agent in self._agents_result.discovered_agents if "workspace" in agent.labels)
+            return tuple(
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels and "is_primary" in agent.labels
+            )
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
