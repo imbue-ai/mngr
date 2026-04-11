@@ -2829,16 +2829,6 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     assert result.environment.env_files == (Path("/etc/agent.env"), Path("/etc/cli.env"))
 
 
-def test_merge_agent_type_provisioning_prepends_append_to_files() -> None:
-    """Agent type append_to_file specs should be parsed and prepended."""
-    agent_config = AgentTypeConfig(append_to_file=("/etc/config:extra_line\n",))
-    options = CreateAgentOptions()
-    result = _merge_agent_type_provisioning(agent_config, options)
-    assert len(result.provisioning.append_to_files) == 1
-    assert result.provisioning.append_to_files[0].remote_path == Path("/etc/config")
-    assert result.provisioning.append_to_files[0].text == "extra_line\n"
-
-
 def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
     """Agent type create_directory should be parsed and prepended."""
     agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))

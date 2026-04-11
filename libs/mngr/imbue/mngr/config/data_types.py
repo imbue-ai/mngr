@@ -151,8 +151,6 @@ AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
         "cli_args",
         "extra_provision_command",
         "upload_file",
-        "append_to_file",
-        "prepend_to_file",
         "create_directory",
         "env",
         "env_file",
@@ -191,14 +189,6 @@ class AgentTypeConfig(FrozenModel):
     upload_file: tuple[str, ...] = Field(
         default=(),
         description="LOCAL:REMOTE file upload specs",
-    )
-    append_to_file: tuple[str, ...] = Field(
-        default=(),
-        description="REMOTE:TEXT append specs",
-    )
-    prepend_to_file: tuple[str, ...] = Field(
-        default=(),
-        description="REMOTE:TEXT prepend specs",
     )
     create_directory: tuple[str, ...] = Field(
         default=(),
