@@ -35,21 +35,20 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     """
     + _COMMON_STYLES
     + """
-    body { background: #f8fafc; padding: 0; }
-    .page { max-width: 800px; margin: 0 auto; padding: 48px 32px; }
-    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
-    .header h1 { font-size: 20px; font-weight: 600; color: #1e293b; margin: 0; }
+    body { background: #f8fafc; padding: 0; font-size: 14px; }
+    .page { max-width: 800px; margin: 0 auto; padding: 48px 0; }
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding: 0 16px; }
+    .header h1 { font-size: 14px; font-weight: 600; color: #1e293b; margin: 0; }
     .create-btn {
-      padding: 8px 20px; background: #1e293b; color: white; border: none;
-      border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer;
-      text-decoration: none; display: inline-block;
+      padding: 6px 16px; background: #1e293b; color: white; border: none;
+      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+      text-decoration: none; display: inline-block; font-family: inherit;
     }
     .create-btn:hover { background: #334155; }
     table { width: 100%; border-collapse: collapse; }
     thead th {
-      text-align: left; padding: 8px 16px; font-size: 11px; font-weight: 600;
-      color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;
-      border-bottom: 1px solid #e2e8f0;
+      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 600;
+      color: #64748b; border-bottom: 1px solid #e2e8f0;
     }
     thead th:last-child { text-align: right; }
     tbody tr { cursor: pointer; transition: background 0.1s; }
@@ -59,8 +58,8 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
     tbody td:last-child { text-align: right; }
-    .ws-name { font-weight: 500; color: #0f172a; font-size: 15px; }
-    .shared-with { color: #94a3b8; font-size: 13px; }
+    .ws-name { font-weight: 500; color: #0f172a; }
+    .shared-with { color: #94a3b8; }
     .menu-wrapper { position: relative; display: inline-block; }
     .menu-btn {
       background: none; border: 1px solid transparent; border-radius: 4px;
