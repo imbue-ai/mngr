@@ -7,6 +7,7 @@ Electron desktop app.
 
 import threading
 from enum import auto
+from types import ModuleType
 
 from loguru import logger
 from pydantic import Field
@@ -15,6 +16,14 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
+
+# tkinter is an optional dependency: not available on all platforms (e.g. headless servers).
+# Load it at module level so the failure is immediate and predictable, but tolerate absence.
+_TKINTER: ModuleType | None
+try:
+    _TKINTER = __import__("tkinter")
+except ImportError:
+    _TKINTER = None
 
 
 class NotificationUrgency(UpperCaseStrEnum):
@@ -65,12 +74,11 @@ def _run_tkinter_toast(
     agent_display_name: str,
 ) -> None:
     """Create and display a tkinter toast window. Runs on a background thread."""
-    try:
-        import tkinter as tk
-    except ImportError as e:
-        logger.warning("tkinter not available, cannot show notification: {}", e)
+    if _TKINTER is None:
+        logger.warning("tkinter not available, cannot show notification toast")
         return
 
+    tk = _TKINTER
     try:
         root = tk.Tk()
         root.overrideredirect(True)
