@@ -506,7 +506,11 @@ def _reverse_tunnel_accept_loop(
     bidirectionally.
     """
     while not shutdown_event.is_set():
-        channel = transport.accept(timeout=_SHUTDOWN_POLL_SECONDS)
+        try:
+            channel = transport.accept(timeout=_SHUTDOWN_POLL_SECONDS)
+        except (paramiko.SSHException, EOFError) as e:
+            logger.debug("Reverse tunnel accept loop exiting: transport closed ({})", e)
+            break
         if channel is None:
             continue
 
