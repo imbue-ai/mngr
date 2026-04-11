@@ -294,3 +294,55 @@ def test_cloudflare_enable_returns_404_for_unknown_server(tmp_path: Path) -> Non
     )
     # No cloudflare client configured, so returns 501
     assert response.status_code == 501
+
+
+# -- Telegram setup with body parsing --
+
+
+def test_telegram_setup_accepts_empty_body(tmp_path: Path) -> None:
+    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    response = client.post(
+        f"/api/v1/agents/{agent_id}/telegram",
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 200
+
+
+def test_telegram_setup_with_invalid_json_body(tmp_path: Path) -> None:
+    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    response = client.post(
+        f"/api/v1/agents/{agent_id}/telegram",
+        content="not json",
+        headers={**_auth_headers(api_key), "Content-Type": "application/json"},
+    )
+    # Should still succeed -- invalid body is handled gracefully
+    assert response.status_code == 200
+
+
+# -- Notification with no dispatcher --
+
+
+def test_notification_returns_501_without_dispatcher(tmp_path: Path) -> None:
+    """When notification_dispatcher is None, the endpoint returns 501."""
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    auth_store = FileAuthStore(data_directory=paths.auth_dir)
+
+    agent_id = AgentId()
+    api_key = generate_api_key()
+    save_api_key_hash(paths.data_dir, agent_id, hash_api_key(api_key))
+
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        paths=paths,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/notifications",
+        json={"message": "test"},
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 501

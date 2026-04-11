@@ -358,3 +358,42 @@ def test_write_api_url_to_local_overwrites_existing(tmp_path: Path) -> None:
     SSHTunnelManager.write_api_url_to_local(state_dir, "http://127.0.0.1:9999")
 
     assert (state_dir / "minds_api_url").read_text() == "http://127.0.0.1:9999"
+
+
+def test_reverse_tunnel_info_stores_metadata() -> None:
+    from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
+
+    ssh_info = RemoteSSHInfo(
+        user="root",
+        host="192.168.1.1",
+        port=22,
+        key_path=Path("/tmp/test_key"),
+    )
+    info = ReverseTunnelInfo(
+        ssh_info=ssh_info,
+        local_port=8420,
+        remote_port=54321,
+        agent_state_dir="~/.mngr/agents/test-id",
+    )
+    assert info.local_port == 8420
+    assert info.remote_port == 54321
+    assert info.agent_state_dir == "~/.mngr/agents/test-id"
+
+
+def test_tunnel_manager_cleanup_with_no_tunnels() -> None:
+    """Verify cleanup works even when no tunnels have been established."""
+    manager = SSHTunnelManager()
+    manager.cleanup()
+
+
+def test_tunnel_manager_health_check_starts_thread() -> None:
+    """Verify start_reverse_tunnel_health_check creates a daemon thread."""
+    manager = SSHTunnelManager()
+    manager.start_reverse_tunnel_health_check()
+    assert manager._health_check_thread is not None
+    assert manager._health_check_thread.daemon is True
+    # Starting again should be a no-op
+    first_thread = manager._health_check_thread
+    manager.start_reverse_tunnel_health_check()
+    assert manager._health_check_thread is first_thread
+    manager.cleanup()
