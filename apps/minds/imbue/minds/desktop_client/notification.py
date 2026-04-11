@@ -6,7 +6,6 @@ Electron desktop app.
 """
 
 import threading
-import tkinter as tk
 from enum import auto
 
 from loguru import logger
@@ -66,6 +65,12 @@ def _run_tkinter_toast(
     agent_display_name: str,
 ) -> None:
     """Create and display a tkinter toast window. Runs on a background thread."""
+    try:
+        import tkinter as tk
+    except ImportError as e:
+        logger.warning("tkinter not available, cannot show notification: {}", e)
+        return
+
     try:
         root = tk.Tk()
         root.overrideredirect(True)
