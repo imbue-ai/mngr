@@ -1,11 +1,9 @@
 import importlib.resources
 import shlex
 import subprocess
-import sys
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -17,10 +15,12 @@ from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import resources as mngr_resources
-from imbue.mngr.api.create import create as api_create
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.headless_runner import accumulate_chunks
+from imbue.mngr.cli.headless_runner import get_local_host
+from imbue.mngr.cli.headless_runner import headless_agent_output
+from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import get_all_help_metadata
@@ -28,23 +28,14 @@ from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import HostLocation
-from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import AgentLabelOptions
-from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 _QUERY_PREFIX: Final[str] = (
     "answer this question about `mngr`. "
@@ -237,124 +228,28 @@ class ClaudeBackendInterface(MutableModel, ABC):
         """Send a prompt to claude and yield response text chunks."""
 
 
-@contextmanager
-def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterator[None]:
-    """Stop and destroy an agent on exit, suppressing cleanup errors."""
-    try:
-        yield
-    finally:
-        try:
-            host.stop_agents([agent.id])
-        except (OSError, BaseMngrError):
-            logger.debug("Failed to stop ask agent {}", agent.name)
-        try:
-            host.destroy_agent(agent)
-        except (OSError, BaseMngrError):
-            logger.debug("Failed to destroy ask agent {}", agent.name)
+_HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
+    "--system-prompt",
+    '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--tools",
+    '""',
+    "--no-session-persistence",
+    '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"',
+)
 
 
-def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
-    """Resolve the local host as an OnlineHostInterface."""
-    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
-    if not isinstance(host_interface, OnlineHostInterface):
-        raise MngrError("Local host is not online")
-    return host_interface
+def _write_claude_files(host: OnlineHostInterface, work_path: Path, prompt: str, system_prompt: str) -> None:
+    """Write prompt and system prompt files to the work directory.
 
-
-def _create_work_dir_on_host(host: OnlineHostInterface) -> Path:
-    """Create a temporary work directory on the host and return its path."""
-    result = host.execute_stateful_command("mktemp -d /tmp/mngr-ask-XXXXXXXXXX")
-    if not result.success:
-        raise MngrError(f"Failed to create temp directory on host: {result.stderr}")
-    return Path(result.stdout.strip())
-
-
-def _remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
-    """Remove a work directory on the host, suppressing errors."""
-    try:
-        host.execute_idempotent_command(f"rm -rf '{work_path}'")
-    except (OSError, BaseMngrError):
-        logger.debug("Failed to remove ask work dir {}", work_path)
-
-
-def _check_headless_claude_available() -> None:
-    """Verify the headless_claude plugin is available.
-
-    When mngr is installed as a standalone tool (not via ``uv run``), the
-    mngr_claude plugin may not be present, causing a silent fallback to
-    BaseAgent which doesn't support streaming output.
+    The headless claude agent reads these via $(cat ...) in its agent_args,
+    avoiding tmux command length limits.
     """
-    agent_class = get_agent_class("headless_claude")
-    if not issubclass(agent_class, StreamingHeadlessAgentMixin):
-        raise MngrError(
-            "The 'headless_claude' agent type is not available. "
-            "The mngr_claude plugin may not be installed.\n"
-            "Install it with:\n"
-            "  mngr plugin add imbue-mngr-claude"
-        )
-
-
-@contextmanager
-def _headless_claude_output(
-    host: OnlineHostInterface, mngr_ctx: MngrContext, prompt: str, system_prompt: str
-) -> Iterator[StreamingHeadlessAgentMixin]:
-    """Create a HeadlessClaude agent, yield it, and destroy it on exit.
-
-    Creates a temporary directory on the host as the work path (no git branch
-    creation), and passes claude args for headless operation (--system-prompt,
-    --output-format stream-json, --tools "", --no-session-persistence).
-
-    All filesystem operations go through the host interface so this works
-    for both local and remote hosts.
-    """
-    _check_headless_claude_available()
-
-    work_path = _create_work_dir_on_host(host)
-    try:
-        # Write prompt and system prompt to files via the host interface so
-        # the shell command can read them via $(cat ...).  Passing them inline
-        # as agent_args would exceed tmux's command length limit.
-        host.write_text_file(work_path / ".mngr-system-prompt", system_prompt)
-        host.write_text_file(work_path / ".mngr-prompt", prompt)
-
-        agent_args = (
-            "--system-prompt",
-            '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--tools",
-            '""',
-            "--no-session-persistence",
-            '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"',
-        )
-
-        source_location = HostLocation(host=host, path=work_path)
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("headless_claude"),
-            agent_args=agent_args,
-            label_options=AgentLabelOptions(labels={"internal": "ask"}),
-            target_path=work_path,
-            name=AgentName("ask"),
-        )
-
-        result = api_create(
-            source_location=source_location,
-            target_host=host,
-            agent_options=agent_options,
-            mngr_ctx=mngr_ctx,
-            create_work_dir=False,
-        )
-
-        agent = result.agent
-        with _destroy_on_exit(host, agent):
-            if not isinstance(agent, StreamingHeadlessAgentMixin):
-                raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
-            yield agent
-    finally:
-        _remove_work_dir_on_host(host, work_path)
+    host.write_text_file(work_path / ".mngr-system-prompt", system_prompt)
+    host.write_text_file(work_path / ".mngr-prompt", prompt)
 
 
 class HeadlessClaudeBackend(ClaudeBackendInterface):
@@ -364,16 +259,16 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     mngr_ctx: MngrContext
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        with _headless_claude_output(self.host, self.mngr_ctx, prompt, system_prompt) as agent:
+        with headless_agent_output(
+            host=self.host,
+            mngr_ctx=self.mngr_ctx,
+            agent_type=AgentTypeName("headless_claude"),
+            agent_args=_HEADLESS_CLAUDE_ARGS,
+            label_options=AgentLabelOptions(labels={"internal": "ask"}),
+            name=AgentName("ask"),
+            pre_create_setup=lambda host, path: _write_claude_files(host, path, prompt, system_prompt),
+        ) as agent:
             yield from agent.stream_output()
-
-
-def _accumulate_chunks(chunks: Iterator[str]) -> str:
-    """Accumulate all chunks from an iterator into a single string."""
-    parts: list[str] = []
-    for chunk in chunks:
-        parts.append(chunk)
-    return "".join(parts)
 
 
 def _load_mega_tutorial() -> str:
@@ -479,36 +374,17 @@ def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info("Thinking...", output_opts.output_format)
 
-    host = _get_local_host(mngr_ctx)
+    host = get_local_host(mngr_ctx)
     backend = HeadlessClaudeBackend(host=host, mngr_ctx=mngr_ctx)
     system_prompt = _build_ask_context()
     chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
 
     if opts.execute:
         # Accumulate all chunks for execute mode (don't stream to user)
-        response = _accumulate_chunks(chunks)
+        response = accumulate_chunks(chunks)
         _execute_response(response=response, output_format=output_opts.output_format)
     else:
-        _stream_or_accumulate_response(chunks=chunks, output_format=output_opts.output_format)
-
-
-def _stream_or_accumulate_response(chunks: Iterator[str], output_format: OutputFormat) -> None:
-    """Stream response chunks for HUMAN format, or accumulate for JSON/JSONL."""
-    match output_format:
-        case OutputFormat.HUMAN:
-            for chunk in chunks:
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        case OutputFormat.JSON:
-            response = _accumulate_chunks(chunks)
-            emit_final_json({"response": response})
-        case OutputFormat.JSONL:
-            response = _accumulate_chunks(chunks)
-            emit_final_json({"event": "response", "response": response})
-        case _ as unreachable:
-            assert_never(unreachable)
+        stream_or_accumulate_response(chunks=chunks, output_format=output_opts.output_format)
 
 
 def _execute_response(response: str, output_format: OutputFormat) -> None:
