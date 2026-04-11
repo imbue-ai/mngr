@@ -247,6 +247,8 @@ class AgentManager:
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(parent_agent_id)
+            parent = self._agents.get(parent_agent_id)
+            parent_labels = dict(parent.labels) if parent else {}
 
         if work_dir is None:
             msg = f"Cannot determine work directory for agent {parent_agent_id}"
@@ -266,6 +268,11 @@ class AgentManager:
             f"chat_parent_id={parent_agent_id}",
             "--no-connect",
         ]
+
+        # Inherit workspace and project labels from the parent agent
+        for key in ("workspace", "project"):
+            if key in parent_labels:
+                cmd.extend(["--label", f"{key}={parent_labels[key]}"])
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 

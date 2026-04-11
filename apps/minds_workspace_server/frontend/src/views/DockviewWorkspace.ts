@@ -101,35 +101,36 @@ function createMithrilRenderer(
 function buildDropdownItems(
   agentId: string,
   dockviewState: AgentDockviewState,
-): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
-  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
+): Array<{ label: string; action: () => void; dividerAfter?: boolean; header?: boolean }> {
+  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean; header?: boolean }> = [];
 
-  // Section 1: Chat entries -- one per agent in this worktree
+  // --- Chat section ---
+  items.push({ label: "Chat", action: () => {}, header: true });
+
   const selectedAgent = getAgentById(agentId);
   if (selectedAgent) {
     items.push({
-      label: `Chat (${selectedAgent.name})`,
+      label: selectedAgent.name,
       action: () => focusOrCreateChatPanelForAgent(agentId, agentId, selectedAgent.name, dockviewState),
     });
   }
   const chatAgents = getChatAgentsForParent(agentId);
   for (const chatAgent of chatAgents) {
     items.push({
-      label: `Chat (${chatAgent.name})`,
+      label: chatAgent.name,
       action: () => focusOrCreateChatPanelForAgent(agentId, chatAgent.id, chatAgent.name, dockviewState),
     });
   }
   const chatProtos = getChatProtoAgentsForParent(agentId);
   for (const proto of chatProtos) {
     items.push({
-      label: `Chat (${proto.name}) - creating...`,
+      label: `${proto.name} (creating...)`,
       action: () => focusOrCreateChatPanelForAgent(agentId, proto.agent_id, proto.name, dockviewState),
     });
   }
 
-  // "New Chat" entry
   items.push({
-    label: "New Chat",
+    label: "+ new chat",
     action: () => {
       showNewChatModal = true;
       newChatParentAgentId = agentId;
@@ -138,22 +139,23 @@ function buildDropdownItems(
     dividerAfter: true,
   });
 
-  // Section 2: Applications from runtime/applications.toml
-  const apps = getApplicationsForAgent(agentId);
-  if (apps.length > 0) {
-    for (const app of apps) {
-      const proxyUrl = getApplicationUrl(app.name, agentId);
-      items.push({
-        label: app.name,
-        action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
-      });
-    }
-    items[items.length - 1].dividerAfter = true;
+  // --- Applications section ---
+  items.push({ label: "Applications", action: () => {}, header: true });
+
+  // Filter out the "web" application for the currently selected agent,
+  // since that's what we're already looking at. Other agents' "web" apps
+  // (e.g., worktree agents) are kept so you can preview their changes.
+  const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web");
+  for (const app of apps) {
+    const proxyUrl = getApplicationUrl(app.name, agentId);
+    items.push({
+      label: app.name,
+      action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
+    });
   }
 
-  // Section 3: Custom URL
   items.push({
-    label: "Custom URL",
+    label: "+ custom URL",
     action: () => showCustomUrlDialog(agentId, dockviewState),
   });
 
@@ -186,6 +188,15 @@ function createAddTabButton(agentId: string, dockviewState: AgentDockviewState):
       dropdown.innerHTML = "";
       const items = buildDropdownItems(agentId, dockviewState);
       for (const item of items) {
+        if (item.header) {
+          const header = document.createElement("div");
+          header.className = "dockview-add-tab-dropdown-header";
+          header.textContent = item.label;
+          header.style.cssText = "padding: 4px 12px; font-size: 0.75em; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;";
+          dropdown.appendChild(header);
+          continue;
+        }
+
         const menuItem = document.createElement("div");
         menuItem.className = "dockview-add-tab-dropdown-item";
         menuItem.textContent = item.label;
@@ -249,7 +260,7 @@ function addChatPanel(
   state: AgentDockviewState,
 ): void {
   const panelId = `chat-${chatAgentId}`;
-  const title = chatAgentId === agentId ? "Chat" : `Chat (${chatAgentName})`;
+  const title = chatAgentName;
   const params: PanelParams = { panelType: "chat", agentId, chatAgentId };
   state.panelParams.set(panelId, params);
   state.component.addPanel({

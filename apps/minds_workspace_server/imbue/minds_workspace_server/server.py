@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import signal
 import socket
@@ -131,8 +132,24 @@ def _inject_base_path_meta_tag(html_content: str, root_path: str) -> str:
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
+def _read_host_name() -> str:
+    """Read the host name from $MNGR_HOST_DIR/data.json, falling back to socket.gethostname()."""
+    host_dir = os.environ.get("MNGR_HOST_DIR", "")
+    if host_dir:
+        data_path = Path(host_dir) / "data.json"
+        if data_path.exists():
+            try:
+                data = json.loads(data_path.read_text())
+                name = data.get("host_name")
+                if name:
+                    return str(name)
+            except (json.JSONDecodeError, OSError):
+                pass
+    return socket.gethostname()
+
+
 def _inject_hostname_meta_tag(html_content: str) -> str:
-    hostname = socket.gethostname()
+    hostname = _read_host_name()
     meta_tag = f'<meta name="minds-workspace-server-hostname" content="{hostname}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
