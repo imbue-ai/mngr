@@ -602,6 +602,18 @@ def test_notification_rejects_non_dict_json_body(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
+def test_notification_rejects_non_string_title(tmp_path: Path) -> None:
+    """When the title field is not a string, return 400."""
+    client, _agent_id, api_key, _paths = _create_test_api_client(tmp_path)
+    response = client.post(
+        "/api/v1/notifications",
+        json={"message": "test", "title": 123},
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 400
+    assert "title" in response.json()["error"]
+
+
 def test_telegram_setup_with_non_dict_json_body(tmp_path: Path) -> None:
     """When the telegram setup body is valid JSON but not a dict, setup still proceeds."""
     client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)

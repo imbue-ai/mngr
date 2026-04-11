@@ -221,6 +221,8 @@ async def _handle_notification(
         return _json_error("'message' field is required and must be a string", 400)
 
     title = body.get("title")
+    if title is not None and not isinstance(title, str):
+        return _json_error("'title' field must be a string", 400)
     urgency_str = body.get("urgency", "NORMAL")
     try:
         urgency = NotificationUrgency(urgency_str.upper())
