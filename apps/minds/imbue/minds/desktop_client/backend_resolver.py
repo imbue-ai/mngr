@@ -307,6 +307,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if "workspace" in agent.labels and "is_primary" in agent.labels
             )
 
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        """Return the workspace label value for an agent, or None."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return agent.labels.get("workspace")
+            return None
+
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:

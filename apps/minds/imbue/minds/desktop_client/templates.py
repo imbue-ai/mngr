@@ -37,8 +37,6 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     + """
     body { background: #f8fafc; padding: 0; font-size: 14px; }
     .page { max-width: 800px; margin: 0 auto; padding: 48px 0; }
-    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding: 0 16px; }
-    .header h1 { font-size: 14px; font-weight: 600; color: #1e293b; margin: 0; }
     .create-btn {
       padding: 6px 16px; background: #1e293b; color: white; border: none;
       border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
@@ -88,17 +86,13 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
 </head>
 <body>
   <div class="page">
-    <div class="header">
-      <h1>Workspaces</h1>
-      <a href="/create" class="create-btn">Create</a>
-    </div>
     {% if agent_ids %}
     <table>
       <thead>
         <tr>
           <th>Name</th>
           <th>Shared with</th>
-          <th></th>
+          <th style="text-align: right;"><a href="/create" class="create-btn">Create</a></th>
         </tr>
       </thead>
       <tbody>
@@ -194,7 +188,10 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     <p class="empty-state">Discovering agents...</p>
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
-    <p class="empty-state">No workspaces yet</p>
+    <div style="text-align: center; padding: 48px 0;">
+      <p class="empty-state" style="margin-bottom: 24px;">No workspaces yet</p>
+      <a href="/create" class="create-btn">Create</a>
+    </div>
       {% endif %}
     {% endif %}
   </div>
