@@ -33,6 +33,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
@@ -381,7 +382,7 @@ class AgentObserver(MutableModel):
                     try:
                         with log_span("Performing periodic full state snapshot"):
                             self._do_full_state_snapshot()
-                    except (MngrError, OSError) as e:
+                    except (BaseMngrError, OSError) as e:
                         logger.warning("Periodic full state snapshot failed (continuing): {}", e)
             except KeyboardInterrupt:
                 pass
@@ -400,7 +401,7 @@ class AgentObserver(MutableModel):
     def _start_discovery_stream(self) -> None:
         """Start the 'mngr observe --discovery-only' subprocess for host discovery."""
         self._discovery_stream_process = self._concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error", "continue"],
             on_output=self._on_discovery_stream_output,
         )
 
@@ -471,7 +472,7 @@ class AgentObserver(MutableModel):
             )
             with self._lock:
                 self._events_processes[host_id_str] = process
-        except (MngrError, OSError) as e:
+        except (BaseMngrError, OSError) as e:
             logger.debug("Failed to start activity stream for host {}: {}", host_name, e)
 
     def _stop_activity_stream(self, host_id_str: str) -> None:
@@ -519,7 +520,7 @@ class AgentObserver(MutableModel):
                     break
                 try:
                     self._fetch_and_emit_agent_state_for_host(hid)
-                except (MngrError, OSError) as e:
+                except (BaseMngrError, OSError) as e:
                     logger.warning("Failed to fetch agent state for host {}: {}", hid, e)
 
     def _fetch_and_emit_agent_state_for_host(self, host_id_str: str) -> None:

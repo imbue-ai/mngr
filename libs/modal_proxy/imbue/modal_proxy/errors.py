@@ -22,5 +22,9 @@ class ModalProxyInternalError(ModalProxyError):
     """Raised on transient Modal internal errors."""
 
 
+class ModalProxyRateLimitError(ModalProxyError):
+    """Raised when a Modal API rate limit is exceeded."""
+
+
 class ModalProxyRemoteError(ModalProxyError):
     """Raised on Modal remote execution errors."""

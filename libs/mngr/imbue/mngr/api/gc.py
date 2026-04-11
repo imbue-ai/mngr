@@ -339,9 +339,9 @@ def _gc_single_host(
             return
 
         if not dry_run:
-            mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
+            mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy, mngr_ctx=mngr_ctx)
             provider.destroy_host(host_to_destroy)
-            mngr_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
+            mngr_ctx.pm.hook.on_host_destroyed(host=host_to_destroy, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host_ref.host_id, [])
 
         with results_lock:
