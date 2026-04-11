@@ -1,9 +1,7 @@
 """Tests for the AgentManager."""
 
 import json
-import os
 import queue
-import subprocess
 import threading
 from pathlib import Path
 
@@ -25,54 +23,6 @@ from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
-
-
-@pytest.fixture
-def broadcaster() -> WebSocketBroadcaster:
-    return WebSocketBroadcaster()
-
-
-@pytest.fixture
-def agent_manager(broadcaster: WebSocketBroadcaster) -> AgentManager:
-    """Create an AgentManager without starting observe subprocess."""
-    with _env(MNGR_AGENT_ID="test-agent-id", MNGR_AGENT_WORK_DIR="/tmp/test-work"):
-        manager = AgentManager.build(broadcaster)
-    return manager
-
-
-@pytest.fixture
-def git_work_dir(tmp_path: Path) -> Path:
-    """Create a minimal git repository for tests that need a real git work directory."""
-    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test.com",
-             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@test.com"},
-    )
-    return tmp_path
-
-
-class _env:
-    """Context manager to temporarily set environment variables."""
-
-    def __init__(self, **kwargs: str) -> None:
-        self._kwargs = kwargs
-        self._previous: dict[str, str | None] = {}
-
-    def __enter__(self) -> "_env":
-        for key, value in self._kwargs.items():
-            self._previous[key] = os.environ.get(key)
-            os.environ[key] = value
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        for key, previous in self._previous.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
