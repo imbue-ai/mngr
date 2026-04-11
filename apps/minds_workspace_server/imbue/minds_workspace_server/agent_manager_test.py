@@ -160,8 +160,6 @@ def test_resolve_agent_work_dir_returns_none_for_unknown(agent_manager: AgentMan
 def test_create_chat_agent_broadcasts_proto_created(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     q = broadcaster.register()
 
     with agent_manager._lock:
@@ -196,8 +194,6 @@ def test_create_chat_agent_raises_for_unknown_parent(agent_manager: AgentManager
 def test_create_worktree_agent_broadcasts_proto_created(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     q = broadcaster.register()
 
     with agent_manager._lock:
@@ -251,3 +247,143 @@ def test_get_log_queue_for_proto_agent(
 
 def test_get_log_queue_returns_none_for_unknown(agent_manager: AgentManager) -> None:
     assert agent_manager.get_log_queue("nonexistent") is None
+
+
+def test_stop_without_start(agent_manager: AgentManager) -> None:
+    """Stopping an agent manager that was never started is safe."""
+    agent_manager.stop()
+
+
+def test_handle_agent_discovered(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """Agent discovered events update the agent list and broadcast."""
+    from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+    from imbue.mngr.primitives import AgentId as MngrAgentId
+    from imbue.mngr.primitives import AgentName as MngrAgentName
+    from imbue.mngr.primitives import DiscoveredAgent
+    from imbue.mngr.primitives import HostId
+    from imbue.mngr.primitives import ProviderInstanceName
+
+    q = broadcaster.register()
+
+    agent = DiscoveredAgent(
+        host_id=HostId("host-1"),
+        agent_id=MngrAgentId("agent-discovered-1"),
+        agent_name=MngrAgentName("discovered-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
+    )
+    event = AgentDiscoveryEvent(
+        timestamp="2026-01-01T00:00:00Z",
+        event_id="evt-1",
+        source="test",
+        type="AGENT_DISCOVERED",
+        agent=agent,
+    )
+
+    agent_manager._handle_agent_discovered(event)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == "agent-discovered-1"
+    assert agents[0].name == "discovered-agent"
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+
+
+def test_handle_agent_destroyed(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """Agent destroyed events remove the agent and broadcast."""
+    from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+    from imbue.mngr.primitives import AgentId as MngrAgentId
+    from imbue.mngr.primitives import HostId
+
+    q = broadcaster.register()
+
+    with agent_manager._lock:
+        agent_manager._agents["agent-to-destroy"] = AgentStateItem(
+            id="agent-to-destroy",
+            name="doomed",
+            state="RUNNING",
+            labels={},
+            work_dir=None,
+        )
+
+    event = AgentDestroyedEvent(
+        timestamp="2026-01-01T00:00:00Z",
+        event_id="evt-2",
+        source="test",
+        type="AGENT_DESTROYED",
+        agent_id=MngrAgentId("agent-to-destroy"),
+        host_id=HostId("host-1"),
+    )
+
+    agent_manager._handle_agent_destroyed(event)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 0
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+
+
+def test_on_applications_changed(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """Application changes are detected and broadcast."""
+    q = broadcaster.register()
+
+    toml_path = tmp_path / "runtime" / "applications.toml"
+    toml_path.parent.mkdir(parents=True, exist_ok=True)
+    toml_path.write_text('[[applications]]\nname = "web"\nurl = "http://localhost:8000"\n')
+
+    with agent_manager._lock:
+        agent_manager._agents["app-agent"] = AgentStateItem(
+            id="app-agent",
+            name="app-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path),
+        )
+
+    agent_manager._on_applications_changed("app-agent")
+
+    apps = agent_manager.get_applications()
+    assert len(apps["app-agent"]) == 1
+    assert apps["app-agent"][0].name == "web"
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "applications_updated"
+
+
+def test_read_applications_handles_invalid_toml(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """Invalid TOML files are handled gracefully."""
+    toml_file = tmp_path / "bad.toml"
+    toml_file.write_text("this is [[ not valid toml {{")
+
+    agent_manager._read_applications("test-agent", toml_file)
+
+    apps = agent_manager.get_applications()
+    assert apps.get("test-agent") == []
+
+
+def test_handle_discovery_event_ignores_unknown_types(agent_manager: AgentManager) -> None:
+    """Unknown event types are ignored gracefully."""
+    agent_manager._handle_discovery_event("not-a-real-event")
+
+
+def test_create_worktree_raises_for_unknown_agent(agent_manager: AgentManager) -> None:
+    """Creating a worktree for an unknown agent raises."""
+    with pytest.raises(AgentCreationError, match="Cannot determine work directory"):
+        agent_manager.create_worktree_agent("test", "nonexistent")
