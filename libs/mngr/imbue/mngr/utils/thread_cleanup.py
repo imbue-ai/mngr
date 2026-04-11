@@ -8,7 +8,7 @@ This module provides a cleanup function registered as the global default
 ``on_thread_exit`` callback via ``set_default_on_thread_exit``.
 """
 
-import gevent
+from gevent._hub_local import get_hub_if_exists
 
 
 def cleanup_thread_local_resources() -> None:
@@ -17,7 +17,7 @@ def cleanup_thread_local_resources() -> None:
     Called automatically at the end of each ConcurrencyGroupExecutor worker
     thread's lifetime to prevent file-descriptor leaks from gevent Hubs.
     """
-    hub = gevent.get_hub_if_exists()
+    hub = get_hub_if_exists()
     if hub is None:
         return
     hub.destroy(destroy_loop=True)
