@@ -220,6 +220,8 @@ def _build_mngr_create_command(
         f"workspace={agent_name}",
         "--label",
         "user_created=true",
+        "--label",
+        "is_primary=true",
         "--template",
         "main",
     ]
