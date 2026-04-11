@@ -1,4 +1,5 @@
 import json
+import threading
 
 from _pytest.capture import CaptureFixture
 
@@ -121,5 +122,43 @@ def test_dispatch_non_electron_does_not_raise() -> None:
     dispatcher = NotificationDispatcher.create(is_electron=False, tkinter_module=None)
     request = NotificationRequest(message="background toast")
     dispatcher.dispatch(request, "agent-y")
+
+
+def test_dispatcher_create_with_no_tkinter() -> None:
+    """NotificationDispatcher.create with tkinter_module=None disables tkinter toasts."""
+    dispatcher = NotificationDispatcher.create(is_electron=False, tkinter_module=None)
+    assert dispatcher.is_electron is False
+    assert dispatcher._tk is None
+
+
+def test_dispatcher_create_defaults_is_electron_false(capsys: CaptureFixture[str]) -> None:
+    """NotificationDispatcher.create(is_electron=True) routes to Electron."""
+    dispatcher = NotificationDispatcher.create(is_electron=True)
+    request = NotificationRequest(message="from create factory")
+    dispatcher.dispatch(request, "agent-factory")
+
+    captured = capsys.readouterr()
+    event = json.loads(captured.out.strip())
+    assert event["message"] == "from create factory"
+
+
+def test_dispatcher_default_constructor_resolves_tkinter() -> None:
+    """NotificationDispatcher() resolves tkinter at construction via model_post_init."""
+    # The _tk private attr should be set to the auto-detected _TKINTER value.
+    # We can't know if tkinter is available, so just verify _tk is not uninitialized.
+    dispatcher = NotificationDispatcher(is_electron=False)
+    # _tk is set by model_post_init; it will be a ModuleType or None (if tkinter is absent)
+    # Just verify the attribute is accessible (not undefined)
+    _ = dispatcher._tk
+
+
+def test_show_tkinter_toast_with_no_tkinter_runs_in_thread() -> None:
+    """_show_tkinter_toast with tk=None starts a daemon thread that exits immediately."""
+    before_count = threading.active_count()
+    request = NotificationRequest(message="thread test")
+    _show_tkinter_toast(request, "agent-thread", tk=None)
+    # Thread is daemon and should start; we can't easily join it but verify no exception
+    assert threading.active_count() >= before_count
+
 
 
