@@ -89,6 +89,9 @@ class DockerOverSsh(MutableModel):
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+        except OSError as e:
+            raise VpsConnectionError(f"SSH command failed: {e}") from e
+        try:
             assert process.stdout is not None
             for line in process.stdout:
                 stripped = line.rstrip("\n")
@@ -101,8 +104,6 @@ class DockerOverSsh(MutableModel):
             raise VpsConnectionError(
                 f"SSH command timed out after {timeout_seconds}s: {remote_command}"
             ) from None
-        except OSError as e:
-            raise VpsConnectionError(f"SSH command failed: {e}") from e
         if returncode != 0:
             error_output = "\n".join(collected_output[-50:])
             raise ContainerSetupError(f"Remote command failed (exit {returncode}): {error_output}")

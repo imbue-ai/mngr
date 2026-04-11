@@ -2,11 +2,13 @@ import json
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from loguru import logger
@@ -18,30 +20,50 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import check_agent_type_known
+from imbue.mngr.hosts.common import compute_idle_seconds
+from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import resolve_expected_process_name
+from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
@@ -197,6 +219,8 @@ class VpsDockerProvider(BaseProviderInstance):
     vps_client: VpsClientInterface = Field(frozen=True, description="VPS provider API client")
 
     _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
+    _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
+    _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -216,6 +240,8 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def reset_caches(self) -> None:
         self._host_by_id_cache.clear()
+        self._host_record_cache.clear()
+        self._container_running_cache.clear()
 
     # =========================================================================
     # Key Management
@@ -1078,6 +1104,89 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return discovered
 
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        """Load hosts and agent references from state volumes in batched SSH calls.
+
+        Reads all host records and agent data from each VPS in a single SSH command,
+        then determines container running status. Avoids the default implementation's
+        per-host SSH calls into containers for agent discovery.
+        """
+        with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
+            try:
+                all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
+            except Exception as e:
+                logger.warning("Failed to discover VPS Docker hosts: {}", e)
+                return {}
+
+        result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+        for record in all_records:
+            host_id = HostId(record.certified_host_data.host_id)
+            host_name = HostName(record.certified_host_data.host_name)
+
+            # Cache the host record for later use by get_host_and_agent_details
+            self._host_record_cache[host_id] = record
+
+            # Determine host state from container running status
+            is_running = False
+            docker_ssh = None
+            if record.vps_ip is not None and record.config is not None:
+                docker_ssh = self._make_docker_ssh(record.vps_ip)
+                container_name = record.config.container_name
+                if container_name not in self._container_running_cache:
+                    self._container_running_cache[container_name] = docker_ssh.container_is_running(container_name)
+                is_running = self._container_running_cache[container_name]
+
+            has_snapshots = len(record.certified_host_data.snapshots) > 0
+            is_failed = record.certified_host_data.failure_reason is not None
+
+            if not is_running and not is_failed and not has_snapshots and not include_destroyed:
+                continue
+
+            if is_running and docker_ssh is not None and record.vps_ip is not None:
+                host_state = HostState.RUNNING
+                self._create_host_object(host_id, record.vps_ip, docker_ssh)
+            else:
+                host_state = derive_offline_host_state(
+                    certified_data=record.certified_host_data,
+                    supports_shutdown_hosts=self.supports_shutdown_hosts,
+                    supports_snapshots=self.supports_snapshots,
+                    has_snapshots=has_snapshots,
+                )
+                self._create_offline_host(record)
+
+            host_ref = DiscoveredHost(
+                host_id=host_id,
+                host_name=host_name,
+                provider_name=self.name,
+                host_state=host_state,
+            )
+
+            # Build agent refs from persisted agent data
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_data in agent_data_by_host_id.get(host_id, []):
+                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
+                if ref is not None:
+                    agent_refs.append(ref)
+
+            result[host_ref] = agent_refs
+
+        return result
+
+    def _discover_host_records_with_agents(
+        self,
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+        """Discover host records and agent data from state volumes.
+
+        Calls _discover_host_records() for host records, and reads agent data
+        from the state volume in the same batched SSH call. Concrete subclasses
+        override this to include API-based discovery.
+        """
+        return [], {}
+
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
         """Discover host records by iterating known VPS instances."""
         # For each VPS instance that has our provider tag, SSH in and read
@@ -1101,6 +1210,243 @@ class VpsDockerProvider(BaseProviderInstance):
         # For now, we need to iterate through VPS instances
         # This is a placeholder that concrete subclasses should improve
         return None
+
+    # =========================================================================
+    # Optimized Listing
+    # =========================================================================
+
+    def get_host_and_agent_details(
+        self,
+        host_ref: DiscoveredHost,
+        agent_refs: Sequence[DiscoveredAgent],
+        field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
+        | None = None,
+        on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
+    ) -> tuple[HostDetails, list[AgentDetails]]:
+        """Build HostDetails and AgentDetails via a single SSH command."""
+        # Look up cached host record (populated during discover_hosts_and_agents)
+        host_record = self._host_record_cache.get(host_ref.host_id)
+        if host_record is None:
+            host_record = self._find_host_record(host_ref.host_id)
+
+        # For offline hosts or hosts without a record, fall back to default
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
+            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+
+        try:
+            host = self.get_host(host_ref.host_id)
+
+            if not isinstance(host, Host):
+                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+
+            # Collect all data in one SSH command
+            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
+            script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
+
+            with log_span("Collecting listing data via single SSH command"):
+                raw_output = docker_ssh.exec_in_container(
+                    host_record.config.container_name,
+                    script,
+                    timeout_seconds=30.0,
+                )
+
+            raw = parse_listing_collection_output(raw_output)
+
+        except HostConnectionError as e:
+            self.on_connection_error(host_ref.host_id)
+            logger.debug(
+                "Host {} unreachable during optimized listing, falling back to default: {}",
+                host_ref.host_id,
+                e,
+            )
+            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+        except MngrError as e:
+            if on_error:
+                on_error(host_ref, e)
+                return HostDetails(
+                    id=host_ref.host_id,
+                    name=str(host_ref.host_name),
+                    provider_name=host_ref.provider_name,
+                    state=HostState.RUNNING,
+                ), []
+            else:
+                raise
+
+        host_details = self._build_host_details_from_raw(host, host_ref, host_record, raw)
+        agent_details_list = self._build_agent_details_from_raw(host_details, host_record.certified_host_data, raw)
+        return host_details, agent_details_list
+
+    def _build_host_details_from_raw(
+        self,
+        host: Host,
+        host_ref: DiscoveredHost,
+        host_record: VpsDockerHostRecord,
+        raw: dict[str, Any],
+    ) -> HostDetails:
+        """Construct HostDetails from cached host record and SSH-collected data."""
+        ssh_info: SSHInfo | None = None
+        ssh_connection = host.get_ssh_connection_info()
+        if ssh_connection is not None:
+            user, hostname, port, key_path = ssh_connection
+            ssh_info = SSHInfo(
+                user=user,
+                host=hostname,
+                port=port,
+                key_path=key_path,
+                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+            )
+
+        boot_time = timestamp_to_datetime(raw.get("btime"))
+        uptime_seconds = raw.get("uptime_seconds")
+        resource = self.get_host_resources(host)
+
+        lock_mtime = raw.get("lock_mtime")
+        is_locked = lock_mtime is not None
+        locked_time = datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if lock_mtime is not None else None
+
+        certified_data: CertifiedHostData | None = None
+        certified_data_dict = raw.get("certified_data")
+        if certified_data_dict is not None:
+            try:
+                certified_data = CertifiedHostData.model_validate(certified_data_dict)
+            except (ValueError, KeyError) as e:
+                logger.warning("Failed to validate host data.json from SSH output: {}", e)
+        if certified_data is None:
+            certified_data = host_record.certified_host_data
+
+        tags = dict(certified_data.user_tags)
+
+        ssh_activity_mtime = raw.get("ssh_activity_mtime")
+        ssh_activity = (
+            datetime.fromtimestamp(ssh_activity_mtime, tz=timezone.utc) if ssh_activity_mtime is not None else None
+        )
+
+        snapshots = self.list_snapshots(host)
+
+        return HostDetails(
+            id=host.id,
+            name=certified_data.host_name,
+            provider_name=host_ref.provider_name,
+            state=HostState.RUNNING,
+            image=certified_data.image,
+            tags=tags,
+            boot_time=boot_time,
+            uptime_seconds=uptime_seconds,
+            resource=resource,
+            ssh=ssh_info,
+            snapshots=snapshots,
+            is_locked=is_locked,
+            locked_time=locked_time,
+            plugin=certified_data.plugin,
+            ssh_activity_time=ssh_activity,
+            failure_reason=certified_data.failure_reason,
+        )
+
+    def _build_agent_details_from_raw(
+        self,
+        host_details: HostDetails,
+        certified_host_data: CertifiedHostData,
+        raw: dict[str, Any],
+    ) -> list[AgentDetails]:
+        """Build AgentDetails objects from SSH-collected agent data."""
+        idle_timeout_seconds = certified_host_data.idle_timeout_seconds
+        activity_sources = certified_host_data.activity_sources
+        idle_mode = certified_host_data.idle_mode
+
+        ssh_activity = timestamp_to_datetime(raw.get("ssh_activity_mtime"))
+        ps_output = raw.get("ps_output", "")
+
+        agent_details_list: list[AgentDetails] = []
+        for agent_raw in raw.get("agents", []):
+            try:
+                agent_details = self._build_single_agent_details(
+                    agent_raw=agent_raw,
+                    host_details=host_details,
+                    ssh_activity=ssh_activity,
+                    ps_output=ps_output,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                    activity_sources=activity_sources,
+                    idle_mode=idle_mode,
+                )
+                if agent_details is not None:
+                    agent_details_list.append(agent_details)
+            except (ValueError, KeyError, TypeError) as e:
+                agent_id = agent_raw.get("data", {}).get("id", "unknown")
+                logger.warning("Failed to build listing info for agent {}: {}", agent_id, e)
+
+        return agent_details_list
+
+    def _build_single_agent_details(
+        self,
+        agent_raw: dict[str, Any],
+        host_details: HostDetails,
+        ssh_activity: datetime | None,
+        ps_output: str,
+        idle_timeout_seconds: int,
+        activity_sources: tuple[ActivitySource, ...],
+        idle_mode: IdleMode,
+    ) -> AgentDetails | None:
+        """Build a single AgentDetails from raw SSH-collected data."""
+        agent_data = agent_raw.get("data", {})
+        agent_id_str = agent_data.get("id")
+        agent_name_str = agent_data.get("name")
+        if not agent_id_str or not agent_name_str:
+            logger.warning("Skipped agent with missing id or name in listing data: {}", agent_data)
+            return None
+
+        agent_type = str(agent_data.get("type", "unknown"))
+        command = CommandString(agent_data.get("command", "bash"))
+        create_time_str = agent_data.get("create_time")
+        try:
+            create_time = (
+                datetime.fromisoformat(create_time_str)
+                if create_time_str
+                else datetime(1970, 1, 1, tzinfo=timezone.utc)
+            )
+        except (ValueError, TypeError) as e:
+            logger.warning("Failed to parse create_time for agent {}: {}", agent_id_str, e)
+            create_time = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+        user_activity = timestamp_to_datetime(agent_raw.get("user_activity_mtime"))
+        agent_activity = timestamp_to_datetime(agent_raw.get("agent_activity_mtime"))
+        start_time = timestamp_to_datetime(agent_raw.get("start_activity_mtime"))
+        now = datetime.now(timezone.utc)
+        runtime_seconds = (now - start_time).total_seconds() if start_time else None
+        idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
+
+        expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
+        is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
+        state = determine_lifecycle_state(
+            tmux_info=agent_raw.get("tmux_info"),
+            is_active=agent_raw.get("is_active", False),
+            expected_process_name=expected_process_name,
+            ps_output=ps_output,
+            is_agent_type_known=is_type_known,
+        )
+
+        return AgentDetails(
+            id=AgentId(agent_id_str),
+            name=AgentName(agent_name_str),
+            type=agent_type,
+            command=command,
+            work_dir=Path(agent_data.get("work_dir", "/")),
+            initial_branch=agent_data.get("created_branch_name"),
+            create_time=create_time,
+            start_on_boot=agent_data.get("start_on_boot", False),
+            state=state,
+            url=agent_raw.get("url"),
+            start_time=start_time,
+            runtime_seconds=runtime_seconds,
+            user_activity_time=user_activity,
+            agent_activity_time=agent_activity,
+            idle_seconds=idle_seconds,
+            idle_mode=idle_mode.value,
+            idle_timeout_seconds=idle_timeout_seconds,
+            activity_sources=tuple(s.value for s in activity_sources),
+            labels=agent_data.get("labels", {}),
+            host=host_details,
+            plugin={},
+        )
 
     # =========================================================================
     # Snapshots
