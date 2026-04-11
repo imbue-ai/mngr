@@ -8,6 +8,7 @@ import platform
 import threading
 from enum import auto
 from types import ModuleType
+from typing import Any
 
 from loguru import logger
 from pydantic import Field
@@ -71,6 +72,82 @@ def _dispatch_electron_notification(
     emit_event("notification", data, OutputFormat.JSONL)
 
 
+def _build_toast_widgets(
+    root: Any,
+    title: str,
+    message: str,
+    urgency: NotificationUrgency,
+    agent_display_name: str,
+    tk: ModuleType,
+) -> tuple[Any, Any]:
+    """Build the widget tree for a toast notification window.
+
+    Returns (frame, content) where frame is the outermost container and
+    content holds the text labels (used for click binding).
+    """
+    urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
+
+    frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    indicator = tk.Frame(frame, bg=urgency_color, width=4)
+    indicator.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+    content = tk.Frame(frame, bg="#1e293b")
+    content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    tk.Label(
+        content,
+        text=f"From: {agent_display_name}",
+        fg="#94a3b8",
+        bg="#1e293b",
+        font=("sans-serif", 9),
+        anchor="w",
+    ).pack(fill=tk.X)
+
+    tk.Label(
+        content,
+        text=title,
+        fg="#f1f5f9",
+        bg="#1e293b",
+        font=("sans-serif", 11, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X)
+
+    tk.Label(
+        content,
+        text=message,
+        fg="#cbd5e1",
+        bg="#1e293b",
+        font=("sans-serif", 10),
+        anchor="w",
+        wraplength=280,
+        justify=tk.LEFT,
+    ).pack(fill=tk.X, pady=(4, 0))
+
+    tk.Label(
+        content,
+        text="Click to dismiss",
+        fg="#64748b",
+        bg="#1e293b",
+        font=("sans-serif", 8),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(4, 0))
+
+    return frame, content
+
+
+def _position_toast_window(root: Any, width: int = 320) -> None:
+    """Position a toast window in the bottom-right corner of the screen."""
+    root.update_idletasks()
+    height = root.winfo_reqheight()
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x_position = screen_width - width - 20
+    y_position = screen_height - height - 60
+    root.geometry(f"{width}x{height}+{x_position}+{y_position}")
+
+
 def _run_tkinter_toast(
     title: str,
     message: str,
@@ -87,71 +164,9 @@ def _run_tkinter_toast(
         root.overrideredirect(True)
         root.attributes("-topmost", True)
 
-        urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
+        frame, content = _build_toast_widgets(root, title, message, urgency, agent_display_name, tk)
+        _position_toast_window(root)
 
-        frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        # Urgency indicator bar
-        indicator = tk.Frame(frame, bg=urgency_color, width=4)
-        indicator.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
-
-        content = tk.Frame(frame, bg="#1e293b")
-        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Agent name
-        tk.Label(
-            content,
-            text=f"From: {agent_display_name}",
-            fg="#94a3b8",
-            bg="#1e293b",
-            font=("sans-serif", 9),
-            anchor="w",
-        ).pack(fill=tk.X)
-
-        # Title
-        tk.Label(
-            content,
-            text=title,
-            fg="#f1f5f9",
-            bg="#1e293b",
-            font=("sans-serif", 11, "bold"),
-            anchor="w",
-        ).pack(fill=tk.X)
-
-        # Message
-        tk.Label(
-            content,
-            text=message,
-            fg="#cbd5e1",
-            bg="#1e293b",
-            font=("sans-serif", 10),
-            anchor="w",
-            wraplength=280,
-            justify=tk.LEFT,
-        ).pack(fill=tk.X, pady=(4, 0))
-
-        # Dismiss hint
-        tk.Label(
-            content,
-            text="Click to dismiss",
-            fg="#64748b",
-            bg="#1e293b",
-            font=("sans-serif", 8),
-            anchor="w",
-        ).pack(fill=tk.X, pady=(4, 0))
-
-        # Position in bottom-right corner
-        root.update_idletasks()
-        width = 320
-        height = root.winfo_reqheight()
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        x_position = screen_width - width - 20
-        y_position = screen_height - height - 60
-        root.geometry(f"{width}x{height}+{x_position}+{y_position}")
-
-        # Click anywhere to dismiss
         root.bind("<Button-1>", lambda _event: root.destroy())
         frame.bind("<Button-1>", lambda _event: root.destroy())
         for child in content.winfo_children():
