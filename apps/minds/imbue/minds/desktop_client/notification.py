@@ -11,6 +11,7 @@ from types import ModuleType
 
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -72,13 +73,12 @@ def _run_tkinter_toast(
     message: str,
     urgency: NotificationUrgency,
     agent_display_name: str,
+    tk: ModuleType | None,
 ) -> None:
     """Create and display a tkinter toast window. Runs on a background thread."""
-    if _TKINTER is None:
+    if tk is None:
         logger.warning("tkinter not available, cannot show notification toast")
         return
-
-    tk = _TKINTER
     try:
         root = tk.Tk()
         root.overrideredirect(True)
@@ -162,12 +162,13 @@ def _run_tkinter_toast(
 def _show_tkinter_toast(
     request: NotificationRequest,
     agent_display_name: str,
+    tk: ModuleType | None,
 ) -> None:
     """Show a small always-on-top toast window in the bottom-right corner."""
     display_title = request.title or "Notification"
     thread = threading.Thread(
         target=_run_tkinter_toast,
-        args=(display_title, request.message, request.urgency, agent_display_name),
+        args=(display_title, request.message, request.urgency, agent_display_name, tk),
         daemon=True,
         name="tkinter-toast",
     )
@@ -178,6 +179,29 @@ class NotificationDispatcher(FrozenModel):
     """Routes notifications to Electron or tkinter based on runtime context."""
 
     is_electron: bool = Field(description="Whether the server is running inside Electron")
+    # _tk stores the resolved tkinter module. Set at construction time to the
+    # module-level _TKINTER value, or injected via NotificationDispatcher.create()
+    # to allow testing without tkinter side effects.
+    _tk: ModuleType | None = PrivateAttr(default=None)
+
+    def model_post_init(self, __context: object) -> None:
+        """Resolve the tkinter module from the module-level auto-detection."""
+        self._tk = _TKINTER
+
+    @classmethod
+    def create(
+        cls,
+        is_electron: bool,
+        tkinter_module: ModuleType | None = _TKINTER,
+    ) -> "NotificationDispatcher":
+        """Create a NotificationDispatcher with an explicit tkinter module.
+
+        Pass tkinter_module=None to disable tkinter toasts (e.g. in tests or on
+        headless servers where tkinter is unavailable).
+        """
+        dispatcher = cls(is_electron=is_electron)
+        dispatcher._tk = tkinter_module
+        return dispatcher
 
     def dispatch(
         self,
@@ -188,4 +212,4 @@ class NotificationDispatcher(FrozenModel):
         if self.is_electron:
             _dispatch_electron_notification(request, agent_display_name)
         else:
-            _show_tkinter_toast(request, agent_display_name)
+            _show_tkinter_toast(request, agent_display_name, tk=self._tk)

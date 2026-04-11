@@ -2,7 +2,6 @@ import json
 
 from _pytest.capture import CaptureFixture
 
-import imbue.minds.desktop_client.notification as notification_module
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -103,13 +102,8 @@ def test_dispatcher_is_electron_false_does_not_raise() -> None:
 
 def test_run_tkinter_toast_without_tkinter_does_not_raise() -> None:
     """When tkinter is unavailable, _run_tkinter_toast returns immediately without error."""
-    original_tkinter = notification_module._TKINTER
-    notification_module._TKINTER = None
-    try:
-        # Should not raise even though tkinter is None
-        _run_tkinter_toast("Title", "Message", NotificationUrgency.LOW, "agent")
-    finally:
-        notification_module._TKINTER = original_tkinter
+    # Should not raise even though tk=None indicates no tkinter
+    _run_tkinter_toast("Title", "Message", NotificationUrgency.LOW, "agent", tk=None)
 
 
 def test_show_tkinter_toast_with_no_tkinter_does_not_raise() -> None:
@@ -118,24 +112,14 @@ def test_show_tkinter_toast_with_no_tkinter_does_not_raise() -> None:
     The function starts a daemon thread. With no tkinter available, the thread
     logs a warning and exits immediately.
     """
-    original_tkinter = notification_module._TKINTER
-    notification_module._TKINTER = None
-    try:
-        request = NotificationRequest(message="toast message", title="Test")
-        _show_tkinter_toast(request, "agent-z")
-    finally:
-        notification_module._TKINTER = original_tkinter
+    request = NotificationRequest(message="toast message", title="Test")
+    _show_tkinter_toast(request, "agent-z", tk=None)
 
 
 def test_dispatch_non_electron_does_not_raise() -> None:
     """The non-Electron dispatch path starts a background toast and does not raise."""
-    original_tkinter = notification_module._TKINTER
-    notification_module._TKINTER = None
-    try:
-        dispatcher = NotificationDispatcher(is_electron=False)
-        request = NotificationRequest(message="background toast")
-        dispatcher.dispatch(request, "agent-y")
-    finally:
-        notification_module._TKINTER = original_tkinter
+    dispatcher = NotificationDispatcher.create(is_electron=False, tkinter_module=None)
+    request = NotificationRequest(message="background toast")
+    dispatcher.dispatch(request, "agent-y")
 
 
