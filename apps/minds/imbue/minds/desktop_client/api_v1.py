@@ -115,8 +115,9 @@ def _handle_cloudflare_disable(
         return _json_error("Cloudflare forwarding not configured", 501)
 
     parsed_id = AgentId(agent_id)
+    parsed_server = ServerName(server_name)
 
-    is_success = cf_client.remove_service(parsed_id, server_name)
+    is_success = cf_client.remove_service(parsed_id, parsed_server)
 
     if is_success:
         return _json_response({"ok": True})
