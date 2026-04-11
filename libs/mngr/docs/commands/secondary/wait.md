@@ -23,9 +23,9 @@ all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED
 
 Use --event to wait for a lifecycle event instead of a state. Valid events: AGENT_READY, AGENT_STARTING.
 --event is mutually exclusive with state arguments and requires an agent target.
-Note: AGENT_READY is only emitted by 'mngr create' (which verifies readiness), not by 'mngr start'.
+AGENT_READY is emitted by 'mngr create' after readiness is verified; 'mngr start' does not emit it.
 
-If no states or event are specified, waits for any terminal state (the target stops running).
+If no states or events are specified, waits for any terminal state (the target stops running).
 
 When watching an agent, both agent and host states are tracked:
 - STOPPED counts if either the agent or host is stopped
@@ -33,7 +33,7 @@ When watching an agent, both agent and host states are tracked:
 - Host-specific states (CRASHED, PAUSED, etc.) are matched against the host
 
 Exit codes:
-  0 - Target reached one of the requested states or event was observed
+  0 - Target matched a requested state or event
   1 - Error
   2 - Timeout expired
 
@@ -54,7 +54,7 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--state` | text | State to wait for [repeatable]. Can also be passed as positional args after TARGET. | None |
-| `--event` | text | Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). Mutually exclusive with state args. Note: AGENT_READY is only emitted by 'mngr create', not 'mngr start'. | None |
+| `--event` | text | Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). Mutually exclusive with state args. | None |
 | `--timeout` | text | Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever. | None |
 | `--interval` | text | Poll interval (e.g. '5s', '1m'). Default: 5s. | `5s` |
 
