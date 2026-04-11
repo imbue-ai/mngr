@@ -537,8 +537,8 @@ def create_application(
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/stream", _stream_subagent_events, methods=["GET"]
     )
-    application.add_websocket_route("/api/ws", _ws_endpoint)
-    application.add_websocket_route("/api/proto-agents/{agent_id}/logs", _proto_agent_logs_endpoint)
+    application.add_api_websocket_route("/api/ws", _ws_endpoint)
+    application.add_api_websocket_route("/api/proto-agents/{agent_id}/logs", _proto_agent_logs_endpoint)
     application.add_api_route("/plugins/{basename}", _serve_static_file, methods=["GET"])
 
     assets_directory = STATIC_DIRECTORY / "assets"
