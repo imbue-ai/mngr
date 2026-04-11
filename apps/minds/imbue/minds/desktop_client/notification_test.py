@@ -73,3 +73,20 @@ def test_dispatcher_routes_to_electron_when_configured() -> None:
 def test_dispatcher_routes_to_tkinter_when_not_electron() -> None:
     dispatcher = NotificationDispatcher(is_electron=False)
     assert dispatcher.is_electron is False
+
+
+def test_dispatch_electron_via_dispatcher(capsys: CaptureFixture[str]) -> None:
+    """Verify the full dispatch path for Electron notifications."""
+    dispatcher = NotificationDispatcher(is_electron=True)
+    request = NotificationRequest(
+        message="dispatched message",
+        title="Dispatch Title",
+        urgency=NotificationUrgency.LOW,
+    )
+    dispatcher.dispatch(request, "agent-x")
+
+    captured = capsys.readouterr()
+    event = json.loads(captured.out.strip())
+    assert event["event"] == "notification"
+    assert event["message"] == "dispatched message"
+    assert event["agent_name"] == "agent-x"
