@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, ipcMain, shell } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -252,6 +252,14 @@ async function startBackendWithRetry() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('status-update', status);
       }
+    }, (event) => {
+      const agentName = event.agent_name || 'Agent';
+      const title = event.title || `Notification from ${agentName}`;
+      const notification = new Notification({
+        title,
+        body: event.message,
+      });
+      notification.show();
     });
 
     backendBaseUrl = `http://127.0.0.1:${port}`;

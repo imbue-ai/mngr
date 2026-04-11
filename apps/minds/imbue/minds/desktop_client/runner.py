@@ -8,6 +8,9 @@ from typing import Final
 
 import uvicorn
 from loguru import logger
+from pydantic import Field
+
+from imbue.imbue_common.frozen_model import FrozenModel
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -21,13 +24,58 @@ from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
 from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
+from imbue.mngr.primitives import AgentId
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
+
+_DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
+
+
+class AgentDiscoveryHandler(FrozenModel):
+    """Handles agent discovery events by setting up reverse tunnels and writing URL files."""
+
+    tunnel_manager: SSHTunnelManager = Field(description="SSH tunnel manager for reverse tunnels")
+    server_port: int = Field(description="Local server port to forward")
+
+    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None) -> None:
+        if ssh_info is not None:
+            self._handle_remote_agent(agent_id, ssh_info)
+        else:
+            self._handle_local_agent(agent_id)
+
+    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
+        agent_state_dir = f"~/.mngr/agents/{agent_id}"
+        try:
+            remote_port = self.tunnel_manager.setup_reverse_tunnel(
+                ssh_info=ssh_info,
+                local_port=self.server_port,
+                agent_state_dir=agent_state_dir,
+            )
+            api_url = f"http://127.0.0.1:{remote_port}"
+            self.tunnel_manager.write_api_url_to_remote(
+                ssh_info=ssh_info,
+                agent_state_dir=agent_state_dir,
+                url=api_url,
+            )
+            logger.debug("Wrote API URL {} for remote agent {}", api_url, agent_id)
+        except (SSHTunnelError, OSError) as e:
+            logger.warning("Failed to set up reverse tunnel for agent {}: {}", agent_id, e)
+
+    def _handle_local_agent(self, agent_id: AgentId) -> None:
+        local_state_dir = _DEFAULT_MNGR_HOST_DIR / "agents" / str(agent_id)
+        api_url = f"http://127.0.0.1:{self.server_port}"
+        try:
+            self.tunnel_manager.write_api_url_to_local(local_state_dir, api_url)
+            logger.debug("Wrote API URL {} for local agent {}", api_url, agent_id)
+        except OSError as e:
+            logger.warning("Failed to write API URL for local agent {}: {}", agent_id, e)
 
 
 def start_desktop_client(
@@ -72,7 +120,14 @@ def start_desktop_client(
         output_format,
     )
 
+    # Register callback to set up reverse tunnels and write API URL files
+    # when agents are discovered
+    discovery_handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=port)
+    stream_manager.add_on_agent_discovered_callback(discovery_handler)
     stream_manager.start()
+
+    # Start health checking for reverse tunnels
+    tunnel_manager.start_reverse_tunnel_health_check()
 
     app = create_desktop_client(
         auth_store=auth_store,

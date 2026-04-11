@@ -23,6 +23,8 @@ _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
 
 _SOCKET_POLL_SECONDS: Final[float] = 0.01
 
+_REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
+
 
 class RemoteSSHInfo(FrozenModel):
     """SSH connection info for a remote agent host."""
@@ -53,6 +55,15 @@ def _ssh_connection_transport(client: paramiko.SSHClient) -> paramiko.Transport:
     return transport
 
 
+class ReverseTunnelInfo(FrozenModel):
+    """Metadata for an active reverse port forward."""
+
+    ssh_info: RemoteSSHInfo = Field(description="SSH connection info for the remote host")
+    local_port: int = Field(description="Local port being forwarded to the remote host")
+    remote_port: int = Field(description="Port assigned on the remote host")
+    agent_state_dir: str = Field(description="$MNGR_AGENT_STATE_DIR path on the remote host")
+
+
 class SSHTunnelManager(MutableModel):
     """Manages SSH tunnels to remote agent backends via paramiko.
 
@@ -60,6 +71,10 @@ class SSHTunnelManager(MutableModel):
     For each unique (SSH host, remote endpoint) pair, creates a Unix domain
     socket in a secure temporary directory that forwards connections through
     SSH direct-tcpip channels.
+
+    Also supports reverse port forwarding so that remote agents can reach
+    the local minds server. Reverse tunnels are health-checked periodically
+    and re-established if broken.
 
     The Unix sockets are created in a temporary directory with 0o700 permissions.
     Other users cannot access the sockets, and same-user processes would need
@@ -72,6 +87,8 @@ class SSHTunnelManager(MutableModel):
     _tunnel_socket_paths: dict[str, Path] = PrivateAttr(default_factory=dict)
     _tunnel_threads: dict[str, threading.Thread] = PrivateAttr(default_factory=dict)
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _reverse_tunnels: dict[str, ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
+    _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
 
     def _get_tmpdir(self) -> Path:
         """Get or create the secure temporary directory for Unix sockets."""
@@ -143,12 +160,160 @@ class SSHTunnelManager(MutableModel):
             self._tunnel_threads[tunnel_key] = thread
             return socket_path
 
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        agent_state_dir: str,
+    ) -> int:
+        """Set up a reverse port forward so the remote host can reach the local server.
+
+        Asks the remote sshd to listen on a dynamic port (port 0) and forward
+        connections back to 127.0.0.1:local_port on the local machine. Returns
+        the assigned remote port.
+        """
+        with self._lock:
+            conn_key = f"{ssh_info.host}:{ssh_info.port}"
+
+            # Check if a reverse tunnel already exists for this host
+            existing = self._reverse_tunnels.get(conn_key)
+            if existing is not None:
+                # Verify the transport is still alive
+                client = self._connections.get(conn_key)
+                if client is not None and _ssh_connection_is_active(client):
+                    return existing.remote_port
+
+            client = self._get_or_create_connection(ssh_info)
+            transport = _ssh_connection_transport(client)
+
+        remote_port = transport.request_port_forward("127.0.0.1", 0)
+        logger.info(
+            "Reverse tunnel established: remote 127.0.0.1:{} -> local 127.0.0.1:{}",
+            remote_port,
+            local_port,
+        )
+
+        tunnel_info = ReverseTunnelInfo(
+            ssh_info=ssh_info,
+            local_port=local_port,
+            remote_port=remote_port,
+            agent_state_dir=agent_state_dir,
+        )
+        with self._lock:
+            self._reverse_tunnels[conn_key] = tunnel_info
+
+        # Start accepting forwarded connections in a background thread
+        thread = threading.Thread(
+            target=_reverse_tunnel_accept_loop,
+            args=(transport, local_port, self._shutdown_event),
+            daemon=True,
+            name=f"reverse-tunnel-{conn_key}",
+        )
+        thread.start()
+
+        return remote_port
+
+    def write_api_url_to_remote(
+        self,
+        ssh_info: RemoteSSHInfo,
+        agent_state_dir: str,
+        url: str,
+    ) -> None:
+        """Write the minds API URL to a file on the remote host via SSH."""
+        with self._lock:
+            client = self._get_or_create_connection(ssh_info)
+
+        command = f"mkdir -p {agent_state_dir} && printf '%s' '{url}' > {agent_state_dir}/minds_api_url"
+        try:
+            _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode().strip()
+                logger.warning(
+                    "Failed to write API URL to remote {}: exit={}, stderr={}",
+                    ssh_info.host,
+                    exit_status,
+                    error_output,
+                )
+        except (paramiko.SSHException, OSError) as e:
+            logger.warning("Failed to write API URL to remote {}: {}", ssh_info.host, e)
+
+    @staticmethod
+    def write_api_url_to_local(
+        agent_state_dir: Path,
+        url: str,
+    ) -> None:
+        """Write the minds API URL to a file on the local filesystem."""
+        agent_state_dir.mkdir(parents=True, exist_ok=True)
+        url_file = agent_state_dir / "minds_api_url"
+        url_file.write_text(url)
+
+    def start_reverse_tunnel_health_check(self) -> None:
+        """Start a background thread that checks reverse tunnels every 30 seconds."""
+        if self._health_check_thread is not None:
+            return
+        self._health_check_thread = threading.Thread(
+            target=self._reverse_tunnel_health_check_loop,
+            daemon=True,
+            name="reverse-tunnel-health-check",
+        )
+        self._health_check_thread.start()
+
+    def _reverse_tunnel_health_check_loop(self) -> None:
+        """Periodically check reverse tunnels and re-establish broken ones."""
+        while not self._shutdown_event.wait(timeout=_REVERSE_TUNNEL_HEALTH_CHECK_SECONDS):
+            with self._lock:
+                tunnels = dict(self._reverse_tunnels)
+
+            for conn_key, tunnel_info in tunnels.items():
+                with self._lock:
+                    client = self._connections.get(conn_key)
+
+                is_alive = client is not None and _ssh_connection_is_active(client)
+                if is_alive:
+                    continue
+
+                logger.info("Reverse tunnel to {} is broken, re-establishing...", conn_key)
+                try:
+                    new_remote_port = self.setup_reverse_tunnel(
+                        ssh_info=tunnel_info.ssh_info,
+                        local_port=tunnel_info.local_port,
+                        agent_state_dir=tunnel_info.agent_state_dir,
+                    )
+                    # Update the URL file with the new port
+                    new_url = f"http://127.0.0.1:{new_remote_port}"
+                    self.write_api_url_to_remote(
+                        ssh_info=tunnel_info.ssh_info,
+                        agent_state_dir=tunnel_info.agent_state_dir,
+                        url=new_url,
+                    )
+                    logger.info("Reverse tunnel re-established to {} on port {}", conn_key, new_remote_port)
+                except (paramiko.SSHException, OSError, SSHTunnelError) as e:
+                    logger.warning("Failed to re-establish reverse tunnel to {}: {}", conn_key, e)
+
     def cleanup(self) -> None:
-        """Shut down all tunnels and SSH connections."""
+        """Shut down all tunnels (forward and reverse) and SSH connections."""
         self._shutdown_event.set()
+
+        # Wait for health check thread
+        if self._health_check_thread is not None:
+            self._health_check_thread.join(timeout=5.0)
+            self._health_check_thread = None
 
         for thread in self._tunnel_threads.values():
             thread.join(timeout=5.0)
+
+        # Cancel reverse port forwards
+        for conn_key, tunnel_info in self._reverse_tunnels.items():
+            client = self._connections.get(conn_key)
+            if client is not None and _ssh_connection_is_active(client):
+                try:
+                    transport = client.get_transport()
+                    if transport is not None:
+                        transport.cancel_port_forward("127.0.0.1", tunnel_info.remote_port)
+                except (paramiko.SSHException, OSError) as e:
+                    logger.trace("Error cancelling reverse port forward: {}", e)
+        self._reverse_tunnels.clear()
 
         for client in self._connections.values():
             try:
@@ -313,6 +478,42 @@ def _relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
             sock.close()
         except OSError as e:
             logger.trace("Error closing socket in relay: {}", e)
+
+
+def _reverse_tunnel_accept_loop(
+    transport: paramiko.Transport,
+    local_port: int,
+    shutdown_event: threading.Event,
+) -> None:
+    """Accept reverse-forwarded connections and relay them to the local server.
+
+    When a remote process connects to the reverse-forwarded port, paramiko
+    delivers the connection as a channel via transport.accept(). This function
+    opens a local TCP connection to 127.0.0.1:local_port and relays data
+    bidirectionally.
+    """
+    while not shutdown_event.is_set():
+        channel = transport.accept(timeout=_SHUTDOWN_POLL_SECONDS)
+        if channel is None:
+            continue
+
+        try:
+            local_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            local_sock.connect(("127.0.0.1", local_port))
+        except OSError as e:
+            logger.warning("Failed to connect to local port {} for reverse tunnel: {}", local_port, e)
+            try:
+                channel.close()
+            except (paramiko.SSHException, OSError):
+                pass
+            continue
+
+        threading.Thread(
+            target=_relay_data,
+            args=(local_sock, channel),
+            daemon=True,
+            name=f"reverse-relay-127.0.0.1:{local_port}",
+        ).start()
 
 
 def parse_url_host_port(url: str) -> tuple[str, int]:
