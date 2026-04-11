@@ -61,6 +61,7 @@ jobs:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
           restore-keys: offload-durations-${{ github.ref }}-
+          save-always: true
 
       - name: Run tests via offload
         run: just test-offload
