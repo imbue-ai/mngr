@@ -518,3 +518,15 @@ def on_error(command_name: str, command_params: dict[str, Any], error: BaseExcep
 @hookspec
 def on_shutdown() -> None:
     """[experimental] Called when mngr is shutting down, after the command has completed."""
+
+
+@hookspec
+def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
+    """Register data sources for kanpan board refresh.
+
+    Each data source must implement the KanpanDataSource protocol
+    (defined in imbue.mngr_kanpan.data_source). Data sources produce
+    typed fields that become columns on the kanpan board.
+
+    Return a sequence of data source instances, or None if not contributing any.
+    """

@@ -1,4 +1,5 @@
 import contextlib
+import re
 from contextlib import AbstractContextManager
 from io import StringIO
 from pathlib import Path
@@ -49,6 +50,11 @@ MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
 
+# Pattern for valid test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS followed by anything.
+# This mirrors TEST_ENV_PATTERN in imbue.mngr.utils.testing but is defined here to avoid importing
+# test utilities in production code.
+_TEST_ENV_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}")
+
 
 def _create_environment(environment_name: str, modal_interface: ModalInterface) -> None:
     """Create a Modal environment.
@@ -60,10 +66,14 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
     a NotFoundError), so it does not check for existence first.
     """
 
-    # first a quick check to make sure we're not naming things incorrectly (and making it hard to clean up these environments)
-    if environment_name.startswith("mngr_") and not environment_name.startswith("mngr_test-"):
+    # Environments starting with mngr_ must follow the timestamped test pattern
+    # (mngr_test-YYYY-MM-DD-HH-MM-SS-*) so they can be identified and cleaned up by CI.
+    # Production environments use a different prefix (mngr-) and are not affected.
+    if environment_name.startswith("mngr_") and not _TEST_ENV_NAME_RE.match(environment_name):
         raise MngrError(
-            f"Refusing to create Modal environment with name {environment_name}: test environments should start with 'mngr_test-' and should be explicitly configured using generate_test_environment_name() so that they can be easily identified and cleaned up."
+            f"Refusing to create Modal environment with name '{environment_name}': "
+            f"test environments must match 'mngr_test-YYYY-MM-DD-HH-MM-SS-*'. "
+            f"Use the modal_mngr_ctx fixture or generate_test_environment_name() for the prefix."
         )
 
     with log_span("Creating Modal environment: {}", environment_name):

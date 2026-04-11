@@ -23,6 +23,70 @@ mngr kanpan --exclude 'state == "DONE"'
 
 When any filter is active, the header displays a `[filtered]` indicator.
 
+## Data sources
+
+Kanpan uses pluggable data sources to fetch per-agent data. Each data source produces typed fields that become columns on the board. Built-in data sources:
+
+- **repo_paths**: Extracts GitHub repo path from agent remote labels (infrastructure data for other sources)
+- **git_info**: Computes commits-ahead count from `git rev-list`
+- **github**: Fetches PRs, CI status, merge conflict status, and unresolved review comments via the `gh` CLI
+
+### Configuration
+
+Data sources are configured in your mngr settings file:
+
+```toml
+[plugins.kanpan]
+column_order = ["name", "state", "commits_ahead", "conflicts", "unresolved", "ci", "pr"]
+
+# GitHub data source: all fields enabled by default
+[plugins.kanpan.data_sources.github]
+enabled = true
+# Toggle individual fields:
+# pr = true
+# ci = true
+# create_pr_url = true
+# conflicts = true
+# unresolved = true
+```
+
+### Shell command data sources
+
+Add custom columns backed by shell commands:
+
+```toml
+[plugins.kanpan.shell_commands.slack_thread]
+name = "Find Slack thread"
+header = "SLACK"
+command = """
+THREAD=$(find-slack-thread --channel project-mngr --search "$MNGR_AGENT_NAME")
+if [ -n "$THREAD" ]; then
+  echo "$THREAD"
+fi
+"""
+```
+
+Shell commands run once per agent in parallel. The stdout (trimmed) becomes the column value. Commands receive environment variables:
+
+| Variable | Description |
+|---|---|
+| `MNGR_AGENT_NAME` | Agent name |
+| `MNGR_AGENT_BRANCH` | Git branch (empty if none) |
+| `MNGR_AGENT_STATE` | Agent lifecycle state |
+| `MNGR_AGENT_PROVIDER` | Provider instance name |
+| `MNGR_FIELD_PR_NUMBER` | PR number (from cached fields) |
+| `MNGR_FIELD_PR_URL` | PR URL (from cached fields) |
+| `MNGR_FIELD_CI_STATUS` | CI status (from cached fields) |
+
+### Disabling a data source
+
+Set `enabled = false` to disable a data source. Its cached fields are excluded from the board:
+
+```toml
+[plugins.kanpan.data_sources.github]
+enabled = false
+```
+
 ## Custom commands
 
 Add to your mngr settings file (e.g. `.mngr/settings.toml`):
@@ -50,53 +114,25 @@ markable = true
 refresh_afterwards = true
 ```
 
-## Custom columns
+## Column order
 
-Add extra columns to the board that display per-agent data. The `source` field selects where the column reads from:
-
-- **`"labels"`** (default) -- reads `agent.labels[key]`, where `key` is the column's config key.
-- **`"agent"`** -- reads from `AgentDetails.plugin`, populated by `agent_field_generators` via `AgentInterface`. Works for both local and remote agents. Requires `plugin_name` and `field`.
-
-Values can be colored by mapping specific strings to urwid color names.
-
-```toml
-# Label-backed column (source = "labels" is the default)
-[plugins.kanpan.columns.blocked]
-header = "BLOCKED"
-[plugins.kanpan.columns.blocked.colors]
-unblocked = "light green"
-blocked = "light red"
-
-# Plugin data column: reads from AgentDetails.plugin (populated by agent_field_generators)
-[plugins.kanpan.columns.waiting]
-header = "WAIT"
-source = "agent"
-plugin_name = "claude"
-field = "waiting_reason"
-[plugins.kanpan.columns.waiting.colors]
-PERMISSIONS = "light red"
-END_OF_TURN = "light green"
-```
-
-By default, custom columns appear after the built-in columns (before CI). To control the order of all columns, set `column_order`:
+Control which columns appear and in what order:
 
 ```toml
 [plugins.kanpan]
-column_order = ["name", "state", "custom_blocked", "git", "pr", "ci"]
+column_order = ["name", "state", "commits_ahead", "ci", "pr"]
 ```
 
-Built-in column names are: `name`, `state`, `git`, `pr`, `ci`. Custom columns use `custom_<key>` (e.g. `custom_blocked` for a column defined under `[plugins.kanpan.columns.blocked]`). Columns not listed in `column_order` are omitted.
+Built-in column names: `name`, `state`. Data source field keys: `commits_ahead`, `pr`, `ci`, `conflicts`, `unresolved`, `repo_path`. Shell command field keys match their config key (e.g. `slack_thread`).
 
 The PR column displays clickable hyperlinks (OSC 8) in terminals that support them. When an agent has a PR, the column shows `#<number>` linked to the PR URL. When no PR exists but the branch is pushable, it shows `+PR` linked to the create-PR URL.
-
-When no label or plugin data is present for an agent, the column shows an empty cell.
 
 ## Refresh behavior
 
 Kanpan uses two refresh strategies:
 
-- **Full refresh** (manual 'r' key, periodic 10-minute timer): fetches both agent state and GitHub PR data. Only one can be in flight at a time -- pressing 'r' while a refresh is running is ignored.
-- **Agent-only refresh** (after push, delete, custom commands): fetches agent state without hitting the GitHub API. PR data is carried forward from the previous snapshot.
+- **Full refresh** (manual 'r' key, periodic 10-minute timer): runs all data sources. Only one can be in flight at a time -- pressing 'r' while a refresh is running is ignored.
+- **Agent-only refresh** (after push, delete, custom commands): runs only local data sources (repo_paths, git_info). Remote data (PR, CI) is carried forward from the previous snapshot.
 
 Both are configurable:
 
@@ -107,31 +143,3 @@ refresh_interval_seconds = 600.0
 # Seconds before retrying after a failed full refresh
 retry_cooldown_seconds = 60.0
 ```
-
-## Refresh hooks
-
-Run shell commands before and/or after each full refresh. Each hook runs once per agent, in parallel across all agents. Hook failures are reported as board errors but do not block the refresh.
-
-```toml
-[plugins.kanpan.on_before_refresh.notify]
-name = "Pre-refresh notify"
-command = "echo Refreshing $MNGR_AGENT_NAME"
-
-[plugins.kanpan.on_after_refresh.sync]
-name = "Post-refresh sync"
-command = "my-sync-script"
-```
-
-Before-hooks run against the previous snapshot's entries (skipped on the first refresh). After-hooks run against the new snapshot's entries. Set `enabled = false` to disable a hook without removing it.
-
-Each hook command receives the following environment variables:
-
-| Variable | Description |
-|---|---|
-| `MNGR_AGENT_NAME` | Agent name |
-| `MNGR_AGENT_BRANCH` | Git branch (empty if none) |
-| `MNGR_AGENT_STATE` | Agent lifecycle state (e.g. `RUNNING`, `DONE`) |
-| `MNGR_AGENT_PROVIDER` | Provider instance name |
-| `MNGR_AGENT_PR_NUMBER` | PR number (empty if no PR) |
-| `MNGR_AGENT_PR_URL` | PR URL (empty if no PR) |
-| `MNGR_AGENT_PR_STATE` | PR state such as `OPEN`, `MERGED`, `CLOSED` (empty if no PR) |
