@@ -338,6 +338,7 @@ def test_setup_cloudflare_tunnel_with_client_logs_creation(tmp_path: Path) -> No
     assert any("WARNING" in m or "failed" in m.lower() for m in messages)
 
 
+@pytest.mark.timeout(30)
 def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:
     """Verify run_mngr_create raises MngrCommandError when mngr create fails."""
     with pytest.raises(MngrCommandError, match="mngr create failed"):
