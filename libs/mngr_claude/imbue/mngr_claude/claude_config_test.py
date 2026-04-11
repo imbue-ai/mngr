@@ -15,25 +15,11 @@ from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import find_project_config
-from imbue.mngr_claude.claude_config import get_claude_config_backup_path
+from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
-from imbue.mngr_claude.claude_config import get_claude_config_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
-from imbue.mngr_claude.claude_config import get_user_claude_config_path
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
-
-
-def test_get_claude_config_path_returns_home_dot_claude_json() -> None:
-    """Test that get_claude_config_path returns ~/.claude.json."""
-    result = get_claude_config_path()
-    assert result == Path.home() / ".claude.json"
-
-
-def test_get_claude_config_backup_path_returns_home_dot_claude_json_bak() -> None:
-    """Test that get_claude_config_backup_path returns ~/.claude.json.bak."""
-    result = get_claude_config_backup_path()
-    assert result == Path.home() / ".claude.json.bak"
 
 
 def test_find_project_config_exact_match() -> None:
@@ -73,7 +59,7 @@ def test_find_project_config_empty_projects() -> None:
 
 def test_check_source_directory_trusted_succeeds_when_trusted(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted passes when directory is trusted."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -90,7 +76,7 @@ def test_check_source_directory_trusted_succeeds_when_trusted(tmp_path: Path) ->
 
 def test_check_source_directory_trusted_succeeds_for_subdirectory(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted passes for subdirectory of trusted path."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     project_root = tmp_path / "project"
     source_path = project_root / "src" / "components"
     project_root.mkdir()
@@ -109,7 +95,7 @@ def test_check_source_directory_trusted_succeeds_for_subdirectory(tmp_path: Path
 
 def test_check_source_directory_trusted_raises_when_not_trusted(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted raises when hasTrustDialogAccepted=false."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -134,12 +120,12 @@ def test_check_source_directory_trusted_raises_when_no_config_file(tmp_path: Pat
     # Config file doesn't exist (HOME points to tmp_path via autouse fixture)
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_source_directory_trusted(get_claude_config_path(), source_path)
+        check_source_directory_trusted(find_user_claude_config(), source_path)
 
 
 def test_check_source_directory_trusted_raises_when_empty_config(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted raises when config file is empty."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -151,7 +137,7 @@ def test_check_source_directory_trusted_raises_when_empty_config(tmp_path: Path)
 
 def test_check_source_directory_trusted_raises_when_not_in_projects(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted raises when source not in projects."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -164,7 +150,7 @@ def test_check_source_directory_trusted_raises_when_not_in_projects(tmp_path: Pa
 
 def test_check_source_directory_trusted_raises_when_trust_field_missing(tmp_path: Path) -> None:
     """Test that check_source_directory_trusted raises when hasTrustDialogAccepted is missing."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -181,7 +167,7 @@ def test_check_source_directory_trusted_raises_when_trust_field_missing(tmp_path
 
 def test_check_source_directory_trusted_raises_json_error_for_invalid_json() -> None:
     """Test that check_source_directory_trusted lets JSONDecodeError bubble up."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
 
     config_file.write_text("{ invalid json }")
 
@@ -198,7 +184,7 @@ def test_add_claude_trust_creates_config_when_none_exists(tmp_path: Path) -> Non
     source_path.mkdir()
 
     # HOME points to a test-isolated temp dir (autouse setup_test_mngr_env)
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     assert not config_file.exists()
 
     add_claude_trust_for_path(config_file, source_path)
@@ -210,7 +196,7 @@ def test_add_claude_trust_creates_config_when_none_exists(tmp_path: Path) -> Non
 
 def test_add_claude_trust_adds_entry_to_existing_config(tmp_path: Path) -> None:
     """Test that add_claude_trust_for_path adds entry to existing config."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -229,8 +215,8 @@ def test_add_claude_trust_adds_entry_to_existing_config(tmp_path: Path) -> None:
 
 def test_add_claude_trust_is_noop_when_already_trusted(tmp_path: Path) -> None:
     """Test that add_claude_trust_for_path is a no-op when path is already trusted."""
-    config_file = get_claude_config_path()
-    backup_file = get_claude_config_backup_path()
+    config_file = find_user_claude_config()
+    backup_file = find_user_claude_config().with_suffix(".json.bak")
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -253,7 +239,7 @@ def test_add_claude_trust_is_noop_when_already_trusted(tmp_path: Path) -> None:
 
 def test_add_claude_trust_updates_entry_when_trust_is_false(tmp_path: Path) -> None:
     """Test that add_claude_trust_for_path updates entry when hasTrustDialogAccepted is False."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -277,7 +263,7 @@ def test_add_claude_trust_updates_entry_when_trust_is_false(tmp_path: Path) -> N
 
 def test_add_claude_trust_handles_empty_config_file(tmp_path: Path) -> None:
     """Test that add_claude_trust_for_path handles empty config file."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -294,7 +280,7 @@ def test_add_claude_trust_handles_empty_config_file(tmp_path: Path) -> None:
 
 def test_remove_claude_trust_removes_mngr_created_entry(tmp_path: Path) -> None:
     """Test that remove_claude_trust_for_path removes mngr-created entries."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
 
@@ -322,7 +308,7 @@ def test_remove_claude_trust_removes_mngr_created_entry(tmp_path: Path) -> None:
 
 def test_remove_claude_trust_skips_non_mngr_entry(tmp_path: Path) -> None:
     """Test that remove_claude_trust_for_path skips entries not created by mngr."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
 
@@ -344,7 +330,7 @@ def test_remove_claude_trust_skips_non_mngr_entry(tmp_path: Path) -> None:
 
 def test_remove_claude_trust_returns_false_when_not_found(tmp_path: Path) -> None:
     """Test that remove_claude_trust_for_path returns False when entry doesn't exist."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
 
@@ -367,14 +353,14 @@ def test_remove_claude_trust_returns_false_when_no_config(tmp_path: Path) -> Non
 
     # Config file doesn't exist (HOME points to tmp_path via autouse fixture)
 
-    result = remove_claude_trust_for_path(get_claude_config_path(), worktree_path)
+    result = remove_claude_trust_for_path(find_user_claude_config(), worktree_path)
 
     assert result is False
 
 
 def test_remove_claude_trust_returns_false_on_error(tmp_path: Path) -> None:
     """Test that remove_claude_trust_for_path returns False on errors."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
 
@@ -388,7 +374,7 @@ def test_remove_claude_trust_returns_false_on_error(tmp_path: Path) -> None:
 
 def test_remove_claude_trust_returns_false_when_empty_config(tmp_path: Path) -> None:
     """Test that remove_claude_trust_for_path returns False when config file is empty."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
 
@@ -404,7 +390,7 @@ def test_remove_claude_trust_returns_false_when_empty_config(tmp_path: Path) -> 
 
 def test_check_effort_callout_dismissed_succeeds_when_dismissed() -> None:
     """Test that check_effort_callout_dismissed passes when effortCalloutDismissed is true."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config = {"effortCalloutDismissed": True}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -414,7 +400,7 @@ def test_check_effort_callout_dismissed_succeeds_when_dismissed() -> None:
 
 def test_check_effort_callout_dismissed_raises_when_not_dismissed() -> None:
     """Test that check_effort_callout_dismissed raises when effortCalloutDismissed is false."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config = {"effortCalloutDismissed": False}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -424,7 +410,7 @@ def test_check_effort_callout_dismissed_raises_when_not_dismissed() -> None:
 
 def test_check_effort_callout_dismissed_raises_when_field_missing() -> None:
     """Test that check_effort_callout_dismissed raises when effortCalloutDismissed is absent."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -435,12 +421,12 @@ def test_check_effort_callout_dismissed_raises_when_field_missing() -> None:
 def test_check_effort_callout_dismissed_raises_when_no_config() -> None:
     """Test that check_effort_callout_dismissed raises when config file doesn't exist."""
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_effort_callout_dismissed(get_claude_config_path())
+        check_effort_callout_dismissed(find_user_claude_config())
 
 
 def test_check_effort_callout_dismissed_raises_when_empty_config() -> None:
     """Test that check_effort_callout_dismissed raises when config file is empty."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config_file.write_text("")
 
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
@@ -449,7 +435,7 @@ def test_check_effort_callout_dismissed_raises_when_empty_config() -> None:
 
 def test_dismiss_effort_callout_sets_field() -> None:
     """Test that dismiss_effort_callout sets effortCalloutDismissed to true."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -462,8 +448,8 @@ def test_dismiss_effort_callout_sets_field() -> None:
 
 def test_dismiss_effort_callout_is_noop_when_already_set() -> None:
     """Test that dismiss_effort_callout is a no-op when already dismissed."""
-    config_file = get_claude_config_path()
-    backup_file = get_claude_config_backup_path()
+    config_file = find_user_claude_config()
+    backup_file = find_user_claude_config().with_suffix(".json.bak")
     config = {"effortCalloutDismissed": True, "projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -474,7 +460,7 @@ def test_dismiss_effort_callout_is_noop_when_already_set() -> None:
 
 def test_dismiss_effort_callout_creates_config_when_none_exists() -> None:
     """Test that dismiss_effort_callout creates config file if it doesn't exist."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     assert not config_file.exists()
 
     dismiss_effort_callout(config_file)
@@ -486,7 +472,7 @@ def test_dismiss_effort_callout_creates_config_when_none_exists() -> None:
 
 def test_dismiss_effort_callout_handles_empty_config() -> None:
     """Test that dismiss_effort_callout handles empty config file."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config_file.write_text("")
 
     dismiss_effort_callout(config_file)
@@ -500,7 +486,7 @@ def test_dismiss_effort_callout_handles_empty_config() -> None:
 
 def test_acknowledge_cost_threshold_sets_field() -> None:
     """Test that acknowledge_cost_threshold sets hasAcknowledgedCostThreshold to true."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -513,8 +499,8 @@ def test_acknowledge_cost_threshold_sets_field() -> None:
 
 def test_acknowledge_cost_threshold_is_noop_when_already_set() -> None:
     """Test that acknowledge_cost_threshold is a no-op when already acknowledged."""
-    config_file = get_claude_config_path()
-    backup_file = get_claude_config_backup_path()
+    config_file = find_user_claude_config()
+    backup_file = find_user_claude_config().with_suffix(".json.bak")
     config = {"hasAcknowledgedCostThreshold": True, "projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
@@ -525,7 +511,7 @@ def test_acknowledge_cost_threshold_is_noop_when_already_set() -> None:
 
 def test_acknowledge_cost_threshold_creates_config_when_none_exists() -> None:
     """Test that acknowledge_cost_threshold creates config file if it doesn't exist."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     assert not config_file.exists()
 
     acknowledge_cost_threshold(config_file)
@@ -537,7 +523,7 @@ def test_acknowledge_cost_threshold_creates_config_when_none_exists() -> None:
 
 def test_acknowledge_cost_threshold_handles_empty_config() -> None:
     """Test that acknowledge_cost_threshold handles empty config file."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     config_file.write_text("")
 
     acknowledge_cost_threshold(config_file)
@@ -551,7 +537,7 @@ def test_acknowledge_cost_threshold_handles_empty_config() -> None:
 
 def test_check_claude_dialogs_dismissed_checks_trust(tmp_path: Path) -> None:
     """Test that check_claude_dialogs_dismissed checks trust for source_path."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -565,7 +551,7 @@ def test_check_claude_dialogs_dismissed_checks_trust(tmp_path: Path) -> None:
 
 def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) -> None:
     """Test that check_claude_dialogs_dismissed checks effort callout."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -583,7 +569,7 @@ def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) ->
 
 def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> None:
     """Test that check_claude_dialogs_dismissed passes when all dialogs are set."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -602,7 +588,7 @@ def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> N
 
 def test_auto_dismiss_claude_dialogs_sets_all(tmp_path: Path) -> None:
     """Test that auto_dismiss_claude_dialogs sets all dialog fields."""
-    config_file = get_claude_config_path()
+    config_file = find_user_claude_config()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
@@ -643,7 +629,7 @@ def test_functions_work_with_non_global_config_path(tmp_path: Path) -> None:
     assert updated["effortCalloutDismissed"] is True
 
     # Global config should be untouched
-    global_config = get_claude_config_path()
+    global_config = find_user_claude_config()
     assert not global_config.exists()
 
 
@@ -702,53 +688,97 @@ def test_get_user_claude_config_dir_falls_back_to_claude_config_dir(
     assert result == custom_dir
 
 
-# Tests for get_claude_config_path (CLAUDE_CONFIG_DIR-aware)
+# Tests for find_user_claude_config
 
 
-def test_get_claude_config_path_respects_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With CLAUDE_CONFIG_DIR set, returns $CLAUDE_CONFIG_DIR/.claude.json."""
-    custom_dir = tmp_path / "custom-claude"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
-    result = get_claude_config_path()
-    assert result == custom_dir / ".claude.json"
-
-
-def test_get_claude_config_backup_path_derives_from_config_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Backup path should follow the config path location."""
-    custom_dir = tmp_path / "custom-claude"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
-    result = get_claude_config_backup_path()
-    assert result == custom_dir / ".claude.json.bak"
-
-
-# Tests for get_user_claude_config_path
-
-
-def test_get_user_claude_config_path_defaults_to_home() -> None:
-    """Without env vars, returns ~/.claude.json."""
-    result = get_user_claude_config_path()
+def test_find_user_claude_config_defaults_to_home() -> None:
+    """Without env vars and no file on disk, returns ~/.claude.json."""
+    result = find_user_claude_config()
     assert result == Path.home() / ".claude.json"
 
 
-def test_get_user_claude_config_path_respects_original_env_var(
+def test_find_user_claude_config_returns_default_path() -> None:
+    """Without env vars, returns ~/.claude.json when it exists."""
+    config = Path.home() / ".claude.json"
+    config.write_text(json.dumps({}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == config
+
+
+def test_find_user_claude_config_defaults_to_inside_dir_with_original_dir_but_no_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With ORIGINAL_CLAUDE_CONFIG_DIR set, returns path inside that dir."""
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set but no config files, returns the inside-dir path."""
     user_dir = tmp_path / "user-claude"
-    agent_dir = tmp_path / "agent-claude"
+    user_dir.mkdir()
     monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(agent_dir))
-    result = get_user_claude_config_path()
+
+    result = find_user_claude_config()
     assert result == user_dir / ".claude.json"
 
 
-def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_find_user_claude_config_finds_inside_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ORIGINAL_CLAUDE_CONFIG_DIR set, finds .claude.json inside it."""
+    user_dir = tmp_path / "user-claude"
+    user_dir.mkdir()
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(user_dir))
+
+    inside = user_dir / ".claude.json"
+    inside.write_text(json.dumps({}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == inside
+
+
+def test_find_user_claude_config_finds_beside_dir(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without ORIGINAL_CLAUDE_CONFIG_DIR, uses CLAUDE_CONFIG_DIR."""
+    """Finds ~/.claude.json (beside ~/.claude/) when only beside-dir config exists.
+
+    The default Claude Code layout stores .claude.json beside the config dir
+    (~/.claude.json), not inside it (~/.claude/.claude.json). When an agent's
+    ORIGINAL_CLAUDE_CONFIG_DIR points to ~/.claude, the function should find
+    the config file at the beside-dir location.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    beside_config = Path.home() / ".claude.json"
+    beside_config.write_text(json.dumps({"projects": {}}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == beside_config
+
+
+def test_find_user_claude_config_prefers_inside_dir_when_both_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both inside-dir and beside-dir configs exist, prefers inside-dir."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORIGINAL_CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    inside_config = claude_dir / ".claude.json"
+    inside_config.write_text(json.dumps({"inside": True}, indent=2))
+    beside_config = Path.home() / ".claude.json"
+    beside_config.write_text(json.dumps({"beside": True}, indent=2))
+
+    result = find_user_claude_config()
+    assert result == inside_config
+
+
+def test_find_user_claude_config_ignores_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without ORIGINAL_CLAUDE_CONFIG_DIR, ignores CLAUDE_CONFIG_DIR (per-agent dir)."""
     custom_dir = tmp_path / "custom-claude"
+    custom_dir.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_dir))
-    result = get_user_claude_config_path()
-    assert result == custom_dir / ".claude.json"
+
+    # File exists in per-agent dir but not at ~/.claude.json
+    config = custom_dir / ".claude.json"
+    config.write_text(json.dumps({}, indent=2))
+
+    # Should return the default user path, not the per-agent path
+    result = find_user_claude_config()
+    assert result == Path.home() / ".claude.json"

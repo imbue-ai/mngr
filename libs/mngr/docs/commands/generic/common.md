@@ -17,13 +17,9 @@ Logs are automatically saved to `~/.mngr/events/logs/<timestamp>-<pid>.json` wit
 
 - `--log-file PATH`: Override the log file path (e.g., `/tmp/mngr.log`)
 - `--[no-]log-commands`: Log what commands were executed [default: from config]
-- `--[no-]log-command-output`: Log stdout/stderr from executed commands [default: from config]
-- `--[no-]log-env-vars`: Log environment variables (security risk, disabled by default)
-
-Environment variables are redacted from logs by default for security. Use `--log-env-vars` to include them.
 
 ### Other Options
 
 - `--headless`: Disable all interactive behavior (prompts, TUI, editor). Also settable via `MNGR_HEADLESS` env var or `headless` config key. When not set, interactive mode is auto-detected from the TTY.
-- `--context PATH`: Project context directory (used for build context and loading project-specific config) [default: local .git root]
 - `--plugin TEXT / --enable-plugin TEXT / --disable-plugin TEXT`: Enable / disable selected plugins
+- `-S KEY=VALUE / --setting KEY=VALUE`: Override a config setting for this invocation. Uses dot-separated paths for nested keys (e.g., `--setting commands.create.connect=false`). Values are parsed as JSON when possible (booleans, numbers, arrays), otherwise as plain strings. Repeatable.

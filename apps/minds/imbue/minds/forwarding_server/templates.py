@@ -99,10 +99,10 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
              placeholder="selene" required>
     </div>
     <div class="form-group">
-      <label for="git_url">Git repository URL</label>
+      <label for="git_url">Git repository URL or local path</label>
       <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
-             placeholder="https://github.com/imbue-ai/simple_mind.git" required>
-      <p class="help-text">The repository will be cloned and used as the agent's working directory.</p>
+             placeholder="https://github.com/user/repo.git or /path/to/repo" required>
+      <p class="help-text">A git URL will be cloned to a temp directory. A local path will be used directly.</p>
     </div>
     <div class="form-group">
       <label for="branch">Branch</label>
@@ -175,28 +175,29 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     }
 
     source.onmessage = function(event) {
-      var data = JSON.parse(event.data);
-      if (data.log) {
-        pendingLines.push(data.log);
-        if (!flushScheduled) {
-          flushScheduled = true;
-          requestAnimationFrame(flushLogs);
+      try {
+        var data = JSON.parse(event.data);
+        if (data._type === 'done') {
+          source.close();
+          flushLogs();
+          if (data.status === 'DONE' && data.redirect_url) {
+            statusEl.textContent = 'Done! Redirecting...';
+            window.location.href = data.redirect_url;
+          } else if (data.status === 'FAILED') {
+            statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
+            statusEl.classList.add('error');
+          }
+        } else if (data.log) {
+          pendingLines.push(data.log);
+          if (!flushScheduled) {
+            flushScheduled = true;
+            requestAnimationFrame(flushLogs);
+          }
         }
+      } catch(e) {
+        // Ignore parse errors for keepalive comments
       }
     };
-
-    source.addEventListener('done', function(event) {
-      source.close();
-      flushLogs();
-      var data = JSON.parse(event.data);
-      if (data.status === 'DONE' && data.redirect_url) {
-        statusEl.textContent = 'Done! Redirecting...';
-        window.location.href = data.redirect_url;
-      } else if (data.status === 'FAILED') {
-        statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
-        statusEl.classList.add('error');
-      }
-    });
 
     source.onerror = function() {
       source.close();
@@ -351,13 +352,33 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     h1 { margin-bottom: 8px; color: rgb(26, 26, 46); }
     .subtitle { margin-bottom: 24px; color: gray; font-size: 14px; }
     .server-list { list-style: none; }
-    .server-list li { margin-bottom: 8px; }
-    .server-list a {
-      display: inline-block; padding: 12px 20px;
-      background: rgb(26, 26, 46); color: white; text-decoration: none;
-      border-radius: 6px; font-size: 16px;
+    .server-list li {
+      margin-bottom: 12px; padding: 12px 16px;
+      background: white; border: 1px solid rgb(220, 220, 230); border-radius: 8px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     }
-    .server-list a:hover { background: rgb(42, 42, 78); }
+    .server-name {
+      font-weight: bold; font-size: 16px; color: rgb(26, 26, 46);
+      min-width: 100px;
+    }
+    .server-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .server-links a {
+      display: inline-block; padding: 6px 12px;
+      background: rgb(26, 26, 46); color: white; text-decoration: none;
+      border-radius: 4px; font-size: 13px;
+    }
+    .server-links a:hover { background: rgb(42, 42, 78); }
+    .server-links a.global-link {
+      background: rgb(37, 99, 235);
+    }
+    .server-links a.global-link:hover { background: rgb(29, 78, 216); }
+    .toggle-btn {
+      padding: 4px 10px; border-radius: 4px; font-size: 12px;
+      border: 1px solid rgb(200, 200, 210); cursor: pointer;
+      background: white; color: rgb(60, 60, 80);
+    }
+    .toggle-btn:hover { background: rgb(240, 240, 245); }
+    .toggle-btn.enabled { background: rgb(220, 252, 231); border-color: rgb(134, 239, 172); color: rgb(22, 101, 52); }
     .empty-state { color: gray; font-size: 16px; }
     .back-link { margin-top: 24px; }
     .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
@@ -369,7 +390,18 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
   {% if server_names %}
   <ul class="server-list">
     {% for server_name in server_names %}
-    <li><a href="/agents/{{ agent_id }}/{{ server_name }}/">{{ server_name }}</a></li>
+    <li>
+      <span class="server-name">{{ server_name }}</span>
+      <div class="server-links">
+        <a href="/agents/{{ agent_id }}/{{ server_name }}/">Local</a>
+        {% if cf_services and server_name in cf_services %}
+        <a href="https://{{ cf_services[server_name] }}" class="global-link" target="_blank">Global</a>
+        <button class="toggle-btn enabled" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', false)">Disable global</button>
+        {% else %}
+        <button class="toggle-btn" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', true)">Enable global</button>
+        {% endif %}
+      </div>
+    </li>
     {% endfor %}
   </ul>
   {% else %}
@@ -378,6 +410,25 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
   </p>
   {% endif %}
   <div class="back-link"><a href="/">Back to all minds</a></div>
+  <script>
+  async function toggleGlobal(agentId, serverName, enable) {
+    try {
+      const resp = await fetch('/agents/' + agentId + '/servers/' + serverName + '/global', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enable})
+      });
+      if (resp.ok) {
+        window.location.reload();
+      } else {
+        const data = await resp.json();
+        alert('Failed: ' + (data.error || resp.statusText));
+      }
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    }
+  }
+  </script>
 </body>
 </html>"""
 
@@ -386,7 +437,11 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
 def render_agent_servers_page(
     agent_id: AgentId,
     server_names: Sequence[ServerName],
+    cf_services: dict[str, str] | None = None,
 ) -> str:
-    """Render a page listing all available servers for a specific agent."""
+    """Render a page listing all available servers for a specific agent.
+
+    cf_services maps server names to their cloudflare hostnames (if globally forwarded).
+    """
     template = _JINJA_ENV.from_string(_AGENT_SERVERS_TEMPLATE)
-    return template.render(agent_id=agent_id, server_names=server_names)
+    return template.render(agent_id=agent_id, server_names=server_names, cf_services=cf_services or {})

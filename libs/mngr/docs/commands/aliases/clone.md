@@ -11,7 +11,7 @@ mngr clone <SOURCE_AGENT> [<AGENT_NAME>] [create-options...]
 
 Create a new agent by cloning an existing one [experimental].
 
-This is a convenience wrapper around `mngr create --from-agent <source>`.
+This is a convenience wrapper around `mngr create --from <source>`.
 The first argument is the source agent to clone from. An optional second
 positional argument sets the new agent's name. All remaining arguments are
 passed through to the create command.

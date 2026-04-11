@@ -4,10 +4,18 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
+from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
+from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
+
+# Standalone resource scripts run outside the mngr process and can only use
+# Python stdlib, so ratchets that require mngr abstractions do not apply.
+_STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = ("sync_keychain_credentials.py",)
+_RATCHET_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
 
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
@@ -40,7 +48,9 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(0))
+    excluded = _RATCHET_SELF_EXCLUSION + _STANDALONE_RESOURCE_SCRIPTS
+    chunks = check_ratchet_rule(PREVENT_BARE_PRINT, _DIR, excluded)
+    assert len(chunks) <= snapshot(0), PREVENT_BARE_PRINT.format_failure(chunks)
 
 
 # --- Exception handling ---
@@ -223,7 +233,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(0))
+    rc.check_direct_subprocess(_DIR, snapshot(0), TEST_FILE_PATTERNS + _STANDALONE_RESOURCE_SCRIPTS)
 
 
 # --- AST-based ratchets ---

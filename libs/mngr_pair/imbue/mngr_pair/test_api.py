@@ -16,7 +16,7 @@ from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import determine_git_sync_actions
@@ -31,7 +31,7 @@ def pair_ctx(tmp_path: Path) -> SyncTestContext:
     local_dir = tmp_path / "target"
 
     # Initialize both as git repos with shared history
-    init_git_repo_with_config(agent_dir)
+    init_git_repo(agent_dir)
     subprocess.run(
         ["git", "clone", str(agent_dir), str(local_dir)],
         capture_output=True,

@@ -42,6 +42,9 @@ def _write_stdout(value: object) -> None:
     sys.stdout.flush()
 
 
+# Uses sys.stderr.write rather than logger because this module is invoked as a
+# standalone CLI tool by shell scripts (chat.sh) where loguru may not be
+# configured with any handlers, causing warnings to be silently dropped.
 def _warn(message: str) -> None:
     sys.stderr.write(f"WARNING: {message}\n")
     sys.stderr.flush()

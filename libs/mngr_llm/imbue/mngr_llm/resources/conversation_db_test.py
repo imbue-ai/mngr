@@ -119,6 +119,7 @@ def test_lookup_model_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[s
     lookup_model(str(db_path), "conv-1")
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "lookup-model failed" in captured.err
     assert captured.out == ""
 
 
@@ -147,6 +148,7 @@ def test_count_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     count(str(db_path))
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "count failed" in captured.err
     assert captured.out == "0\n"
 
 
@@ -177,6 +179,7 @@ def test_max_rowid_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     max_rowid(str(db_path))
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "max-rowid failed" in captured.err
     assert captured.out == "0\n"
 
 
@@ -210,6 +213,7 @@ def test_poll_new_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     poll_new(str(db_path), "0")
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "poll-new failed" in captured.err
 
 
 def test_lookup_by_name_found(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -248,6 +252,7 @@ def test_lookup_by_name_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture
     lookup_by_name(str(db_path), "anything")
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "lookup-by-name failed" in captured.err
     assert captured.out == ""
 
 
@@ -296,6 +301,7 @@ def test_last_response_id_missing_db(tmp_path: Path, capsys: pytest.CaptureFixtu
     last_response_id(str(db_path), "conv-1")
     captured = capsys.readouterr()
     assert "WARNING:" in captured.err
+    assert "last-response-id failed" in captured.err
     assert captured.out == ""
 
 

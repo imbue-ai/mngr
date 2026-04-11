@@ -1,4 +1,5 @@
-from collections.abc import Generator
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -85,14 +86,6 @@ def test_format_user_message_trace_includes_message_placeholder() -> None:
     assert "{message}" in result
 
 
-@pytest.fixture()
-def _isolated_logger() -> Generator[None, None, None]:
-    """Remove all loguru handlers before and after each test to isolate logger state."""
-    logger.remove()
-    yield
-    logger.remove()
-
-
 @pytest.mark.usefixtures("_isolated_logger")
 def test_setup_logging_none_suppresses_output(capfd: Any) -> None:
     setup_logging(ConsoleLogLevel.NONE)
@@ -127,3 +120,36 @@ def test_setup_logging_shows_messages_at_configured_level(
 
     captured = capfd.readouterr()
     assert marker in captured.err
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_always_uses_human_format_on_stderr(capfd: Any) -> None:
+    """Stderr output is always human-readable, never JSONL."""
+    setup_logging(ConsoleLogLevel.INFO)
+
+    logger.info("human-test-marker-71824")
+
+    captured = capfd.readouterr()
+    assert "human-test-marker-71824" in captured.err
+    # Should not be JSON
+    assert "{" not in captured.err.split("human-test-marker-71824")[0]
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_with_log_file(tmp_path: Path, capfd: Any) -> None:
+    """Verify that --log-file creates a JSONL log file."""
+    log_file = tmp_path / "test.jsonl"
+    setup_logging(ConsoleLogLevel.INFO, log_file=log_file)
+
+    logger.info("file-log-test-marker-38291")
+
+    captured = capfd.readouterr()
+    # Still shows on stderr
+    assert "file-log-test-marker-38291" in captured.err
+
+    # Also written to the log file
+    log_content = log_file.read_text()
+    assert log_content.strip()
+    event = json.loads(log_content.strip().split("\n")[-1])
+    assert event["message"] == "file-log-test-marker-38291"
+    assert event["type"] == "minds"

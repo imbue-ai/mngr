@@ -1,0 +1,7 @@
+# Built frontend assets (run `cd frontend && npm run build` to generate)
+imbue/claude_web_chat/static/
+# Node modules
+frontend/node_modules/
+# Binary assets (cause UnicodeDecodeError in meta ratchet scans)
+frontend/media/*.ico
+frontend/src/assets/*.png

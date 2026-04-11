@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import Field
-from pydantic import computed_field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -14,11 +11,8 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.data_types import WorkDirInfo
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredHost
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 
 
 class CreateAgentResult(FrozenModel):
@@ -28,51 +22,12 @@ class CreateAgentResult(FrozenModel):
     host: OnlineHostInterface = Field(description="The host running the agent")
 
 
-class SourceLocation(FrozenModel):
-    """Specifies where to get source data from.
-
-    Can be a local path, an agent on a host, or a combination. At minimum,
-    either path or agent_name must be specified.
-    """
-
-    path: Path | None = Field(
-        default=None,
-        description="Local or remote path to the source directory",
-    )
-    agent_id: AgentId | None = Field(
-        default=None,
-        description="Source agent ID (for cloning from an existing agent)",
-    )
-    agent_name: AgentName | None = Field(
-        default=None,
-        description="Source agent name (alternative to ID)",
-    )
-    host_id: HostId | None = Field(
-        default=None,
-        description="Host where the source agent/path resides",
-    )
-    host_name: HostName | None = Field(
-        default=None,
-        description="Host name (alternative to ID)",
-    )
-
-    @computed_field
-    @property
-    def is_from_agent(self) -> bool:
-        """Returns True if this source is from an existing agent."""
-        return self.agent_id is not None or self.agent_name is not None
-
-
 class ConnectionOptions(FrozenModel):
     """Options for connecting to an agent after creation."""
 
     is_reconnect: bool = Field(
         default=True,
         description="Automatically reconnect if connection is dropped",
-    )
-    is_interactive: bool | None = Field(
-        default=None,
-        description="Enable interactive mode (None means auto-detect TTY)",
     )
     message: str | None = Field(
         default=None,

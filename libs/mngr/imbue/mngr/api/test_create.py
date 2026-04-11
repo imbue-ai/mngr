@@ -25,6 +25,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentGitOptions
+from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -901,6 +902,79 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
 
         assert exc_info.value.agent_name == agent_name
         assert exc_info.value.existing_agent_id == result.agent.id
+
+
+@pytest.mark.tmux
+def test_create_with_update_flag_updates_existing_agent(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Test that create() with is_update=True re-creates an existing agent in place.
+
+    Verifies the full end-to-end update flow:
+    1. Create an agent normally
+    2. Stop it
+    3. Call create() again with is_update=True and the same agent_id
+    4. The agent should be re-created with the same ID and work_dir but updated metadata
+    """
+    agent_name = AgentName(f"test-update-{int(time.time())}")
+    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
+
+        # Step 1: Create the agent normally
+        original_options = CreateAgentOptions(
+            agent_type=AgentTypeName("echo"),
+            name=agent_name,
+            command=CommandString("sleep 847291"),
+            label_options=AgentLabelOptions(labels={"project": "old-project"}),
+        )
+        original_result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=original_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        original_agent_id = original_result.agent.id
+        original_work_dir = original_result.agent.work_dir
+        original_create_time = original_result.agent.create_time
+
+        # Step 2: Stop the agent (the CLI does this before calling create with is_update)
+        local_host.stop_agents([original_agent_id])
+
+        # Step 3: Call create() with is_update=True and the same agent_id + work_dir
+        update_options = CreateAgentOptions(
+            agent_id=original_agent_id,
+            agent_type=AgentTypeName("echo"),
+            name=agent_name,
+            command=CommandString("sleep 847292"),
+            target_path=original_work_dir,
+            label_options=AgentLabelOptions(labels={"project": "new-project"}),
+            is_update=True,
+        )
+        update_result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=update_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        # Step 4: Verify the agent was updated, not duplicated
+        assert update_result.agent.id == original_agent_id
+        assert update_result.agent.work_dir == original_work_dir
+
+        # Verify the create_time was preserved
+        updated_agent = _get_agent_from_create_result(update_result, temp_mngr_ctx)
+        assert updated_agent.create_time == original_create_time
+
+        # Verify the labels were updated
+        assert updated_agent.get_labels()["project"] == "new-project"
+
+        # Verify there's only one agent with this name on the host
+        all_agents = local_host.get_agents()
+        matching = [a for a in all_agents if a.name == agent_name]
+        assert len(matching) == 1
 
 
 # =============================================================================

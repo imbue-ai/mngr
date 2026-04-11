@@ -101,37 +101,37 @@ def get_user_claude_config_dir() -> Path:
     return get_claude_config_dir()
 
 
-def get_claude_config_path() -> Path:
-    """Return the path to the Claude config file (.claude.json).
+def find_user_claude_config() -> Path:
+    """Find the user-scope Claude config file (.claude.json).
 
-    When $CLAUDE_CONFIG_DIR is set, returns $CLAUDE_CONFIG_DIR/.claude.json.
-    Otherwise returns ~/.claude.json (Claude Code's default location).
+    Returns the first candidate path that exists on disk. If none exist,
+    returns the first candidate as the default creation path.
+
+    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's isolated
+    config dir. This function looks for the *user's* original config instead.
+
+    Candidate paths when $ORIGINAL_CLAUDE_CONFIG_DIR is set:
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json (custom CLAUDE_CONFIG_DIR convention)
+    2. Parent of $ORIGINAL_CLAUDE_CONFIG_DIR / .claude.json (default layout where the
+       config file lives *beside* the config dir: ~/.claude/ dir -> ~/.claude.json file)
+
+    Without $ORIGINAL_CLAUDE_CONFIG_DIR:
+    1. ~/.claude.json (Claude Code's default location)
     """
-    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    if env_dir:
-        return Path(env_dir) / ".claude.json"
-    return Path.home() / ".claude.json"
+    candidates: list[Path] = []
 
-
-def get_user_claude_config_path() -> Path:
-    """Return the path to the user-scope Claude config file (.claude.json).
-
-    Inside an mngr agent, $CLAUDE_CONFIG_DIR points to the agent's config dir.
-    Use this function to get the user's original .claude.json path.
-
-    Resolution order mirrors get_user_claude_config_dir():
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR/.claude.json
-    2. Falls back to get_claude_config_path()
-    """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
     if original:
-        return Path(original) / ".claude.json"
-    return get_claude_config_path()
+        original_path = Path(original)
+        candidates.append(original_path / ".claude.json")
+        candidates.append(original_path.parent / ".claude.json")
 
+    candidates.append(Path.home() / ".claude.json")
 
-def get_claude_config_backup_path() -> Path:
-    """Return the path to the Claude config backup file (.claude.json.bak)."""
-    return get_claude_config_path().with_suffix(".json.bak")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 # =============================================================================
@@ -596,6 +596,31 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": _SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+
+
+@pure
+def build_credential_sync_hooks_config() -> dict[str, Any]:
+    """Build the hooks configuration for credential sync on macOS.
+
+    Installs a Notification:auth_success hook that propagates keychain
+    credentials from the current agent to all other per-agent keychain entries
+    after a successful login.
+    """
+    return {
+        "hooks": {
+            "Notification": [
+                {
+                    "matcher": "auth_success",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'python3 "$MNGR_AGENT_STATE_DIR/commands/sync_keychain_credentials.py"',
                         },
                     ],
                 }

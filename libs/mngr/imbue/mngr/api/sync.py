@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
+from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import count_commits_between
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import get_head_commit
@@ -741,7 +742,11 @@ def _remote_git_push_mirror(
     is_dry_run: bool,
     cg: ConcurrencyGroup,
 ) -> int:
-    """Push via git push --mirror over SSH, overwriting all refs in the target.
+    """Push all branches and tags over SSH, overwriting all refs in the target.
+
+    Uses explicit refspecs instead of --mirror to avoid pushing remote-tracking
+    refs (refs/remotes/*), which cause "inconsistent aliased update" errors on
+    git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
 
     Returns the number of commits transferred.
     """
@@ -774,10 +779,20 @@ def _remote_git_push_mirror(
         if not config_result.success:
             raise GitSyncError(f"Failed to configure remote for mirror push: {config_result.stderr}")
 
-    # Push all refs from local to remote
+    # Push branches and tags from local to remote
     try:
         cg.run_process_to_completion(
-            ["git", "-C", str(local_path), "push", "--no-verify", "--mirror", "--force", git_url],
+            [
+                "git",
+                "-C",
+                str(local_path),
+                "push",
+                "--no-verify",
+                "--force",
+                "--prune",
+                git_url,
+                *GIT_MIRROR_PUSH_REFSPECS,
+            ],
             env=env,
         )
     except ProcessError as e:

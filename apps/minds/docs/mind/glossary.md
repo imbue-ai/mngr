@@ -1,8 +1,21 @@
 # Glossary
 
-There are several key concepts to understand when working with minds:
+Key concepts in the minds system:
 
-- **mind**: a collection of persistent mngr agents (called **role agents**) that serve a web interface and support chat input/output. The role agents coordinate through shared event streams in a common git repo. Each mind is identified by its `AgentId` and is labeled with `mind=true` for discovery via `mngr list`. The mind has a repo directory at `~/.minds/<agent-id>/`. The agent type can be specified in `minds.toml` or defaults to `claude-mind`.
-- **role agent**: a standard mngr agent that fulfills a specific role within a mind (e.g., thinking, working, verifying). Each role agent is created via `mngr create`, appears in `mngr list`, and has its own lifecycle. Multiple instances of the same role can run simultaneously (e.g., several workers).
-- **supporting service**: a background process running alongside a role agent (e.g., watchers, web server). These are *not* mngr agents -- they don't appear in `mngr list` and have no lifecycle state. They are infrastructure provisioned automatically by the mind plugin.
-- **forwarding server**: a local process (started via `mind forward`) that handles authentication and proxies web traffic from the user's browser to the appropriate mind's web server. Since a user may have *multiple minds* running simultaneously, the forwarding server multiplexes access to all of them through a single local endpoint, handling discovery, routing, and authentication centrally. The forwarding server can also create new minds from git repositories.
+- **mind**: a persistent mngr agent created from a template repository via `mngr create`. All configuration lives in the template's `.mngr/settings.toml`. Each mind is labeled with `mind=<name>` for discovery.
+
+- **template repository**: a git repository (e.g. forever-claude-template) that defines a mind's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
+
+- **forwarding server**: a local process (`mind forward`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple minds through a single local endpoint.
+
+- **bootstrap service manager**: a process running inside each agent container that watches `services.toml` and starts/stops background services in tmux windows.
+
+- **application**: a service that exposes a port for forwarding. Registered in `runtime/applications.toml` via `scripts/forward_port.py`. Each application gets both a local URL (via the forwarding server) and optionally a global URL (via Cloudflare tunnel).
+
+- **app watcher**: a background service that monitors `runtime/applications.toml`, writes server events to `events.jsonl`, and reconciles with the Cloudflare forwarding API.
+
+- **cloudflare tunnel**: a persistent connection from the agent container to Cloudflare's network, managed by `cloudflared`. Enables global access to agent applications protected by Cloudflare Access (Google OAuth, service tokens).
+
+- **server event**: a JSON line in `events/servers/events.jsonl` that registers (or deregisters) a server name and URL. The forwarding server's MngrStreamManager watches these events to discover agent backends.
+
+- **launch mode**: how the agent runs. DEV mode runs in-place on the local host. LOCAL mode runs in a Docker container. CLOUD mode is not yet implemented.

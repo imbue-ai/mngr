@@ -518,10 +518,6 @@ class CreateWorkDirResult(FrozenModel):
 class AgentGitOptions(FrozenModel):
     """Git-related options for the agent work_dir."""
 
-    is_git_synced: bool = Field(
-        default=True,
-        description="Whether to sync git data from the source repository",
-    )
     base_branch: str | None = Field(
         default=None,
         description="Starting branch for the agent (default: current branch)",
@@ -529,14 +525,6 @@ class AgentGitOptions(FrozenModel):
     new_branch_name: str | None = Field(
         default=None,
         description="Fully resolved name for the new branch, or None to use base_branch directly",
-    )
-    depth: int | None = Field(
-        default=None,
-        description="Shallow clone depth (None for full clone)",
-    )
-    shallow_since: str | None = Field(
-        default=None,
-        description="Shallow clone since date",
     )
     is_include_unclean: bool = Field(
         # the default is true because we should not assume that git is even being used
@@ -810,7 +798,12 @@ class CreateAgentOptions(FrozenModel):
     source_agent_state_dir: Path | None = Field(
         default=None,
         description="Agent state directory of the source agent, used to transfer "
-        "per-agent data during clone operations (set when cloning via --from-agent)",
+        "per-agent data during clone operations (set when cloning via --from with an agent source)",
+    )
+    is_update: bool = Field(
+        default=False,
+        description="Whether this is an update of an existing agent (idempotent create). "
+        "When True, existing work_dir and state are updated rather than created from scratch.",
     )
 
 

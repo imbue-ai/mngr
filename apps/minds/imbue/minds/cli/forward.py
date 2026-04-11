@@ -7,6 +7,7 @@ from imbue.minds.config.data_types import DEFAULT_FORWARDING_SERVER_HOST
 from imbue.minds.config.data_types import DEFAULT_FORWARDING_SERVER_PORT
 from imbue.minds.config.data_types import get_default_data_dir
 from imbue.minds.forwarding_server.runner import start_forwarding_server
+from imbue.minds.primitives import OutputFormat
 
 
 @click.command()
@@ -28,7 +29,14 @@ from imbue.minds.forwarding_server.runner import start_forwarding_server
     default=None,
     help="Data directory for minds state (default: ~/.minds)",
 )
-def forward(host: str, port: int, data_dir: str | None) -> None:
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    default=False,
+    help="Do not open the login URL in the system browser",
+)
+@click.pass_context
+def forward(ctx: click.Context, host: str, port: int, data_dir: str | None, no_browser: bool) -> None:
     """Start the local forwarding server.
 
     The forwarding server handles authentication and proxies web traffic
@@ -36,6 +44,7 @@ def forward(host: str, port: int, data_dir: str | None) -> None:
     mngr CLI commands (mngr list, mngr events).
     """
     data_directory = Path(data_dir) if data_dir else get_default_data_dir()
+    output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
 
     logger.info("Starting minds forwarding server...")
     logger.info("  Listening on: http://{}:{}", host, port)
@@ -48,4 +57,6 @@ def forward(host: str, port: int, data_dir: str | None) -> None:
         data_directory=data_directory,
         host=host,
         port=port,
+        output_format=output_format,
+        is_no_browser=no_browser,
     )

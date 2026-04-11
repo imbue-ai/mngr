@@ -41,8 +41,13 @@ fi
 
 # ── Step 2: Install mngr ─────────────────────────────────────────────────────
 
-info "Installing mngr..."
-uv tool install imbue-mngr
+if uv tool list 2>/dev/null | grep -q '^imbue-mngr '; then
+    info "Upgrading mngr..."
+    uv tool upgrade imbue-mngr
+else
+    info "Installing mngr..."
+    uv tool install imbue-mngr
+fi
 
 if ! command -v mngr &>/dev/null; then
     TOOL_BIN="$(uv tool dir --bin)"
