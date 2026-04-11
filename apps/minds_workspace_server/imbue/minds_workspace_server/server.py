@@ -474,10 +474,11 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
         ws_broadcaster.unregister(client_queue)
 
 
-async def _proto_agent_logs_endpoint(websocket: WebSocket, agent_id: str) -> None:
+async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
     """WebSocket for streaming proto-agent creation logs."""
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
+    agent_id = websocket.path_params.get("agent_id", "")
 
     log_queue = agent_manager.get_log_queue(agent_id)
     if log_queue is None:
