@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import _relay_data
@@ -361,8 +362,6 @@ def test_write_api_url_to_local_overwrites_existing(tmp_path: Path) -> None:
 
 
 def test_reverse_tunnel_info_stores_metadata() -> None:
-    from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
-
     ssh_info = RemoteSSHInfo(
         user="root",
         host="192.168.1.1",
