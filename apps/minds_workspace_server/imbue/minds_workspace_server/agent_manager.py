@@ -142,6 +142,11 @@ class AgentManager:
         with self._lock:
             return list(self._agents.values())
 
+    def get_agent_by_id(self, agent_id: str) -> AgentStateItem | None:
+        """Look up a single agent by ID."""
+        with self._lock:
+            return self._agents.get(agent_id)
+
     def get_applications(self) -> dict[str, list[ApplicationEntry]]:
         """Return per-agent application map."""
         with self._lock:

@@ -24,6 +24,7 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_discovery import _read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -196,13 +197,36 @@ def _list_agents_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
+def _get_host_dir() -> Path:
+    """Get the mngr host directory from the environment."""
+    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
+
+
 def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
-    """Find a specific agent by ID."""
-    agents = _discover_with_filters(request)
-    for agent in agents:
-        if agent.id == agent_id:
-            return agent
-    return None
+    """Find a specific agent by ID.
+
+    Uses the AgentManager's already-loaded state instead of running a full
+    mngr discovery on every request.  Falls back to the agent state directory
+    for claude_config_dir resolution.
+    """
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_state = agent_manager.get_agent_by_id(agent_id)
+    if agent_state is None:
+        return None
+
+    host_dir = _get_host_dir()
+    agent_state_dir = host_dir / "agents" / agent_id
+    claude_config_dir = _read_claude_config_dir_from_env_file(agent_state_dir)
+
+    return AgentInfo(
+        id=agent_state.id,
+        name=agent_state.name,
+        state=agent_state.state,
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        labels=agent_state.labels,
+        work_dir=agent_state.work_dir,
+    )
 
 
 def _agent_not_found_response(agent_id: str) -> JSONResponse:
