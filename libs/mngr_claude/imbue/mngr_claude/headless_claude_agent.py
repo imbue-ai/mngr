@@ -240,6 +240,17 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     def get_tui_ready_indicator(self) -> str | None:
         return BaseHeadlessAgent.get_tui_ready_indicator(self)
 
+    def wait_for_ready_signal(
+        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        """Start the agent without waiting for a readiness signal.
+
+        Must be defined here to override ClaudeAgent.wait_for_ready_signal, which
+        would otherwise poll for a 'session_started' file that 'claude --print' never
+        creates (it runs non-interactively and exits without a SessionStart hook).
+        """
+        start_action()
+
     def assemble_command(
         self,
         host: OnlineHostInterface,

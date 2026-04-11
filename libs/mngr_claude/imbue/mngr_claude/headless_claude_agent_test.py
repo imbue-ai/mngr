@@ -155,6 +155,26 @@ class _CreatesFileOnSecondPollAgent(_AlwaysFinishedHeadlessClaude):
 
 
 # =============================================================================
+# Tests for wait_for_ready_signal
+# =============================================================================
+
+
+def test_wait_for_ready_signal_calls_start_action(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """wait_for_ready_signal should call start_action() immediately without polling.
+
+    Verifies that HeadlessClaude overrides ClaudeAgent.wait_for_ready_signal to
+    avoid polling for a 'session_started' file that 'claude --print' never creates.
+    """
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
+    called = []
+    agent.wait_for_ready_signal(is_creating=True, start_action=lambda: called.append(True))
+    assert called == [True]
+
+
+# =============================================================================
 # Tests for assemble_command
 # =============================================================================
 
