@@ -130,9 +130,9 @@ def _execute_destroy(
                 case HostInterface() as offline_host:
                     with log_span("Destroying offline host {} with {} agent(s)", host_id, len(host_agents)):
                         try:
-                            mngr_ctx.pm.hook.on_before_host_destroy(host=offline_host)
+                            mngr_ctx.pm.hook.on_before_host_destroy(host=offline_host, mngr_ctx=mngr_ctx)
                             provider.destroy_host(offline_host)
-                            mngr_ctx.pm.hook.on_host_destroyed(host=offline_host)
+                            mngr_ctx.pm.hook.on_host_destroyed(host=offline_host, mngr_ctx=mngr_ctx)
                             for agent_details in host_agents:
                                 result.destroyed_agents.append(agent_details.name)
                                 logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)

@@ -76,7 +76,7 @@ def on_host_created(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 
 @hookspec
-def on_before_host_destroy(host: HostInterface) -> None:
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     """[experimental] Called before a host is destroyed.
 
     This hook fires before provider.destroy_host() is called. The host is still
@@ -87,7 +87,7 @@ def on_before_host_destroy(host: HostInterface) -> None:
 
 
 @hookspec
-def on_host_destroyed(host: HostInterface) -> None:
+def on_host_destroyed(host: HostInterface, mngr_ctx: MngrContext) -> None:
     """[experimental] Called after a host has been destroyed.
 
     This hook fires after provider.destroy_host() completes. The host's
