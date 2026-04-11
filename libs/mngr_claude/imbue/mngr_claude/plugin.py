@@ -21,7 +21,6 @@ from typing import Any
 from typing import Callable
 from typing import Final
 
-import click
 from loguru import logger
 from pydantic import Field
 
@@ -75,7 +74,6 @@ from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import warn_undismissed_claude_dialogs
-from imbue.mngr_claude.cli import claude_group
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -1715,12 +1713,6 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
-
-
-@hookimpl
-def register_cli_commands() -> Sequence[click.Command] | None:
-    """Register the claude CLI command group."""
-    return [claude_group]
 
 
 class WaitingReason(UpperCaseStrEnum):
