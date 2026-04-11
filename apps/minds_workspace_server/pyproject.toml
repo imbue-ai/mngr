@@ -13,6 +13,7 @@ dependencies = [
     "starlette>=0.45",
     "uvicorn>=0.34",
     "watchdog>=4.0",
+    "websockets>=13.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
