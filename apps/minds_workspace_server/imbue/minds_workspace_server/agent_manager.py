@@ -90,7 +90,7 @@ class AgentManager:
     _own_work_dir: str
     _shutdown_event: ShutdownEvent
     _observe_cg: ConcurrencyGroup | None
-    _creation_cg: ConcurrencyGroup | None
+    _creation_cg: ConcurrencyGroup
 
     @classmethod
     def build(cls, broadcaster: WebSocketBroadcaster) -> "AgentManager":
@@ -107,7 +107,8 @@ class AgentManager:
         manager._own_work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
         manager._shutdown_event = ShutdownEvent.build_root()
         manager._observe_cg = None
-        manager._creation_cg = None
+        manager._creation_cg = ConcurrencyGroup(name="agent-creation")
+        manager._creation_cg.__enter__()
         return manager
 
     def start(self) -> None:
@@ -128,9 +129,7 @@ class AgentManager:
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
 
-        if self._creation_cg is not None:
-            self._creation_cg.__exit__(None, None, None)
-            self._creation_cg = None
+        self._creation_cg.__exit__(None, None, None)
 
         for observer in self._app_observers.values():
             observer.stop()
@@ -299,10 +298,6 @@ class AgentManager:
         log_queue: queue.Queue[str | None],
     ) -> None:
         """Start a background thread to run agent creation and stream logs."""
-        if self._creation_cg is None:
-            self._creation_cg = ConcurrencyGroup(name="agent-creation")
-            self._creation_cg.__enter__()
-
         self._creation_cg.start_new_thread(
             target=self._run_creation,
             args=(agent_id, cmd, work_dir, log_queue),
