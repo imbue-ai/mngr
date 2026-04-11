@@ -92,7 +92,7 @@ def test_make_host_name() -> None:
 
 
 def test_build_mngr_create_command_dev_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
@@ -106,10 +106,15 @@ def test_build_mngr_create_command_dev_mode() -> None:
     assert "docker" not in cmd
     # DEV mode: address is just the agent name (no host suffix)
     assert cmd[2] == "test-agent"
+    # API key is injected via --env
+    assert "--env" in cmd
+    env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
+    assert any(v.startswith("MINDS_API_KEY=") for v in env_values)
+    assert len(api_key) > 0
 
 
 def test_build_mngr_create_command_local_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
@@ -125,7 +130,7 @@ def test_build_mngr_create_command_local_mode() -> None:
 
 
 def test_build_mngr_create_command_lima_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LIMA,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),

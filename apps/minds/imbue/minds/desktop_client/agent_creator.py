@@ -36,6 +36,9 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.api_key_store import generate_api_key
+from imbue.minds.desktop_client.api_key_store import hash_api_key
+from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
@@ -182,8 +185,11 @@ def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
     agent_id: AgentId,
-) -> list[str]:
-    """Build the mngr create command for the given launch mode.
+) -> tuple[list[str], str]:
+    """Build the mngr create command and generate an API key for the agent.
+
+    Returns (command_list, api_key) where api_key is a UUID4 string injected
+    as MINDS_API_KEY into the agent's environment via --env.
 
     DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
@@ -207,6 +213,8 @@ def _build_mngr_create_command(
         case _ as unreachable:
             assert_never(unreachable)
 
+    api_key = generate_api_key()
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
@@ -218,6 +226,8 @@ def _build_mngr_create_command(
         "--update",
         "--label",
         f"workspace={agent_name}",
+        "--env",
+        f"MINDS_API_KEY={api_key}",
         "--template",
         "main",
     ]
@@ -234,7 +244,7 @@ def _build_mngr_create_command(
         case _ as unreachable:
             assert_never(unreachable)
 
-    return mngr_command
+    return mngr_command, api_key
 
 
 def run_mngr_create(
@@ -243,15 +253,16 @@ def run_mngr_create(
     agent_name: AgentName,
     agent_id: AgentId,
     on_output: OutputCallback | None = None,
-) -> None:
+) -> str:
     """Create an mngr agent via ``mngr create``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
     environment variables, and all other configuration.
 
+    Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
-    mngr_command = _build_mngr_create_command(launch_mode, agent_name, agent_id)
+    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id)
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -271,6 +282,8 @@ def run_mngr_create(
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
             )
         )
+
+    return api_key
 
 
 def _inject_tunnel_token(
@@ -437,13 +450,18 @@ class AgentCreator(MutableModel):
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
-                run_mngr_create(
+                api_key = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     agent_id=agent_id,
                     on_output=emit_log,
                 )
+
+                # Persist the API key hash
+                key_hash = hash_api_key(api_key)
+                save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
+                log_queue.put("[minds] API key generated and hash stored.")
 
                 self._setup_cloudflare_tunnel(agent_id, log_queue)
 
