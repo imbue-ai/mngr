@@ -31,7 +31,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -75,7 +75,7 @@ def extract_repo_name(git_url: str) -> str:
 
     Strips .git suffix and trailing slashes, then takes the last path component.
     Non-alphanumeric characters (except hyphens and underscores) are replaced
-    with hyphens. Falls back to 'mind' if the URL doesn't yield a usable name.
+    with hyphens. Falls back to 'workspace' if the URL doesn't yield a usable name.
     """
     url = git_url.rstrip("/")
     if url.endswith(".git"):
@@ -83,7 +83,7 @@ def extract_repo_name(git_url: str) -> str:
     name = url.rsplit("/", 1)[-1]
     cleaned = "".join(c if c.isalnum() or c in "-_" else "-" for c in name)
     cleaned = cleaned.strip("-")
-    return cleaned if cleaned else "mind"
+    return cleaned if cleaned else "workspace"
 
 
 def _is_local_path(repo_source: str) -> bool:
@@ -171,7 +171,7 @@ def checkout_branch(
 
 
 def _make_host_name(agent_name: AgentName) -> str:
-    """Build the host name for a mind agent.
+    """Build the host name for an agent.
 
     Uses ``{agent_name}-host`` so it is obvious why the host was created.
     """
@@ -217,7 +217,7 @@ def _build_mngr_create_command(
         "--reuse",
         "--update",
         "--label",
-        f"mind={agent_name}",
+        f"workspace={agent_name}",
         "--template",
         "main",
     ]
@@ -239,7 +239,7 @@ def _build_mngr_create_command(
 
 def run_mngr_create(
     launch_mode: LaunchMode,
-    mind_dir: Path,
+    workspace_dir: Path,
     agent_name: AgentName,
     agent_id: AgentId,
     on_output: OutputCallback | None = None,
@@ -259,7 +259,7 @@ def run_mngr_create(
     with cg:
         result = cg.run_process_to_completion(
             command=mngr_command,
-            cwd=mind_dir,
+            cwd=workspace_dir,
             is_checked_after=False,
             on_output=on_output,
         )
@@ -312,7 +312,7 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    paths: MindPaths = Field(frozen=True, description="Filesystem paths for minds data")
+    paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
     cloudflare_client: CloudflareForwardingClient | None = Field(
         default=None,
         frozen=True,
@@ -415,10 +415,10 @@ class AgentCreator(MutableModel):
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
                         clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
-                        mind_dir = clone_target
+                        workspace_dir = clone_target
                     else:
-                        mind_dir = resolved_path
-                        log_queue.put(f"[minds] Using local directory: {mind_dir}")
+                        workspace_dir = resolved_path
+                        log_queue.put(f"[minds] Using local directory: {workspace_dir}")
                 else:
                     repo_name = extract_repo_name(repo_source)
                     clone_target = Path(tempfile.gettempdir()) / f"minds-clone-{repo_name}"
@@ -426,11 +426,11 @@ class AgentCreator(MutableModel):
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
                     clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True)
-                    mind_dir = clone_target
+                    workspace_dir = clone_target
 
                 if branch:
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(mind_dir, GitBranch(branch), on_output=emit_log)
+                    checkout_branch(workspace_dir, GitBranch(branch), on_output=emit_log)
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
@@ -439,7 +439,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
                 run_mngr_create(
                     launch_mode=launch_mode,
-                    mind_dir=mind_dir,
+                    workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     agent_id=agent_id,
                     on_output=emit_log,

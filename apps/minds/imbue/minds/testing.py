@@ -82,7 +82,7 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 
 
 # ---------------------------------------------------------------------------
-# End-to-end test helpers (for real mngr/mind subprocess calls)
+# End-to-end test helpers (for real mngr subprocess calls)
 # ---------------------------------------------------------------------------
 
 

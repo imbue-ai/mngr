@@ -1,6 +1,6 @@
-# Mind template documentation
+# Workspace template documentation
 
-A "mind" is a persistent mngr agent created from a template repository. The template defines the agent's entire runtime environment.
+A "workspace" is a persistent mngr agent created from a template repository. The template defines the agent's entire runtime environment.
 
 ## Template structure
 

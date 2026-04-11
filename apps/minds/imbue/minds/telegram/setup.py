@@ -1,4 +1,4 @@
-"""Orchestrate the full Telegram bot setup flow for a mind agent.
+"""Orchestrate the full Telegram bot setup flow for an agent.
 
 The setup flow:
 1. Check for stored Telegram user credentials (reused across agents)
@@ -21,7 +21,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import TelegramBotCreationError
 from imbue.minds.errors import TelegramCredentialError
@@ -72,7 +72,7 @@ def generate_bot_username(agent_name: str) -> str:
     sanitized = re.sub(r"_+", "_", sanitized).strip("_")
 
     if not sanitized:
-        sanitized = "mind"
+        sanitized = "workspace"
 
     username = f"{sanitized}_bot"
 
@@ -83,7 +83,7 @@ def generate_bot_username(agent_name: str) -> str:
 
     # Pad if too short
     if len(username) < _MIN_BOT_USERNAME_LENGTH:
-        username = f"mind_{username}"
+        username = f"minds_{username}"
 
     return username
 
@@ -94,12 +94,12 @@ def generate_bot_display_name(agent_name: str) -> str:
 
 
 class TelegramSetupOrchestrator(MutableModel):
-    """Manages background Telegram bot setup for mind agents.
+    """Manages background Telegram bot setup for agents.
 
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    paths: MindPaths = Field(frozen=True, description="Filesystem paths for minds data")
+    paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
 
     _statuses: dict[str, TelegramSetupStatus] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)

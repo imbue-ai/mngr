@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
@@ -53,10 +53,10 @@ def test_extract_repo_name_replaces_special_chars() -> None:
     assert extract_repo_name("https://github.com/user/my repo!test") == "my-repo-test"
 
 
-def test_extract_repo_name_falls_back_to_mind() -> None:
-    assert extract_repo_name("") == "mind"
-    assert extract_repo_name("/") == "mind"
-    assert extract_repo_name(".git") == "mind"
+def test_extract_repo_name_falls_back_to_workspace() -> None:
+    assert extract_repo_name("") == "workspace"
+    assert extract_repo_name("/") == "workspace"
+    assert extract_repo_name(".git") == "workspace"
 
 
 def test_extract_repo_name_from_local_path() -> None:
@@ -229,7 +229,7 @@ def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
 
 def test_agent_creator_get_creation_info_returns_none_for_unknown() -> None:
     creator = AgentCreator(
-        paths=MindPaths(data_dir=Path("/tmp/test")),
+        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
     )
     assert creator.get_creation_info(AgentId()) is None
 
@@ -241,7 +241,7 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     but the initial status should be immediately available.
     """
     creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
 
     agent_id = creator.start_creation("file:///nonexistent-repo")
@@ -256,7 +256,7 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
 def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
     """Verify start_creation accepts a custom agent name."""
     creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
     agent_id = creator.start_creation("file:///nonexistent-repo", agent_name="my-agent")
     info = creator.get_creation_info(agent_id)
@@ -266,14 +266,14 @@ def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
 
 def test_agent_creator_get_log_queue_returns_none_for_unknown() -> None:
     creator = AgentCreator(
-        paths=MindPaths(data_dir=Path("/tmp/test")),
+        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
     )
     assert creator.get_log_queue(AgentId()) is None
 
 
 def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
     creator = AgentCreator(
-        paths=MindPaths(data_dir=Path("/tmp/test")),
+        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
     )
     agent_id = creator.start_creation("file:///nonexistent-repo")
     q = creator.get_log_queue(agent_id)
@@ -284,7 +284,7 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
 def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
     """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
     creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
     agent_id = creator.start_creation("/nonexistent/local/path", agent_name="local-test")
     # The background thread runs immediately and fails because the path doesn't exist.
@@ -302,7 +302,7 @@ def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
 def test_setup_cloudflare_tunnel_skips_when_no_client(tmp_path: Path) -> None:
     """Verify _setup_cloudflare_tunnel does nothing when cloudflare_client is None."""
     creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
     creator._setup_cloudflare_tunnel(AgentId(), log_queue)
@@ -321,7 +321,7 @@ def test_setup_cloudflare_tunnel_with_client_logs_creation(tmp_path: Path) -> No
         owner_email=OwnerEmail("test@example.com"),
     )
     creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         cloudflare_client=client,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
@@ -338,7 +338,7 @@ def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:
     with pytest.raises(MngrCommandError, match="mngr create failed"):
         run_mngr_create(
             launch_mode=LaunchMode.DEV,
-            mind_dir=tmp_path,
+            workspace_dir=tmp_path,
             agent_name=AgentName("test"),
             agent_id=AgentId(),
         )

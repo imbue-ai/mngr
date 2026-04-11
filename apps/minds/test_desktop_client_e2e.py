@@ -32,7 +32,7 @@ import uvicorn
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -129,7 +129,7 @@ class DesktopClientFixture:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        paths = MindPaths(data_dir=self.tmp_dir)
+        paths = WorkspacePaths(data_dir=self.tmp_dir)
         auth_store = FileAuthStore(data_directory=paths.auth_dir)
         auth_store.add_one_time_code(code=self.code)
 
@@ -249,7 +249,7 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
     """Create an agent and verify its web server is accessible through the desktop client."""
     _configure_logging()
     _load_env()
-    os.environ["MIND_NAME"] = _AGENT_NAME
+    os.environ["MINDS_WORKSPACE_NAME"] = _AGENT_NAME
 
     _SIGNAL_FILE.unlink(missing_ok=True)
     _destroy_agent(_AGENT_NAME)
@@ -259,7 +259,7 @@ def test_create_agent_e2e(tmp_path: Path) -> None:
 
     client = httpx.Client(
         base_url=server.base_url,
-        cookies={"mind_session": "skip"},
+        cookies={"minds_session": "skip"},
         timeout=15.0,
     )
     os.environ["SKIP_AUTH"] = "1"
@@ -303,7 +303,7 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
     """
     _configure_logging()
     _load_env()
-    os.environ["MIND_NAME"] = _DEV_AGENT_NAME
+    os.environ["MINDS_WORKSPACE_NAME"] = _DEV_AGENT_NAME
 
     # Set up isolated UV tool directories so the extra_provision_command
     # installs mngr into a temp location instead of clobbering the host's install.
@@ -323,7 +323,7 @@ def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
 
         client = httpx.Client(
             base_url=server.base_url,
-            cookies={"mind_session": "skip"},
+            cookies={"minds_session": "skip"},
             timeout=15.0,
         )
         os.environ["SKIP_AUTH"] = "1"

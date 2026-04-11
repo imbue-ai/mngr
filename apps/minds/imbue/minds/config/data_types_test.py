@@ -1,24 +1,24 @@
 import json
 from pathlib import Path
 
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import get_default_data_dir
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.mngr.primitives import AgentId
 
 
-def test_mind_paths_mind_dir_uses_agent_id(tmp_path: Path) -> None:
-    """Verify mind_dir incorporates the agent_id into the path."""
-    paths = MindPaths(data_dir=tmp_path)
+def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
+    """Verify workspace_dir incorporates the agent_id into the path."""
+    paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId()
 
-    result = paths.mind_dir(agent_id)
+    result = paths.workspace_dir(agent_id)
     assert result.parent == tmp_path
     assert str(agent_id) in str(result)
 
 
-def test_mind_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
-    paths = MindPaths(data_dir=tmp_path)
+def test_workspace_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
     assert paths.auth_dir == tmp_path / "auth"
 
 

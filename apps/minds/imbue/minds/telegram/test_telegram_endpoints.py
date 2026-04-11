@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import SecretStr
 from starlette.testclient import TestClient
 
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -33,7 +33,7 @@ def _create_test_server_with_telegram(
         server_logs={str(agent_id): server_log},
     )
 
-    paths = MindPaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(
@@ -141,7 +141,7 @@ def _create_test_server_with_two_agents(
         },
     )
 
-    paths = MindPaths(data_dir=tmp_path / "minds_data")
+    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
     app = create_desktop_client(

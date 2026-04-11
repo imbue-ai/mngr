@@ -76,7 +76,7 @@ class SSHTunnelManager(MutableModel):
     def _get_tmpdir(self) -> Path:
         """Get or create the secure temporary directory for Unix sockets."""
         if self._tmpdir is None:
-            self._tmpdir = tempfile.TemporaryDirectory(prefix="mind-ssh-")
+            self._tmpdir = tempfile.TemporaryDirectory(prefix="minds-ssh-")
             os.chmod(self._tmpdir.name, 0o700)
         return Path(self._tmpdir.name)
 

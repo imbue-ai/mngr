@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -968,7 +968,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create a Mind" in response.text
+    assert "Create a Workspace" in response.text
     assert "git_url" in response.text
 
 
@@ -999,7 +999,7 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create a Mind" in response.text
+    assert "Create a Workspace" in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -1086,7 +1086,7 @@ def _create_test_server_with_agent_creator(
     """
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     agent_creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -1188,7 +1188,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your mind" in response.text
+    assert "Creating your workspace" in response.text
     agent_creator.wait_for_all()
 
 
@@ -1224,7 +1224,7 @@ def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
 
 
 def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Path) -> None:
-    """When authenticated with multiple agents known, landing page shows 'Create another mind' link."""
+    """When authenticated with multiple agents known, landing page shows 'Create another workspace' link."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -1242,7 +1242,7 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create another mind" in response.text
+    assert "Create another workspace" in response.text
 
 
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:

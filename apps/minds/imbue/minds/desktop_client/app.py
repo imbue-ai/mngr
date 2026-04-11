@@ -272,7 +272,7 @@ def _handle_landing_page(
         html = render_login_page()
         return HTMLResponse(content=html)
 
-    all_agent_ids = backend_resolver.list_known_mind_ids()
+    all_agent_ids = backend_resolver.list_known_workspace_ids()
 
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator

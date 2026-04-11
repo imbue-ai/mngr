@@ -17,7 +17,7 @@ DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 MNGR_BINARY: Final[str] = "mngr"
 
 
-class MindPaths(FrozenModel):
+class WorkspacePaths(FrozenModel):
     """Resolved filesystem paths for minds data storage."""
 
     data_dir: Path = Field(description="Root directory for minds data (e.g. ~/.minds)")
@@ -27,8 +27,8 @@ class MindPaths(FrozenModel):
         """Directory for authentication data (signing key, one-time codes)."""
         return self.data_dir / "auth"
 
-    def mind_dir(self, agent_id: AgentId) -> Path:
-        """Directory for a specific mind's repo (e.g. ~/.minds/<agent-id>/)."""
+    def workspace_dir(self, agent_id: AgentId) -> Path:
+        """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
         return self.data_dir / str(agent_id)
 
 

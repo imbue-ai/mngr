@@ -66,8 +66,8 @@ class BackendResolverInterface(MutableModel, ABC):
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         """Return all known agent IDs."""
 
-    def list_known_mind_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the mind=true label.
+    def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return agent IDs that have the workspace=true label.
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
@@ -295,10 +295,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             return self._agents_result.agent_ids
 
-    def list_known_mind_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the mind label set."""
+    def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return agent IDs that have the workspace label set."""
         with self._lock:
-            return tuple(agent.agent_id for agent in self._agents_result.discovered_agents if "mind" in agent.labels)
+            return tuple(agent.agent_id for agent in self._agents_result.discovered_agents if "workspace" in agent.labels)
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
@@ -335,10 +335,10 @@ class MngrStreamManager(MutableModel):
        - AGENT_DISCOVERED: incrementally adds or updates a single agent
        - AGENT_DESTROYED: incrementally removes a single agent
        - HOST_DESTROYED: removes all agents on a destroyed host
-    2. `mngr events <agent-id> servers --follow --quiet` (one per mind agent)
+    2. `mngr events <agent-id> servers --follow --quiet` (one per workspace agent)
        to discover each agent's servers.
 
-    Only agents with the ``mind`` label get events streams -- non-mind agents
+    Only agents with the ``workspace`` label get events streams -- other agents
     are tracked in the resolver for completeness but their server events are
     not streamed.
     """
@@ -414,9 +414,9 @@ class MngrStreamManager(MutableModel):
             logger.trace("Ignoring discovery event: {}", type(event).__name__)
 
     @staticmethod
-    def _is_mind_agent(agent: DiscoveredAgent) -> bool:
-        """Check whether a discovered agent has the ``mind`` label."""
-        return "mind" in agent.labels
+    def _is_workspace_agent(agent: DiscoveredAgent) -> bool:
+        """Check whether a discovered agent has the ``workspace`` label."""
+        return "workspace" in agent.labels
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update agent list and agent-to-host mapping from a full snapshot."""
@@ -431,8 +431,8 @@ class MngrStreamManager(MutableModel):
 
         self._update_resolver(tuple(agent_ids), event.agents)
 
-        mind_ids = {str(agent.agent_id) for agent in event.agents if self._is_mind_agent(agent)}
-        self._sync_events_streams(mind_ids)
+        workspace_ids = {str(agent.agent_id) for agent in event.agents if self._is_workspace_agent(agent)}
+        self._sync_events_streams(workspace_ids)
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Update SSH info for a host and refresh the resolver."""
@@ -459,9 +459,9 @@ class MngrStreamManager(MutableModel):
             updated_agents = [a for a in self._discovered_agents if str(a.agent_id) != aid_str]
             updated_agents.append(agent)
             self._discovered_agents = tuple(updated_agents)
-            # Start events stream if this is a newly discovered mind agent
+            # Start events stream if this is a newly discovered workspace agent
             is_new = aid_str not in self._known_agent_ids
-            if is_new and self._is_mind_agent(agent):
+            if is_new and self._is_workspace_agent(agent):
                 self._known_agent_ids.add(aid_str)
                 self._start_events_stream(agent.agent_id)
             agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
@@ -581,7 +581,7 @@ class MngrStreamManager(MutableModel):
             logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> servers --follow for a single mind agent."""
+        """Start mngr events <agent-id> servers --follow for a single workspace agent."""
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 

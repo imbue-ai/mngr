@@ -87,7 +87,7 @@ function startBackend(onProgress) {
         uvBin = 'uv';
         args = [
           'run', '--package', 'minds',
-          'mind', '-vv', '--format', 'jsonl',
+          'minds', '-vv', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
@@ -108,7 +108,7 @@ function startBackend(onProgress) {
         uvBin = uvPath;
         args = [
           'run', '--project', pyprojectDir,
-          'mind', '--format', 'jsonl',
+          'minds', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',

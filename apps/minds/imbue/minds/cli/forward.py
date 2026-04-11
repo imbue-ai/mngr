@@ -27,7 +27,7 @@ from imbue.minds.primitives import OutputFormat
     "--data-dir",
     type=click.Path(resolve_path=True),
     default=None,
-    help="Data directory for minds state (default: ~/.minds)",
+    help="Data directory for workspace state (default: ~/.minds)",
 )
 @click.option(
     "--no-browser",
@@ -40,7 +40,7 @@ def forward(ctx: click.Context, host: str, port: int, data_dir: str | None, no_b
     """Start the local desktop client.
 
     The desktop client handles authentication and proxies web traffic
-    to individual mind web servers. It discovers backends by calling
+    to individual workspace web servers. It discovers backends by calling
     mngr CLI commands (mngr list, mngr events).
     """
     data_directory = Path(data_dir) if data_dir else get_default_data_dir()

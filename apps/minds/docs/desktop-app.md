@@ -7,7 +7,7 @@ Minds ships as a standalone desktop application built with Electron and distribu
 The Electron shell is deliberately thin. It handles four things:
 
 1. **Environment setup**: Runs `uv sync` on launch to install/update the Python environment
-2. **Backend lifecycle**: Spawns and monitors the `mind forward` process
+2. **Backend lifecycle**: Spawns and monitors the `minds forward` process
 3. **Auth handshake**: Parses the login URL from stdout and navigates to it
 4. **Window management**: Displays the backend's web UI in a native window
 
@@ -30,7 +30,7 @@ When accessing an agent URL in a regular browser (not the Electron app), the Pyt
 
 1. Electron creates a frameless window showing a loading screen (`shell.html`)
 2. `uv sync` runs using the bundled `uv` binary and the packaged `pyproject.toml` + lockfile
-3. Electron finds an available port and spawns: `uv run mind --format jsonl --log-file <path> forward --host 127.0.0.1 --port <port> --no-browser`
+3. Electron finds an available port and spawns: `uv run minds --format jsonl --log-file <path> forward --host 127.0.0.1 --port <port> --no-browser`
 4. The backend emits a JSONL event `{"event": "login_url", "login_url": "..."}` on stdout
 5. Electron waits for the port to accept TCP connections, then navigates directly to the login URL
 6. Auth completes (one-time code consumed, session cookie set), the custom title bar is injected, user sees the web UI

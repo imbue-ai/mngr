@@ -1,11 +1,11 @@
 # Architecture
 
-The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their minds.
+The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
 The simplest way would be to use sub-domains, but we don't control the DNS or URLs where user's agents are being served, so we have to do it with URL paths instead.
 In order to make that actually work, we use a combination of service workers, script injection, and rewriting.
 
-This desktop client is a separate component from any individual mind's web server -- the desktop client does not define what minds do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the mind are accessible remotely.
+This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible remotely.
 
 ## Authentication
 
@@ -13,7 +13,7 @@ Authentication is global (one session grants access to all agents). The desktop 
 
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
 - **One-time codes**: a login code is generated and printed to the terminal when the server starts. Codes are stored in `{data_directory}/one_time_codes.json` and can only be used once.
-- **Session cookie**: after successful authentication, the server sets a signed `mind_session` cookie. This single cookie grants access to all agents and all server routes.
+- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. This single cookie grants access to all agents and all server routes.
 
 ## Local desktop client routes
 
@@ -35,7 +35,7 @@ Authentication is global (one session grants access to all agents). The desktop 
         if no agents exist, shows the agent creation form
 
 `/create` route (requires auth):
-    GET: shows a form to enter a git URL for creating a new mind
+    GET: shows a form to enter a git URL for creating a new workspace
     POST: accepts form data with git_url, starts agent creation, redirects to /creating/{agent_id}
 
 `/api/create-agent` route (POST, JSON API, requires auth):
@@ -60,7 +60,7 @@ Authentication is global (one session grants access to all agents). The desktop 
 
 ## Proxying design
 
-Since we can't control DNS or use subdomains, we multiplex minds under URL path prefixes (`/agents/{agent_id}/{server_name}/`). Each server for an agent gets its own prefix and Service Worker scope. This requires a combination of Service Workers, script injection, and rewriting:
+Since we can't control DNS or use subdomains, we multiplex workspaces under URL path prefixes (`/agents/{agent_id}/{server_name}/`). Each server for an agent gets its own prefix and Service Worker scope. This requires a combination of Service Workers, script injection, and rewriting:
 
 - On first navigation, a bootstrap page installs a Service Worker scoped to `/agents/{agent_id}/{server_name}/`
 - The SW intercepts all same-origin requests and rewrites paths to include the prefix

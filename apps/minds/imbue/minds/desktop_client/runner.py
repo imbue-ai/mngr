@@ -9,7 +9,7 @@ from typing import Final
 import uvicorn
 from loguru import logger
 
-from imbue.minds.config.data_types import MindPaths
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -43,7 +43,7 @@ def start_desktop_client(
     format (human-readable text or JSONL event). Unless --no-browser is
     set, the URL is opened in the system browser.
     """
-    paths = MindPaths(data_dir=data_directory)
+    paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     backend_resolver = MngrCliBackendResolver()
     stream_manager = MngrStreamManager(resolver=backend_resolver)

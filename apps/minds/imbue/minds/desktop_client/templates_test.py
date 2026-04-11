@@ -27,14 +27,14 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
-    assert "No minds are accessible" in html
+    assert "No workspaces are accessible" in html
 
 
 def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     assert "Discovering agents" in html
     assert "reload" in html
-    assert "No minds are accessible" not in html
+    assert "No workspaces are accessible" not in html
     assert "/agents/" not in html
 
 
@@ -85,7 +85,7 @@ def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
 def test_render_agent_servers_page_has_back_link() -> None:
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
     assert 'href="/"' in html
-    assert "Back to all minds" in html
+    assert "Back to all workspaces" in html
 
 
 def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
@@ -108,7 +108,7 @@ def test_render_agent_servers_page_without_cf_services_shows_enable_buttons() ->
 def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     assert "selene" in html
-    assert "simple_mind" in html
+    assert "forever-claude-template" in html
     assert "agent_name" in html
     assert "main" in html
     assert "launch_mode" in html

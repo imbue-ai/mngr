@@ -30,7 +30,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Minds</title>
+  <title>Workspaces</title>
   <style>
     """
     + _COMMON_STYLES
@@ -63,7 +63,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Your Minds</h1>
+  <h1>Your Workspaces</h1>
   {% if agent_ids %}
   <ul class="agent-list">
     {% for agent_id in agent_ids %}
@@ -81,7 +81,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     {% endfor %}
   </ul>
   <div class="create-section">
-    <a href="/create">Create another mind</a>
+    <a href="/create">Create another workspace</a>
   </div>
   <script>
   async function setupTelegram(agentId) {
@@ -148,7 +148,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
   <script>setTimeout(function() { location.reload(); }, 2000);</script>
     {% else %}
   <p class="empty-state">
-    No minds are accessible. Use a login link to authenticate with a mind.
+    No workspaces are accessible. Use a login link to authenticate with a workspace.
   </p>
     {% endif %}
   {% endif %}
@@ -160,7 +160,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Create a Mind</title>
+  <title>Create a Workspace</title>
   <style>
     """
     + _COMMON_STYLES
@@ -178,7 +178,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Create a Mind</h1>
+  <h1>Create a Workspace</h1>
   <form action="/create" method="post">
     <div class="form-group">
       <label for="agent_name">Name</label>
@@ -217,7 +217,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Creating your mind...</title>
+  <title>Creating your workspace...</title>
   <style>
     """
     + _COMMON_STYLES
@@ -239,7 +239,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Creating your mind...</h1>
+  <h1>Creating your workspace...</h1>
   <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
   <div id="logs"></div>
   <script>
@@ -298,7 +298,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Login - Minds</title>
+  <title>Login - Workspaces</title>
   <style>
     """
     + _COMMON_STYLES
@@ -307,7 +307,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Minds</h1>
+  <h1>Workspaces</h1>
   <p class="login-message">
     Please use the login URL printed in the terminal where the server is running.
   </p>
@@ -351,7 +351,7 @@ def render_landing_page(
     telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
 ) -> str:
-    """Render the landing page listing accessible minds.
+    """Render the landing page listing accessible workspaces.
 
     telegram_status_by_agent_id maps agent ID strings to whether they have
     active Telegram bot credentials. When None, no telegram buttons are shown.
@@ -369,13 +369,13 @@ def render_landing_page(
     )
 
 
-_DEFAULT_GIT_URL: Final[str] = os.getenv("MIND_GIT_URL", "https://github.com/imbue-ai/simple_mind.git")
+_DEFAULT_GIT_URL: Final[str] = os.getenv("MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git")
 
 
-_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MIND_NAME", "selene")
+_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "selene")
 
 
-_DEFAULT_BRANCH: Final[str] = os.getenv("MIND_BRANCH", "main")
+_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "main")
 
 
 @pure
@@ -388,7 +388,7 @@ def render_create_form(
     """Render the agent creation form page.
 
     When git_url is provided, the form field is pre-filled with that value.
-    Defaults to the simple_mind repository URL when empty.
+    Defaults to the forever-claude-template repository URL when empty.
     """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
@@ -511,7 +511,7 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     No servers are currently running for this agent.
   </p>
   {% endif %}
-  <div class="back-link"><a href="/">Back to all minds</a></div>
+  <div class="back-link"><a href="/">Back to all workspaces</a></div>
   <script>
   async function toggleGlobal(agentId, serverName, enable) {
     try {

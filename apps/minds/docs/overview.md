@@ -1,6 +1,6 @@
 # How it works
 
-Each mind is a persistent `mngr` agent running in a Docker container, created from a template repository. The template defines everything the agent needs: services, skills, configuration, and a Dockerfile.
+Each workspace is a persistent `mngr` agent running in a Docker container, created from a template repository. The template defines everything the agent needs: services, skills, configuration, and a Dockerfile.
 
 ## Architecture
 
@@ -8,15 +8,15 @@ The system has two main components:
 
 ### Desktop client (runs on your machine)
 
-The desktop client (`mind forward`) provides:
+The desktop client (`minds forward`) provides:
 - Authentication via one-time codes and signed cookies
-- A landing page listing all accessible minds (or a creation form if none exist)
+- A landing page listing all accessible workspaces (or a creation form if none exist)
 - Agent creation from git repositories or local paths via a web form or API
 - Reverse proxying of HTTP and WebSocket traffic to agent web servers
 - A per-agent servers page showing local and global (Cloudflare) URLs with toggle controls
 - Service Worker-based path rewriting for transparent URL multiplexing
 
-Each mind may run multiple web servers on separate ports. The desktop client multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{server_name}/`).
+Each workspace may run multiple web servers on separate ports. The desktop client multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{server_name}/`).
 
 ### Agent container (runs in Docker)
 

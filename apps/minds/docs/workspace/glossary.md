@@ -2,11 +2,11 @@
 
 Key concepts in the minds system:
 
-- **mind**: a persistent mngr agent created from a template repository via `mngr create`. All configuration lives in the template's `.mngr/settings.toml`. Each mind is labeled with `mind=<name>` for discovery.
+- **workspace**: a persistent mngr agent created from a template repository via `mngr create`. All configuration lives in the template's `.mngr/settings.toml`. Each workspace is labeled with `workspace=<name>` for discovery.
 
-- **template repository**: a git repository (e.g. forever-claude-template) that defines a mind's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
+- **template repository**: a git repository (e.g. forever-claude-template) that defines a workspace's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
 
-- **desktop client**: a local process (`mind forward`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple minds through a single local endpoint.
+- **desktop client**: a local process (`minds forward`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
 - **bootstrap service manager**: a process running inside each agent container that watches `services.toml` and starts/stops background services in tmux windows.
 

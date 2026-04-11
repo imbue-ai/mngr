@@ -3,7 +3,7 @@
 ## Starting the desktop client
 
 ```bash
-mind forward
+minds forward
 ```
 
 This starts the local desktop client (default: `http://127.0.0.1:8420`). A one-time login URL is printed to the terminal.

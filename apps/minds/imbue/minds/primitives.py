@@ -15,7 +15,7 @@ class OutputFormat(UpperCaseStrEnum):
 
 
 class LaunchMode(UpperCaseStrEnum):
-    """How a mind agent should be launched."""
+    """How a workspace agent should be launched."""
 
     LOCAL = auto()
     CLOUD = auto()
@@ -24,13 +24,13 @@ class LaunchMode(UpperCaseStrEnum):
 
 
 class AgentName(NonEmptyStr):
-    """User-chosen name for a mind agent."""
+    """User-chosen name for an agent."""
 
     ...
 
 
 class OneTimeCode(NonEmptyStr):
-    """A single-use authentication code for mind access."""
+    """A single-use authentication code for workspace access."""
 
     ...
 
@@ -42,7 +42,7 @@ class CookieSigningKey(SecretStr):
 
 
 class ServerName(NonEmptyStr):
-    """Name of a server run by a mind agent (e.g. 'web', 'api')."""
+    """Name of a server run by an agent (e.g. 'web', 'api')."""
 
     ...
 

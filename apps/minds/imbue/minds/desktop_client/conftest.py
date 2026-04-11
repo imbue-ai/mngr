@@ -34,7 +34,7 @@ def short_tmp_path() -> Iterator[Path]:
 
 def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
     """Build a JSON string matching `mngr list --format json` output for the given agent IDs."""
-    effective_labels = labels if labels is not None else {"mind": "true"}
+    effective_labels = labels if labels is not None else {"workspace": "true"}
     return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 
@@ -57,7 +57,7 @@ def make_resolver_with_data(
 
     if agents_json is not None:
         parsed = parse_agents_from_json(agents_json)
-        # Build DiscoveredAgent objects from the JSON for list_known_mind_ids()
+        # Build DiscoveredAgent objects from the JSON for list_known_workspace_ids()
         raw = json.loads(agents_json)
         discovered = tuple(
             DiscoveredAgent(

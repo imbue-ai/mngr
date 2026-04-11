@@ -5,9 +5,9 @@ from itsdangerous import URLSafeTimedSerializer
 
 from imbue.minds.primitives import CookieSigningKey
 
-_COOKIE_SALT: Final[str] = "mind-auth"
+_COOKIE_SALT: Final[str] = "minds-auth"
 
-SESSION_COOKIE_NAME: Final[str] = "mind_session"
+SESSION_COOKIE_NAME: Final[str] = "minds_session"
 
 _SESSION_PAYLOAD: Final[str] = "authenticated"
 

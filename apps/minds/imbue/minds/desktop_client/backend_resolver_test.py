@@ -644,7 +644,7 @@ def _make_agent_discovered_line(
     labels: dict[str, str] | None = None,
 ) -> str:
     """Build an AGENT_DISCOVERED event JSON line."""
-    effective_labels = labels if labels is not None else {"mind": "true"}
+    effective_labels = labels if labels is not None else {"workspace": "true"}
     return json.dumps(
         {
             "type": "AGENT_DISCOVERED",
@@ -882,7 +882,7 @@ def test_stream_manager_agent_destroyed_clears_servers() -> None:
         full_line = _make_discovery_full_line(
             agents=[(str(_AGENT_A), host_id)],
             hosts=[host_id],
-            labels={"mind": "true"},
+            labels={"workspace": "true"},
         )
         manager._handle_discovery_line(full_line)
 

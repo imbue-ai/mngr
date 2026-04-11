@@ -5,7 +5,7 @@ from imbue.minds.primitives import CookieSigningKey
 
 
 def test_session_cookie_name_is_stable() -> None:
-    assert SESSION_COOKIE_NAME == "mind_session"
+    assert SESSION_COOKIE_NAME == "minds_session"
 
 
 def test_create_and_verify_session_cookie_round_trip() -> None:
