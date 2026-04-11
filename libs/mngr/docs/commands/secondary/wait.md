@@ -6,12 +6,13 @@
 **Synopsis:**
 
 ```text
-mngr wait [TARGET] [STATE ...] [--state STATE ...] [--timeout DURATION] [--interval DURATION]
+mngr wait [TARGET] [STATE ...] [--state STATE ...] [--event EVENT] [--timeout DURATION] [--interval DURATION]
 ```
 
-Wait for an agent or host to reach a target state.
+Wait for an agent or host to reach a target state or event.
 
-Wait for an agent or host to transition to one of the specified states.
+Wait for an agent or host to transition to one of the specified states,
+or wait for a lifecycle event.
 
 TARGET can be an agent ID (agent-*), host ID (host-*), or an agent/host name.
 If TARGET is omitted, it is read from stdin (one line, must be an ID like agent-* or host-*).
@@ -20,7 +21,11 @@ States can be provided as positional arguments after TARGET, via the repeatable 
 Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE) and
 all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED).
 
-If no states are specified, waits for any terminal state (the target stops running).
+Use --event to wait for a lifecycle event instead of a state. Valid events: AGENT_READY, AGENT_STARTING.
+--event is mutually exclusive with state arguments and requires an agent target.
+AGENT_READY is emitted by 'mngr create' after readiness is verified; 'mngr start' does not emit it.
+
+If no states or events are specified, waits for any terminal state (the target stops running).
 
 When watching an agent, both agent and host states are tracked:
 - STOPPED counts if either the agent or host is stopped
@@ -28,7 +33,7 @@ When watching an agent, both agent and host states are tracked:
 - Host-specific states (CRASHED, PAUSED, etc.) are matched against the host
 
 Exit codes:
-  0 - Target reached one of the requested states
+  0 - Target matched a requested state or event
   1 - Error
   2 - Timeout expired
 
@@ -49,6 +54,7 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--state` | text | State to wait for [repeatable]. Can also be passed as positional args after TARGET. | None |
+| `--event` | text | Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). Mutually exclusive with state args. | None |
 | `--timeout` | text | Maximum time to wait (e.g. '30s', '5m', '1h'). Default: wait forever. | None |
 | `--interval` | text | Poll interval (e.g. '5s', '1m'). Default: 5s. | `5s` |
 
@@ -78,6 +84,18 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 
 ```bash
 $ mngr wait my-agent DONE
+```
+
+**Wait for agent to be ready**
+
+```bash
+$ mngr wait my-agent --event AGENT_READY
+```
+
+**Wait for ready with timeout**
+
+```bash
+$ mngr wait my-agent --event AGENT_READY --timeout 2m
 ```
 
 **Wait for any terminal state**

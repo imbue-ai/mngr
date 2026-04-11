@@ -6,6 +6,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.lifecycle_events import LifecycleEventType
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -20,6 +21,7 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr_wait.api import poll_target_state
 from imbue.mngr_wait.api import resolve_wait_target
+from imbue.mngr_wait.api import wait_for_event
 from imbue.mngr_wait.api import wait_for_state
 from imbue.mngr_wait.data_types import StateChange
 from imbue.mngr_wait.data_types import WaitResult
@@ -39,6 +41,7 @@ class WaitCliOptions(CommonCliOptions):
     target: str | None
     states: tuple[str, ...]
     state: tuple[str, ...]
+    event: str | None
     timeout: str | None
     interval: str
 
@@ -55,6 +58,20 @@ def _read_target_from_stdin(
     if not line:
         raise click.UsageError("No target provided on stdin")
     return line
+
+
+def _validate_event_type(event_str: str) -> str:
+    """Validate an event type string against LifecycleEventType.
+
+    Returns the uppercased event type string.
+    Raises click.UsageError if the event type is not recognized.
+    """
+    uppercased = event_str.upper()
+    valid_types = {e.value for e in LifecycleEventType}
+    if uppercased not in valid_types:
+        sorted_valid = sorted(valid_types)
+        raise click.UsageError(f"Invalid event type: '{event_str}'. Valid event types: {', '.join(sorted_valid)}")
+    return uppercased
 
 
 def _emit_state_change(change: StateChange, output_format: OutputFormat) -> None:
@@ -116,7 +133,7 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
         case OutputFormat.HUMAN:
             if result.is_matched:
                 write_human_line(
-                    "Target '{}' reached state {} (after {:.1f}s)",
+                    "Target '{}' matched {} (after {:.1f}s)",
                     result.target.identifier,
                     result.matched_state,
                     result.elapsed_seconds,
@@ -145,6 +162,11 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
     "--state",
     multiple=True,
     help="State to wait for [repeatable]. Can also be passed as positional args after TARGET.",
+)
+@optgroup.option(
+    "--event",
+    default=None,
+    help="Event type to wait for in the agent's event stream (e.g. 'AGENT_READY'). Mutually exclusive with state args.",
 )
 @optgroup.option(
     "--timeout",
@@ -176,10 +198,10 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
 
     # Combine positional states and --state option values
     all_state_args = list(opts.states) + list(opts.state)
-    if all_state_args:
-        target_states = validate_state_strings(all_state_args, ALL_VALID_STATE_STRINGS)
-    else:
-        target_states = compute_default_target_states(resolved.target.target_type)
+
+    # Validate mutual exclusivity of --event and state args
+    if opts.event is not None and all_state_args:
+        raise click.UsageError("Cannot combine --event with state arguments")
 
     # Parse timeout
     timeout_seconds: float | None = None
@@ -188,6 +210,44 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
 
     # Parse interval
     interval_seconds = parse_duration_to_seconds(opts.interval)
+
+    # Event-based waiting
+    if opts.event is not None:
+        validated_event = _validate_event_type(opts.event)
+        emit_info(
+            f"Waiting for event '{validated_event}' on '{resolved.target.identifier}'",
+            output_opts.output_format,
+        )
+        if timeout_seconds is not None:
+            logger.info("Timeout: {:.0f}s", timeout_seconds)
+        logger.info("Poll interval: {:.0f}s", interval_seconds)
+
+        try:
+            result = wait_for_event(
+                resolved=resolved,
+                event_type=validated_event,
+                timeout_seconds=timeout_seconds,
+                interval_seconds=interval_seconds,
+            )
+        except KeyboardInterrupt:
+            logger.debug("Received keyboard interrupt")
+            ctx.exit(EXIT_CODE_ERROR)
+            return
+
+        _output_result(result, output_opts)
+        if result.is_matched:
+            ctx.exit(EXIT_CODE_SUCCESS)
+        elif result.is_timed_out:
+            ctx.exit(EXIT_CODE_TIMEOUT)
+        else:
+            ctx.exit(EXIT_CODE_ERROR)
+        return
+
+    # State-based waiting (existing behavior)
+    if all_state_args:
+        target_states = validate_state_strings(all_state_args, ALL_VALID_STATE_STRINGS)
+    else:
+        target_states = compute_default_target_states(resolved.target.target_type)
 
     # Poll the initial state
     initial_state = poll_target_state(resolved)
@@ -258,9 +318,10 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
 
 CommandHelpMetadata(
     key="wait",
-    one_line_description="Wait for an agent or host to reach a target state",
-    synopsis="mngr wait [TARGET] [STATE ...] [--state STATE ...] [--timeout DURATION] [--interval DURATION]",
-    description="""Wait for an agent or host to transition to one of the specified states.
+    one_line_description="Wait for an agent or host to reach a target state or event",
+    synopsis="mngr wait [TARGET] [STATE ...] [--state STATE ...] [--event EVENT] [--timeout DURATION] [--interval DURATION]",
+    description="""Wait for an agent or host to transition to one of the specified states,
+or wait for a lifecycle event.
 
 TARGET can be an agent ID (agent-*), host ID (host-*), or an agent/host name.
 If TARGET is omitted, it is read from stdin (one line, must be an ID like agent-* or host-*).
@@ -269,7 +330,11 @@ States can be provided as positional arguments after TARGET, via the repeatable 
 Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE) and
 all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED).
 
-If no states are specified, waits for any terminal state (the target stops running).
+Use --event to wait for a lifecycle event instead of a state. Valid events: AGENT_READY, AGENT_STARTING.
+--event is mutually exclusive with state arguments and requires an agent target.
+AGENT_READY is emitted by 'mngr create' after readiness is verified; 'mngr start' does not emit it.
+
+If no states or events are specified, waits for any terminal state (the target stops running).
 
 When watching an agent, both agent and host states are tracked:
 - STOPPED counts if either the agent or host is stopped
@@ -277,11 +342,13 @@ When watching an agent, both agent and host states are tracked:
 - Host-specific states (CRASHED, PAUSED, etc.) are matched against the host
 
 Exit codes:
-  0 - Target reached one of the requested states
+  0 - Target matched a requested state or event
   1 - Error
   2 - Timeout expired""",
     examples=(
         ("Wait for an agent to finish", "mngr wait my-agent DONE"),
+        ("Wait for agent to be ready", "mngr wait my-agent --event AGENT_READY"),
+        ("Wait for ready with timeout", "mngr wait my-agent --event AGENT_READY --timeout 2m"),
         ("Wait for any terminal state", "mngr wait agent-abc123"),
         ("Wait for agent to enter WAITING", "mngr wait my-agent WAITING"),
         ("Wait with timeout", "mngr wait my-agent DONE --timeout 5m"),
