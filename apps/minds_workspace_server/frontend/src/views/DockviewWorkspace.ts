@@ -28,7 +28,7 @@ import {
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-function getApplicationUrl(appName: string, agentId: string): string {
+function getApplicationUrl(appName: string, rawUrl: string, agentId: string): string {
   const hostname = window.location.hostname;
 
   // Cloudflare proxy: server--agentid--username.domain
@@ -41,8 +41,12 @@ function getApplicationUrl(appName: string, agentId: string): string {
 
   // Local forwarding server: /agents/{id}/{server_name}/
   const pathMatch = window.location.pathname.match(/^(.*\/agents\/[^/]+)\//);
-  const agentBase = pathMatch ? pathMatch[1] : `/agents/${agentId}`;
-  return `${agentBase}/${appName}/`;
+  if (pathMatch) {
+    return `${pathMatch[1]}/${appName}/`;
+  }
+
+  // Dev mode (no forwarding server): use the raw URL from applications.toml
+  return rawUrl;
 }
 
 type PanelType = "chat" | "iframe" | "subagent";
@@ -147,7 +151,7 @@ function buildDropdownItems(
   // (e.g., worktree agents) are kept so you can preview their changes.
   const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web");
   for (const app of apps) {
-    const proxyUrl = getApplicationUrl(app.name, agentId);
+    const proxyUrl = getApplicationUrl(app.name, app.url, agentId);
     items.push({
       label: app.name,
       action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
