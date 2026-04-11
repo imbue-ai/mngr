@@ -166,30 +166,24 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Start the agent, emitting lifecycle events around the readiness check
+        # Start the agent and wait for readiness, emitting lifecycle events.
+        # All agent types go through wait_for_ready_signal: the base implementation
+        # just calls start_action() and returns for agents without readiness checks.
         initial_message = agent.get_initial_message()
         logger.info("Starting agent {} ...", agent.name)
         start_id = f"start-{uuid4().hex}"
         emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_STARTING, start_id)
+        timeout = agent_options.ready_timeout_seconds
+        agent.wait_for_ready_signal(
+            is_creating=True,
+            start_action=lambda: host.start_agents([agent.id]),
+            timeout=timeout,
+        )
+        emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
 
         if initial_message is not None:
-            # Start agent with signal-based readiness detection, then send the initial message.
-            # Raises AgentStartError if the agent doesn't signal readiness in time.
-            timeout = agent_options.ready_timeout_seconds
-            agent.wait_for_ready_signal(
-                is_creating=True,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=timeout,
-            )
-            emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
             logger.info("Sending initial message...")
             agent.send_message(initial_message)
-        else:
-            # No initial message -- just start the agent directly.
-            # Some agent types (e.g. HeadlessClaude) don't support wait_for_ready_signal
-            # because they pass the prompt as a CLI arg rather than via send_message.
-            host.start_agents([agent.id])
-            emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
 
         # Build and return the result
         result = CreateAgentResult(agent=agent, host=host)

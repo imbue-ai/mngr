@@ -254,10 +254,8 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        raise NotImplementedError(
-            "HeadlessClaude agents do not support wait_for_ready_signal. "
-            "The prompt is passed as a CLI arg, not via send_message."
-        )
+        logger.debug("HeadlessClaude: skipping readiness check, starting directly")
+        start_action()
 
     def assemble_command(
         self,
