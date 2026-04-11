@@ -16,6 +16,7 @@ from watchdog.observers import Observer as _Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
@@ -341,7 +342,7 @@ class AgentManager:
             success = result.returncode == 0
             if not success:
                 error = f"mngr create exited with code {result.returncode}"
-        except OSError as e:
+        except (OSError, ConcurrencyGroupError) as e:
             error = str(e)
             _loguru_logger.exception("Error creating agent {}", agent_id)
 
