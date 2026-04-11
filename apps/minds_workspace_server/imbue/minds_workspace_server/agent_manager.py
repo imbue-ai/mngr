@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
+from watchdog.events import DirModifiedEvent
 from watchdog.events import FileModifiedEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
@@ -55,7 +56,7 @@ class _ApplicationsFileHandler(FileSystemEventHandler):
     agent_id: str
     on_change: Any
 
-    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
+    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
         if not event.is_directory:
             self.on_change(self.agent_id)
 
