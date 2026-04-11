@@ -88,6 +88,7 @@ class SSHTunnelManager(MutableModel):
     _tunnel_threads: dict[str, threading.Thread] = PrivateAttr(default_factory=dict)
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _reverse_tunnels: dict[str, ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
+    _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
 
     def _get_tmpdir(self) -> Path:
@@ -160,6 +161,13 @@ class SSHTunnelManager(MutableModel):
             self._tunnel_threads[tunnel_key] = thread
             return socket_path
 
+    def _get_reverse_tunnel_setup_lock(self, conn_key: str) -> threading.Lock:
+        """Get or create a per-host setup lock for reverse tunnels."""
+        with self._lock:
+            if conn_key not in self._reverse_tunnel_setup_locks:
+                self._reverse_tunnel_setup_locks[conn_key] = threading.Lock()
+            return self._reverse_tunnel_setup_locks[conn_key]
+
     def setup_reverse_tunnel(
         self,
         ssh_info: RemoteSSHInfo,
@@ -171,47 +179,52 @@ class SSHTunnelManager(MutableModel):
         Asks the remote sshd to listen on a dynamic port (port 0) and forward
         connections back to 127.0.0.1:local_port on the local machine. Returns
         the assigned remote port.
+
+        Concurrent calls for the same host are serialized via a per-host lock to
+        prevent establishing duplicate reverse tunnels.
         """
-        with self._lock:
-            conn_key = f"{ssh_info.host}:{ssh_info.port}"
+        conn_key = f"{ssh_info.host}:{ssh_info.port}"
+        host_lock = self._get_reverse_tunnel_setup_lock(conn_key)
 
-            # Check if a reverse tunnel already exists for this host
-            existing = self._reverse_tunnels.get(conn_key)
-            if existing is not None:
-                # Verify the transport is still alive
-                client = self._connections.get(conn_key)
-                if client is not None and _ssh_connection_is_active(client):
-                    return existing.remote_port
+        with host_lock:
+            with self._lock:
+                # Check if a reverse tunnel already exists for this host
+                existing = self._reverse_tunnels.get(conn_key)
+                if existing is not None:
+                    # Verify the transport is still alive
+                    client = self._connections.get(conn_key)
+                    if client is not None and _ssh_connection_is_active(client):
+                        return existing.remote_port
 
-            client = self._get_or_create_connection(ssh_info)
-            transport = _ssh_connection_transport(client)
+                client = self._get_or_create_connection(ssh_info)
+                transport = _ssh_connection_transport(client)
 
-        remote_port = transport.request_port_forward("127.0.0.1", 0)
-        logger.info(
-            "Reverse tunnel established: remote 127.0.0.1:{} -> local 127.0.0.1:{}",
-            remote_port,
-            local_port,
-        )
+            remote_port = transport.request_port_forward("127.0.0.1", 0)
+            logger.info(
+                "Reverse tunnel established: remote 127.0.0.1:{} -> local 127.0.0.1:{}",
+                remote_port,
+                local_port,
+            )
 
-        tunnel_info = ReverseTunnelInfo(
-            ssh_info=ssh_info,
-            local_port=local_port,
-            remote_port=remote_port,
-            agent_state_dir=agent_state_dir,
-        )
-        with self._lock:
-            self._reverse_tunnels[conn_key] = tunnel_info
+            tunnel_info = ReverseTunnelInfo(
+                ssh_info=ssh_info,
+                local_port=local_port,
+                remote_port=remote_port,
+                agent_state_dir=agent_state_dir,
+            )
+            with self._lock:
+                self._reverse_tunnels[conn_key] = tunnel_info
 
-        # Start accepting forwarded connections in a background thread
-        thread = threading.Thread(
-            target=_reverse_tunnel_accept_loop,
-            args=(transport, local_port, self._shutdown_event),
-            daemon=True,
-            name=f"reverse-tunnel-{conn_key}",
-        )
-        thread.start()
+            # Start accepting forwarded connections in a background thread
+            thread = threading.Thread(
+                target=_reverse_tunnel_accept_loop,
+                args=(transport, local_port, self._shutdown_event),
+                daemon=True,
+                name=f"reverse-tunnel-{conn_key}",
+            )
+            thread.start()
 
-        return remote_port
+            return remote_port
 
     def write_api_url_to_remote(
         self,
