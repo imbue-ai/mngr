@@ -355,6 +355,13 @@ def test_parse_agents_from_json_returns_empty_for_invalid_json() -> None:
     assert result.agent_ids == ()
 
 
+def test_parse_agents_from_json_skips_entries_missing_id() -> None:
+    """Agents without an 'id' field in the output are skipped."""
+    json_str = json.dumps({"agents": [{"name": "no-id-agent"}]})
+    result = parse_agents_from_json(json_str)
+    assert result.agent_ids == ()
+
+
 def test_parse_agents_from_json_skips_agents_with_invalid_ssh() -> None:
     json_str = json.dumps(
         {
@@ -957,3 +964,95 @@ def test_stream_manager_host_destroyed_removes_all_agents_on_host() -> None:
         manager._handle_discovery_line(destroy_line)
 
     assert manager.resolver.list_known_agent_ids() == ()
+
+
+# -- On-agent-discovered callback tests --
+
+
+_HOST_CALLBACK_TEST = "host-00000000000000000000000000000099"
+
+
+def test_add_on_agent_discovered_callback_fires_on_full_snapshot() -> None:
+    """Registered callbacks are invoked when a DISCOVERY_FULL event is processed."""
+    manager = _make_stream_manager()
+    discovered: list[AgentId] = []
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info: discovered.append(agent_id))
+
+    full_line = _make_discovery_full_line(
+        agents=[(str(_AGENT_A), _HOST_CALLBACK_TEST)],
+        hosts=[_HOST_CALLBACK_TEST],
+    )
+    manager._handle_discovery_line(full_line)
+
+    assert _AGENT_A in discovered
+
+
+def test_add_on_agent_discovered_callback_fires_on_agent_discovered() -> None:
+    """Registered callbacks are invoked when an AGENT_DISCOVERED event is processed."""
+    manager = _make_stream_manager()
+    discovered: list[AgentId] = []
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info: discovered.append(agent_id))
+
+    # Use empty labels so no events stream is started (avoids needing to start _cg)
+    disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
+    manager._handle_discovery_line(disc_line)
+
+    assert _AGENT_A in discovered
+
+
+def test_fire_agent_discovered_callbacks_catches_exceptions() -> None:
+    """Exceptions raised by callbacks are caught and logged without propagating."""
+    manager = _make_stream_manager()
+
+    def failing_callback(agent_id: AgentId, ssh_info: object) -> None:
+        raise RuntimeError("callback error")
+
+    manager.add_on_agent_discovered_callback(failing_callback)
+
+    disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
+    manager._handle_discovery_line(disc_line)
+
+
+def test_multiple_callbacks_all_invoked() -> None:
+    """Multiple registered callbacks are each invoked."""
+    manager = _make_stream_manager()
+    results_a: list[AgentId] = []
+    results_b: list[AgentId] = []
+    manager.add_on_agent_discovered_callback(lambda aid, ssh: results_a.append(aid))
+    manager.add_on_agent_discovered_callback(lambda aid, ssh: results_b.append(aid))
+
+    disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
+    manager._handle_discovery_line(disc_line)
+
+    assert _AGENT_A in results_a
+    assert _AGENT_A in results_b
+
+
+def test_callback_re_fired_with_ssh_info_when_host_ssh_info_arrives() -> None:
+    """When SSH info arrives after agent discovery, callbacks are re-fired with ssh_info set."""
+    manager = _make_stream_manager()
+    ssh_infos: list[object] = []
+    manager.add_on_agent_discovered_callback(lambda aid, ssh_info: ssh_infos.append(ssh_info))
+
+    # Discover the agent first (no SSH info yet); use empty labels to avoid events stream
+    disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
+    manager._handle_discovery_line(disc_line)
+    # First callback fires with ssh_info=None (no SSH info available yet)
+    assert None in ssh_infos
+
+    ssh_infos.clear()
+
+    # Now SSH info arrives for that host
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 22,
+        "key_path": "/tmp/key",
+        "command": "ssh -i /tmp/key root@remote.example.com",
+    }
+    ssh_line = _make_host_ssh_info_line(_HOST_CALLBACK_TEST, ssh_data)
+    manager._handle_discovery_line(ssh_line)
+
+    # Callback is re-fired with the actual SSH info
+    assert len(ssh_infos) == 1
+    assert ssh_infos[0] is not None

@@ -2,10 +2,12 @@ import json
 import threading
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
+import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -16,6 +18,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.primitives import ServerName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -354,6 +357,19 @@ class MngrStreamManager(MutableModel):
     _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None], None]] = PrivateAttr(
+        default_factory=list
+    )
+
+    def add_on_agent_discovered_callback(
+        self,
+        callback: Callable[[AgentId, RemoteSSHInfo | None], None],
+    ) -> None:
+        """Register a callback invoked when an agent is discovered.
+
+        The callback receives the agent ID and SSH info (None for local agents).
+        """
+        self._on_agent_discovered_callbacks.append(callback)
 
     def start(self) -> None:
         """Start the streaming subprocess for continuous agent discovery."""
@@ -434,6 +450,11 @@ class MngrStreamManager(MutableModel):
         workspace_ids = {str(agent.agent_id) for agent in event.agents if self._is_workspace_agent(agent)}
         self._sync_events_streams(workspace_ids)
 
+        # Notify callbacks for all discovered agents
+        for agent in event.agents:
+            ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
+            self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info)
+
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Update SSH info for a host and refresh the resolver."""
         ssh_info = RemoteSSHInfo(
@@ -442,11 +463,21 @@ class MngrStreamManager(MutableModel):
             port=event.ssh.port,
             key_path=event.ssh.key_path,
         )
+        host_id_str = str(event.host_id)
         with self._lock:
-            self._ssh_by_host_id[str(event.host_id)] = ssh_info
+            self._ssh_by_host_id[host_id_str] = ssh_info
             agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
+            # Find agents on this host so we can notify discovery callbacks with SSH info
+            agents_on_host = tuple(
+                AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str
+            )
 
         self._update_resolver(agent_ids)
+
+        # Re-fire callbacks for agents on this host now that SSH info is available.
+        # This handles the case where agent discovery fires before SSH info arrives.
+        for agent_id in agents_on_host:
+            self._fire_agent_discovered_callbacks(agent_id, ssh_info)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         """Incrementally add or update a single agent in the resolver."""
@@ -468,6 +499,10 @@ class MngrStreamManager(MutableModel):
             discovered_agents = self._discovered_agents
 
         self._update_resolver(agent_ids, discovered_agents)
+
+        # Notify callbacks
+        ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
+        self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info)
 
     def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
         """Remove a destroyed agent from the resolver and stop its events stream."""
@@ -507,6 +542,26 @@ class MngrStreamManager(MutableModel):
         self._update_resolver(agent_ids, discovered_agents)
         for agent_id in event.agent_ids:
             self.resolver.update_servers(agent_id, {})
+
+    def _get_ssh_info_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
+        """Look up SSH info for an agent from the host mapping."""
+        with self._lock:
+            host_id = self._agent_host_map.get(str(agent_id))
+            if host_id is None:
+                return None
+            return self._ssh_by_host_id.get(host_id)
+
+    def _fire_agent_discovered_callbacks(
+        self,
+        agent_id: AgentId,
+        ssh_info: RemoteSSHInfo | None,
+    ) -> None:
+        """Invoke all registered on_agent_discovered callbacks."""
+        for callback in self._on_agent_discovered_callbacks:
+            try:
+                callback(agent_id, ssh_info)
+            except (OSError, ValueError, RuntimeError, paramiko.SSHException, SSHTunnelError) as e:
+                logger.warning("Agent discovery callback failed for {}: {}", agent_id, e)
 
     def _update_resolver(
         self,

@@ -65,7 +65,7 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress) {
+function startBackend(onProgress, onNotification) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -95,7 +95,7 @@ function startBackend(onProgress) {
           '--no-browser',
         ];
         cwd = paths.getMonorepoRoot();
-        env = { ...process.env };
+        env = { ...process.env, MINDS_ELECTRON: '1' };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
@@ -121,6 +121,7 @@ function startBackend(onProgress) {
           PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
+          MINDS_ELECTRON: '1',
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;
@@ -160,6 +161,8 @@ function startBackend(onProgress) {
                   reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
                 });
               }
+            } else if (event.event === 'notification' && event.message && onNotification) {
+              onNotification(event);
             }
           } catch {
             // Not valid JSON -- just log it

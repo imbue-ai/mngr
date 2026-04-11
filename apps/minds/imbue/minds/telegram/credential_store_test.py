@@ -84,6 +84,17 @@ def test_load_bot_credentials_returns_none_for_invalid_schema(tmp_path: Path) ->
     assert load_agent_bot_credentials(data_dir, agent_id) is None
 
 
+def test_load_bot_credentials_returns_none_for_corrupted_json(tmp_path: Path) -> None:
+    """Verify that a malformed JSON bot credentials file is handled gracefully."""
+    data_dir = tmp_path
+    agent_id = AgentId()
+    creds_path = data_dir / "telegram" / "bots" / f"{agent_id}.json"
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    creds_path.write_text("not valid json {{{")
+
+    assert load_agent_bot_credentials(data_dir, agent_id) is None
+
+
 def test_multiple_agents_have_independent_bot_credentials(tmp_path: Path) -> None:
     data_dir = tmp_path
     agent_1 = AgentId()

@@ -65,3 +65,12 @@ def test_parse_agents_from_mngr_output_handles_mixed_output() -> None:
     agents = parse_agents_from_mngr_output(output)
     assert len(agents) == 1
     assert agents[0]["id"] == "agent-xyz"
+
+
+def test_parse_agents_from_mngr_output_skips_invalid_json_lines() -> None:
+    """Lines starting with '{' but containing invalid JSON are skipped."""
+    valid_json = json.dumps({"agents": [{"id": "agent-abc", "name": "test"}]})
+    output = "{invalid json here\n" + valid_json
+    agents = parse_agents_from_mngr_output(output)
+    assert len(agents) == 1
+    assert agents[0]["id"] == "agent-abc"

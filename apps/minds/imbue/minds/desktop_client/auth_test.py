@@ -1,9 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from imbue.minds.errors import SigningKeyError
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import OneTimeCode
 
 
@@ -106,3 +107,44 @@ def test_get_signing_key_reads_existing_key(tmp_path: Path) -> None:
     store = FileAuthStore(data_directory=auth_dir)
     key = store.get_signing_key()
     assert key.get_secret_value() == "my-custom-key-82734"
+
+
+def test_get_signing_key_raises_on_read_error(tmp_path: Path) -> None:
+    """If an existing signing key file is not readable, SigningKeyError is raised."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    key_file = auth_dir / "signing_key"
+    key_file.write_text("some-key")
+    os.chmod(key_file, 0o000)
+
+    try:
+        store = FileAuthStore(data_directory=auth_dir)
+        with pytest.raises(SigningKeyError):
+            store.get_signing_key()
+    finally:
+        os.chmod(key_file, 0o644)
+
+
+def test_get_signing_key_raises_on_write_error(tmp_path: Path) -> None:
+    """If the auth directory cannot be written to, SigningKeyError is raised on key generation."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    os.chmod(auth_dir, 0o555)
+
+    try:
+        store = FileAuthStore(data_directory=auth_dir)
+        with pytest.raises(SigningKeyError):
+            store.get_signing_key()
+    finally:
+        os.chmod(auth_dir, 0o755)
+
+
+def test_validate_code_returns_false_on_json_decode_error(tmp_path: Path) -> None:
+    """If the codes file contains invalid JSON, code validation returns False without crashing."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    (auth_dir / "one_time_codes.json").write_text("not valid json {{{")
+
+    store = FileAuthStore(data_directory=auth_dir)
+    result = store.validate_and_consume_code(OneTimeCode("any-code"))
+    assert result is False
