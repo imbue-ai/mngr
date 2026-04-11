@@ -114,8 +114,10 @@ if modal.is_local():
         copy=True,
     ).dockerfile_commands(
         [
-            "RUN cp -a /staging/home/. $HOME/",
-            "RUN cp -a /staging/project/. .",
+            # Guard with -d because Modal's add_local_dir skips empty directories,
+            # so /staging/project/ won't exist when no plugins stage project files.
+            "RUN [ -d /staging/home ] && cp -a /staging/home/. $HOME/ || true",
+            "RUN [ -d /staging/project ] && cp -a /staging/project/. . || true",
         ]
     )
 else:

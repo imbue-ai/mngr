@@ -71,7 +71,7 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
             modal_interface.environment_create(environment_name)
             logger.info("Created Modal environment: {}", environment_name)
         except ModalProxyError as e:
-            logger.warning("Failed to create Modal environment: {}", e)
+            raise MngrError(f"Failed to create Modal environment '{environment_name}': {e}") from e
 
 
 def _lookup_persistent_app_with_env_retry(
@@ -484,6 +484,8 @@ Supported build arguments for the modal provider:
                 "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
                 f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
             ) from e
+        except ModalProxyError as e:
+            raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
         return ModalProviderInstance(
             name=name,

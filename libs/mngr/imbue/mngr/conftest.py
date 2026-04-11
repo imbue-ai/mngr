@@ -14,6 +14,7 @@ import pluggy
 import psutil
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mngr.main
@@ -383,12 +384,18 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
 
     python_path = str(venv_dir / "bin" / "python")
 
+    # Unset UV_OFFLINE so uv can fetch packages from cache or network.
+    # The autouse fixture sets UV_OFFLINE=1 for test isolation, but this
+    # fixture needs to install packages into a fresh venv.
+    uv_env = {k: v for k, v in os.environ.items() if k not in ("UV_OFFLINE", "UV_FROZEN")}
+
     cg = ConcurrencyGroup(name="isolated-venv-setup")
     with cg:
         # Export mngr's pinned transitive deps from the lockfile (no editable/comment lines)
         export_result = cg.run_process_to_completion(
             ("uv", "export", "--package", "imbue-mngr", "--no-hashes", "--frozen"),
             cwd=_REPO_ROOT,
+            env=uv_env,
         )
         reqs_file = tmp_path / "pinned-deps.txt"
         reqs_file.write_text(
@@ -397,14 +404,16 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
             )
         )
 
-        cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
+        cg.run_process_to_completion(("uv", "venv", str(venv_dir)), env=uv_env)
         # Install pinned deps from cache (no resolution or network needed)
         cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file))
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file)),
+            env=uv_env,
         )
         # Install workspace packages as editable (no-deps since deps are already installed)
         cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args),
+            env=uv_env,
         )
 
     # Write a uv-receipt.toml so plugin add/remove recognise this as a
@@ -651,6 +660,42 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
                 pass
     finally:
         client.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_dockerd_for_release() -> None:
+    """Start the Docker daemon if running inside a release test sandbox.
+
+    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh, and
+    BASH_ENV=/ensure-dockerd.sh handles bash subprocesses, but tests that
+    use the Docker Python SDK connect to the socket directly. This fixture
+    ensures the daemon is running before any test code tries to connect.
+
+    Uses /usr/local/bin/docker directly to bypass the resource guard PATH
+    wrapper (which would block docker commands outside @pytest.mark.docker tests).
+    """
+    start_script = Path("/start-dockerd.sh")
+    docker_bin = Path("/usr/local/bin/docker")
+    if not start_script.exists() or not docker_bin.exists():
+        return
+    cg = ConcurrencyGroup(name="ensure-dockerd")
+    with cg:
+        result = cg.run_process_to_completion(
+            [str(docker_bin), "info"],
+            is_checked_after=False,
+        )
+        if result.returncode != 0:
+            start_result = cg.run_process_to_completion(
+                [str(start_script)],
+                is_checked_after=False,
+            )
+            if start_result.returncode != 0:
+                logger.error(
+                    "Docker daemon failed to start (exit {}). stdout: {} stderr: {}",
+                    start_result.returncode,
+                    start_result.stdout,
+                    start_result.stderr,
+                )
 
 
 @pytest.fixture(scope="session", autouse=True)

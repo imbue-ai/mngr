@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     git \
     git-lfs \
+    iproute2 \
+    iptables \
     jq \
     nano \
     openssh-server \
@@ -47,8 +49,28 @@ ARG CLAUDE_CODE_VERSION=""
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# ---- Docker-in-Docker (static binaries) ----
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+    | tar xz -C /usr/local/bin --strip-components=1
+
+# Modern runc for reliable networking under gVisor
+RUN rm -f /usr/local/bin/runc \
+    && wget -q https://github.com/opencontainers/runc/releases/download/v1.3.0/runc.amd64 \
+    && chmod +x runc.amd64 \
+    && mv runc.amd64 /usr/local/bin/runc
+
+# gVisor doesn't support nftables (https://github.com/google/gvisor/issues/10510)
+RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
+    && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
+
+# ---- Docker daemon startup scripts ----
+COPY libs/mngr/imbue/mngr/resources/start-dockerd.sh /start-dockerd.sh
+COPY libs/mngr/imbue/mngr/resources/ensure-dockerd.sh /ensure-dockerd.sh
+COPY libs/mngr/imbue/mngr/resources/run-with-docker.sh /run-with-docker.sh
+RUN chmod +x /start-dockerd.sh /ensure-dockerd.sh /run-with-docker.sh
 
 # copy in all of our code:
 COPY . /code/
@@ -63,9 +85,13 @@ WORKDIR /code/mngr/
 # install python dependencies
 RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mngr/libs/mngr --with-editable /code/mngr/libs/mngr_modal --with-editable /code/mngr/libs/mngr_schedule && uv tool install modal
 
+# BASH_ENV ensures dockerd is running before every bash command at runtime.
+# Placed after all RUN instructions so it does not affect the image build.
+ENV BASH_ENV=/ensure-dockerd.sh
+
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
 # `tail -f /dev/null` does not do this.
 # Since `docker stop` issues a `SIGTERM`, we use an explicit `trap`.
 # In practice, this appears to enable rapid interactions using `docker stop`.
-CMD ["sh", "-c", "trap 'exit 0' TERM; tail -f /dev/null & wait"]
+CMD ["sh", "-c", "/start-dockerd.sh && trap 'exit 0' TERM; tail -f /dev/null & wait"]

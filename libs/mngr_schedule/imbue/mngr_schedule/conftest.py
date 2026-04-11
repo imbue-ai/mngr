@@ -68,3 +68,21 @@ def bare_temp_mngr_ctx(
 ) -> MngrContext:
     """MngrContext with no plugins loaded (bare hookspecs only)."""
     return _build_mngr_ctx(bare_plugin_manager, tmp_path)
+
+
+@pytest.fixture()
+def monorepo_root() -> Path:
+    """Get the git root from this file's location.
+
+    mngr schedule add needs to package the repo, so the subprocess must run
+    from the git root. We can't use cwd because isolate_home() chdir's to a
+    temp directory.
+    """
+    with ConcurrencyGroup(name="git-toplevel") as cg:
+        result = cg.run_process_to_completion(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=Path(__file__).parent,
+            is_checked_after=False,
+        )
+    assert result.returncode == 0, f"git rev-parse failed: {result.stderr}"
+    return Path(result.stdout.strip())
