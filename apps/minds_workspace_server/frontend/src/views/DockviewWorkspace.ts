@@ -511,13 +511,6 @@ async function initializeAgentDockview(agentId: string, parentElement: HTMLEleme
     }
     try {
       state.component.fromJSON(saved.dockview);
-      // Ensure chat tab title is "Chat" (older saved layouts may have agent name)
-      for (const panel of state.component.panels) {
-        const params = state.panelParams.get(panel.id);
-        if (params?.panelType === "chat" && panel.api.title !== "Chat") {
-          panel.api.setTitle("Chat");
-        }
-      }
       return;
     } catch {
       // If restore fails, fall through to default layout
