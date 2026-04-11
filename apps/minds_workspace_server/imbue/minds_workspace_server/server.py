@@ -461,7 +461,7 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
         shutdown = False
         while not shutdown:
             try:
-                message = await run_in_threadpool(client_queue.get, timeout=30.0)
+                message = await run_in_threadpool(client_queue.get, timeout=1.0)
                 if message is None:
                     shutdown = True
                 else:

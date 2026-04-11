@@ -308,6 +308,7 @@ def test_create_chat_agent_missing_parent(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+@pytest.mark.timeout(10)
 def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
     """The WebSocket endpoint sends agents_updated and applications_updated on connect."""
     with client.websocket_connect("/api/ws") as ws:
