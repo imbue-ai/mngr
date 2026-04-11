@@ -211,60 +211,76 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     body { background: #f8fafc; padding: 0; font-size: 14px; }
     .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
     .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
-    .page-header h1 { font-size: 14px; font-weight: 600; color: #1e293b; margin: 0; }
-    .back-link { color: #64748b; text-decoration: none; font-size: 14px; }
-    .back-link:hover { color: #334155; }
-    .form-group { margin-bottom: 20px; }
-    label { display: block; margin-bottom: 6px; font-size: 14px; color: #334155; font-weight: 500; }
+    .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
+    .page-header a:hover { color: #334155; }
+    .submit-btn {
+      padding: 6px 16px; background: #1e293b; color: white; border: none;
+      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+      font-family: inherit;
+    }
+    .submit-btn:hover { background: #334155; }
+    .form-group { display: flex; gap: 24px; margin-bottom: 16px; align-items: flex-start; }
+    .form-label { flex: 0 0 200px; padding-top: 10px; }
+    .form-label label { font-size: 14px; color: #334155; font-weight: 500; display: block; }
+    .form-label .help-text { margin-top: 2px; font-size: 13px; color: #94a3b8; }
+    .form-input { flex: 1; }
     input[type="text"], select {
       width: 100%; padding: 10px 12px;
       border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;
       font-family: inherit; background: white; color: #0f172a;
     }
     input[type="text"]:focus, select:focus { outline: none; border-color: #94a3b8; }
-    .help-text { margin-top: 4px; font-size: 13px; color: #94a3b8; }
-    .submit-btn {
-      padding: 8px 20px; background: #1e293b; color: white; border: none;
-      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
-      font-family: inherit; margin-top: 8px;
-    }
-    .submit-btn:hover { background: #334155; }
   </style>
 </head>
 <body>
   <div class="page">
     <div class="page-header">
-      <h1>Create a Workspace</h1>
-      <a href="/" class="back-link">Back</a>
+      <a href="/">Back to workspace list</a>
+      <button type="submit" form="create-form" class="submit-btn">Create</button>
     </div>
-    <form action="/create" method="post">
+    <form id="create-form" action="/create" method="post">
       <div class="form-group">
-        <label for="agent_name">Name</label>
-        <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
-               placeholder="selene" required>
+        <div class="form-label">
+          <label for="agent_name">Name</label>
+        </div>
+        <div class="form-input">
+          <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
+                 placeholder="selene" required>
+        </div>
       </div>
       <div class="form-group">
-        <label for="git_url">Git repository URL or local path</label>
-        <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
-               placeholder="https://github.com/user/repo.git or /path/to/repo" required>
-        <p class="help-text">A git URL will be cloned to a temp directory. A local path will be used directly.</p>
+        <div class="form-label">
+          <label for="git_url">Repository</label>
+          <p class="help-text">Git URL or local path</p>
+        </div>
+        <div class="form-input">
+          <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
+                 placeholder="https://github.com/user/repo.git" required>
+        </div>
       </div>
       <div class="form-group">
-        <label for="branch">Branch</label>
-        <input type="text" id="branch" name="branch" value="{{ branch }}"
-               placeholder="main">
-        <p class="help-text">Leave empty to use the repository's default branch.</p>
+        <div class="form-label">
+          <label for="branch">Branch</label>
+          <p class="help-text">Leave empty for default</p>
+        </div>
+        <div class="form-input">
+          <input type="text" id="branch" name="branch" value="{{ branch }}"
+                 placeholder="main">
+        </div>
       </div>
       <div class="form-group">
-        <label for="launch_mode">Launch mode</label>
-        <select id="launch_mode" name="launch_mode">
-          {% for mode in launch_modes %}
-          <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
-          {% endfor %}
-        </select>
-        <p class="help-text">Local: Docker container. Lima: Lima VM. Dev: directly on this host.</p>
+        <div class="form-label">
+          <label for="launch_mode">Launch mode</label>
+          <p class="help-text">Local: Docker. Dev: this host.</p>
+        </div>
+        <div class="form-input">
+          <select id="launch_mode" name="launch_mode">
+            {% for mode in launch_modes %}
+            <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+            {% endfor %}
+          </select>
+        </div>
       </div>
-      <button type="submit" class="submit-btn">Create</button>
     </form>
   </div>
 </body>
