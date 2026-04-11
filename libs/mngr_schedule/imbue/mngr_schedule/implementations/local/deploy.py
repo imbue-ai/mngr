@@ -11,6 +11,7 @@ Each trigger gets:
 import os
 import platform
 import shlex
+import shutil
 import stat
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -30,6 +31,7 @@ from imbue.mngr_schedule.env import collect_env_lines
 from imbue.mngr_schedule.git import get_current_mngr_git_hash
 from imbue.mngr_schedule.implementations.local.crontab import add_crontab_entry
 from imbue.mngr_schedule.implementations.local.crontab import read_system_crontab
+from imbue.mngr_schedule.implementations.local.crontab import remove_crontab_entry
 from imbue.mngr_schedule.implementations.local.crontab import write_system_crontab
 
 _SCHEDULE_DIR_NAME: Final[str] = "schedule"
@@ -134,6 +136,34 @@ def _save_creation_record(
     record_path = records_dir / f"{record.trigger.name}.json"
     record_path.write_text(record.model_dump_json(indent=2))
     logger.debug("Saved schedule creation record to {}", record_path)
+
+
+def get_local_schedule_creation_record(
+    mngr_ctx: MngrContext,
+    trigger_name: str,
+) -> ScheduleCreationRecord | None:
+    """Read a single schedule creation record by trigger name.
+
+    Returns None if the record does not exist, is unreadable, or is invalid.
+    """
+    record_path = _get_records_dir(mngr_ctx) / f"{trigger_name}.json"
+    if not record_path.is_file():
+        return None
+    try:
+        data = record_path.read_bytes()
+    except OSError as exc:
+        logger.warning("Unreadable schedule record at {}: {}", record_path, exc)
+        return None
+    try:
+        return ScheduleCreationRecord.model_validate_json(data)
+    except (ValidationError, ValueError) as exc:
+        logger.warning("Invalid schedule record at {}: {}", record_path, exc)
+        return None
+
+
+def get_local_trigger_run_script(mngr_ctx: MngrContext, trigger_name: str) -> Path:
+    """Get the path to a local trigger's run.sh wrapper script."""
+    return _get_trigger_dir(mngr_ctx, trigger_name) / "run.sh"
 
 
 def list_local_schedule_creation_records(
@@ -242,3 +272,45 @@ def deploy_local_schedule(
         created_at=datetime.now(timezone.utc),
     )
     _save_creation_record(creation_record, mngr_ctx)
+
+
+def remove_local_schedule(
+    trigger_name: str,
+    mngr_ctx: MngrContext,
+    crontab_reader: CrontabReader = read_system_crontab,
+    crontab_writer: CrontabWriter = write_system_crontab,
+) -> None:
+    """Remove a local scheduled trigger.
+
+    Idempotent: missing artifacts are logged as warnings, not errors.
+    Cleans up in order:
+    1. Crontab entry
+    2. Trigger directory (run.sh, .env)
+    3. Creation record
+    """
+    prefix = mngr_ctx.config.prefix
+
+    # 1. Remove crontab entry
+    existing_crontab = crontab_reader()
+    updated_crontab = remove_crontab_entry(existing_crontab, prefix, trigger_name)
+    if updated_crontab != existing_crontab:
+        crontab_writer(updated_crontab)
+        logger.info("Removed crontab entry for schedule '{}'", trigger_name)
+    else:
+        logger.warning("No crontab entry found for schedule '{}'", trigger_name)
+
+    # 2. Remove trigger directory
+    trigger_dir = _get_trigger_dir(mngr_ctx, trigger_name)
+    if trigger_dir.is_dir():
+        shutil.rmtree(trigger_dir)
+        logger.info("Removed trigger directory {}", trigger_dir)
+    else:
+        logger.warning("Trigger directory not found at {}", trigger_dir)
+
+    # 3. Remove creation record
+    record_path = _get_records_dir(mngr_ctx) / f"{trigger_name}.json"
+    if record_path.is_file():
+        record_path.unlink()
+        logger.info("Removed creation record {}", record_path)
+    else:
+        logger.warning("Creation record not found at {}", record_path)

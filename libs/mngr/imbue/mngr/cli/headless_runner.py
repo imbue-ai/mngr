@@ -141,10 +141,7 @@ def headless_agent_output(
 
 def accumulate_chunks(chunks: Iterator[str]) -> str:
     """Accumulate all chunks from an iterator into a single string."""
-    parts: list[str] = []
-    for chunk in chunks:
-        parts.append(chunk)
-    return "".join(parts)
+    return "".join(chunks)
 
 
 def stream_or_accumulate_response(chunks: Iterator[str], output_format: OutputFormat) -> None:

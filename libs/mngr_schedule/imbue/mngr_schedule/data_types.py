@@ -15,6 +15,7 @@ class ScheduledMngrCommand(UpperCaseStrEnum):
     START = auto()
     MESSAGE = auto()
     EXEC = auto()
+    RUN = auto()
 
 
 class VerifyMode(UpperCaseStrEnum):
