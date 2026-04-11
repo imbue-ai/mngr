@@ -1,8 +1,11 @@
 from pathlib import Path
+from subprocess import TimeoutExpired
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
@@ -68,6 +71,35 @@ def test_get_all_commits_ahead_nonexistent_dir(tmp_path: Path) -> None:
     with ConcurrencyGroup(name="test") as cg:
         result = _get_all_commits_ahead([missing], cg)
     assert result[missing] is None
+
+
+def test_get_all_commits_ahead_invalid_output(tmp_path: Path) -> None:
+    """Process exits 0 but outputs non-numeric text -- returns None."""
+    proc = MagicMock()
+    proc.read_stdout.return_value = "not-a-number\n"
+    proc.returncode = 0
+    cg = MagicMock()
+    cg.run_process_in_background.return_value = proc
+    result = _get_all_commits_ahead([tmp_path], cg)
+    assert result[tmp_path] is None
+
+
+def test_get_all_commits_ahead_launch_error(tmp_path: Path) -> None:
+    """ConcurrencyGroupError on process launch -- returns None."""
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ConcurrencyGroupError("failed")
+    result = _get_all_commits_ahead([tmp_path], cg)
+    assert result[tmp_path] is None
+
+
+def test_get_all_commits_ahead_wait_timeout(tmp_path: Path) -> None:
+    """TimeoutExpired on process wait -- returns None."""
+    proc = MagicMock()
+    proc.wait.side_effect = TimeoutExpired(["git"], 10.0)
+    cg = MagicMock()
+    cg.run_process_in_background.return_value = proc
+    result = _get_all_commits_ahead([tmp_path], cg)
+    assert result[tmp_path] is None
 
 
 # === compute ===

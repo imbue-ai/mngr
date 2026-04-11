@@ -196,7 +196,7 @@ def test_prevent_click_echo() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(4))
+    rc.check_unittest_mock_imports(_DIR, snapshot(5))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
