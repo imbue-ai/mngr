@@ -240,12 +240,6 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     def get_tui_ready_indicator(self) -> str | None:
         return BaseHeadlessAgent.get_tui_ready_indicator(self)
 
-    def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
-    ) -> None:
-        logger.debug("HeadlessClaude: skipping readiness check, starting directly")
-        start_action()
-
     def assemble_command(
         self,
         host: OnlineHostInterface,
