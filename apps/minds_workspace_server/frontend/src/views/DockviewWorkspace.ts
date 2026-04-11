@@ -16,7 +16,7 @@ import { IframePanel } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { ProtoAgentLogView } from "./ProtoAgentLogView";
 import { CreateAgentModal } from "./CreateAgentModal";
-import { apiUrl, getBasePath } from "../base-path";
+import { apiUrl } from "../base-path";
 import {
   getAgentById,
   getChatAgentsForParent,
@@ -26,6 +26,23 @@ import {
 import { selectAgent } from "../navigation";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
+
+function getApplicationUrl(appName: string, agentId: string): string {
+  const hostname = window.location.hostname;
+
+  // Cloudflare proxy: server--agentid--username.domain
+  const cfMatch = hostname.match(/^[^-]+--(.*)/);
+  if (cfMatch) {
+    const proto = window.location.protocol;
+    const port = window.location.port ? `:${window.location.port}` : "";
+    return `${proto}//${appName}--${cfMatch[1]}${port}/`;
+  }
+
+  // Local forwarding server: /agents/{id}/{server_name}/
+  const pathMatch = window.location.pathname.match(/^(.*\/agents\/[^/]+)\//);
+  const agentBase = pathMatch ? pathMatch[1] : `/agents/${agentId}`;
+  return `${agentBase}/${appName}/`;
+}
 
 type PanelType = "chat" | "iframe" | "subagent" | "proto-agent";
 
@@ -124,8 +141,7 @@ function buildDropdownItems(
   const apps = getApplicationsForAgent(agentId);
   if (apps.length > 0) {
     for (const app of apps) {
-      const basePath = getBasePath();
-      const proxyUrl = `${basePath.replace(/\/web\/?$/, "")}/${app.name}/`;
+      const proxyUrl = getApplicationUrl(app.name, agentId);
       items.push({
         label: app.name,
         action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
