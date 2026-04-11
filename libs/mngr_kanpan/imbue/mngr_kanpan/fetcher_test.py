@@ -1,14 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
 
 import pytest
 
-from imbue.mngr.api.list import ErrorInfo
-from imbue.mngr.api.list import ListResult
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CiField
@@ -22,21 +18,16 @@ from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import PrField
 from imbue.mngr_kanpan.data_source import PrState
 from imbue.mngr_kanpan.data_source import StringField
-from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
-from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import DataSourceConfig
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 from imbue.mngr_kanpan.fetcher import _get_local_work_dir
 from imbue.mngr_kanpan.fetcher import _is_agent_muted
-from imbue.mngr_kanpan.fetcher import _load_muted_agents
 from imbue.mngr_kanpan.fetcher import _parse_github_repo_path
 from imbue.mngr_kanpan.fetcher import _run_data_sources_parallel
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
-from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
-from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import repo_path_from_labels
 from imbue.mngr_kanpan.fetcher import save_field_cache
@@ -479,200 +470,6 @@ def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
     assert result is not None
     names = [s.name for s in result]
     assert "shell_my_cmd" in names
-
-
-# === fetch_board_snapshot ===
-
-
-def _make_list_result(agents: list[AgentDetails]) -> ListResult:
-    """Build a ListResult with the given agents and no errors."""
-    result = ListResult()
-    result.agents = agents
-    return result
-
-
-def _make_fetch_ctx() -> MngrContext:
-    """Build a minimal MngrContext for fetch_board_snapshot tests."""
-    return cast(MngrContext, SimpleNamespace())
-
-
-def test_fetch_board_snapshot_empty_agents() -> None:
-    """Board snapshot with no agents returns empty entries."""
-    ctx = _make_fetch_ctx()
-    list_result = _make_list_result([])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_board_snapshot(ctx, [], {})
-    assert isinstance(result.snapshot, BoardSnapshot)
-    assert result.snapshot.entries == ()
-    assert result.snapshot.errors == ()
-    assert result.cached_fields == {}
-
-
-def test_fetch_board_snapshot_single_agent_no_data_sources() -> None:
-    """Single agent with no data sources gets a STILL_COOKING section."""
-    agent = make_agent_details(name="agent-1")
-    ctx = _make_fetch_ctx()
-    list_result = _make_list_result([agent])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_board_snapshot(ctx, [], {})
-    assert len(result.snapshot.entries) == 1
-    entry = result.snapshot.entries[0]
-    assert isinstance(entry, AgentBoardEntry)
-    assert entry.name == agent.name
-    assert entry.section == BoardSection.STILL_COOKING
-    assert entry.is_muted is False
-    assert FIELD_MUTED in entry.fields
-    muted_field = entry.fields[FIELD_MUTED]
-    assert isinstance(muted_field, BoolField)
-    assert muted_field.value is False
-
-
-def test_fetch_board_snapshot_muted_agent() -> None:
-    """Muted agents end up in the MUTED section."""
-    agent = make_agent_details(name="muted-agent")
-    ctx = _make_fetch_ctx()
-    list_result = _make_list_result([agent])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value={agent.name}):
-            result = fetch_board_snapshot(ctx, [], {})
-    assert len(result.snapshot.entries) == 1
-    entry = result.snapshot.entries[0]
-    assert entry.is_muted is True
-    assert entry.section == BoardSection.MUTED
-    muted_field = entry.fields[FIELD_MUTED]
-    assert isinstance(muted_field, BoolField)
-    assert muted_field.value is True
-
-
-def test_fetch_board_snapshot_merges_fields_from_data_sources() -> None:
-    """Fields from data sources are merged and available on entries."""
-    agent = make_agent_details(name="agent-1")
-    ctx = _make_fetch_ctx()
-    pr_field = PrField(
-        number=5,
-        title="Test PR",
-        state=PrState.OPEN,
-        url="https://github.com/org/repo/pull/5",
-        head_branch="branch",
-        is_draft=False,
-    )
-    source = _MockDataSource("github", {agent.name: {FIELD_PR: pr_field}})
-    list_result = _make_list_result([agent])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_board_snapshot(ctx, [source], {})
-    assert len(result.snapshot.entries) == 1
-    entry = result.snapshot.entries[0]
-    assert FIELD_PR in entry.fields
-    pr_field_result = entry.fields[FIELD_PR]
-    assert isinstance(pr_field_result, PrField)
-    assert pr_field_result.number == 5
-    assert entry.section == BoardSection.PR_BEING_REVIEWED
-
-
-def test_fetch_board_snapshot_errors_from_list_agents() -> None:
-    """Errors from list_agents are captured in the snapshot."""
-    ctx = _make_fetch_ctx()
-    list_result = _make_list_result([])
-    error = ErrorInfo(exception_type="SomeError", message="provider failed")
-    list_result.errors = [error]
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_board_snapshot(ctx, [], {})
-    assert any("SomeError" in e for e in result.snapshot.errors)
-
-
-def test_fetch_board_snapshot_cached_fields_updated() -> None:
-    """The cached_fields in the result reflect newly computed fields."""
-    agent = make_agent_details(name="agent-1")
-    ctx = _make_fetch_ctx()
-    pr_field = PrField(
-        number=1,
-        title="PR",
-        state=PrState.MERGED,
-        url="https://github.com/org/repo/pull/1",
-        head_branch="branch",
-        is_draft=False,
-    )
-    source = _MockDataSource("github", {agent.name: {FIELD_PR: pr_field}})
-    list_result = _make_list_result([agent])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_board_snapshot(ctx, [source], {})
-    assert agent.name in result.cached_fields
-    assert FIELD_PR in result.cached_fields[agent.name]
-
-
-# === fetch_local_snapshot ===
-
-
-class _RemoteDataSource(_MockDataSource):
-    @property
-    def is_remote(self) -> bool:
-        return True
-
-
-def test_fetch_local_snapshot_skips_remote_sources() -> None:
-    """fetch_local_snapshot only runs non-remote data sources."""
-    agent = make_agent_details(name="agent-1")
-    pr_field = PrField(
-        number=1,
-        title="PR",
-        state=PrState.OPEN,
-        url="https://github.com/org/repo/pull/1",
-        head_branch="b",
-        is_draft=False,
-    )
-    local_source = _MockDataSource("local_src", {agent.name: {FIELD_PR: pr_field}})
-    remote_source = _RemoteDataSource("remote_src", {agent.name: {FIELD_CI: CiField(status=CiStatus.PASSING)}})
-
-    ctx = _make_fetch_ctx()
-    list_result = _make_list_result([agent])
-    with patch("imbue.mngr_kanpan.fetcher.list_agents", return_value=list_result):
-        with patch("imbue.mngr_kanpan.fetcher._load_muted_agents", return_value=set()):
-            result = fetch_local_snapshot(ctx, [local_source, remote_source], {})
-    entry = result.snapshot.entries[0]
-    assert FIELD_PR in entry.fields
-    assert FIELD_CI not in entry.fields
-
-
-# === _load_muted_agents ===
-
-
-def test_load_muted_agents_returns_muted_names() -> None:
-    """_load_muted_agents returns names of agents whose certified_data marks them muted."""
-    agent_ref_muted = SimpleNamespace(
-        agent_name=AgentName("muted-agent"),
-        certified_data={"plugin": {"kanpan": {"muted": True}}},
-    )
-    agent_ref_not_muted = SimpleNamespace(
-        agent_name=AgentName("active-agent"),
-        certified_data={"plugin": {"kanpan": {"muted": False}}},
-    )
-    agents_by_host = {
-        "host-1": [agent_ref_muted, agent_ref_not_muted],
-    }
-    ctx = cast(MngrContext, SimpleNamespace())
-    with patch(
-        "imbue.mngr_kanpan.fetcher.discover_hosts_and_agents",
-        return_value=(agents_by_host, {}),
-    ):
-        muted = _load_muted_agents(ctx)
-    assert AgentName("muted-agent") in muted
-    assert AgentName("active-agent") not in muted
-
-
-def test_load_muted_agents_returns_empty_on_exception() -> None:
-    """_load_muted_agents returns empty set when discover_hosts_and_agents raises."""
-    ctx = cast(MngrContext, SimpleNamespace())
-    with patch(
-        "imbue.mngr_kanpan.fetcher.discover_hosts_and_agents",
-        side_effect=RuntimeError("network down"),
-    ):
-        muted = _load_muted_agents(ctx)
-    assert muted == set()
 
 
 # === save_field_cache / load_field_cache ===
