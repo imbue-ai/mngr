@@ -5,7 +5,6 @@ Telegram bot setup, and user notifications. Authentication uses
 per-agent API keys (Bearer tokens) with SHA-256 hash lookup.
 """
 
-import asyncio
 import json
 from typing import Annotated
 
@@ -14,7 +13,9 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import Response
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
@@ -65,15 +66,28 @@ def _json_error(message: str, status_code: int) -> Response:
     return _json_response({"error": message}, status_code=status_code)
 
 
+# -- Request body models --
+
+
+class _CloudflareEnableBody(FrozenModel):
+    """Optional request body for the Cloudflare enable endpoint."""
+
+    service_url: str | None = Field(
+        default=None,
+        description="Service URL to register. If omitted, resolved from the backend resolver.",
+    )
+
+
 # -- Cloudflare forwarding routes --
 
 
-async def _handle_cloudflare_enable(
+def _handle_cloudflare_enable(
     agent_id: str,
     server_name: str,
     request: Request,
     _caller_agent_id: CallerAgentIdDep,
     backend_resolver: BackendResolverDep,
+    body: _CloudflareEnableBody | None = None,
 ) -> Response:
     """Enable Cloudflare forwarding for a server."""
     cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
@@ -83,22 +97,14 @@ async def _handle_cloudflare_enable(
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
 
-    # Try to get service_url from request body, fall back to backend resolver
-    service_url: str | None = None
-    try:
-        body = await request.json()
-        service_url = body.get("service_url")
-    except (json.JSONDecodeError, ValueError):
-        pass
-
+    service_url = body.service_url if body is not None else None
     if service_url is None:
         backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
         if backend_url is None:
             return _json_error("Server not found locally", 404)
         service_url = backend_url
 
-    loop = asyncio.get_running_loop()
-    is_success = await loop.run_in_executor(None, cf_client.add_service, parsed_id, parsed_server, service_url)
+    is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
 
     if is_success:
         return _json_response({"ok": True})
