@@ -3,6 +3,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from collections.abc import Hashable
+from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -32,18 +33,20 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-from imbue.mngr_kanpan.data_types import CheckStatus
-from imbue.mngr_kanpan.data_types import CustomColumnConfig
 from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-from imbue.mngr_kanpan.data_types import PrState
-from imbue.mngr_kanpan.data_types import RefreshHook
-from imbue.mngr_kanpan.fetcher import fetch_agent_snapshot
+from imbue.mngr_kanpan.fetcher import FetchResult
+from imbue.mngr_kanpan.fetcher import collect_data_sources
+from imbue.mngr_kanpan.fetcher import compute_section
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
-from imbue.mngr_kanpan.fetcher import repo_path_from_labels
+from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
+from imbue.mngr_kanpan.fetcher import load_field_cache
+from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
@@ -104,7 +107,7 @@ _SECTION_SUFFIX: dict[BoardSection, str] = {
     BoardSection.PR_CLOSED: "PR closed",
     BoardSection.PR_BEING_REVIEWED: "PR pending",
     BoardSection.STILL_COOKING: "no PR yet",
-    BoardSection.PRS_FAILED: "PRs not loaded",
+    BoardSection.PRS_FAILED: "PRs failed",
     BoardSection.MUTED: "",
 }
 
@@ -115,11 +118,6 @@ _SECTION_ATTR: dict[BoardSection, str] = {
     BoardSection.STILL_COOKING: "section_in_progress",
     BoardSection.PRS_FAILED: "section_prs_failed",
     BoardSection.MUTED: "section_muted",
-}
-
-_CHECK_STATUS_ATTR: dict[CheckStatus, str] = {
-    CheckStatus.FAILING: "check_failing",
-    CheckStatus.PENDING: "check_pending",
 }
 
 # Builtin commands. Users can override these by defining a command with the same key.
@@ -183,16 +181,7 @@ def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) ->
 
 
 class _HyperlinkCanvas(MutableModel):
-    """Canvas wrapper that injects OSC 8 terminal hyperlink escape sequences.
-
-    Wraps a TextCanvas and modifies content() to add OSC 8 open/close sequences
-    around each row's text bytes. These are zero-width escape sequences interpreted
-    by modern terminal emulators (iTerm2, Windows Terminal, GNOME Terminal, etc.)
-    to make text clickable.
-
-    Implements the urwid Canvas protocol so it can be used in place of TextCanvas
-    within the urwid rendering pipeline.
-    """
+    """Canvas wrapper that injects OSC 8 terminal hyperlink escape sequences."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -245,10 +234,7 @@ class _HyperlinkCanvas(MutableModel):
 
 
 class _HyperlinkText(Text):
-    """Text widget that wraps its rendered content in an OSC 8 terminal hyperlink.
-
-    Set ``_hyperlink_url`` after construction to activate hyperlinking.
-    """
+    """Text widget that wraps its rendered content in an OSC 8 terminal hyperlink."""
 
     _hyperlink_url: str = ""
 
@@ -260,11 +246,7 @@ class _HyperlinkText(Text):
 
 
 class _SelectableRow(Columns):
-    """A Columns widget that is selectable, allowing it to receive focus.
-
-    Columns.selectable() checks children rather than _selectable, so we
-    must override it explicitly to make the widget focusable in a ListBox.
-    """
+    """A Columns widget that is selectable, allowing it to receive focus."""
 
     def selectable(self) -> bool:
         return True
@@ -275,7 +257,7 @@ class _SelectableRow(Columns):
 
 
 class _KanpanState(MutableModel):
-    """Mutable state for the pankan TUI."""
+    """Mutable state for the kanpan TUI."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -287,7 +269,9 @@ class _KanpanState(MutableModel):
     footer_right: Any  # urwid Text widget (right side of footer)
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
-    refresh_future: Future[BoardSnapshot] | None = None
+    refresh_future: Future[FetchResult] | None = None
+    # In-memory cache of fields from previous refresh cycle
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {}
     executor: ThreadPoolExecutor | None = None
     # Dired-style marks: agents flagged for batch operations, keyed by command key
     marks: dict[AgentName, str] = {}
@@ -316,20 +300,19 @@ class _KanpanState(MutableModel):
     retry_cooldown_seconds: float = 60.0
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
-    # Column definitions (builtins + any custom columns from config)
-    column_defs: list["_ColumnDef"] = []  # populated from _BOARD_COLUMN_DEFS at startup
+    # Column definitions (from data sources)
+    column_defs: list["_ColumnDef"] = []
     # Palette attr names for custom column colors
     col_attr_names: tuple[str, ...] = ()
-    # Refresh hooks loaded from plugin config
-    on_before_refresh: list[RefreshHook] = []
-    on_after_refresh: list[RefreshHook] = []
+    # Data sources collected from plugins
+    data_sources: Sequence[KanpanDataSource] = ()
     # CEL filter expressions passed from CLI
     include_filters: tuple[str, ...] = ()
     exclude_filters: tuple[str, ...] = ()
 
 
 class _KanpanInputHandler(MutableModel):
-    """Callable input handler for the pankan TUI."""
+    """Callable input handler for the kanpan TUI."""
 
     state: _KanpanState
 
@@ -372,8 +355,6 @@ def _clear_focus(state: _KanpanState) -> None:
     """Clear agent focus by moving to the first non-selectable widget."""
     state.focused_agent_name = None
     if state.list_walker is not None and len(state.list_walker) > 0:
-        # Move focus to position 0 (a section heading, which is non-selectable
-        # so it won't highlight, but the ListBox will show the top of the list)
         state.list_walker.set_focus(0)
 
 
@@ -415,10 +396,8 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
     entry = state.index_to_entry.get(walker_idx)
     if entry is None:
         return
-    repo_pr_loaded = state.snapshot.repo_pr_loaded if state.snapshot is not None else {}
-    section = _classify_entry(entry, repo_pr_loaded)
     name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
-    if section == BoardSection.MUTED:
+    if entry.section == BoardSection.MUTED:
         name_markup = _flatten_markup_to_muted(name_markup)
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
@@ -473,7 +452,6 @@ def _unmark_all(state: _KanpanState) -> None:
     """Remove all marks."""
     if not state.marks:
         return
-    # Update each marked row's display before clearing
     marked_names = set(state.marks.keys())
     state.marks.clear()
     for idx, entry in state.index_to_entry.items():
@@ -548,11 +526,7 @@ def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.Complet
 
 
 def _start_batch_execution(state: _KanpanState) -> None:
-    """Begin executing all marked operations sequentially.
-
-    Delete operations are batched into a single subprocess call.
-    Other operations (push, custom commands) run individually.
-    """
+    """Begin executing all marked operations sequentially."""
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
@@ -595,7 +569,7 @@ def _start_batch_execution(state: _KanpanState) -> None:
 def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
-    """Submit a single batch work item to the executor. Returns None if the item can't be executed."""
+    """Submit a single batch work item to the executor."""
     if item.key == _BUILTIN_COMMAND_KEY_DELETE:
         names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
         return executor.submit(_run_destroy, names)
@@ -695,7 +669,7 @@ def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
 
     _refresh_display(state)
 
-    # Local-only refresh to immediately show updated state (no cooldown needed)
+    # Local-only refresh to immediately show updated state
     if state.loop is not None:
         _start_local_refresh(state.loop, state)
 
@@ -714,11 +688,7 @@ def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: 
 
 
 def _mute_focused_agent(state: _KanpanState) -> None:
-    """Toggle mute on the currently focused agent.
-
-    Optimistically updates the UI immediately, then persists in the background.
-    If the persist fails, reverts the UI change.
-    """
+    """Toggle mute on the currently focused agent."""
     entry = _get_focused_entry(state)
     if entry is None:
         return
@@ -761,7 +731,7 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
 
 
 def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
-    """Dispatch a command by key. Routes to builtins, markable commands, or immediate shell commands."""
+    """Dispatch a command by key."""
     if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
         if state.loop is not None and state.refresh_future is None:
             _start_refresh(state.loop, state)
@@ -854,14 +824,7 @@ def _on_restore_footer(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _request_refresh(loop: MainLoop, state: _KanpanState, cooldown_seconds: float) -> None:
-    """Request a refresh, subject to a cooldown period.
-
-    If enough time has passed since the last refresh, starts immediately.
-    Otherwise, schedules a deferred refresh for when the cooldown expires.
-    If a deferred refresh is already pending but the new request would fire
-    sooner (e.g. manual refresh with a shorter cooldown), the old alarm is
-    replaced.
-    """
+    """Request a refresh, subject to a cooldown period."""
     if state.refresh_future is not None:
         return
     elapsed = time.monotonic() - state.last_refresh_time
@@ -894,10 +857,7 @@ def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a local-only background refresh (no GitHub API calls).
-
-    Bypasses cooldown entirely since local state is cheap to fetch.
-    """
+    """Start a local-only background refresh (no GitHub API calls)."""
     if state.refresh_future is not None:
         return
     if state.executor is None:
@@ -906,7 +866,12 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.spinner_index = 0
     state.refresh_is_local_only = True
     state.refresh_future = state.executor.submit(
-        fetch_agent_snapshot, state.mngr_ctx, state.include_filters, state.exclude_filters
+        fetch_local_snapshot,
+        state.mngr_ctx,
+        state.data_sources,
+        state.cached_fields,
+        state.include_filters,
+        state.exclude_filters,
     )
     _schedule_spinner_tick(loop, state)
 
@@ -921,11 +886,10 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.refresh_future = state.executor.submit(
         fetch_board_snapshot,
         state.mngr_ctx,
+        state.data_sources,
+        state.cached_fields,
         state.include_filters,
         state.exclude_filters,
-        state.on_before_refresh or None,
-        state.on_after_refresh or None,
-        state.snapshot,
     )
     _schedule_spinner_tick(loop, state)
 
@@ -959,13 +923,16 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     was_local_only = state.refresh_is_local_only
     failed = False
     try:
-        new_snapshot = state.refresh_future.result()
-        should_carry_forward = was_local_only or (
-            state.snapshot is not None
-            and _has_regressed_repos(state.snapshot.repo_pr_loaded, new_snapshot.repo_pr_loaded)
-        )
-        if should_carry_forward and state.snapshot is not None:
-            new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
+        fetch_result = state.refresh_future.result()
+        new_snapshot = fetch_result.snapshot
+        # Update in-memory field cache
+        state.cached_fields = fetch_result.cached_fields
+        # Persist cache to disk after full refreshes
+        if not was_local_only:
+            save_field_cache(state.mngr_ctx, state.cached_fields, state.data_sources)
+        # For local-only refreshes, carry forward fields from previous snapshot
+        if was_local_only and state.snapshot is not None:
+            new_snapshot = _carry_forward_fields(state.snapshot, new_snapshot)
         state.snapshot = new_snapshot
     except Exception as e:
         failed = True
@@ -980,8 +947,6 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     finally:
         state.refresh_future = None
         state.refresh_is_local_only = False
-        # Only update last_refresh_time for full refreshes (so the full-refresh
-        # cooldown isn't affected by cheap local-only refreshes)
         if not was_local_only:
             state.last_refresh_time = time.monotonic()
 
@@ -1005,83 +970,40 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 @pure
-def _has_regressed_repos(old_status: dict[str, bool], new_status: dict[str, bool]) -> bool:
-    """Check if any repo that previously loaded successfully has now failed or is missing."""
-    return any(old_status.get(repo) is True and new_status.get(repo) is not True for repo in old_status)
+def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
+    """Carry forward field data from a previous full snapshot for local-only refreshes.
 
-
-@pure
-def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
-    """Carry forward PR data from a previous snapshot for agents whose repo failed to load.
-
-    For each agent, if its repo was loaded in the old snapshot but not in the new one,
-    copies pr and create_pr_url from the old entry. Agents whose repo loaded successfully
-    in the new snapshot keep their fresh data.
+    Local-only refreshes only run git_info and repo_paths. Other fields (PR, CI, etc.)
+    are carried forward from the previous snapshot.
     """
     old_by_name = {entry.name: entry for entry in old.entries}
-    updated_entries = []
+    updated_entries: list[AgentBoardEntry] = []
     for entry in new.entries:
-        agent_repo = repo_path_from_labels(entry.column_data.labels)
-        repo_regressed = (
-            agent_repo is not None
-            and old.repo_pr_loaded.get(agent_repo) is True
-            and new.repo_pr_loaded.get(agent_repo) is not True
-        )
         old_entry = old_by_name.get(entry.name)
-        if (
-            repo_regressed
-            and old_entry is not None
-            and (old_entry.pr is not None or old_entry.create_pr_url is not None)
-        ):
+        if old_entry is not None:
+            # Merge: new fields override old, but keep old fields not produced by local sources
+            merged_fields = dict(old_entry.fields)
+            merged_fields.update(entry.fields)
+            merged_cells = {key: field.display() for key, field in merged_fields.items()}
+            section = compute_section(merged_fields)
             ref = entry.field_ref()
             updated = entry.model_copy_update(
-                to_update(ref.pr, old_entry.pr),
-                to_update(ref.create_pr_url, old_entry.create_pr_url),
+                to_update(ref.fields, merged_fields),
+                to_update(ref.cells, merged_cells),
+                to_update(ref.section, section),
             )
             updated_entries.append(updated)
         else:
             updated_entries.append(entry)
-    # Merge: for regressed repos, restore True from old; keep new status for everything else.
-    merged_status = {**new.repo_pr_loaded}
-    for repo, loaded in old.repo_pr_loaded.items():
-        if loaded and not merged_status.get(repo):
-            merged_status[repo] = True
     return BoardSnapshot(
         entries=tuple(updated_entries),
         errors=new.errors,
-        repo_pr_loaded=merged_status,
         fetch_time_seconds=new.fetch_time_seconds,
     )
 
 
-def _classify_entry(entry: AgentBoardEntry, repo_pr_loaded: dict[str, bool]) -> BoardSection:
-    """Determine which board section an agent belongs to based on its PR state.
-
-    Muted agents are always placed in the MUTED section regardless of PR state.
-    Agents whose repo failed to load PRs go into PRS_FAILED (agents with no
-    remote label are not considered failed -- they just have no upstream).
-    """
-    if entry.is_muted:
-        return BoardSection.MUTED
-    if entry.pr is not None:
-        if entry.pr.state == PrState.MERGED:
-            return BoardSection.PR_MERGED
-        if entry.pr.state == PrState.CLOSED:
-            return BoardSection.PR_CLOSED
-        return BoardSection.PR_BEING_REVIEWED
-    agent_repo = repo_path_from_labels(entry.column_data.labels)
-    if agent_repo is not None and repo_pr_loaded.get(agent_repo) is False:
-        return BoardSection.PRS_FAILED
-    return BoardSection.STILL_COOKING
-
-
 def _get_state_attr(entry: AgentBoardEntry) -> str:
-    """Determine the color attribute for an agent's lifecycle state.
-
-    RUNNING gets green, WAITING gets magenta (needs user response).
-    Everything else is default (no color). Muted override is handled
-    separately in _build_agent_row.
-    """
+    """Determine the color attribute for an agent's lifecycle state."""
     if entry.state == AgentLifecycleState.RUNNING:
         return "state_running"
     if entry.state == AgentLifecycleState.WAITING:
@@ -1100,44 +1022,10 @@ def _get_state_cell_text(entry: AgentBoardEntry) -> str:
 
 
 def _get_state_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]:
-    """Build urwid text markup for the state column cell.
-
-    RUNNING gets green, WAITING gets magenta. Everything else uses default color.
-    """
+    """Build urwid text markup for the state column cell."""
     text = _get_state_cell_text(entry)
     attr = _get_state_attr(entry)
     return (attr, text) if attr else text
-
-
-def _get_check_cell_text(entry: AgentBoardEntry) -> str:
-    """Get plain text for the CI check status column cell."""
-    if entry.pr is None or entry.pr.check_status == CheckStatus.UNKNOWN:
-        return ""
-    return entry.pr.check_status.lower()
-
-
-def _get_check_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]:
-    """Build urwid text markup for a CI check status column cell.
-
-    Only failing and pending checks get color. Passing checks use default color.
-    """
-    if entry.pr is None or entry.pr.check_status == CheckStatus.UNKNOWN:
-        return ""
-    check_attr = _CHECK_STATUS_ATTR.get(entry.pr.check_status)
-    if check_attr is not None:
-        return (check_attr, entry.pr.check_status.lower())
-    return entry.pr.check_status.lower()
-
-
-def _get_push_cell_text(entry: AgentBoardEntry) -> str:
-    """Get plain text for the git push status column cell."""
-    if entry.work_dir is None:
-        return ""
-    if entry.commits_ahead is None:
-        return "[not pushed]"
-    if entry.commits_ahead == 0:
-        return "[up to date]"
-    return f"[{entry.commits_ahead} unpushed]"
 
 
 def _flatten_markup_to_muted(
@@ -1162,22 +1050,22 @@ def _get_name_cell_markup(
     return f"  {entry.name}"
 
 
-def _get_pr_cell_text(entry: AgentBoardEntry) -> str:
-    """Get plain text for the PR column cell."""
-    if entry.pr is not None:
-        return f"#{entry.pr.number}"
-    if entry.create_pr_url is not None:
-        return "+PR"
-    return ""
+def _field_cell_text(entry: AgentBoardEntry, field_key: str) -> str:
+    """Get plain text for a field-based column cell."""
+    cell = entry.cells.get(field_key)
+    if cell is None:
+        return ""
+    return cell.text
 
 
-def _get_pr_url(entry: AgentBoardEntry) -> str:
-    """Get the URL for the PR column hyperlink (PR URL or create-PR URL)."""
-    if entry.pr is not None:
-        return entry.pr.url
-    if entry.create_pr_url is not None:
-        return entry.create_pr_url
-    return ""
+def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Hashable, str]:
+    """Build urwid text markup for a field-based column cell."""
+    cell = entry.cells.get(field_key)
+    if cell is None:
+        return ""
+    if cell.color is not None:
+        return (f"field_{field_key}_{cell.color}", cell.text)
+    return cell.text
 
 
 class _ColumnDef(FrozenModel):
@@ -1188,106 +1076,80 @@ class _ColumnDef(FrozenModel):
     text_fn: Callable[[AgentBoardEntry], str]
     markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
     flexible: bool
-    url_fn: Callable[[AgentBoardEntry], str] | None = None
 
 
-def _custom_col_text(
-    entry: AgentBoardEntry, col_key: str, plugin_name: str | None, field: str | None, source: str = "labels"
-) -> str:
-    """Get the text value for a custom column from the configured source."""
-    if source == "labels":
-        return entry.column_data.labels.get(col_key, "")
-    return str(entry.column_data.plugin_data.get(plugin_name or "", {}).get(field or "", ""))
+class _FieldCellTextFn(FrozenModel):
+    """Callable that extracts a field cell's text from an AgentBoardEntry."""
 
-
-def _custom_col_markup(
-    entry: AgentBoardEntry,
-    col_key: str,
-    plugin_name: str | None,
-    field: str | None,
-    colors: dict[str, str],
-    source: str = "labels",
-) -> str | tuple[Hashable, str]:
-    """Get markup for a custom column, applying color when configured."""
-    value = _custom_col_text(entry, col_key, plugin_name, field, source=source)
-    if not value:
-        return ""
-    if value in colors:
-        return (f"col_{col_key}_{value}", value)
-    return value
-
-
-class _CustomColTextFn(FrozenModel):
-    """Callable that extracts a custom column's text value from an AgentBoardEntry."""
-
-    col_key: str
-    plugin_name: str | None
-    field: str | None
-    source: str
+    field_key: str
 
     def __call__(self, entry: AgentBoardEntry) -> str:
-        return _custom_col_text(entry, self.col_key, self.plugin_name, self.field, self.source)
+        return _field_cell_text(entry, self.field_key)
 
 
-class _CustomColMarkupFn(FrozenModel):
-    """Callable that produces urwid markup for a custom column value."""
+class _FieldCellMarkupFn(FrozenModel):
+    """Callable that produces urwid markup for a field cell."""
 
-    col_key: str
-    plugin_name: str | None
-    field: str | None
-    colors: dict[str, str]
-    source: str
+    field_key: str
 
     def __call__(self, entry: AgentBoardEntry) -> str | tuple[Hashable, str]:
-        return _custom_col_markup(entry, self.col_key, self.plugin_name, self.field, self.colors, self.source)
+        return _field_cell_markup(entry, self.field_key)
+
+
+# Built-in column definitions for name and state (always present)
+_BUILTIN_COLUMN_DEFS: list[_ColumnDef] = [
+    _ColumnDef(
+        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_text, flexible=False
+    ),
+    _ColumnDef(
+        name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
+    ),
+]
 
 
 @pure
-def _build_custom_column_defs(columns_config: dict[str, CustomColumnConfig]) -> list[_ColumnDef]:
-    """Build _ColumnDef list from custom column configuration."""
+def _build_data_source_column_defs(
+    data_sources: Sequence[KanpanDataSource],
+) -> list[_ColumnDef]:
+    """Build column definitions from data source declarations."""
     defs: list[_ColumnDef] = []
-    for col_key, col_config in columns_config.items():
-        defs.append(
-            _ColumnDef(
-                name=f"custom_{col_key}",
-                header=col_config.header,
-                text_fn=_CustomColTextFn(
-                    col_key=col_key,
-                    plugin_name=col_config.plugin_name,
-                    field=col_config.field,
-                    source=col_config.source,
-                ),
-                markup_fn=_CustomColMarkupFn(
-                    col_key=col_key,
-                    plugin_name=col_config.plugin_name,
-                    field=col_config.field,
-                    colors=col_config.colors,
-                    source=col_config.source,
-                ),
-                flexible=False,
+    seen: set[str] = set()
+    for source in data_sources:
+        for field_key, header in source.columns.items():
+            if field_key in seen:
+                continue
+            seen.add(field_key)
+            # Skip empty headers (infrastructure columns like create_pr_url)
+            if not header:
+                continue
+            defs.append(
+                _ColumnDef(
+                    name=field_key,
+                    header=header,
+                    text_fn=_FieldCellTextFn(field_key=field_key),
+                    markup_fn=_FieldCellMarkupFn(field_key=field_key),
+                    flexible=False,
+                )
             )
-        )
     return defs
 
 
 @pure
 def _assemble_column_defs(
     builtin_defs: list[_ColumnDef],
-    custom_defs: list[_ColumnDef],
+    source_defs: list[_ColumnDef],
     column_order: list[str] | None,
 ) -> list[_ColumnDef]:
     """Assemble the final ordered list of column definitions.
 
-    If column_order is None, default ordering is: builtins (except last) + custom + last builtin.
-    If column_order is provided, definitions are returned in that order (unknown names skipped).
-    The last column in the result always gets flexible=True.
+    If column_order is None, default ordering is: builtins + source columns.
+    If column_order is provided, definitions are returned in that order.
+    The last column always gets flexible=True.
     """
     if column_order is None:
-        if not custom_defs:
-            return builtin_defs
-        result = builtin_defs[:-1] + custom_defs + [builtin_defs[-1]]
+        result = builtin_defs + source_defs
     else:
-        registry: dict[str, _ColumnDef] = {d.name: d for d in builtin_defs + custom_defs}
+        registry: dict[str, _ColumnDef] = {d.name: d for d in builtin_defs + source_defs}
         result = [registry[name] for name in column_order if name in registry]
     if not result:
         return builtin_defs
@@ -1299,51 +1161,38 @@ def _assemble_column_defs(
 
 
 @pure
-def _build_column_palette(
-    columns_config: dict[str, CustomColumnConfig],
+def _build_field_color_palette(
+    snapshot: BoardSnapshot | None,
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
-    """Build palette entries and attr names for custom column colors."""
+    """Build palette entries for field-based column colors.
+
+    Scans all cells in the snapshot for colors and creates palette entries.
+    """
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
-    for col_key, col_config in columns_config.items():
-        for value, color in col_config.colors.items():
-            attr = f"col_{col_key}_{value}"
-            entries.append((attr, color, ""))
-            entries.append((f"{attr}_focus", f"{color},standout", ""))
-            attr_names.append(attr)
+    seen: set[str] = set()
+
+    if snapshot is None:
+        return entries, tuple(attr_names)
+
+    for entry in snapshot.entries:
+        for field_key, cell in entry.cells.items():
+            if cell.color is not None:
+                attr = f"field_{field_key}_{cell.color}"
+                if attr not in seen:
+                    seen.add(attr)
+                    entries.append((attr, cell.color, ""))
+                    entries.append((f"{attr}_focus", f"{cell.color},standout", ""))
+                    attr_names.append(attr)
+
     return entries, tuple(attr_names)
-
-
-# Single source of truth for all board column definitions (order matters)
-_BOARD_COLUMN_DEFS: list[_ColumnDef] = [
-    _ColumnDef(
-        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_text, flexible=False
-    ),
-    _ColumnDef(
-        name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
-    ),
-    _ColumnDef(name="git", header="GIT", text_fn=_get_push_cell_text, markup_fn=_get_push_cell_text, flexible=False),
-    _ColumnDef(
-        name="pr",
-        header="PR",
-        text_fn=_get_pr_cell_text,
-        markup_fn=_get_pr_cell_text,
-        flexible=False,
-        url_fn=_get_pr_url,
-    ),
-    _ColumnDef(name="ci", header="CI", text_fn=_get_check_cell_text, markup_fn=_get_check_cell_markup, flexible=False),
-]
 
 
 def _compute_board_column_widths(
     entries: tuple[AgentBoardEntry, ...],
     column_defs: list[_ColumnDef],
 ) -> dict[str, int]:
-    """Compute column widths based on content, like tabulate auto-sizing.
-
-    Each column is sized to fit the widest value (or header), with the
-    last column (link) left flexible to fill remaining terminal space.
-    """
+    """Compute column widths based on content."""
     return {
         defn.name: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries)) if entries else len(defn.header)
         for defn in column_defs
@@ -1367,23 +1216,18 @@ def _build_column_header(
 
 def _build_agent_row(
     entry: AgentBoardEntry,
-    section: BoardSection,
     widths: dict[str, int],
     column_defs: list[_ColumnDef],
     mark: str | None = None,
 ) -> _SelectableRow:
-    """Build a columnar urwid widget for a single agent row.
-
-    Muted agents are rendered entirely in gray. Mark indicators (d/p) replace
-    the leading spaces in the name column.
-    """
+    """Build a columnar urwid widget for a single agent row."""
     raw_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
         defn.name: defn.markup_fn(entry) for defn in column_defs
     }
     raw_markup["name"] = _get_name_cell_markup(entry, mark)
 
     # Muted agents: flatten all markup to gray
-    if section == BoardSection.MUTED:
+    if entry.section == BoardSection.MUTED:
         cell_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
             k: _flatten_markup_to_muted(v) for k, v in raw_markup.items()
         }
@@ -1392,10 +1236,11 @@ def _build_agent_row(
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
-        if defn.url_fn is not None:
-            url = defn.url_fn(entry)
+        cell = entry.cells.get(defn.name)
+        cell_url = cell.url if cell is not None else None
+        if cell_url:
             hyperlink_widget = _HyperlinkText(cell_markup[defn.name])
-            hyperlink_widget._hyperlink_url = url
+            hyperlink_widget._hyperlink_url = cell_url
             widget = hyperlink_widget
         else:
             widget = Text(cell_markup[defn.name])
@@ -1407,10 +1252,7 @@ def _build_agent_row(
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
-    """Build urwid text markup for a section heading.
-
-    Only the prefix (e.g. "Done") is colored; the rest is default.
-    """
+    """Build urwid text markup for a section heading."""
     prefix = _SECTION_PREFIX[section]
     suffix = _SECTION_SUFFIX[section]
     attr = _SECTION_ATTR[section]
@@ -1427,11 +1269,7 @@ def _build_board_widgets(
     mark_attr_names: tuple[str, ...] = (),
     col_attr_names: tuple[str, ...] = (),
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
-    """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
-
-    Returns (walker, index_to_entry) where index_to_entry maps list walker
-    indices to the AgentBoardEntry for selectable rows.
-    """
+    """Build the urwid widget list from a BoardSnapshot, grouped by section."""
     index_to_entry: dict[int, AgentBoardEntry] = {}
     walker: SimpleFocusListWalker[AttrMap | Text | Divider | Columns] = SimpleFocusListWalker([])
 
@@ -1439,14 +1277,13 @@ def _build_board_widgets(
         walker.append(Text("Loading..."))
         return walker, index_to_entry
 
-    # Compute column widths from all entries (content-aware sizing)
+    # Compute column widths from all entries
     col_widths = _compute_board_column_widths(snapshot.entries, column_defs)
 
-    # Classify entries into sections
+    # Group entries by section (pre-computed on each entry)
     by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
     for entry in snapshot.entries:
-        section = _classify_entry(entry, snapshot.repo_pr_loaded)
-        by_section.setdefault(section, []).append(entry)
+        by_section.setdefault(entry.section, []).append(entry)
 
     has_content = False
 
@@ -1467,7 +1304,7 @@ def _build_board_widgets(
 
         for entry in entries:
             mark = marks.get(entry.name) if marks else None
-            item = _build_agent_row(entry, section, col_widths, column_defs, mark)
+            item = _build_agent_row(entry, col_widths, column_defs, mark)
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
             for attr in _AGENT_LINE_ATTRS + mark_attr_names + col_attr_names:
@@ -1489,14 +1326,17 @@ def _build_board_widgets(
 
 
 def _refresh_display(state: _KanpanState) -> None:
-    """Rebuild the body display from the current snapshot.
-
-    Preserves focus on the previously selected agent if it still exists.
-    """
+    """Rebuild the body display from the current snapshot."""
     # Save the currently focused agent name before rebuilding
     focused_entry = _get_focused_entry(state)
     if focused_entry is not None:
         state.focused_agent_name = focused_entry.name
+
+    # Update field color palette from snapshot and register new entries with the screen
+    field_palette, field_attr_names = _build_field_color_palette(state.snapshot)
+    state.col_attr_names = field_attr_names
+    if state.loop is not None and field_palette:
+        state.loop.screen.register_palette(field_palette)
 
     walker, state.index_to_entry = _build_board_widgets(
         state.snapshot,
@@ -1527,30 +1367,9 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
         _start_refresh(loop, state)
 
 
-def _load_refresh_hooks(hooks_raw: dict[str, Any]) -> list[RefreshHook]:
-    """Parse and filter enabled refresh hooks from a raw config dict.
-
-    Config loader uses model_construct() which bypasses validation,
-    so nested dicts may not be parsed into RefreshHook objects.
-    """
-    hooks: list[RefreshHook] = []
-    for value in hooks_raw.values():
-        if isinstance(value, RefreshHook):
-            hook = value
-        elif isinstance(value, dict):
-            hook = RefreshHook(**value)
-        else:
-            continue
-        if hook.enabled:
-            hooks.append(hook)
-    return hooks
-
-
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     """Load user-defined commands from plugin config."""
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-    # Config loader uses model_construct() which bypasses validation,
-    # so nested dicts may not be parsed into CustomCommand objects.
     result: dict[str, CustomCommand] = {}
     for key, value in config.commands.items():
         if isinstance(value, CustomCommand):
@@ -1560,24 +1379,8 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     return result
 
 
-def _load_user_columns(mngr_ctx: MngrContext) -> dict[str, CustomColumnConfig]:
-    """Load user-defined custom columns from plugin config."""
-    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-    result: dict[str, CustomColumnConfig] = {}
-    for key, value in config.columns.items():
-        if isinstance(value, CustomColumnConfig):
-            result[key] = value
-        elif isinstance(value, dict):
-            result[key] = CustomColumnConfig(**value)
-    return result
-
-
 def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
-    """Build the unified command map: builtins merged with user config.
-
-    User commands override builtins when they share the same key.
-    Commands with enabled=False are filtered out.
-    """
+    """Build the unified command map: builtins merged with user config."""
     commands = dict(_BUILTIN_COMMANDS)
     user_commands = _load_user_commands(mngr_ctx)
     commands.update(user_commands)
@@ -1588,10 +1391,7 @@ def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
 def _build_mark_palette(
     commands: dict[str, CustomCommand],
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
-    """Build palette entries and attr names for markable commands.
-
-    Returns (palette_entries, mark_attr_names).
-    """
+    """Build palette entries and attr names for markable commands."""
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
     for key, cmd in commands.items():
@@ -1614,7 +1414,11 @@ def run_kanpan(
     commands = _build_command_map(mngr_ctx)
     plugin_config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
 
-    # Build footer keybindings, visually separating mark-related from action commands
+    # Collect data sources and load cached fields from disk
+    data_sources = collect_data_sources(mngr_ctx)
+    initial_cached_fields = load_field_cache(mngr_ctx, data_sources)
+
+    # Build footer keybindings
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
     mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
     mark_parts.append("U: unmark all")
@@ -1625,14 +1429,12 @@ def run_kanpan(
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
     footer_right = Text(keybindings, align="right")
-    # Pack the left side so it gets exactly the space its text needs; the right
-    # side (keybindings) gets the remainder and wraps when the terminal is narrow.
     footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
     footer_columns = Columns(footer_items, dividechars=1)
     footer = Pile([Divider(), footer_columns])
 
     is_filtered = bool(include_filters or exclude_filters)
-    header_title = "Kanpan - all-seeing agent tracker - 看 πᾶν"
+    header_title = "Kanpan - all-seeing agent tracker - \u770b \u03c0\u1fb6\u03bd"
     if is_filtered:
         header_title += "  [filtered]"
     header = Pile(
@@ -1647,14 +1449,9 @@ def run_kanpan(
 
     mark_palette_entries, mark_attr_names = _build_mark_palette(commands)
 
-    # Build custom column definitions
-    user_columns = _load_user_columns(mngr_ctx)
-    custom_col_defs = _build_custom_column_defs(user_columns)
-    column_defs = _assemble_column_defs(_BOARD_COLUMN_DEFS, custom_col_defs, plugin_config.column_order)
-    col_palette_entries, col_attr_names = _build_column_palette(user_columns)
-
-    on_before_refresh = _load_refresh_hooks(plugin_config.on_before_refresh)
-    on_after_refresh = _load_refresh_hooks(plugin_config.on_after_refresh)
+    # Build column definitions from data sources
+    source_col_defs = _build_data_source_column_defs(data_sources)
+    column_defs = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, source_col_defs, plugin_config.column_order)
 
     state = _KanpanState(
         mngr_ctx=mngr_ctx,
@@ -1663,13 +1460,12 @@ def run_kanpan(
         footer_left_attr=footer_left_attr,
         footer_right=footer_right,
         commands=commands,
-        on_before_refresh=on_before_refresh,
-        on_after_refresh=on_after_refresh,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
-        col_attr_names=col_attr_names,
+        data_sources=data_sources,
+        cached_fields=initial_cached_fields,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
     )
@@ -1679,7 +1475,7 @@ def run_kanpan(
     with create_urwid_screen_preserving_terminal() as screen:
         loop = MainLoop(
             frame,
-            palette=PALETTE + mark_palette_entries + col_palette_entries,
+            palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
             screen=screen,
         )

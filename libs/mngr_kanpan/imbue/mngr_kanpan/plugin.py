@@ -1,11 +1,22 @@
 from collections.abc import Sequence
+from typing import Any
 
 import click
 
 from imbue.mngr import hookimpl
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr_kanpan.cli import kanpan
+from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
+from imbue.mngr_kanpan.data_sources.labels import LabelColumnConfig
+from imbue.mngr_kanpan.data_sources.labels import LabelsDataSource
+from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
+from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
+from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 
 register_plugin_config("kanpan", KanpanPluginConfig)
 
@@ -14,3 +25,53 @@ register_plugin_config("kanpan", KanpanPluginConfig)
 def register_cli_commands() -> Sequence[click.Command] | None:
     """Register the kanpan command with mngr."""
     return [kanpan]
+
+
+@hookimpl
+def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
+    """Register built-in data sources for kanpan board refresh."""
+    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
+
+    sources: list[Any] = [
+        RepoPathsDataSource(),
+        GitInfoDataSource(),
+    ]
+
+    # GitHub data source reads its own config directly
+    github_config_raw = config.data_sources.get("github")
+    if isinstance(github_config_raw, dict):
+        github_ds_config = GitHubDataSourceConfig(**{k: v for k, v in github_config_raw.items() if k != "enabled"})
+    else:
+        github_ds_config = GitHubDataSourceConfig()
+    sources.append(GitHubDataSource(config=github_ds_config))
+
+    # Label-backed columns from config
+    for field_key, col_config in config.columns.items():
+        if isinstance(col_config, dict):
+            header = col_config.get("header", field_key.upper())
+            colors = col_config.get("colors", {})
+            label_key = col_config.get("label_key", field_key)
+        else:
+            continue
+        sources.append(
+            LabelsDataSource(
+                field_key=field_key,
+                config=LabelColumnConfig(header=header, label_key=label_key, colors=colors),
+            )
+        )
+
+    # Shell command data sources from config
+    for field_key, shell_config in config.shell_commands.items():
+        if isinstance(shell_config, ShellCommandSourceConfig):
+            sc = ShellCommandConfig(
+                name=shell_config.name,
+                header=shell_config.header,
+                command=shell_config.command,
+            )
+        elif isinstance(shell_config, dict):
+            sc = ShellCommandConfig(**shell_config)
+        else:
+            continue
+        sources.append(ShellCommandDataSource(field_key=field_key, config=sc))
+
+    return sources

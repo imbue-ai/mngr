@@ -2,8 +2,8 @@ import json
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.mngr_kanpan.data_types import CheckStatus
-from imbue.mngr_kanpan.data_types import PrState
+from imbue.mngr_kanpan.data_source import CiStatus
+from imbue.mngr_kanpan.data_source import PrState
 from imbue.mngr_kanpan.github import _parse_check_status
 from imbue.mngr_kanpan.github import _parse_gh_output
 from imbue.mngr_kanpan.github import _parse_pr
@@ -39,11 +39,11 @@ def test_parse_pr_state_unknown_defaults_to_open() -> None:
 
 
 def test_parse_check_status_none() -> None:
-    assert _parse_check_status(None) == CheckStatus.UNKNOWN
+    assert _parse_check_status(None) == CiStatus.UNKNOWN
 
 
 def test_parse_check_status_empty_list() -> None:
-    assert _parse_check_status([]) == CheckStatus.UNKNOWN
+    assert _parse_check_status([]) == CiStatus.UNKNOWN
 
 
 def test_parse_check_status_all_success() -> None:
@@ -51,7 +51,7 @@ def test_parse_check_status_all_success() -> None:
         {"status": "COMPLETED", "conclusion": "SUCCESS"},
         {"status": "COMPLETED", "conclusion": "SUCCESS"},
     ]
-    assert _parse_check_status(rollup) == CheckStatus.PASSING
+    assert _parse_check_status(rollup) == CiStatus.PASSING
 
 
 def test_parse_check_status_any_failure() -> None:
@@ -59,27 +59,27 @@ def test_parse_check_status_any_failure() -> None:
         {"status": "COMPLETED", "conclusion": "SUCCESS"},
         {"status": "COMPLETED", "conclusion": "FAILURE"},
     ]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 def test_parse_check_status_error_conclusion() -> None:
     rollup = [{"status": "COMPLETED", "conclusion": "ERROR"}]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 def test_parse_check_status_cancelled_conclusion() -> None:
     rollup = [{"status": "COMPLETED", "conclusion": "CANCELLED"}]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 def test_parse_check_status_timed_out_conclusion() -> None:
     rollup = [{"status": "COMPLETED", "conclusion": "TIMED_OUT"}]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 def test_parse_check_status_action_required_conclusion() -> None:
     rollup = [{"status": "COMPLETED", "conclusion": "ACTION_REQUIRED"}]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 def test_parse_check_status_pending() -> None:
@@ -87,12 +87,12 @@ def test_parse_check_status_pending() -> None:
         {"status": "COMPLETED", "conclusion": "SUCCESS"},
         {"status": "IN_PROGRESS", "conclusion": None},
     ]
-    assert _parse_check_status(rollup) == CheckStatus.PENDING
+    assert _parse_check_status(rollup) == CiStatus.PENDING
 
 
 def test_parse_check_status_queued() -> None:
     rollup = [{"status": "QUEUED", "conclusion": None}]
-    assert _parse_check_status(rollup) == CheckStatus.PENDING
+    assert _parse_check_status(rollup) == CiStatus.PENDING
 
 
 def test_parse_check_status_failure_takes_priority_over_pending() -> None:
@@ -100,7 +100,7 @@ def test_parse_check_status_failure_takes_priority_over_pending() -> None:
         {"status": "IN_PROGRESS", "conclusion": None},
         {"status": "COMPLETED", "conclusion": "FAILURE"},
     ]
-    assert _parse_check_status(rollup) == CheckStatus.FAILING
+    assert _parse_check_status(rollup) == CiStatus.FAILING
 
 
 # === _parse_pr ===
@@ -123,7 +123,7 @@ def test_parse_pr() -> None:
     assert pr.state == PrState.OPEN
     assert pr.url == "https://github.com/org/repo/pull/42"
     assert pr.head_branch == "mngr/my-agent"
-    assert pr.check_status == CheckStatus.PASSING
+    assert pr.check_status == CiStatus.PASSING
     assert pr.is_draft is False
 
 
@@ -153,7 +153,7 @@ def test_parse_pr_merged_with_no_checks() -> None:
     }
     pr = _parse_pr(raw)
     assert pr.state == PrState.MERGED
-    assert pr.check_status == CheckStatus.UNKNOWN
+    assert pr.check_status == CiStatus.UNKNOWN
 
 
 # === _parse_gh_output ===
@@ -242,16 +242,13 @@ def test_fetch_all_prs_success() -> None:
     assert len(result.prs) == 2
     assert result.error is None
     prs_by_number = {pr.number: pr for pr in result.prs}
-    # Open PR has CI status from statusCheckRollup
     assert prs_by_number[1].state == PrState.OPEN
-    assert prs_by_number[1].check_status == CheckStatus.PASSING
-    # Merged PR from all-states query has UNKNOWN check status (no statusCheckRollup)
+    assert prs_by_number[1].check_status == CiStatus.PASSING
     assert prs_by_number[2].state == PrState.MERGED
-    assert prs_by_number[2].check_status == CheckStatus.UNKNOWN
+    assert prs_by_number[2].check_status == CiStatus.UNKNOWN
 
 
 def test_fetch_all_prs_open_data_preferred_over_all() -> None:
-    """Open PR data (with CI status) is preferred over the all-states duplicate."""
     open_prs = [
         {
             "number": 5,
@@ -274,11 +271,10 @@ def test_fetch_all_prs_open_data_preferred_over_all() -> None:
     cg = _make_mock_cg(json.dumps(open_prs), json.dumps(all_prs))
     result = fetch_all_prs(cg)
     assert len(result.prs) == 1
-    assert result.prs[0].check_status == CheckStatus.FAILING
+    assert result.prs[0].check_status == CiStatus.FAILING
 
 
 def test_fetch_all_prs_open_query_fails_all_succeeds() -> None:
-    """If the open query fails but all-states succeeds, we still get PRs."""
     all_prs = [
         {
             "number": 3,

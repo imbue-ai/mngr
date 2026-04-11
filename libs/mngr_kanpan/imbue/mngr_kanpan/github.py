@@ -9,12 +9,27 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr_kanpan.data_types import CheckStatus
-from imbue.mngr_kanpan.data_types import PrInfo
-from imbue.mngr_kanpan.data_types import PrState
+from imbue.mngr_kanpan.data_source import CiStatus
+from imbue.mngr_kanpan.data_source import PrState
 
 _BASE_FIELDS = "number,title,state,headRefName,url,isDraft"
 _OPEN_FIELDS = f"{_BASE_FIELDS},statusCheckRollup"
+
+
+class PrInfo(FrozenModel):
+    """GitHub pull request information from the gh CLI.
+
+    This is the raw data structure used internally by the fetch layer.
+    Data sources convert this to PrField for the board.
+    """
+
+    number: int = Field(description="PR number")
+    title: str = Field(description="PR title")
+    state: PrState = Field(description="PR state (open/closed/merged)")
+    url: str = Field(description="PR URL")
+    head_branch: str = Field(description="Head branch name of the PR")
+    check_status: CiStatus = Field(description="Aggregate CI check status")
+    is_draft: bool = Field(description="Whether the PR is a draft")
 
 
 class FetchPrsResult(FrozenModel):
@@ -149,14 +164,14 @@ def _parse_pr_state(state_str: str) -> PrState:
 
 
 @pure
-def _parse_check_status(rollup: list[dict[str, Any]] | None) -> CheckStatus:
+def _parse_check_status(rollup: list[dict[str, Any]] | None) -> CiStatus:
     """Derive aggregate check status from statusCheckRollup.
 
     Priority: any failure -> FAILING, any pending -> PENDING,
     all success -> PASSING, empty/None -> UNKNOWN.
     """
     if not rollup:
-        return CheckStatus.UNKNOWN
+        return CiStatus.UNKNOWN
 
     has_pending = False
     for check in rollup:
@@ -164,10 +179,10 @@ def _parse_check_status(rollup: list[dict[str, Any]] | None) -> CheckStatus:
         status = (check.get("status") or "").upper()
 
         if conclusion in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"):
-            return CheckStatus.FAILING
+            return CiStatus.FAILING
         if status != "COMPLETED":
             has_pending = True
 
     if has_pending:
-        return CheckStatus.PENDING
-    return CheckStatus.PASSING
+        return CiStatus.PENDING
+    return CiStatus.PASSING
