@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import _relay_data
+from imbue.minds.desktop_client.ssh_tunnel import _shell_quote_remote_path
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_is_active
 from imbue.minds.desktop_client.ssh_tunnel import _ssh_connection_transport
 from imbue.minds.desktop_client.ssh_tunnel import _tunnel_accept_loop
@@ -333,6 +334,34 @@ def test_tunnel_accept_loop_shutdown_event_stops_loop(short_tmp_path: Path) -> N
     shutdown_event.set()
     accept_thread.join(timeout=10.0)
     assert not accept_thread.is_alive()
+
+
+# -- _shell_quote_remote_path tests --
+
+
+def test_shell_quote_remote_path_tilde_slash() -> None:
+    """Paths starting with ~/ are converted to use $HOME/ for shell expansion."""
+    result = _shell_quote_remote_path("~/.mngr/agents/agent-123")
+    assert result == '"$HOME/.mngr/agents/agent-123"'
+
+
+def test_shell_quote_remote_path_tilde_only() -> None:
+    """A bare '~' path is converted to $HOME."""
+    result = _shell_quote_remote_path("~")
+    assert result == '"$HOME"'
+
+
+def test_shell_quote_remote_path_absolute() -> None:
+    """Absolute paths are passed through shlex.quote (safe chars are returned unquoted)."""
+    result = _shell_quote_remote_path("/home/user/.mngr/agents/agent-123")
+    # Path has only safe chars, shlex.quote leaves it unquoted
+    assert result == "/home/user/.mngr/agents/agent-123"
+
+
+def test_shell_quote_remote_path_plain_name() -> None:
+    """Plain names without tilde are shell-quoted normally."""
+    result = _shell_quote_remote_path("agents/agent-123")
+    assert result == "agents/agent-123"
 
 
 # -- write_api_url_to_local tests --

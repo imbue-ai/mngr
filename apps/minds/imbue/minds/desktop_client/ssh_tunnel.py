@@ -248,9 +248,9 @@ class SSHTunnelManager(MutableModel):
         with self._lock:
             client = self._get_or_create_connection(ssh_info)
 
-        quoted_dir = shlex.quote(agent_state_dir)
+        shell_dir = _shell_quote_remote_path(agent_state_dir)
         quoted_url = shlex.quote(url)
-        command = f"mkdir -p {quoted_dir} && printf '%s' {quoted_url} > {quoted_dir}/minds_api_url"
+        command = f"mkdir -p {shell_dir} && printf '%s' {quoted_url} > {shell_dir}/minds_api_url"
         try:
             _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
             _stdin.close()
@@ -569,6 +569,21 @@ def _reverse_tunnel_accept_loop(
             daemon=True,
             name=f"reverse-relay-127.0.0.1:{local_port}",
         ).start()
+
+
+def _shell_quote_remote_path(path: str) -> str:
+    """Produce a shell-safe argument for a remote path, preserving tilde expansion.
+
+    shlex.quote wraps strings in single quotes, which prevents tilde expansion on
+    the remote shell. Paths starting with '~/' are rewritten to use '$HOME/'
+    in a double-quoted string so the remote shell expands the variable correctly.
+    The remainder of the path after '~/' is the agent ID (UUID format: alphanumeric
+    and hyphens), which is safe to embed in a double-quoted shell string.
+    """
+    if path == "~" or path.startswith("~/"):
+        rest = path[1:]  # strip the leading '~', keeping the '/' if present
+        return f'"$HOME{rest}"'
+    return shlex.quote(path)
 
 
 def parse_url_host_port(url: str) -> tuple[str, int]:
