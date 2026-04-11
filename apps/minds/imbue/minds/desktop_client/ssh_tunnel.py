@@ -290,48 +290,56 @@ class SSHTunnelManager(MutableModel):
         )
         self._health_check_thread.start()
 
+    def _check_and_repair_tunnels(self) -> None:
+        """Check all reverse tunnels and re-establish any that are broken.
+
+        Called once per health-check iteration. Broken tunnels are re-established
+        and URL files on the remote hosts are updated with the new port.
+        """
+        with self._lock:
+            tunnels = dict(self._reverse_tunnels)
+
+        for conn_key, tunnel_info in tunnels.items():
+            with self._lock:
+                client = self._connections.get(conn_key)
+
+            is_alive = client is not None and _ssh_connection_is_active(client)
+            if is_alive:
+                continue
+
+            logger.info("Reverse tunnel to {} is broken, re-establishing...", conn_key)
+            try:
+                first_dir = tunnel_info.agent_state_dirs[0] if tunnel_info.agent_state_dirs else ""
+                new_remote_port = self.setup_reverse_tunnel(
+                    ssh_info=tunnel_info.ssh_info,
+                    local_port=tunnel_info.local_port,
+                    agent_state_dir=first_dir,
+                )
+                # Re-register remaining agent state dirs so they are tracked
+                # in the new tunnel's ReverseTunnelInfo (setup_reverse_tunnel
+                # appends dirs to an existing active tunnel without creating a new one).
+                for extra_dir in tunnel_info.agent_state_dirs[1:]:
+                    self.setup_reverse_tunnel(
+                        ssh_info=tunnel_info.ssh_info,
+                        local_port=tunnel_info.local_port,
+                        agent_state_dir=extra_dir,
+                    )
+                # Update the URL file for all agents sharing this tunnel
+                new_url = f"http://127.0.0.1:{new_remote_port}"
+                for agent_state_dir in tunnel_info.agent_state_dirs:
+                    self.write_api_url_to_remote(
+                        ssh_info=tunnel_info.ssh_info,
+                        agent_state_dir=agent_state_dir,
+                        url=new_url,
+                    )
+                logger.info("Reverse tunnel re-established to {} on port {}", conn_key, new_remote_port)
+            except (paramiko.SSHException, OSError, SSHTunnelError) as e:
+                logger.warning("Failed to re-establish reverse tunnel to {}: {}", conn_key, e)
+
     def _reverse_tunnel_health_check_loop(self) -> None:
         """Periodically check reverse tunnels and re-establish broken ones."""
         while not self._shutdown_event.wait(timeout=_REVERSE_TUNNEL_HEALTH_CHECK_SECONDS):
-            with self._lock:
-                tunnels = dict(self._reverse_tunnels)
-
-            for conn_key, tunnel_info in tunnels.items():
-                with self._lock:
-                    client = self._connections.get(conn_key)
-
-                is_alive = client is not None and _ssh_connection_is_active(client)
-                if is_alive:
-                    continue
-
-                logger.info("Reverse tunnel to {} is broken, re-establishing...", conn_key)
-                try:
-                    first_dir = tunnel_info.agent_state_dirs[0] if tunnel_info.agent_state_dirs else ""
-                    new_remote_port = self.setup_reverse_tunnel(
-                        ssh_info=tunnel_info.ssh_info,
-                        local_port=tunnel_info.local_port,
-                        agent_state_dir=first_dir,
-                    )
-                    # Re-register remaining agent state dirs so they are tracked
-                    # in the new tunnel's ReverseTunnelInfo (setup_reverse_tunnel
-                    # appends dirs to an existing active tunnel without creating a new one).
-                    for extra_dir in tunnel_info.agent_state_dirs[1:]:
-                        self.setup_reverse_tunnel(
-                            ssh_info=tunnel_info.ssh_info,
-                            local_port=tunnel_info.local_port,
-                            agent_state_dir=extra_dir,
-                        )
-                    # Update the URL file for all agents sharing this tunnel
-                    new_url = f"http://127.0.0.1:{new_remote_port}"
-                    for agent_state_dir in tunnel_info.agent_state_dirs:
-                        self.write_api_url_to_remote(
-                            ssh_info=tunnel_info.ssh_info,
-                            agent_state_dir=agent_state_dir,
-                            url=new_url,
-                        )
-                    logger.info("Reverse tunnel re-established to {} on port {}", conn_key, new_remote_port)
-                except (paramiko.SSHException, OSError, SSHTunnelError) as e:
-                    logger.warning("Failed to re-establish reverse tunnel to {}: {}", conn_key, e)
+            self._check_and_repair_tunnels()
 
     def cleanup(self) -> None:
         """Shut down all tunnels (forward and reverse) and SSH connections."""

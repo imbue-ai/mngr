@@ -396,3 +396,140 @@ def test_tunnel_manager_health_check_starts_thread() -> None:
     manager.start_reverse_tunnel_health_check()
     assert manager._health_check_thread is first_thread
     manager.cleanup()
+
+
+# -- _check_and_repair_tunnels tests --
+#
+# These tests call _check_and_repair_tunnels directly (bypassing the
+# 30-second wait in the health check loop) to exercise the repair logic.
+
+
+class _FakeSSHTunnelManager(SSHTunnelManager):
+    """Test double that overrides setup_reverse_tunnel and write_api_url_to_remote
+    so tests can exercise _check_and_repair_tunnels without a real SSH server.
+    """
+
+    _setup_calls: list[tuple[RemoteSSHInfo, int, str]] = []
+    _write_calls: list[tuple[RemoteSSHInfo, str, str]] = []
+    _setup_port: int = 9999
+    _setup_raise: type[Exception] | None = None
+
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        agent_state_dir: str,
+    ) -> int:
+        self._setup_calls.append((ssh_info, local_port, agent_state_dir))
+        if self._setup_raise is not None:
+            raise self._setup_raise("simulated failure")
+        return self._setup_port
+
+    def write_api_url_to_remote(
+        self,
+        ssh_info: RemoteSSHInfo,
+        agent_state_dir: str,
+        url: str,
+    ) -> None:
+        self._write_calls.append((ssh_info, agent_state_dir, url))
+
+
+def _make_fake_reverse_tunnel_manager(
+    remote_port: int = 9999,
+    raise_on_setup: type[Exception] | None = None,
+) -> _FakeSSHTunnelManager:
+    """Create a _FakeSSHTunnelManager with fresh call lists."""
+    mgr = _FakeSSHTunnelManager()
+    mgr._setup_calls = []
+    mgr._write_calls = []
+    mgr._setup_port = remote_port
+    mgr._setup_raise = raise_on_setup
+    return mgr
+
+
+def _sample_ssh_info(tmp_path: Path) -> RemoteSSHInfo:
+    return RemoteSSHInfo(
+        user="root",
+        host="192.0.2.1",
+        port=22,
+        key_path=tmp_path / "key",
+    )
+
+
+def test_check_and_repair_tunnels_does_nothing_when_no_tunnels() -> None:
+    """When no reverse tunnels are registered, _check_and_repair_tunnels is a no-op."""
+    manager = _make_fake_reverse_tunnel_manager()
+    manager._check_and_repair_tunnels()
+    assert manager._setup_calls == []
+    assert manager._write_calls == []
+    manager.cleanup()
+
+
+def test_check_and_repair_tunnels_calls_setup_for_broken_tunnel(tmp_path: Path) -> None:
+    """_check_and_repair_tunnels calls setup_reverse_tunnel for tunnels with no active client."""
+    manager = _make_fake_reverse_tunnel_manager(remote_port=12345)
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = "192.0.2.1:22"
+    tunnel_info = ReverseTunnelInfo(
+        ssh_info=ssh_info,
+        local_port=8420,
+        remote_port=5000,
+        agent_state_dirs=["~/.mngr/agents/agent-a", "~/.mngr/agents/agent-b"],
+    )
+    with manager._lock:
+        manager._reverse_tunnels[conn_key] = tunnel_info
+
+    manager._check_and_repair_tunnels()
+
+    # setup_reverse_tunnel called for first dir, then again for the second dir
+    assert len(manager._setup_calls) == 2
+    assert manager._setup_calls[0][2] == "~/.mngr/agents/agent-a"
+    assert manager._setup_calls[1][2] == "~/.mngr/agents/agent-b"
+    # write_api_url_to_remote called for each agent state dir
+    assert len(manager._write_calls) == 2
+    for _, _agent_dir, url in manager._write_calls:
+        assert url == "http://127.0.0.1:12345"
+    manager.cleanup()
+
+
+def test_check_and_repair_tunnels_handles_setup_error(tmp_path: Path) -> None:
+    """When setup_reverse_tunnel raises SSHTunnelError, the error is logged and not propagated."""
+    manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = "192.0.2.1:22"
+    tunnel_info = ReverseTunnelInfo(
+        ssh_info=ssh_info,
+        local_port=8420,
+        remote_port=5000,
+        agent_state_dirs=["~/.mngr/agents/agent-a"],
+    )
+    with manager._lock:
+        manager._reverse_tunnels[conn_key] = tunnel_info
+
+    manager._check_and_repair_tunnels()
+
+    assert len(manager._setup_calls) == 1
+    assert manager._write_calls == []
+    manager.cleanup()
+
+
+def test_check_and_repair_tunnels_empty_agent_dirs(tmp_path: Path) -> None:
+    """When agent_state_dirs is empty, setup is called with an empty string."""
+    manager = _make_fake_reverse_tunnel_manager(remote_port=7777)
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = "192.0.2.1:22"
+    tunnel_info = ReverseTunnelInfo(
+        ssh_info=ssh_info,
+        local_port=8420,
+        remote_port=5000,
+        agent_state_dirs=[],
+    )
+    with manager._lock:
+        manager._reverse_tunnels[conn_key] = tunnel_info
+
+    manager._check_and_repair_tunnels()
+
+    assert len(manager._setup_calls) == 1
+    assert manager._setup_calls[0][2] == ""
+    assert manager._write_calls == []
+    manager.cleanup()
