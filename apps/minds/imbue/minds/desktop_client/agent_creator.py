@@ -188,7 +188,7 @@ def _build_mngr_create_command(
     DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: not yet supported
+    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
 
     For modes that create a separate host (LOCAL, LIMA, CLOUD), the agent address
     uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
@@ -203,7 +203,7 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(agent_name)}"
+            address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -230,7 +230,7 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "lima"])
         case LaunchMode.CLOUD:
-            raise NotImplementedError("Cloud launch mode is not yet supported")
+            mngr_command.extend(["--new-host", "--template", "vultr"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -453,7 +453,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (GitCloneError, GitOperationError, MngrCommandError, NotImplementedError, ValueError, OSError) as e:
+        except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:

@@ -140,13 +140,20 @@ def test_build_mngr_create_command_lima_mode() -> None:
     assert cmd[2] == "test-agent@test-agent-host.lima"
 
 
-def test_build_mngr_create_command_cloud_mode_raises() -> None:
-    with pytest.raises(NotImplementedError, match="Cloud launch mode"):
-        _build_mngr_create_command(
-            launch_mode=LaunchMode.CLOUD,
-            agent_name=AgentName("test-agent"),
-            agent_id=AgentId(),
-        )
+def test_build_mngr_create_command_cloud_mode() -> None:
+    cmd = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--template" in cmd
+    assert "vultr" in cmd
+    assert "main" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
+    assert "--new-host" in cmd
+    # CLOUD mode: address includes host name with vultr provider suffix
+    assert cmd[2] == "test-agent@test-agent-host.vultr"
 
 
 # -- clone_git_repo tests --
