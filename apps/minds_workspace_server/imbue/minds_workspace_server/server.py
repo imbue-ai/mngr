@@ -398,7 +398,7 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
 
     try:
         agent_name = create_request.name
-        selected_agent_id = create_request.selected_agent_id or agent_manager._own_agent_id
+        selected_agent_id = create_request.selected_agent_id or agent_manager.get_own_agent_id()
         agent_id = agent_manager.create_worktree_agent(agent_name, selected_agent_id)
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),

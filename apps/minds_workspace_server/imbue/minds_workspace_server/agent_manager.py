@@ -154,6 +154,10 @@ class AgentManager:
         with self._lock:
             return self._log_queues.get(agent_id)
 
+    def get_own_agent_id(self) -> str:
+        """Return this server's own agent ID from the environment."""
+        return self._own_agent_id
+
     def generate_random_name(self) -> str:
         """Generate a random agent name using mngr's name generator."""
         return str(generate_agent_name(AgentNameStyle.COOLNAME))
