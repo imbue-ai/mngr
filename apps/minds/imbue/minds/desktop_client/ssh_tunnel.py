@@ -312,6 +312,15 @@ class SSHTunnelManager(MutableModel):
                         local_port=tunnel_info.local_port,
                         agent_state_dir=first_dir,
                     )
+                    # Re-register remaining agent state dirs so they are tracked
+                    # in the new tunnel's ReverseTunnelInfo (setup_reverse_tunnel
+                    # appends dirs to an existing active tunnel without creating a new one).
+                    for extra_dir in tunnel_info.agent_state_dirs[1:]:
+                        self.setup_reverse_tunnel(
+                            ssh_info=tunnel_info.ssh_info,
+                            local_port=tunnel_info.local_port,
+                            agent_state_dir=extra_dir,
+                        )
                     # Update the URL file for all agents sharing this tunnel
                     new_url = f"http://127.0.0.1:{new_remote_port}"
                     for agent_state_dir in tunnel_info.agent_state_dirs:
