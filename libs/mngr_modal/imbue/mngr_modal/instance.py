@@ -82,8 +82,6 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
-from imbue.mngr.providers.listing_utils import parse_optional_float
-from imbue.mngr.providers.listing_utils import parse_optional_int
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
@@ -246,16 +244,6 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
 
     return wrapper
 
-
-# =========================================================================
-# Listing Data Collection Helpers (imported from shared module)
-# =========================================================================
-
-# Re-export for backward compatibility within this module
-_build_listing_collection_script = build_listing_collection_script
-_parse_listing_collection_output = parse_listing_collection_output
-_parse_optional_int = parse_optional_int
-_parse_optional_float = parse_optional_float
 
 
 class SandboxConfig(HostConfig):
@@ -2517,7 +2505,7 @@ log "=== Shutdown script completed ==="
         prefix = self.mngr_ctx.config.prefix
 
         # Build a shell script that collects everything we need
-        script = _build_listing_collection_script(host_dir, prefix)
+        script = build_listing_collection_script(host_dir, prefix)
 
         with log_span("Collecting listing data via single SSH command", host_id=str(host.id)):
             result = host.execute_idempotent_command(script, timeout_seconds=30.0)
@@ -2547,7 +2535,7 @@ log "=== Shutdown script completed ==="
                         f"Failed to collect listing data from host {host.id}: {result.stdout}\n{result.stderr}"
                     )
 
-        return _parse_listing_collection_output(result.stdout)
+        return parse_listing_collection_output(result.stdout)
 
     def _build_host_details_from_raw(
         self,

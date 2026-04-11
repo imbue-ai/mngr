@@ -51,12 +51,12 @@ from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
+from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import parse_optional_float
+from imbue.mngr.providers.listing_utils import parse_optional_int
 from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
-from imbue.mngr_modal.instance import _build_listing_collection_script
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
-from imbue.mngr_modal.instance import _parse_optional_float
-from imbue.mngr_modal.instance import _parse_optional_int
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -1753,16 +1753,16 @@ def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
     ("value", "expected"),
     [("42", 42), ("  123  ", 123), ("0", 0), ("", None), ("   ", None), ("not_a_number", None), ("12.5", None)],
 )
-def test_parse_optional_int(value: str, expected: int | None) -> None:
-    assert _parse_optional_int(value) == expected
+def testparse_optional_int(value: str, expected: int | None) -> None:
+    assert parse_optional_int(value) == expected
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [("3.14", 3.14), ("  42.0  ", 42.0), ("0", 0.0), ("100", 100.0), ("", None), ("   ", None), ("abc", None)],
 )
-def test_parse_optional_float(value: str, expected: float | None) -> None:
-    assert _parse_optional_float(value) == expected
+def testparse_optional_float(value: str, expected: float | None) -> None:
+    assert parse_optional_float(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -2525,6 +2525,6 @@ def test_discover_hosts_empty_volume_and_no_sandboxes(
 
 
 def test_build_listing_script_uses_host_dir() -> None:
-    script = _build_listing_collection_script("/custom/host/dir", "test-prefix-")
+    script = build_listing_collection_script("/custom/host/dir", "test-prefix-")
     assert "/custom/host/dir" in script
     assert "test-prefix-" in script
