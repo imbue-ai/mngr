@@ -33,7 +33,7 @@ class ClaudeDirectoryNotTrustedError(ConfigError):
         self.source_path = source_path
         super().__init__(
             f"Source directory {source_path} is not trusted by Claude Code. "
-            f"Fix with: mngr claude dismiss trust {source_path}"
+            f"Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
 
 
@@ -43,7 +43,7 @@ class ClaudeEffortCalloutNotDismissedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's effort callout has not been dismissed in ~/.claude.json. "
-            "Fix with: mngr claude dismiss effort-callout"
+            "Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
 
 
@@ -52,7 +52,8 @@ class ClaudeOnboardingNotCompletedError(ConfigError):
 
     def __init__(self) -> None:
         super().__init__(
-            "Claude Code onboarding has not been completed in ~/.claude.json. Fix with: mngr claude dismiss onboarding"
+            "Claude Code onboarding has not been completed in ~/.claude.json. "
+            "Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
 
 
@@ -62,7 +63,7 @@ class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's dangerous-mode safety warning has not been dismissed in ~/.claude.json. "
-            "Fix with: mngr claude dismiss all <path>"
+            "Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
 
 
@@ -420,21 +421,25 @@ def warn_undismissed_claude_dialogs(config_path: Path, source_path: Path) -> lis
     """Check each dialog and return warning messages for any that are not dismissed.
 
     Returns a list of human-readable warning strings, each containing the
-    ``mngr claude dismiss`` command needed to fix the issue. Returns an empty
+    ``mngr config set`` command needed to fix the issue. Returns an empty
     list when every dialog is already dismissed.
     """
     warnings: list[str] = []
     if not is_source_directory_trusted(config_path, source_path):
         warnings.append(
             f"Source directory {source_path} is not trusted by Claude Code. "
-            f"Fix with: mngr claude dismiss trust {source_path}"
+            f"Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
     if not is_effort_callout_dismissed(config_path):
         warnings.append(
-            "Claude Code's effort callout has not been dismissed. Fix with: mngr claude dismiss effort-callout"
+            "Claude Code's effort callout has not been dismissed. "
+            "Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
         )
     if not is_onboarding_completed(config_path):
-        warnings.append("Claude Code onboarding has not been completed. Fix with: mngr claude dismiss onboarding")
+        warnings.append(
+            "Claude Code onboarding has not been completed. "
+            "Fix with: mngr config set local_system_mutations.accept_permission_dialogs YES"
+        )
     return warnings
 
 
