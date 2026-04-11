@@ -239,6 +239,7 @@ def test_discover_hosts_and_agents_disconnects_hosts(
     mock_host = MagicMock(spec=HostInterface)
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
+    mock_host.get_state.return_value = HostState.RUNNING
     mock_host.discover_agents.return_value = []
 
     provider.mock_hosts = [mock_host]
