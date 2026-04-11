@@ -704,6 +704,7 @@ class VpsDockerProvider(BaseProviderInstance):
             else:
                 non_context_args.append(arg)
 
+        logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
         if context_args:
             # Upload the build context directory to the VPS
             local_context = Path(context_args[-1])
@@ -712,7 +713,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
                 docker_ssh.upload_directory(local_context, remote_build_dir)
 
-            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
             with log_span("Building Docker image on VPS"):
                 docker_ssh.build_image(
                     tag=build_tag,
@@ -723,7 +723,6 @@ class VpsDockerProvider(BaseProviderInstance):
         else:
             # No local context -- pass all args to docker build with a minimal context
             docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
-            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
             with log_span("Building Docker image on VPS"):
                 docker_ssh.build_image(
                     tag=build_tag,
