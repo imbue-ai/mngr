@@ -331,3 +331,30 @@ def test_tunnel_accept_loop_shutdown_event_stops_loop(short_tmp_path: Path) -> N
     shutdown_event.set()
     accept_thread.join(timeout=10.0)
     assert not accept_thread.is_alive()
+
+
+# -- write_api_url_to_local tests --
+
+
+def test_write_api_url_to_local_creates_file(tmp_path: Path) -> None:
+    state_dir = tmp_path / "agents" / "test-agent"
+    SSHTunnelManager.write_api_url_to_local(state_dir, "http://127.0.0.1:8420")
+
+    url_file = state_dir / "minds_api_url"
+    assert url_file.exists()
+    assert url_file.read_text() == "http://127.0.0.1:8420"
+
+
+def test_write_api_url_to_local_creates_parent_dirs(tmp_path: Path) -> None:
+    state_dir = tmp_path / "deep" / "nested" / "path"
+    SSHTunnelManager.write_api_url_to_local(state_dir, "http://127.0.0.1:9000")
+
+    assert (state_dir / "minds_api_url").read_text() == "http://127.0.0.1:9000"
+
+
+def test_write_api_url_to_local_overwrites_existing(tmp_path: Path) -> None:
+    state_dir = tmp_path / "agents" / "test-agent"
+    SSHTunnelManager.write_api_url_to_local(state_dir, "http://127.0.0.1:8420")
+    SSHTunnelManager.write_api_url_to_local(state_dir, "http://127.0.0.1:9999")
+
+    assert (state_dir / "minds_api_url").read_text() == "http://127.0.0.1:9999"

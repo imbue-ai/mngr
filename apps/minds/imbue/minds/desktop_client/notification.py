@@ -142,7 +142,7 @@ def _run_tkinter_toast(
             child.bind("<Button-1>", lambda _event: root.destroy())
 
         root.mainloop()
-    except tk.TclError as e:
+    except (tk.TclError, OSError, RuntimeError) as e:
         logger.warning("Failed to show tkinter notification: {}", e)
 
 
