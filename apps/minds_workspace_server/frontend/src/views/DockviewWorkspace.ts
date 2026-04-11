@@ -27,7 +27,7 @@ import { selectAgent } from "../navigation";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-type PanelType = "chat" | "terminal" | "iframe" | "subagent" | "proto-agent";
+type PanelType = "chat" | "iframe" | "subagent" | "proto-agent";
 
 interface PanelParams {
   panelType: PanelType;
