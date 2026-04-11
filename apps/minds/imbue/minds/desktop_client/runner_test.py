@@ -1,8 +1,12 @@
 import os
 from pathlib import Path
 
+from pydantic import PrivateAttr
+
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
+from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.mngr.primitives import AgentId
 
@@ -86,3 +90,90 @@ def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> No
     agent_id = AgentId()
     handler(agent_id, None)
     tunnel_manager.cleanup()
+
+
+class _FakeTunnelManager(SSHTunnelManager):
+    """Test double for SSHTunnelManager that records calls instead of making SSH connections."""
+
+    _fake_remote_port: int = PrivateAttr(default=55000)
+    _fake_fail: bool = PrivateAttr(default=False)
+    _reverse_tunnel_calls: list[tuple[RemoteSSHInfo, int, str]] = PrivateAttr(default_factory=list)
+    _write_remote_calls: list[tuple[RemoteSSHInfo, str, str]] = PrivateAttr(default_factory=list)
+
+    def model_post_init(self, __context: object) -> None:
+        super().model_post_init(__context)
+
+    @classmethod
+    def create(cls, remote_port: int = 55000, fail: bool = False) -> "_FakeTunnelManager":
+        mgr = cls()
+        mgr._fake_remote_port = remote_port
+        mgr._fake_fail = fail
+        return mgr
+
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        agent_state_dir: str,
+    ) -> int:
+        self._reverse_tunnel_calls.append((ssh_info, local_port, agent_state_dir))
+        if self._fake_fail:
+            raise SSHTunnelError("simulated failure")
+        return self._fake_remote_port
+
+    def write_api_url_to_remote(
+        self,
+        ssh_info: RemoteSSHInfo,
+        agent_state_dir: str,
+        url: str,
+    ) -> None:
+        self._write_remote_calls.append((ssh_info, agent_state_dir, url))
+
+
+def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
+    """Verify remote agents get a reverse tunnel set up and URL written to remote."""
+    fake_manager = _FakeTunnelManager.create(remote_port=12345)
+    ssh_info = RemoteSSHInfo(
+        user="root",
+        host="192.168.1.100",
+        port=22,
+        key_path=tmp_path / "key",
+    )
+    handler = AgentDiscoveryHandler(
+        tunnel_manager=fake_manager,
+        server_port=8420,
+        mngr_host_dir=tmp_path,
+    )
+    agent_id = AgentId()
+    handler(agent_id, ssh_info)
+
+    assert len(fake_manager._reverse_tunnel_calls) == 1
+    _, local_port, agent_state_dir = fake_manager._reverse_tunnel_calls[0]
+    assert local_port == 8420
+    assert str(agent_id) in agent_state_dir
+
+    assert len(fake_manager._write_remote_calls) == 1
+    _, _, url = fake_manager._write_remote_calls[0]
+    assert url == "http://127.0.0.1:12345"
+    fake_manager.cleanup()
+
+
+def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Path) -> None:
+    """Verify SSHTunnelError during remote setup is caught and logged, not propagated."""
+    fake_manager = _FakeTunnelManager.create(fail=True)
+    ssh_info = RemoteSSHInfo(
+        user="root",
+        host="192.168.1.100",
+        port=22,
+        key_path=tmp_path / "key",
+    )
+    handler = AgentDiscoveryHandler(
+        tunnel_manager=fake_manager,
+        server_port=8420,
+        mngr_host_dir=tmp_path,
+    )
+    agent_id = AgentId()
+    # Should not raise even though setup_reverse_tunnel raises SSHTunnelError
+    handler(agent_id, ssh_info)
+    assert len(fake_manager._write_remote_calls) == 0
+    fake_manager.cleanup()

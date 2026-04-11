@@ -92,3 +92,9 @@ def test_dispatch_electron_via_dispatcher(capsys: CaptureFixture[str]) -> None:
     assert event["agent_name"] == "agent-x"
 
 
+def test_dispatcher_is_electron_false_does_not_raise() -> None:
+    """Verify NotificationDispatcher can be constructed in non-electron mode."""
+    dispatcher = NotificationDispatcher(is_electron=False)
+    assert dispatcher.is_electron is False
+
+
