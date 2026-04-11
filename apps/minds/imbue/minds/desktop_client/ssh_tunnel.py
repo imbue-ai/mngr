@@ -266,6 +266,7 @@ class SSHTunnelManager(MutableModel):
                     )
             finally:
                 stdout.channel.close()
+                stdout.close()
                 stderr.close()
         except (paramiko.SSHException, OSError) as e:
             logger.warning("Failed to write API URL to remote {}: {}", ssh_info.host, e)
