@@ -569,11 +569,14 @@ class AgentManager:
 
     def _on_applications_changed(self, agent_id: str) -> None:
         """Called when an agent's applications.toml changes."""
-        agent = self._agents.get(agent_id)
-        if agent is None or agent.work_dir is None:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            work_dir = agent.work_dir if agent is not None else None
+
+        if work_dir is None:
             return
 
-        toml_path = Path(agent.work_dir) / _APPLICATIONS_TOML_FILENAME
+        toml_path = Path(work_dir) / _APPLICATIONS_TOML_FILENAME
         self._read_applications(agent_id, toml_path)
         self._broadcaster.broadcast_applications_updated(
             self.get_applications_serialized()
