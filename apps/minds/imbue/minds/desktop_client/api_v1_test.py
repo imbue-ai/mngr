@@ -362,7 +362,15 @@ def test_cloudflare_enable_returns_404_for_unknown_server(tmp_path: Path) -> Non
 
 
 def test_telegram_setup_accepts_empty_body(tmp_path: Path) -> None:
-    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    """Pre-saves credentials to avoid spawning a browser thread."""
+    client, agent_id, api_key, paths = _create_test_api_client_with_telegram(tmp_path)
+
+    credentials = TelegramBotCredentials(
+        bot_token=SecretStr("123:fake_token_for_empty_body"),
+        bot_username="empty_body_bot",
+    )
+    save_agent_bot_credentials(paths.data_dir, agent_id, credentials)
+
     response = client.post(
         f"/api/v1/agents/{agent_id}/telegram",
         headers=_auth_headers(api_key),
@@ -371,7 +379,15 @@ def test_telegram_setup_accepts_empty_body(tmp_path: Path) -> None:
 
 
 def test_telegram_setup_with_invalid_json_body(tmp_path: Path) -> None:
-    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    """Pre-saves credentials to avoid spawning a browser thread."""
+    client, agent_id, api_key, paths = _create_test_api_client_with_telegram(tmp_path)
+
+    credentials = TelegramBotCredentials(
+        bot_token=SecretStr("123:fake_token_for_invalid_json"),
+        bot_username="invalid_json_bot",
+    )
+    save_agent_bot_credentials(paths.data_dir, agent_id, credentials)
+
     response = client.post(
         f"/api/v1/agents/{agent_id}/telegram",
         content="not json",
@@ -615,8 +631,19 @@ def test_notification_rejects_non_string_title(tmp_path: Path) -> None:
 
 
 def test_telegram_setup_with_non_dict_json_body(tmp_path: Path) -> None:
-    """When the telegram setup body is valid JSON but not a dict, setup still proceeds."""
-    client, agent_id, api_key, _paths = _create_test_api_client_with_telegram(tmp_path)
+    """When the telegram setup body is valid JSON but not a dict, setup still proceeds.
+
+    Pre-saves bot credentials so the orchestrator detects them immediately
+    and does not spawn a background thread that opens a real browser.
+    """
+    client, agent_id, api_key, paths = _create_test_api_client_with_telegram(tmp_path)
+
+    credentials = TelegramBotCredentials(
+        bot_token=SecretStr("123:fake_token_for_non_dict_test"),
+        bot_username="non_dict_test_bot",
+    )
+    save_agent_bot_credentials(paths.data_dir, agent_id, credentials)
+
     response = client.post(
         f"/api/v1/agents/{agent_id}/telegram",
         content="42",
