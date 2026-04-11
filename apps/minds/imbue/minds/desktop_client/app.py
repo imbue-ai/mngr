@@ -1108,8 +1108,10 @@ def create_desktop_client(
     When telegram_orchestrator is provided, the landing page shows Telegram setup
     buttons and the /api/agents/{agent_id}/telegram/* endpoints are available.
 
-    When notification_dispatcher and paths are provided, the /api/v1/ REST API
-    router is mounted with API key authentication and notification support.
+    When paths is provided, the /api/v1/ REST API router is mounted with API
+    key authentication. The notification endpoint within the router additionally
+    requires notification_dispatcher to be provided; without it that endpoint
+    returns 501.
     """
     is_externally_managed_client = http_client is not None
 
