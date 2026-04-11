@@ -208,7 +208,10 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(2))
+    # 3 = run_ssh (subprocess.run), upload_directory (subprocess.run),
+    #     run_ssh_streaming (subprocess.Popen) -- all in docker_over_ssh.py,
+    #     the low-level SSH transport layer where direct subprocess is appropriate
+    rc.check_direct_subprocess(_DIR, snapshot(3))
 
 
 # --- AST-based ratchets ---

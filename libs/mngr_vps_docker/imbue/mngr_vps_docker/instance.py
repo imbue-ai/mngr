@@ -1,4 +1,6 @@
 import json
+import shutil
+import tempfile
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -14,6 +16,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -74,23 +77,33 @@ def _remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: i
     known_hosts_path.write_text("".join(filtered))
 
 
+class _ParsedVpsBuildOptions(FrozenModel):
+    """Result of parsing VPS-specific build args from Docker build args."""
+
+    region: str = Field(description="VPS region")
+    plan: str = Field(description="VPS plan")
+    os_id: int = Field(description="VPS OS image ID")
+    git_depth: int | None = Field(default=None, description="Git clone depth for build context, or None for full clone")
+    docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
+
+
 def _parse_build_args(
     build_args: Sequence[str] | None,
     *,
     default_region: str,
     default_plan: str,
     default_os_id: int,
-) -> tuple[str, str, int, tuple[str, ...]]:
+) -> _ParsedVpsBuildOptions:
     """Parse build args, separating VPS provisioning args from Docker build args.
 
     VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
+    ``--git-depth=N`` controls the git clone depth for the build context.
     Everything else is passed through to docker build on the VPS.
-
-    Returns (region, plan, os_id, docker_build_args).
     """
     region = default_region
     plan = default_plan
     os_id = default_os_id
+    git_depth: int | None = None
     docker_build_args: list[str] = []
 
     if build_args:
@@ -101,12 +114,20 @@ def _parse_build_args(
                 plan = arg.split("=", 1)[1]
             elif arg.startswith("--vps-os="):
                 os_id = int(arg.split("=", 1)[1])
+            elif arg.startswith("--git-depth="):
+                git_depth = int(arg.split("=", 1)[1])
             elif arg.startswith("--vps-"):
-                raise MngrError(f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=")
+                raise MngrError(f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth=")
             else:
                 docker_build_args.append(arg)
 
-    return region, plan, os_id, tuple(docker_build_args)
+    return _ParsedVpsBuildOptions(
+        region=region,
+        plan=plan,
+        os_id=os_id,
+        git_depth=git_depth,
+        docker_build_args=tuple(docker_build_args),
+    )
 
 
 def _resolve_dockerfile_paths(
@@ -139,6 +160,13 @@ def _resolve_dockerfile_paths(
                     break
         resolved.append(arg)
     return tuple(resolved)
+
+
+def _emit_docker_build_output(line: str) -> None:
+    """Log a line of docker build output at BUILD level."""
+    stripped = line.strip()
+    if stripped:
+        logger.log(LogLevel.BUILD.value, "{}", stripped, source="docker")
 
 
 # Label constants (same scheme as Docker provider)
@@ -418,7 +446,9 @@ class VpsDockerProvider(BaseProviderInstance):
 
         base_image = str(image) if image else self.config.default_image
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
-        region, plan, os_id, docker_build_args = self._parse_build_args(build_args)
+        parsed = self._parse_build_args(build_args)
+        region, plan, os_id = parsed.region, parsed.plan, parsed.os_id
+        docker_build_args = parsed.docker_build_args
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -448,6 +478,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 base_image=base_image,
                 effective_start_args=effective_start_args,
                 docker_build_args=docker_build_args,
+                git_depth=parsed.git_depth,
                 tags=tags,
                 known_hosts=known_hosts,
                 authorized_keys=authorized_keys,
@@ -560,6 +591,7 @@ class VpsDockerProvider(BaseProviderInstance):
         base_image: str,
         effective_start_args: tuple[str, ...],
         docker_build_args: tuple[str, ...],
+        git_depth: int | None,
         tags: Mapping[str, str] | None,
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
@@ -579,7 +611,7 @@ class VpsDockerProvider(BaseProviderInstance):
             docker_ssh.create_volume(volume_name)
 
         if docker_build_args:
-            base_image = self._build_image_on_vps(docker_ssh, host_id, base_image, docker_build_args)
+            base_image = self._build_image_on_vps(docker_ssh, host_id, base_image, docker_build_args, git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", base_image, source="vps")
             with log_span("Pulling Docker image on VPS"):
@@ -715,11 +747,17 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id: HostId,
         base_image: str,
         docker_build_args: tuple[str, ...],
+        git_depth: int | None,
     ) -> str:
         """Build a Docker image on the VPS from the provided build args.
 
         Uploads the build context (if a local path is referenced) to the VPS
         and runs docker build there. Returns the image tag to use.
+
+        If the local build context is a git worktree, clones it into a temp
+        directory first so the .git directory is self-contained. If git_depth
+        is specified, the clone uses --depth and always creates a temp clone
+        (even for non-worktree repos).
         """
         build_tag = f"mngr-build-{host_id}"
         remote_build_dir = f"/tmp/mngr-build-{host_id.get_uuid().hex}"
@@ -736,38 +774,76 @@ class VpsDockerProvider(BaseProviderInstance):
             else:
                 non_context_args.append(arg)
 
-        logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
+        # If the build context is a git worktree or --git-depth is set,
+        # clone into a temp directory to get a standalone .git directory.
+        local_clone_dir: Path | None = None
         if context_args:
-            # Upload the build context directory to the VPS
-            local_context = Path(context_args[-1])
-            logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")
-            with log_span("Uploading build context to VPS"):
+            local_context = Path(context_args[-1]).resolve()
+            is_worktree = (local_context / ".git").is_file()
+            if is_worktree or git_depth is not None:
+                local_clone_dir = Path(tempfile.mkdtemp(prefix="mngr-vps-build-"))
+                clone_reason = "worktree" if is_worktree else f"--git-depth={git_depth}"
+                logger.log(
+                    LogLevel.BUILD.value,
+                    "Cloning build context locally ({})...",
+                    clone_reason,
+                    source="vps",
+                )
+                clone_cmd = ["git", "clone"]
+                if git_depth is not None:
+                    clone_cmd.extend(["--depth", str(git_depth)])
+                # Use file:// so --depth is honored for local repos
+                clone_cmd.extend([f"file://{local_context}", str(local_clone_dir / "repo")])
+                cg = ConcurrencyGroup(name="git-clone-build-context")
+                with cg:
+                    clone_result = cg.run_process_to_completion(
+                        command=clone_cmd,
+                        is_checked_after=False,
+                        timeout=120.0,
+                    )
+                if clone_result.returncode != 0:
+                    raise ContainerSetupError(
+                        f"Failed to clone build context: {clone_result.stderr.strip()}"
+                    )
+                context_args[-1] = str(local_clone_dir / "repo")
+
+        try:
+            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
+            if context_args:
+                upload_context = Path(context_args[-1])
+                logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")
+                with log_span("Uploading build context to VPS"):
+                    docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
+                    docker_ssh.upload_directory(upload_context, remote_build_dir)
+
+                # Rewrite --file/--dockerfile paths to absolute paths on the VPS.
+                # These are relative to the local build context, but on the VPS
+                # the context lives at remote_build_dir.
+                resolved_build_args = _resolve_dockerfile_paths(non_context_args, remote_build_dir)
+
+                with log_span("Building Docker image on VPS"):
+                    docker_ssh.build_image(
+                        tag=build_tag,
+                        build_context_path=remote_build_dir,
+                        docker_build_args=tuple(resolved_build_args),
+                        timeout_seconds=600.0,
+                        on_output=_emit_docker_build_output,
+                    )
+            else:
+                # No local context -- pass all args to docker build with a minimal context
                 docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
-                docker_ssh.upload_directory(local_context, remote_build_dir)
-
-            # Rewrite --file/--dockerfile paths to absolute paths on the VPS.
-            # These are relative to the local build context, but on the VPS
-            # the context lives at remote_build_dir.
-            resolved_build_args = _resolve_dockerfile_paths(non_context_args, remote_build_dir)
-
-            with log_span("Building Docker image on VPS"):
-                docker_ssh.build_image(
-                    tag=build_tag,
-                    build_context_path=remote_build_dir,
-                    docker_build_args=tuple(resolved_build_args),
-                    timeout_seconds=600.0,
-                )
-        else:
-            # No local context -- pass all args to docker build with a minimal context
-            docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
-            with log_span("Building Docker image on VPS"):
-                docker_ssh.build_image(
-                    tag=build_tag,
-                    build_context_path=remote_build_dir,
-                    docker_build_args=tuple(docker_build_args),
-                    timeout_seconds=600.0,
-                )
-        logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
+                with log_span("Building Docker image on VPS"):
+                    docker_ssh.build_image(
+                        tag=build_tag,
+                        build_context_path=remote_build_dir,
+                        docker_build_args=tuple(docker_build_args),
+                        timeout_seconds=600.0,
+                        on_output=_emit_docker_build_output,
+                    )
+            logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
+        finally:
+            if local_clone_dir is not None:
+                shutil.rmtree(local_clone_dir, ignore_errors=True)
 
         # Clean up remote build directory
         try:
@@ -785,14 +861,8 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> tuple[str, str, int, tuple[str, ...]]:
-        """Parse build args, separating VPS provisioning args from Docker build args.
-
-        VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
-        Everything else is passed through to docker build on the VPS.
-
-        Returns (region, plan, os_id, docker_build_args).
-        """
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> _ParsedVpsBuildOptions:
+        """Parse build args, separating VPS provisioning args from Docker build args."""
         return _parse_build_args(
             build_args,
             default_region=self.config.default_region,

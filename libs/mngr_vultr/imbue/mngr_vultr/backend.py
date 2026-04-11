@@ -138,10 +138,11 @@ class VultrProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (--vps- prefix, consumed by provider):\n"
+            "VPS-specific args (consumed by provider, not passed to docker):\n"
             "  --vps-region=REGION  Vultr region (default: ewr)\n"
             "  --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)\n"
             "  --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)\n"
+            "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
             "Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
