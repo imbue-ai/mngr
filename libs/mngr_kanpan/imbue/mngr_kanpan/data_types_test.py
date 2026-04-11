@@ -183,6 +183,20 @@ def test_kanpan_plugin_config_merge_with_column_order_none_keeps_base() -> None:
     assert merged.column_order == ["name", "state", "ci"]
 
 
+def test_kanpan_plugin_config_merge_with_section_order() -> None:
+    base = KanpanPluginConfig(section_order=[BoardSection.PR_MERGED, BoardSection.MUTED])
+    override = KanpanPluginConfig(section_order=[BoardSection.STILL_COOKING, BoardSection.PR_MERGED])
+    merged = base.merge_with(override)
+    assert merged.section_order == [BoardSection.STILL_COOKING, BoardSection.PR_MERGED]
+
+
+def test_kanpan_plugin_config_merge_with_section_order_none_keeps_base() -> None:
+    base = KanpanPluginConfig(section_order=[BoardSection.PR_MERGED, BoardSection.MUTED])
+    override = KanpanPluginConfig()
+    merged = base.merge_with(override)
+    assert merged.section_order == [BoardSection.PR_MERGED, BoardSection.MUTED]
+
+
 def test_kanpan_plugin_config_merge_with_column_override_replaces() -> None:
     base = KanpanPluginConfig(
         columns={"blocked": CustomColumnConfig(header="OLD")},
