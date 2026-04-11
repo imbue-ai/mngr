@@ -29,6 +29,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -477,6 +478,7 @@ class VpsDockerProvider(BaseProviderInstance):
             host_public_key=vps_host_public_key,
         )
 
+        logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
         with log_span("Creating VPS instance"):
             vps_tags = [f"mngr-host-id={host_id}", f"mngr-provider={self.name}"]
             vps_instance_id = self.vps_client.create_instance(
@@ -489,11 +491,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 tags=vps_tags,
             )
 
+        logger.log(LogLevel.BUILD.value, "Waiting for VPS to become active...", source="vps")
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
                 vps_instance_id,
                 timeout_seconds=self.config.vps_boot_timeout,
             )
+        logger.log(LogLevel.BUILD.value, "VPS active (IP: {})", vps_ip, source="vps")
 
         add_host_to_known_hosts(
             known_hosts_path=self._vps_known_hosts_path(),
@@ -502,13 +506,16 @@ class VpsDockerProvider(BaseProviderInstance):
             public_key=vps_host_public_key,
         )
 
+        logger.log(LogLevel.BUILD.value, "Waiting for SSH to be ready on VPS...", source="vps")
         with log_span("Waiting for VPS SSH"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
         docker_ssh = self._make_docker_ssh(vps_ip)
 
+        logger.log(LogLevel.BUILD.value, "Waiting for cloud-init to complete (Docker installation)...", source="vps")
         with log_span("Waiting for cloud-init (Docker install)"):
             self._wait_for_cloud_init(docker_ssh, timeout_seconds=self.config.docker_install_timeout)
+        logger.log(LogLevel.BUILD.value, "Cloud-init complete, Docker is ready", source="vps")
 
         return vps_instance_id, vps_ip, docker_ssh
 
@@ -542,6 +549,7 @@ class VpsDockerProvider(BaseProviderInstance):
         if docker_build_args:
             base_image = self._build_image_on_vps(docker_ssh, host_id, base_image, docker_build_args)
         else:
+            logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", base_image, source="vps")
             with log_span("Pulling Docker image on VPS"):
                 docker_ssh.pull_image(base_image, timeout_seconds=300.0)
 
@@ -552,6 +560,7 @@ class VpsDockerProvider(BaseProviderInstance):
             LABEL_PROVIDER: str(self.name),
             LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
         }
+        logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
         with log_span("Starting Docker container"):
             container_id = docker_ssh.run_container(
                 image=base_image,
@@ -563,6 +572,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
             )
 
+        logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")
         with log_span("Setting up SSH in container"):
             self._setup_container_ssh(
                 docker_ssh=docker_ssh,
@@ -579,8 +589,10 @@ class VpsDockerProvider(BaseProviderInstance):
             port=self.config.container_ssh_port,
             public_key=container_host_public_key,
         )
+        logger.log(LogLevel.BUILD.value, "Waiting for container SSH to be ready...", source="vps")
         with log_span("Waiting for container SSH"):
             self._wait_for_container_sshd(vps_ip)
+        logger.log(LogLevel.BUILD.value, "Container SSH ready", source="vps")
 
         return container_name, container_id, volume_name
 
@@ -695,10 +707,12 @@ class VpsDockerProvider(BaseProviderInstance):
         if context_args:
             # Upload the build context directory to the VPS
             local_context = Path(context_args[-1])
+            logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")
             with log_span("Uploading build context to VPS"):
                 docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
                 docker_ssh.upload_directory(local_context, remote_build_dir)
 
+            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
             with log_span("Building Docker image on VPS"):
                 docker_ssh.build_image(
                     tag=build_tag,
@@ -706,9 +720,11 @@ class VpsDockerProvider(BaseProviderInstance):
                     docker_build_args=tuple(non_context_args),
                     timeout_seconds=600.0,
                 )
+            logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
         else:
             # No local context -- pass all args to docker build with a minimal context
             docker_ssh.run_ssh(f"mkdir -p {remote_build_dir}")
+            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
             with log_span("Building Docker image on VPS"):
                 docker_ssh.build_image(
                     tag=build_tag,
@@ -716,6 +732,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     docker_build_args=tuple(docker_build_args),
                     timeout_seconds=600.0,
                 )
+            logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
 
         # Clean up remote build directory
         try:
