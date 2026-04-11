@@ -377,3 +377,95 @@ def test_create_worktree_raises_for_unknown_agent(agent_manager: AgentManager) -
     """Creating a worktree for an unknown agent raises."""
     with pytest.raises(AgentCreationError, match="Cannot determine work directory"):
         agent_manager.create_worktree_agent("test", "nonexistent")
+
+
+def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """Starting an app watcher for an agent creates the runtime directory."""
+    runtime_dir = tmp_path / "runtime"
+    agent_manager._start_app_watcher("watcher-test", tmp_path)
+    assert runtime_dir.exists()
+    agent_manager._stop_app_watcher("watcher-test")
+
+
+def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:
+    """Stopping a watcher for an agent that isn't watched is safe."""
+    agent_manager._stop_app_watcher("nonexistent")
+
+
+def test_initial_discover_handles_errors(agent_manager: AgentManager) -> None:
+    """Initial discovery handles errors gracefully."""
+    with patch(
+        "imbue.minds_workspace_server.agent_manager.discover_agents",
+        side_effect=RuntimeError("test error"),
+    ):
+        agent_manager._initial_discover()
+    assert agent_manager.get_agents() == []
+
+
+def test_refresh_agents_updates_state(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """Refresh agents updates the agent list and broadcasts."""
+    from imbue.minds_workspace_server.agent_discovery import AgentInfo
+
+    q = broadcaster.register()
+
+    mock_agents = [
+        AgentInfo(
+            id="refreshed-1",
+            name="refreshed-agent",
+            state="RUNNING",
+            agent_state_dir=Path("/tmp/state"),
+            claude_config_dir=Path("/tmp/.claude"),
+        )
+    ]
+    with patch(
+        "imbue.minds_workspace_server.agent_manager.discover_agents",
+        return_value=mock_agents,
+    ):
+        agent_manager._refresh_agents()
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == "refreshed-1"
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+
+
+def test_handle_full_snapshot(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """Full snapshot events replace the entire agent list."""
+    from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
+
+    q = broadcaster.register()
+
+    agent1 = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("agent-one"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": "/tmp/w1"},
+    )
+    agent2 = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("agent-two"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": "/tmp/w2"},
+    )
+    event = make_full_discovery_snapshot_event([agent1, agent2], [])
+
+    agent_manager._handle_full_snapshot(event)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 2
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+    assert len(msg["agents"]) == 2
