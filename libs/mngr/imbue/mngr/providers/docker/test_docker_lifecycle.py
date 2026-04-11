@@ -1,4 +1,3 @@
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -17,14 +16,8 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.timeout(120)]
-
-
-@pytest.fixture
-def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
-    yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
 @pytest.mark.docker
