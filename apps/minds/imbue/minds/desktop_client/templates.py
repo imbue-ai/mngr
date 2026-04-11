@@ -36,7 +36,10 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     + _COMMON_STYLES
     + """
     body { background: #f8fafc; padding: 0; font-size: 14px; }
-    .page { max-width: 800px; margin: 0 auto; padding: 48px 0; }
+    .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
+    .page-header a:hover { color: #334155; }
     .create-btn {
       padding: 6px 16px; background: #1e293b; color: white; border: none;
       border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
@@ -45,14 +48,14 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .create-btn:hover { background: #334155; }
     table { width: 100%; border-collapse: collapse; }
     thead th {
-      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 400;
+      text-align: left; padding: 10px 0; font-size: 14px; font-weight: 400;
       color: #94a3b8; border-bottom: 1px solid #e2e8f0;
     }
     thead th:last-child { text-align: right; }
     tbody tr { cursor: pointer; transition: background 0.1s; }
     tbody tr:hover { background: #f1f5f9; }
     tbody td {
-      padding: 20px 16px; font-size: 14px; color: #334155;
+      padding: 20px 0; font-size: 14px; color: #334155;
       border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
     tbody td:last-child { text-align: right; }
@@ -87,12 +90,16 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     {% if agent_ids %}
+    <div class="page-header">
+      <div></div>
+      <a href="/create" class="create-btn">Create</a>
+    </div>
     <table>
       <thead>
         <tr>
           <th>Name</th>
           <th>Shared with</th>
-          <th style="text-align: right;"><a href="/create" class="create-btn">Create</a></th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -210,33 +217,36 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     + """
     body { background: #f8fafc; padding: 0; font-size: 14px; }
     .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
-    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
     .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
     .page-header a:hover { color: #334155; }
-    .submit-btn {
-      padding: 6px 16px; background: #1e293b; color: white; border: none;
-      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
-      font-family: inherit;
-    }
-    .submit-btn:hover { background: #334155; }
     .form-group { display: flex; gap: 24px; margin-bottom: 16px; align-items: flex-start; }
     .form-label { flex: 0 0 200px; padding-top: 10px; }
     .form-label label { font-size: 14px; color: #334155; font-weight: 500; display: block; }
     .form-label .help-text { margin-top: 2px; font-size: 13px; color: #94a3b8; }
     .form-input { flex: 1; }
-    input[type="text"], select {
+    input[type="text"] {
       width: 100%; padding: 10px 12px;
       border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;
       font-family: inherit; background: white; color: #0f172a;
     }
-    input[type="text"]:focus, select:focus { outline: none; border-color: #94a3b8; }
+    input[type="text"]:focus { outline: none; border-color: #94a3b8; }
+    .toggle-group { display: flex; gap: 8px; }
+    .toggle-option {
+      padding: 8px 16px; border: 1px solid #e2e8f0; border-radius: 6px;
+      font-size: 14px; font-family: inherit; background: white; color: #64748b;
+      cursor: pointer; transition: all 0.1s;
+    }
+    .toggle-option:hover { border-color: #94a3b8; color: #334155; }
+    .toggle-option.selected { background: #1e293b; color: white; border-color: #1e293b; }
+    .toggle-option input { display: none; }
   </style>
 </head>
 <body>
   <div class="page">
     <div class="page-header">
       <a href="/">Back to workspace list</a>
-      <button type="submit" form="create-form" class="submit-btn">Create</button>
+      <button type="submit" form="create-form" class="create-btn">Create</button>
     </div>
     <form id="create-form" action="/create" method="post">
       <div class="form-group">
@@ -246,6 +256,22 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
         <div class="form-input">
           <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
                  placeholder="selene" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">
+          <label>Launch mode</label>
+          <p class="help-text">Where to run the agent</p>
+        </div>
+        <div class="form-input">
+          <div class="toggle-group">
+            {% for mode in launch_modes %}
+            <label class="toggle-option{% if mode.value == selected_launch_mode %} selected{% endif %}" onclick="selectMode(this, '{{ mode.value }}')">
+              <input type="radio" name="launch_mode" value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} checked{% endif %}>
+              {{ mode.value | lower }}
+            </label>
+            {% endfor %}
+          </div>
         </div>
       </div>
       <div class="form-group">
@@ -268,20 +294,13 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
                  placeholder="main">
         </div>
       </div>
-      <div class="form-group">
-        <div class="form-label">
-          <label for="launch_mode">Launch mode</label>
-          <p class="help-text">Local: Docker. Dev: this host.</p>
-        </div>
-        <div class="form-input">
-          <select id="launch_mode" name="launch_mode">
-            {% for mode in launch_modes %}
-            <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
-            {% endfor %}
-          </select>
-        </div>
-      </div>
     </form>
+    <script>
+    function selectMode(el, value) {
+      document.querySelectorAll('.toggle-option').forEach(function(o) { o.classList.remove('selected'); });
+      el.classList.add('selected');
+    }
+    </script>
   </div>
 </body>
 </html>"""
