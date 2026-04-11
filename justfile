@@ -98,7 +98,7 @@ test-offload-release args="":
 
     # Invalidate offload's image cache when build inputs change.
     CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile.release offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
-    CACHE_KEY_FILE=".offload-cache-key"
+    CACHE_KEY_FILE=".offload-release-cache-key"
     if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
         echo "[test-offload-release] Image cache key matches, reusing cached image."
     else
@@ -114,6 +114,7 @@ test-offload-release args="":
     echo '.git/' >> .dockerignore
     echo '.offload-image-cache' >> .dockerignore
     echo '.offload-cache-key' >> .dockerignore
+    echo '.offload-release-cache-key' >> .dockerignore
 
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
