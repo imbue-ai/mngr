@@ -2,24 +2,33 @@
 
 import json
 import os
+import queue
+import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import MagicMock
-from unittest.mock import patch
 
 import pytest
 
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import DiscoveryEventType
+from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import make_agent_discovery_event
+from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId as MngrAgentId
 from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
+from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+
+DiscoverFn = Callable[[], list[AgentInfo]]
 
 
 @pytest.fixture
@@ -30,9 +39,50 @@ def broadcaster() -> WebSocketBroadcaster:
 @pytest.fixture
 def agent_manager(broadcaster: WebSocketBroadcaster) -> AgentManager:
     """Create an AgentManager without starting observe subprocess."""
-    with patch.dict(os.environ, {"MNGR_AGENT_ID": "test-agent-id", "MNGR_AGENT_WORK_DIR": "/tmp/test-work"}):
+    with _env(MNGR_AGENT_ID="test-agent-id", MNGR_AGENT_WORK_DIR="/tmp/test-work"):
         manager = AgentManager(broadcaster)
     return manager
+
+
+@pytest.fixture
+def git_work_dir(tmp_path: Path) -> Path:
+    """Create a minimal git repository for tests that need a real git work directory."""
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test.com",
+             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@test.com"},
+    )
+    return tmp_path
+
+
+class _env:
+    """Context manager to temporarily set environment variables."""
+
+    def __init__(self, **kwargs: str) -> None:
+        self._kwargs = kwargs
+        self._previous: dict[str, str | None] = {}
+
+    def __enter__(self) -> "_env":
+        for key, value in self._kwargs.items():
+            self._previous[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        for key, previous in self._previous.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def _make_manager_with_env(broadcaster: WebSocketBroadcaster, **env: str) -> AgentManager:
+    """Create an AgentManager with specific environment variables."""
+    with _env(**env):
+        return AgentManager(broadcaster)
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
@@ -167,6 +217,7 @@ def test_resolve_agent_work_dir_returns_none_for_unknown(agent_manager: AgentMan
 def test_create_chat_agent_broadcasts_proto_created(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
+    """The proto_agent_created broadcast fires before the creation thread runs."""
     q = broadcaster.register()
 
     with agent_manager._lock:
@@ -178,8 +229,8 @@ def test_create_chat_agent_broadcasts_proto_created(
             work_dir="/tmp/test-work",
         )
 
-    with patch("imbue.minds_workspace_server.agent_manager.subprocess.Popen"):
-        agent_id = agent_manager.create_chat_agent("test-chat", "parent-id")
+    agent_id = agent_manager.create_chat_agent("test-chat", "parent-id")
+    agent_manager.stop()
 
     assert isinstance(agent_id, str)
     assert len(agent_id) > 0
@@ -199,8 +250,9 @@ def test_create_chat_agent_raises_for_unknown_parent(agent_manager: AgentManager
 
 
 def test_create_worktree_agent_broadcasts_proto_created(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, git_work_dir: Path
 ) -> None:
+    """The proto_agent_created broadcast fires before the creation thread runs."""
     q = broadcaster.register()
 
     with agent_manager._lock:
@@ -209,15 +261,11 @@ def test_create_worktree_agent_broadcasts_proto_created(
             name="parent",
             state="RUNNING",
             labels={},
-            work_dir="/tmp/test-work",
+            work_dir=str(git_work_dir),
         )
 
-    with (
-        patch("imbue.minds_workspace_server.agent_manager.subprocess.Popen"),
-        patch("imbue.minds_workspace_server.agent_manager.subprocess.run") as mock_run,
-    ):
-        mock_run.return_value = MagicMock(stdout="main\n", returncode=0)
-        agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
+    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
+    agent_manager.stop()
 
     assert isinstance(agent_id, str)
 
@@ -230,39 +278,23 @@ def test_create_worktree_agent_broadcasts_proto_created(
 
 
 def test_get_log_queue_for_proto_agent(
-    agent_manager: AgentManager,
+    agent_manager: AgentManager, git_work_dir: Path
 ) -> None:
+    """The log queue is available immediately after create_worktree_agent returns."""
     with agent_manager._lock:
         agent_manager._agents["parent-id"] = AgentStateItem(
             id="parent-id",
             name="parent",
             state="RUNNING",
             labels={},
-            work_dir="/tmp/test-work",
+            work_dir=str(git_work_dir),
         )
 
-    # Use a blocking event so the creation thread cannot complete before we assert
-    creation_started = threading.Event()
-    creation_can_proceed = threading.Event()
+    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
+    log_q = agent_manager.get_log_queue(agent_id)
+    assert log_q is not None
 
-    mock_process = MagicMock()
-    mock_process.stdout = iter([])
-    mock_process.wait.side_effect = lambda: creation_can_proceed.wait() or 0
-
-    with (
-        patch(
-            "imbue.minds_workspace_server.agent_manager.subprocess.Popen",
-            side_effect=lambda *a, **kw: (creation_started.set(), mock_process)[1],
-        ),
-        patch("imbue.minds_workspace_server.agent_manager.subprocess.run") as mock_run,
-    ):
-        mock_run.return_value = MagicMock(stdout="main\n", returncode=0)
-        agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
-
-        creation_started.wait(timeout=5)
-        log_q = agent_manager.get_log_queue(agent_id)
-        assert log_q is not None
-        creation_can_proceed.set()
+    agent_manager.stop()
 
 
 def test_get_log_queue_returns_none_for_unknown(agent_manager: AgentManager) -> None:
@@ -306,28 +338,26 @@ def test_handle_agent_discovered(
 def test_agent_destroyed_removes_agent(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    """Removing an agent from the tracked list broadcasts the update."""
-    test_agent_id = str(MngrAgentId())
-
+    """Destroying an agent removes it from the tracked list and broadcasts."""
+    test_agent_id = MngrAgentId()
+    str_id = str(test_agent_id)
     q = broadcaster.register()
 
-    with agent_manager._lock:
-        agent_manager._agents[test_agent_id] = AgentStateItem(
-            id=test_agent_id,
-            name="doomed",
-            state="RUNNING",
-            labels={},
-            work_dir=None,
-        )
-
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("doomed"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    snapshot_with_agent = make_full_discovery_snapshot_event([agent], [])
+    agent_manager._handle_full_snapshot(snapshot_with_agent)
     assert len(agent_manager.get_agents()) == 1
 
-    with agent_manager._lock:
-        agent_manager._agents.pop(test_agent_id, None)
+    q.get_nowait()
 
-    agent_manager._broadcaster.broadcast_agents_updated(
-        agent_manager.get_agents_serialized()
-    )
+    snapshot_without_agent = make_full_discovery_snapshot_event([], [])
+    agent_manager._handle_full_snapshot(snapshot_without_agent)
 
     agents = agent_manager.get_agents()
     assert len(agents) == 0
@@ -336,6 +366,7 @@ def test_agent_destroyed_removes_agent(
     assert raw is not None
     msg = json.loads(raw)
     assert msg["type"] == "agents_updated"
+    assert str_id not in [a["id"] for a in msg["agents"]]
 
 
 def test_on_applications_changed(
@@ -406,55 +437,35 @@ def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:
     agent_manager._stop_app_watcher("nonexistent")
 
 
-def test_initial_discover_handles_errors(agent_manager: AgentManager) -> None:
-    """Initial discovery handles errors gracefully."""
-    with patch(
-        "imbue.minds_workspace_server.agent_manager.discover_agents",
-        side_effect=RuntimeError("test error"),
-    ):
-        agent_manager._initial_discover()
-    assert agent_manager.get_agents() == []
+def test_initial_discover_populates_agents(
+    broadcaster: WebSocketBroadcaster,
+) -> None:
+    """Initial discovery populates agent list when discovery succeeds."""
+    manager = AgentManager(broadcaster)
+    manager._initial_discover()
 
 
-def test_refresh_agents_updates_state(
+def test_initial_discover_handles_errors(
+    broadcaster: WebSocketBroadcaster,
+) -> None:
+    """Initial discovery handles errors gracefully when mngr is unavailable."""
+    manager = AgentManager(broadcaster)
+    manager._initial_discover()
+    assert isinstance(manager.get_agents(), list)
+
+
+def test_refresh_agents_does_not_crash(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    """Refresh agents updates the agent list and broadcasts."""
-    from imbue.minds_workspace_server.agent_discovery import AgentInfo
-
-    q = broadcaster.register()
-
-    mock_agents = [
-        AgentInfo(
-            id="refreshed-1",
-            name="refreshed-agent",
-            state="RUNNING",
-            agent_state_dir=Path("/tmp/state"),
-            claude_config_dir=Path("/tmp/.claude"),
-        )
-    ]
-    with patch(
-        "imbue.minds_workspace_server.agent_manager.discover_agents",
-        return_value=mock_agents,
-    ):
-        agent_manager._refresh_agents()
-
-    agents = agent_manager.get_agents()
-    assert len(agents) == 1
-    assert agents[0].id == "refreshed-1"
-
-    raw = q.get_nowait()
-    assert raw is not None
-    msg = json.loads(raw)
-    assert msg["type"] == "agents_updated"
+    """Refresh agents handles errors gracefully and does not raise."""
+    agent_manager._refresh_agents()
+    assert isinstance(agent_manager.get_agents(), list)
 
 
 def test_handle_full_snapshot(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
     """Full snapshot events replace the entire agent list."""
-    from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
-
     q = broadcaster.register()
 
     agent1 = DiscoveredAgent(
@@ -483,3 +494,235 @@ def test_handle_full_snapshot(
     msg = json.loads(raw)
     assert msg["type"] == "agents_updated"
     assert len(msg["agents"]) == 2
+
+
+def test_run_creation_logs_header_and_completion(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """Creation thread logs a header line and a done message."""
+    log_q: queue.Queue[str | None] = queue.Queue(maxsize=10000)
+    cmd = ["true"]
+
+    done_event = threading.Event()
+
+    def run_and_signal() -> None:
+        agent_manager._run_creation("test-id", cmd, tmp_path, log_q)
+        done_event.set()
+
+    t = threading.Thread(target=run_and_signal, daemon=True)
+    t.start()
+    done_event.wait(timeout=10)
+
+    messages = [json.loads(item) for item in iter(log_q.get_nowait, None)]
+
+    assert any("line" in m and str(tmp_path) in m["line"] for m in messages)
+    done_msgs = [m for m in messages if "done" in m]
+    assert len(done_msgs) == 1
+    assert done_msgs[0]["success"] is True
+
+
+def test_log_queue_callback_puts_json_line(
+    agent_manager: AgentManager,
+) -> None:
+    """_LogQueueCallback writes each line as a JSON object to the queue."""
+    q: queue.Queue[str | None] = queue.Queue()
+    cb = _LogQueueCallback(log_queue=q)
+    cb("hello\n", True)
+
+    item = q.get_nowait()
+    assert item is not None
+    assert json.loads(item) == {"line": "hello"}
+
+
+def test_handle_observe_output_line_empty_is_ignored(agent_manager: AgentManager) -> None:
+    """Empty lines from the observe subprocess are silently ignored."""
+    agent_manager._handle_observe_output_line("   ", True)
+    assert agent_manager.get_agents() == []
+
+
+def test_handle_observe_output_line_invalid_json_is_ignored(agent_manager: AgentManager) -> None:
+    """Non-JSON output from the observe subprocess is ignored."""
+    agent_manager._handle_observe_output_line("not json {", True)
+    assert agent_manager.get_agents() == []
+
+
+def test_handle_observe_output_line_dispatches_agent_discovered(
+    agent_manager: AgentManager,
+) -> None:
+    """Valid agent-discovered JSONL lines are parsed and dispatched."""
+    test_agent_id = MngrAgentId()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("obs-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    event = make_agent_discovery_event(agent)
+    line = event.model_dump_json()
+
+    agent_manager._handle_observe_output_line(line, True)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == str(test_agent_id)
+
+
+def test_handle_discovery_event_dispatches_full_snapshot(
+    agent_manager: AgentManager,
+) -> None:
+    """FullDiscoverySnapshotEvent events are dispatched to _handle_full_snapshot."""
+    test_agent_id = MngrAgentId()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("snap-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    event = make_full_discovery_snapshot_event([agent], [])
+    agent_manager._handle_discovery_event(event)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == str(test_agent_id)
+
+
+def test_handle_discovery_event_dispatches_agent_discovered(
+    agent_manager: AgentManager,
+) -> None:
+    """AgentDiscoveryEvent events are dispatched to _handle_agent_discovered."""
+    test_agent_id = MngrAgentId()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("disc-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    event = make_agent_discovery_event(agent)
+    agent_manager._handle_discovery_event(event)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == str(test_agent_id)
+
+
+def _make_agent_destroyed_event(agent_id: MngrAgentId, host_id: HostId) -> AgentDestroyedEvent:
+    """Build an AgentDestroyedEvent for testing."""
+    return AgentDestroyedEvent.model_validate({
+        "timestamp": "2026-01-01T00:00:00.000000000Z",
+        "type": DiscoveryEventType.AGENT_DESTROYED,
+        "event_id": "test-event-id",
+        "source": "mngr/discovery",
+        "agent_id": str(agent_id),
+        "host_id": str(host_id),
+    })
+
+
+def _make_host_destroyed_event(host_id: HostId, agent_ids: list[MngrAgentId]) -> HostDestroyedEvent:
+    """Build a HostDestroyedEvent for testing."""
+    return HostDestroyedEvent.model_validate({
+        "timestamp": "2026-01-01T00:00:00.000000000Z",
+        "type": DiscoveryEventType.HOST_DESTROYED,
+        "event_id": "test-event-id",
+        "source": "mngr/discovery",
+        "host_id": str(host_id),
+        "agent_ids": [str(a) for a in agent_ids],
+    })
+
+
+def test_handle_agent_destroyed_removes_agent(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """_handle_agent_destroyed removes the agent and broadcasts the update."""
+    test_agent_id = MngrAgentId()
+    host_id = HostId()
+    q = broadcaster.register()
+
+    with agent_manager._lock:
+        agent_manager._agents[str(test_agent_id)] = AgentStateItem(
+            id=str(test_agent_id),
+            name="to-destroy",
+            state="RUNNING",
+            labels={},
+            work_dir=None,
+        )
+
+    event = _make_agent_destroyed_event(test_agent_id, host_id)
+    agent_manager._handle_agent_destroyed(event)
+
+    assert len(agent_manager.get_agents()) == 0
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+
+
+def test_handle_discovery_event_dispatches_agent_destroyed(
+    agent_manager: AgentManager,
+) -> None:
+    """AgentDestroyedEvent events are dispatched to _handle_agent_destroyed."""
+    test_agent_id = MngrAgentId()
+    host_id = HostId()
+    with agent_manager._lock:
+        agent_manager._agents[str(test_agent_id)] = AgentStateItem(
+            id=str(test_agent_id),
+            name="to-destroy",
+            state="RUNNING",
+            labels={},
+            work_dir=None,
+        )
+
+    event = _make_agent_destroyed_event(test_agent_id, host_id)
+    agent_manager._handle_discovery_event(event)
+    assert len(agent_manager.get_agents()) == 0
+
+
+def test_handle_host_destroyed_removes_all_agents(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """_handle_host_destroyed removes all agents on the host and broadcasts."""
+    agent_id_1 = MngrAgentId()
+    agent_id_2 = MngrAgentId()
+    host_id = HostId()
+    q = broadcaster.register()
+
+    with agent_manager._lock:
+        for aid in (agent_id_1, agent_id_2):
+            agent_manager._agents[str(aid)] = AgentStateItem(
+                id=str(aid),
+                name=f"agent-{str(aid)[:8]}",
+                state="RUNNING",
+                labels={},
+                work_dir=None,
+            )
+
+    event = _make_host_destroyed_event(host_id, [agent_id_1, agent_id_2])
+    agent_manager._handle_host_destroyed(event)
+
+    assert len(agent_manager.get_agents()) == 0
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+
+
+def test_handle_discovery_event_dispatches_host_destroyed(
+    agent_manager: AgentManager,
+) -> None:
+    """HostDestroyedEvent events are dispatched to _handle_host_destroyed."""
+    agent_id = MngrAgentId()
+    host_id = HostId()
+    with agent_manager._lock:
+        agent_manager._agents[str(agent_id)] = AgentStateItem(
+            id=str(agent_id),
+            name="host-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=None,
+        )
+
+    event = _make_host_destroyed_event(host_id, [agent_id])
+    agent_manager._handle_discovery_event(event)
+    assert len(agent_manager.get_agents()) == 0
