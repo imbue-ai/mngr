@@ -83,7 +83,7 @@ def generate_bot_username(agent_name: str) -> str:
 
     # Pad if too short
     if len(username) < _MIN_BOT_USERNAME_LENGTH:
-        username = f"minds_{username}"
+        username = f"workspace_{username}"
 
     return username
 
