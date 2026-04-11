@@ -210,7 +210,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     + """
     body { background: #f8fafc; padding: 0; font-size: 14px; }
     .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
-    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; padding-top: 10px; }
     .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
     .page-header a:hover { color: #334155; }
     .submit-btn {
