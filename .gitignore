@@ -220,10 +220,6 @@
 # Claude Code local settings (session-specific permissions)
 **/.claude/settings.local.json
 
-# PR status and URL files written by main_claude_stop_hook.sh for status line display
-**/.claude/pr_url
-**/.claude/pr_status
-
 # Local Claude settings backup files
 **/.claude/*.bak
 

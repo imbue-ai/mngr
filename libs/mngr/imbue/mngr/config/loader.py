@@ -15,6 +15,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
@@ -361,18 +362,34 @@ def _parse_providers(
     return providers
 
 
-def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
-    """Normalize cli_args from str or list to tuple before model_construct (which bypasses validators)."""
-    if "cli_args" not in raw_config:
-        return raw_config
-    cli_args = raw_config["cli_args"]
-    if isinstance(cli_args, str):
-        normalized = split_cli_args_string(cli_args) if cli_args else ()
-    elif isinstance(cli_args, (list, tuple)):
-        normalized = tuple(cli_args)
-    else:
-        normalized = cli_args
-    return {**raw_config, "cli_args": normalized}
+_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+
+
+def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize tuple fields from str or list to tuple before model_construct (which bypasses validators).
+
+    cli_args gets special shell-splitting behavior for single strings.
+    All other tuple fields just convert list -> tuple.
+    """
+    result = raw_config
+    if "cli_args" in result:
+        cli_args = result["cli_args"]
+        if isinstance(cli_args, str):
+            normalized = split_cli_args_string(cli_args) if cli_args else ()
+        elif isinstance(cli_args, (list, tuple)):
+            normalized = tuple(cli_args)
+        else:
+            normalized = cli_args
+        result = {**result, "cli_args": normalized}
+
+    for field_name in _PLAIN_TUPLE_FIELDS:
+        if field_name not in result:
+            continue
+        value = result[field_name]
+        if isinstance(value, (list, tuple)):
+            result = {**result, field_name: tuple(value)}
+        # strings are not split for these fields -- each element is already a complete spec
+    return result
 
 
 def _has_disabled_ancestor(
@@ -428,7 +445,7 @@ def _parse_agent_types(
             continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
-        normalized_config = _normalize_cli_args_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types
