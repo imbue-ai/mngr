@@ -1156,10 +1156,10 @@ def test_provision_local_credentials_missing_source(local_provider: LocalProvide
     assert not (config_dir / ".credentials.json").exists()
 
 
-def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
+def test_configure_agent_hooks_adds_permission_auto_allow_when_enabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should add permission auto-allow hook when auto_allow_permissions is True."""
+    """_configure_agent_hooks should add permission auto-allow hook when auto_allow_permissions is True."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -1177,7 +1177,7 @@ def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     settings_path = work_dir / ".claude" / "settings.local.json"
     assert settings_path.exists()
@@ -1196,10 +1196,10 @@ def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
     assert inner["timeout"] == 5
 
 
-def test_configure_readiness_hooks_does_not_add_permission_auto_allow_by_default(
+def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should not add permission auto-allow hook when auto_allow_permissions is False."""
+    """_configure_agent_hooks should not add permission auto-allow hook when auto_allow_permissions is False."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -1217,7 +1217,7 @@ def test_configure_readiness_hooks_does_not_add_permission_auto_allow_by_default
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     settings_path = work_dir / ".claude" / "settings.local.json"
     settings = json.loads(settings_path.read_text())

@@ -144,7 +144,7 @@ def create_telegram_bot(
         client.connect()  # ty: ignore[unused-awaitable]
 
         try:
-            if not client.is_user_authorized():  # ty: ignore[unused-awaitable]
+            if not client.is_user_authorized():
                 raise TelegramCredentialError(
                     "Telegram session is not authorized. The auth key may have been "
                     "revoked. Please log in again via the Setup Telegram button."
@@ -152,7 +152,7 @@ def create_telegram_bot(
 
             # telethon.sync patches async methods to return synchronous values at runtime,
             # but the type stubs still show coroutine return types
-            me = client.get_me()  # ty: ignore[unused-awaitable]
+            me = client.get_me()
             logger.debug("Connected as: {} (id={})", me.first_name, me.id)  # ty: ignore[unresolved-attribute]
 
             bot_token, actual_username = _converse_with_botfather(
@@ -161,7 +161,7 @@ def create_telegram_bot(
                 bot_username=bot_username,
             )
         finally:
-            client.disconnect()  # ty: ignore[unused-awaitable]
+            client.disconnect()
 
     return TelegramBotCredentials(
         bot_token=SecretStr(bot_token),
@@ -178,7 +178,7 @@ def _converse_with_botfather(
 
     Returns (bot_token, actual_username).
     """
-    botfather = client.get_entity("@BotFather")  # ty: ignore[unused-awaitable]
+    botfather = client.get_entity("@BotFather")
 
     with client.conversation(botfather) as conv:  # ty: ignore[invalid-argument-type]
         # Step 1: initiate bot creation
