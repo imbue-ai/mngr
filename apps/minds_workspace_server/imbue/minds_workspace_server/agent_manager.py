@@ -21,10 +21,10 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
@@ -32,16 +32,17 @@ from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
 
 
-class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on modifications to applications.toml."""
+def _make_applications_file_handler(
+    agent_id: str, manager: "AgentManager"
+) -> FileSystemEventHandler:
+    """Create a watchdog handler that triggers on modifications to applications.toml."""
 
-    def __init__(self, agent_id: str, manager: "AgentManager") -> None:
-        self._agent_id = agent_id
-        self._manager = manager
+    class Handler(FileSystemEventHandler):
+        def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
+            if not event.is_directory:
+                manager._on_applications_changed(agent_id)
 
-    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
-        if not event.is_directory:
-            self._manager._on_applications_changed(self._agent_id)
+    return Handler()
 
 
 class AgentManager:
@@ -158,7 +159,7 @@ class AgentManager:
 
         if work_dir is None:
             msg = f"Cannot determine work directory for agent {selected_agent_id}"
-            raise ValueError(msg)
+            raise AgentCreationError(msg)
 
         current_branch = self._get_current_branch(Path(work_dir))
         new_branch = f"mngr/{name}"
@@ -451,6 +452,8 @@ class AgentManager:
             self._handle_agent_destroyed(event)
         elif isinstance(event, HostDestroyedEvent):
             self._handle_host_destroyed(event)
+        else:
+            pass
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Handle a full discovery snapshot."""
@@ -534,7 +537,7 @@ class AgentManager:
 
         self._read_applications(agent_id, toml_path)
 
-        handler = _ApplicationsFileHandler(agent_id, self)
+        handler = _make_applications_file_handler(agent_id, self)
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=False)
         observer.daemon = True

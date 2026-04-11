@@ -28,6 +28,7 @@ from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
 from imbue.minds_workspace_server.models import CreateAgentResponse
@@ -403,7 +404,7 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
         )
-    except (ValueError, OSError) as e:
+    except (AgentCreationError, OSError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=400)
 
@@ -422,7 +423,7 @@ async def _create_chat_agent(request: Request) -> JSONResponse:
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
         )
-    except (ValueError, OSError) as e:
+    except (AgentCreationError, OSError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=400)
 

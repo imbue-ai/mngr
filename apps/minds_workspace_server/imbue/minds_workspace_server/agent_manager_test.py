@@ -2,7 +2,6 @@
 
 import json
 import os
-import queue
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -10,6 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
+from imbue.minds_workspace_server.models import AgentCreationError
+from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
@@ -105,8 +106,6 @@ url = "http://localhost:8000"
 
 
 def test_get_agents_serialized(agent_manager: AgentManager) -> None:
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     with agent_manager._lock:
         agent_manager._agents["a1"] = AgentStateItem(
             id="a1",
@@ -140,8 +139,6 @@ def test_resolve_agent_work_dir_from_own_env(agent_manager: AgentManager) -> Non
 
 
 def test_resolve_agent_work_dir_from_tracked_agent(agent_manager: AgentManager) -> None:
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     with agent_manager._lock:
         agent_manager._agents["other-agent"] = AgentStateItem(
             id="other-agent",
@@ -190,7 +187,7 @@ def test_create_chat_agent_broadcasts_proto_created(
 
 
 def test_create_chat_agent_raises_for_unknown_parent(agent_manager: AgentManager) -> None:
-    with pytest.raises(ValueError, match="Cannot determine work directory"):
+    with pytest.raises(AgentCreationError, match="Cannot determine work directory"):
         agent_manager.create_chat_agent("test-chat", "nonexistent-parent")
 
 
@@ -228,8 +225,6 @@ def test_create_worktree_agent_broadcasts_proto_created(
 def test_get_log_queue_for_proto_agent(
     agent_manager: AgentManager,
 ) -> None:
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     with agent_manager._lock:
         agent_manager._agents["parent-id"] = AgentStateItem(
             id="parent-id",

@@ -3,6 +3,12 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 
 
+class AgentCreationError(ValueError):
+    """Raised when agent creation fails due to invalid input."""
+
+    ...
+
+
 class AgentListItem(FrozenModel):
     """An agent entry in the agent list response."""
 

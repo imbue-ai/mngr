@@ -6,6 +6,13 @@ import queue
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 
+def _get_message(q: queue.Queue[str | None]) -> str:
+    """Get a non-None message from the queue."""
+    value = q.get_nowait()
+    assert value is not None
+    return value
+
+
 def test_register_returns_queue() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
@@ -19,10 +26,10 @@ def test_broadcast_puts_message_in_all_queues() -> None:
 
     broadcaster.broadcast({"type": "test", "data": 42})
 
-    msg1 = q1.get_nowait()
-    msg2 = q2.get_nowait()
-    assert json.loads(msg1) == {"type": "test", "data": 42}
-    assert json.loads(msg2) == {"type": "test", "data": 42}
+    msg1 = json.loads(_get_message(q1))
+    msg2 = json.loads(_get_message(q2))
+    assert msg1 == {"type": "test", "data": 42}
+    assert msg2 == {"type": "test", "data": 42}
 
 
 def test_unregister_removes_queue() -> None:
@@ -47,7 +54,7 @@ def test_broadcast_agents_updated() -> None:
     agents = [{"id": "a1", "name": "agent-1", "state": "RUNNING"}]
     broadcaster.broadcast_agents_updated(agents)
 
-    msg = json.loads(q.get_nowait())
+    msg = json.loads(_get_message(q))
     assert msg["type"] == "agents_updated"
     assert msg["agents"] == agents
 
@@ -59,7 +66,7 @@ def test_broadcast_applications_updated() -> None:
     apps = {"agent-1": [{"name": "web", "url": "http://localhost:8000"}]}
     broadcaster.broadcast_applications_updated(apps)
 
-    msg = json.loads(q.get_nowait())
+    msg = json.loads(_get_message(q))
     assert msg["type"] == "applications_updated"
     assert msg["applications"] == apps
 
@@ -72,7 +79,7 @@ def test_broadcast_proto_agent_created() -> None:
         agent_id="a1", name="test", creation_type="worktree", parent_agent_id=None
     )
 
-    msg = json.loads(q.get_nowait())
+    msg = json.loads(_get_message(q))
     assert msg["type"] == "proto_agent_created"
     assert msg["agent_id"] == "a1"
     assert msg["creation_type"] == "worktree"
@@ -87,7 +94,7 @@ def test_broadcast_proto_agent_completed() -> None:
         agent_id="a1", success=True, error=None
     )
 
-    msg = json.loads(q.get_nowait())
+    msg = json.loads(_get_message(q))
     assert msg["type"] == "proto_agent_completed"
     assert msg["success"] is True
     assert msg["error"] is None
