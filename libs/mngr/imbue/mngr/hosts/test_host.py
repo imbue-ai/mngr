@@ -9,7 +9,6 @@ import json
 import os
 import stat
 import subprocess
-import sys
 import threading
 from collections.abc import Callable
 from collections.abc import Generator
@@ -19,6 +18,7 @@ from pathlib import Path
 
 import pluggy
 import pytest
+from loguru import logger
 from pyinfra.api.command import StringCommand
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
@@ -815,17 +815,14 @@ def test_procps_ps_command_available() -> None:
     """
     result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
     if result.returncode != 0:
-        sys.stderr.write(f"PROCPS TEST FAILED: 'ps aux' returned {result.returncode}\n")
-        sys.stderr.write(f"stderr: {result.stderr}\n")
-        sys.stderr.write("The procps package is likely not installed. Install with: apt-get install procps\n")
-        sys.stderr.flush()
+        logger.warning("PROCPS TEST FAILED: 'ps aux' returned {}", result.returncode)
+        logger.warning("stderr: {}", result.stderr)
+        logger.warning("The procps package is likely not installed. Install with: apt-get install procps")
         raise AssertionError(f"ps aux failed: {result.stderr}")
 
     # Verify we get reasonable output (should include at least our own process)
     if "PID" not in result.stdout and len(result.stdout.strip().split("\n")) <= 1:
-        sys.stderr.write("PROCPS TEST FAILED: 'ps aux' output looks wrong\n")
-        sys.stderr.write(f"stdout: {result.stdout}\n")
-        sys.stderr.flush()
+        logger.warning("PROCPS TEST FAILED: 'ps aux' output looks wrong, stdout: {}", result.stdout)
         raise AssertionError("ps aux output invalid")
 
 
@@ -1719,8 +1716,8 @@ def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
     commits them.
     """
     # Inline GIT_CONFIG_NOSYSTEM to prevent reading /etc/gitconfig under
-    # parallel execution. We don't import run_git_command from testing.py
-    # because the type checker cannot resolve that module.
+    # parallel execution. This helper commits pre-existing files (unlike
+    # init_git_repo which creates a fresh repo), so we keep it local.
     env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
     subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True, env=env)
     subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True, env=env)

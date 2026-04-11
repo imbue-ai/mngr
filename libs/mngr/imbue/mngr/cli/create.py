@@ -124,6 +124,31 @@ class _CachedAgentHostLoader(MutableModel):
 
 
 @pure
+def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
+    """Split an address string into the address part and an optional target path.
+
+    Uses the same first-colon splitting convention as parse_source_string,
+    but without the bare-path recognition (since the positional arg is always
+    an agent address, not a path).
+
+    Examples:
+      - "foo" -> ("foo", None)
+      - "foo:/tmp/work" -> ("foo", Path("/tmp/work"))
+      - "foo@host.modal:/root/work" -> ("foo@host.modal", Path("/root/work"))
+      - ":/tmp/work" -> ("", Path("/tmp/work"))
+      - ":./rel/path" -> ("", Path("./rel/path"))
+      - "foo:" -> ("foo", None)  [trailing colon with no path]
+    """
+    # Same first-colon splitting as parse_source_string
+    if ":" not in raw:
+        return raw, None
+
+    address_part, path_str = raw.split(":", 1)
+    path = Path(path_str) if path_str else None
+    return address_part, path
+
+
+@pure
 def _is_new_host_implied(address: AgentAddress) -> bool:
     """True when the address implies creating a new host (NAME@.PROVIDER form)."""
     return address.provider_name is not None and address.host_name is None
@@ -287,7 +312,8 @@ class _CreateCommand(click.Command):
 @optgroup.option("--rsync-args", help="Additional arguments to pass to rsync")
 @optgroup.group("Target (where to put the new agent)")
 @optgroup.option(
-    "--target-path", help="Directory to mount source inside agent host. Incompatible with --transfer=none"
+    "--target-path",
+    help="Directory to mount source inside agent host (alternative to :PATH in address). Incompatible with --transfer=none",
 )
 @optgroup.option(
     "--transfer",
@@ -296,7 +322,7 @@ class _CreateCommand(click.Command):
     help="How to transfer the project into the agent. "
     "none: run in-place (no transfer). "
     "rsync: copy via rsync (non-git projects). "
-    "git-mirror: transfer via git push --mirror (git projects). "
+    "git-mirror: push all local branches and tags via git (git projects). "
     "git-worktree: create a git worktree (git projects, local only). "
     "[default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git]",
 )
@@ -432,9 +458,13 @@ def create(ctx: click.Context, **kwargs) -> None:
     with suppressor:
         # Parse agent address from the positional argument or --name flag.
         # Both accept agent addresses; they are equivalent but mutually exclusive.
+        # The address may include an optional :PATH suffix for the target path
+        # (e.g. "myagent:/path/to/dir" or "myagent@host.modal:/path").
         if opts.positional_name and opts.name:
             raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
-        address = parse_agent_address(opts.positional_name or opts.name or "")
+        raw_address = opts.positional_name or opts.name or ""
+        address_str, target_path = _split_address_and_target_path(raw_address)
+        address = parse_agent_address(address_str)
 
         # Merge --provider flag into the address (alternative to .PROVIDER in the address).
         if opts.provider:
@@ -448,6 +478,17 @@ def create(ctx: click.Context, **kwargs) -> None:
                 address = address.model_copy_update(
                     to_update(address.field_ref().provider_name, flag_provider),
                 )
+
+        # Merge --target-path flag into the address (alternative to :PATH in the address).
+        if opts.target_path:
+            flag_target_path = Path(opts.target_path)
+            if target_path is not None and target_path != flag_target_path:
+                raise UserInputError(
+                    f"Conflicting target paths: address has '{target_path}' "
+                    f"but --target-path is '{flag_target_path}'. Use one or the other."
+                )
+            if target_path is None:
+                target_path = flag_target_path
 
         # Apply --yes flag to auto-approve prompts (e.g., skill installation)
         if opts.yes:
@@ -466,7 +507,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         }
 
         # Setup (validation, editor session, source resolution, etc.)
-        setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params)
+        setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params, target_path)
 
         # Create agent
         create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
@@ -490,6 +531,9 @@ class _CreateSetup(FrozenModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     address: AgentAddress = Field(description="Parsed agent address from the positional argument")
+    target_path: Path | None = Field(
+        default=None, description="Target path from :PATH in the address or --target-path"
+    )
     initial_message: str | None = Field(
         description="Resolved initial message content (from --message or --message-file)"
     )
@@ -510,6 +554,7 @@ def _setup_create(
     logging_config: LoggingConfig,
     address: AgentAddress,
     plugin_cli_params: dict[str, Any] | None = None,
+    target_path: Path | None = None,
 ) -> _CreateSetup:
     """Validate options, resolve messages, start editor session, resolve source location."""
     # Validate that both --message and --message-file are not provided
@@ -557,6 +602,7 @@ def _setup_create(
 
     return _CreateSetup(
         address=address,
+        target_path=target_path,
         initial_message=initial_message,
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
@@ -610,6 +656,7 @@ def _create_agent(
         source_location=setup.resolved_source.location,
         source_agent_state_dir=source_agent_state_dir,
         mngr_ctx=mngr_ctx,
+        target_path=setup.target_path,
     )
 
     # Merge plugin-registered CLI params into plugin_data so plugin hooks can access them
@@ -644,9 +691,10 @@ def _create_agent(
                 existing_agent, existing_host = reuse_result
                 logger.info("Updating existing agent: {}", existing_agent.name)
                 existing_host.stop_agents([existing_agent.id])
-                # If the user didn't explicitly set --target-path, default to
-                # the existing agent's work_dir so we update in place.
-                # If they did set one, honor it (the agent moves to the new path).
+                # If the user didn't specify a target path (via :PATH in the address
+                # or --target-path), default to the existing agent's work_dir so we
+                # update in place. If they did set one, honor it (the agent moves
+                # to the new path).
                 resolved_target = (
                     agent_opts.target_path if agent_opts.target_path is not None else existing_agent.work_dir
                 )
@@ -1106,6 +1154,7 @@ def _resolve_transfer_mode(
     address: AgentAddress,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
+    target_path: Path | None,
 ) -> TransferMode:
     """Resolve the transfer mode from CLI flags and context.
 
@@ -1121,8 +1170,8 @@ def _resolve_transfer_mode(
 
     # Check if target path points to the same location as source
     is_same_path = False
-    if opts.target_path is not None:
-        target_resolved = Path(opts.target_path).resolve()
+    if target_path is not None:
+        target_resolved = target_path.resolve()
         source_resolved = source_location.path.resolve()
         if target_resolved == source_resolved and not is_remote:
             is_same_path = True
@@ -1144,8 +1193,8 @@ def _resolve_transfer_mode(
     # Validate the transfer mode against the context
     if is_same_path and transfer_mode != TransferMode.NONE:
         raise UserInputError(
-            f"--transfer={opts.transfer} is not compatible with --target-path pointing to the source directory. "
-            f"Use --transfer=none or omit --target-path."
+            f"--transfer={opts.transfer} is not compatible with a target path pointing to the source directory. "
+            f"Use --transfer=none or omit the target path."
         )
 
     if is_git_repo and transfer_mode == TransferMode.RSYNC:
@@ -1165,10 +1214,10 @@ def _resolve_transfer_mode(
             "--transfer=git-worktree only works for local agents. Use --transfer=git-mirror for remote agents."
         )
 
-    if transfer_mode == TransferMode.NONE and opts.target_path is not None and not is_same_path:
+    if transfer_mode == TransferMode.NONE and target_path is not None and not is_same_path:
         raise UserInputError(
-            "--transfer=none is incompatible with --target-path pointing to a different directory. "
-            "Use a different --transfer mode, or omit --target-path."
+            "--transfer=none is incompatible with a target path pointing to a different directory. "
+            "Use a different --transfer mode, or omit the target path."
         )
 
     return transfer_mode
@@ -1181,6 +1230,7 @@ def _parse_agent_opts(
     source_location: HostLocation,
     mngr_ctx: MngrContext,
     source_agent_state_dir: Path | None = None,
+    target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
     # otherwise auto-generate
@@ -1192,7 +1242,7 @@ def _parse_agent_opts(
         parsed_agent_name = generate_agent_name(parsed_name_style)
 
     # Determine transfer mode
-    transfer_mode = _resolve_transfer_mode(opts, address, source_location, mngr_ctx)
+    transfer_mode = _resolve_transfer_mode(opts, address, source_location, mngr_ctx, target_path)
 
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
     base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
@@ -1255,8 +1305,7 @@ def _parse_agent_opts(
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
     )
 
-    # Parse target_path if provided
-    parsed_target_path = Path(opts.target_path) if opts.target_path else None
+    # target_path comes from :PATH in the address or --target-path (merged upstream)
 
     # Determine agent type: --type and positional are equivalent; specifying both
     # with different values is an error. _CreateCommand.parse_args handles --
@@ -1299,7 +1348,7 @@ def _parse_agent_opts(
         command=CommandString(opts.command) if opts.command else None,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
-        target_path=parsed_target_path,
+        target_path=target_path,
         worktree_base_folder=parsed_worktree_base_folder,
         transfer_mode=transfer_mode,
         initial_message=initial_message,
@@ -1547,12 +1596,14 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]""",
     aliases=("c",),
-    arguments_description="""- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]]` format (all parts optional):
+    arguments_description="""- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]][:PATH]` format (all parts optional):
   - `NAME` -- agent name only, creates on local host (default)
   - `NAME@HOST` -- agent on existing host
   - `NAME@HOST.PROVIDER` -- agent on existing host (with provider for disambiguation)
   - `NAME@.PROVIDER` -- agent on a new host (auto-generated host name); implies `--new-host`
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
+  - `NAME:PATH` -- agent with a target path for the working directory
+  - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
 - `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
 - `AGENT_ARGS`: Additional arguments passed to the agent""",
     description="""This command sets up an agent's working directory, optionally provisions a
@@ -1570,7 +1621,7 @@ directly to the agent command.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
-via git push --mirror. Use --transfer to override the default.""",
+by pushing all local branches and tags via git. Use --transfer to override the default.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mngr create my-agent"),
         ("Create an agent in a new Docker container", "mngr create my-agent@.docker"),
