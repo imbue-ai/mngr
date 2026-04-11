@@ -14,7 +14,8 @@ import {
 import { ChatPanel } from "./ChatPanel";
 import { IframePanel } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
-import { ProtoAgentLogView } from "./ProtoAgentLogView";
+// ProtoAgentLogView is no longer used as a separate panel type.
+// Build logs are now shown inline by ChatPanel when the agent is a proto-agent.
 import { CreateAgentModal } from "./CreateAgentModal";
 import { apiUrl } from "../base-path";
 import {
@@ -23,7 +24,7 @@ import {
   getApplicationsForAgent,
   getChatProtoAgentsForParent,
 } from "../models/AgentManager";
-import { selectAgent } from "../navigation";
+// selectAgent is not used here -- chat panels stay in the parent dockview
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
@@ -44,7 +45,7 @@ function getApplicationUrl(appName: string, agentId: string): string {
   return `${agentBase}/${appName}/`;
 }
 
-type PanelType = "chat" | "iframe" | "subagent" | "proto-agent";
+type PanelType = "chat" | "iframe" | "subagent";
 
 interface PanelParams {
   panelType: PanelType;
@@ -122,7 +123,7 @@ function buildDropdownItems(
   for (const proto of chatProtos) {
     items.push({
       label: `Chat (${proto.name}) - creating...`,
-      action: () => addProtoAgentPanel(agentId, proto.agent_id, proto.name, dockviewState),
+      action: () => focusOrCreateChatPanelForAgent(agentId, proto.agent_id, proto.name, dockviewState),
     });
   }
 
@@ -260,31 +261,6 @@ function addChatPanel(
   });
 }
 
-function addProtoAgentPanel(
-  agentId: string,
-  protoAgentId: string,
-  name: string,
-  state: AgentDockviewState,
-): void {
-  const panelId = `proto-agent-${protoAgentId}`;
-  const existingPanel = state.component.panels.find((p) => p.id === panelId);
-  if (existingPanel) {
-    state.component.setActivePanel(existingPanel);
-    return;
-  }
-  const params: PanelParams = {
-    panelType: "proto-agent",
-    agentId: protoAgentId,
-    title: `Creating: ${name}`,
-  };
-  state.panelParams.set(panelId, params);
-  state.component.addPanel({
-    id: panelId,
-    component: "proto-agent",
-    title: `Creating: ${name}`,
-    params,
-  });
-}
 
 function openIframeTab(
   agentId: string,
@@ -483,11 +459,6 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
             subagentSessionId: params?.subagentSessionId ?? "",
           });
 
-        case "proto-agent":
-          return createMithrilRenderer(ProtoAgentLogView, {
-            agentId: params?.agentId ?? agentId,
-          });
-
         default:
           return createMithrilRenderer(ChatPanel, { agentId });
       }
@@ -619,7 +590,10 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
               showNewChatModal = false;
               const state = agentDockviews.get(agentId);
               if (state) {
-                addProtoAgentPanel(agentId, newAgentId, newAgentName, state);
+                // Open a chat panel for the new agent. ChatPanel will detect
+                // it's a proto-agent and show build logs, then automatically
+                // switch to the chat view when creation completes.
+                focusOrCreateChatPanelForAgent(agentId, newAgentId, newAgentName, state);
               }
             },
             onCancel() {
