@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Final
 
+import paramiko
 import uvicorn
 from loguru import logger
 from pydantic import Field
@@ -69,7 +70,7 @@ class AgentDiscoveryHandler(FrozenModel):
                 url=api_url,
             )
             logger.debug("Wrote API URL {} for remote agent {}", api_url, agent_id)
-        except (SSHTunnelError, OSError) as e:
+        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning("Failed to set up reverse tunnel for agent {}: {}", agent_id, e)
 
     def _handle_local_agent(self, agent_id: AgentId) -> None:
