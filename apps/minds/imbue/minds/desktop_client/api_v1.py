@@ -27,15 +27,10 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 
-def _get_paths(request: Request) -> WorkspacePaths:
-    return request.app.state.api_v1_paths
-
-
 def _get_backend_resolver(request: Request) -> BackendResolverInterface:
     return request.app.state.backend_resolver
 
 
-PathsDep = Annotated[WorkspacePaths, Depends(_get_paths)]
 BackendResolverDep = Annotated[BackendResolverInterface, Depends(_get_backend_resolver)]
 
 
