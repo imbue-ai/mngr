@@ -43,6 +43,10 @@ class AgentDiscoveryHandler(FrozenModel):
 
     tunnel_manager: SSHTunnelManager = Field(description="SSH tunnel manager for reverse tunnels")
     server_port: int = Field(description="Local server port to forward")
+    mngr_host_dir: Path = Field(
+        default_factory=lambda: _DEFAULT_MNGR_HOST_DIR,
+        description="Base mngr host directory for local agents (defaults to ~/.mngr)",
+    )
 
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None) -> None:
         if ssh_info is not None:
@@ -69,7 +73,7 @@ class AgentDiscoveryHandler(FrozenModel):
             logger.warning("Failed to set up reverse tunnel for agent {}: {}", agent_id, e)
 
     def _handle_local_agent(self, agent_id: AgentId) -> None:
-        local_state_dir = _DEFAULT_MNGR_HOST_DIR / "agents" / str(agent_id)
+        local_state_dir = self.mngr_host_dir / "agents" / str(agent_id)
         api_url = f"http://127.0.0.1:{self.server_port}"
         try:
             self.tunnel_manager.write_api_url_to_local(local_state_dir, api_url)
