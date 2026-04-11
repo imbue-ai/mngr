@@ -1,5 +1,5 @@
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
@@ -32,7 +32,7 @@ def test_repo_paths_compute_with_remote_label() -> None:
     fields, errors = ds.compute(
         agents=(agent,),
         cached_fields={},
-        mngr_ctx=cast(MngrContext, MagicMock()),
+        mngr_ctx=cast(MngrContext, SimpleNamespace()),
     )
     assert len(errors) == 0
     assert agent.name in fields
@@ -47,7 +47,7 @@ def test_repo_paths_compute_without_remote_label() -> None:
     fields, errors = ds.compute(
         agents=(agent,),
         cached_fields={},
-        mngr_ctx=cast(MngrContext, MagicMock()),
+        mngr_ctx=cast(MngrContext, SimpleNamespace()),
     )
     assert len(errors) == 0
     assert agent.name not in fields

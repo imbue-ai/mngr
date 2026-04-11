@@ -1,7 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
@@ -267,7 +266,7 @@ class _FailingDataSource:
 
 
 def test_run_data_sources_parallel_empty() -> None:
-    results, errors = _run_data_sources_parallel([], (), {}, cast(MngrContext, MagicMock()))
+    results, errors = _run_data_sources_parallel([], (), {}, cast(MngrContext, SimpleNamespace()))
     assert results == {}
     assert errors == []
 
@@ -276,7 +275,7 @@ def test_run_data_sources_parallel_single_source() -> None:
     agent = AgentName("agent-1")
     pr = _make_pr()
     source = _MockDataSource("github", {agent: {"pr": pr}})
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
     assert "github" in results
     assert agent in results["github"]
     assert errors == []
@@ -284,13 +283,13 @@ def test_run_data_sources_parallel_single_source() -> None:
 
 def test_run_data_sources_parallel_source_with_errors() -> None:
     source = _MockDataSource("github", {}, errors=["some error"])
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
     assert "some error" in errors
 
 
 def test_run_data_sources_parallel_source_raises_exception() -> None:
     source = _FailingDataSource()
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, MagicMock()))
+    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
     assert any("failing" in e and "failed" in e for e in errors)
 
 
@@ -300,7 +299,7 @@ def test_run_data_sources_parallel_multiple_sources() -> None:
     ci = CiField(status=CiStatus.PASSING)
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
-    results, errors = _run_data_sources_parallel([s1, s2], (), {}, cast(MngrContext, MagicMock()))
+    results, errors = _run_data_sources_parallel([s1, s2], (), {}, cast(MngrContext, SimpleNamespace()))
     assert "github" in results
     assert "git_info" in results
     assert errors == []
@@ -336,10 +335,8 @@ def test_get_local_work_dir_remote_agent() -> None:
 
 def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> MngrContext:
     """Build a minimal mock MngrContext for collect_data_sources tests."""
-    hook = MagicMock()
-    hook.kanpan_data_sources.return_value = [sources]
-    pm = MagicMock()
-    pm.hook = hook
+    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [sources])
+    pm = SimpleNamespace(hook=hook)
     return cast(
         MngrContext,
         SimpleNamespace(
@@ -373,10 +370,8 @@ def test_collect_data_sources_includes_enabled_source() -> None:
 
 
 def test_collect_data_sources_skips_none_results() -> None:
-    hook = MagicMock()
-    hook.kanpan_data_sources.return_value = [None]
-    pm = MagicMock()
-    pm.hook = hook
+    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [None])
+    pm = SimpleNamespace(hook=hook)
     ctx = cast(
         MngrContext,
         SimpleNamespace(
@@ -391,10 +386,8 @@ def test_collect_data_sources_skips_none_results() -> None:
 def test_collect_data_sources_dict_config_disabled() -> None:
     """When source_config is a raw dict with enabled=False, source should be excluded."""
     source = _MockDataSource("github", {})
-    hook = MagicMock()
-    hook.kanpan_data_sources.return_value = [[source]]
-    pm = MagicMock()
-    pm.hook = hook
+    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
+    pm = SimpleNamespace(hook=hook)
     ctx = cast(
         MngrContext,
         SimpleNamespace(
@@ -411,10 +404,8 @@ def test_collect_data_sources_dict_config_disabled() -> None:
 def test_collect_data_sources_dict_config_enabled() -> None:
     """When source_config is a raw dict with enabled=True, source should be included."""
     source = _MockDataSource("github", {})
-    hook = MagicMock()
-    hook.kanpan_data_sources.return_value = [[source]]
-    pm = MagicMock()
-    pm.hook = hook
+    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
+    pm = SimpleNamespace(hook=hook)
     ctx = cast(
         MngrContext,
         SimpleNamespace(
@@ -502,7 +493,7 @@ def _make_list_result(agents: list[AgentDetails]) -> ListResult:
 
 def _make_fetch_ctx() -> MngrContext:
     """Build a minimal MngrContext for fetch_board_snapshot tests."""
-    return cast(MngrContext, MagicMock())
+    return cast(MngrContext, SimpleNamespace())
 
 
 def test_fetch_board_snapshot_empty_agents() -> None:
@@ -663,7 +654,7 @@ def test_load_muted_agents_returns_muted_names() -> None:
     agents_by_host = {
         "host-1": [agent_ref_muted, agent_ref_not_muted],
     }
-    ctx = cast(MngrContext, MagicMock())
+    ctx = cast(MngrContext, SimpleNamespace())
     with patch(
         "imbue.mngr_kanpan.fetcher.discover_hosts_and_agents",
         return_value=(agents_by_host, {}),
@@ -675,7 +666,7 @@ def test_load_muted_agents_returns_muted_names() -> None:
 
 def test_load_muted_agents_returns_empty_on_exception() -> None:
     """_load_muted_agents returns empty set when discover_hosts_and_agents raises."""
-    ctx = cast(MngrContext, MagicMock())
+    ctx = cast(MngrContext, SimpleNamespace())
     with patch(
         "imbue.mngr_kanpan.fetcher.discover_hosts_and_agents",
         side_effect=RuntimeError("network down"),
@@ -688,9 +679,7 @@ def test_load_muted_agents_returns_empty_on_exception() -> None:
 
 
 def _make_cache_ctx(profile_dir: Path) -> MngrContext:
-    ctx = MagicMock(spec=MngrContext)
-    ctx.profile_dir = profile_dir
-    return cast(MngrContext, ctx)
+    return cast(MngrContext, SimpleNamespace(profile_dir=profile_dir))
 
 
 def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> KanpanDataSource:
