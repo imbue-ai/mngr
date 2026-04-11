@@ -1026,3 +1026,33 @@ def test_multiple_callbacks_all_invoked() -> None:
 
     assert _AGENT_A in results_a
     assert _AGENT_A in results_b
+
+
+def test_callback_re_fired_with_ssh_info_when_host_ssh_info_arrives() -> None:
+    """When SSH info arrives after agent discovery, callbacks are re-fired with ssh_info set."""
+    manager = _make_stream_manager()
+    ssh_infos: list[object] = []
+    manager.add_on_agent_discovered_callback(lambda aid, ssh_info: ssh_infos.append(ssh_info))
+
+    # Discover the agent first (no SSH info yet); use empty labels to avoid events stream
+    disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
+    manager._handle_discovery_line(disc_line)
+    # First callback fires with ssh_info=None (no SSH info available yet)
+    assert None in ssh_infos
+
+    ssh_infos.clear()
+
+    # Now SSH info arrives for that host
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 22,
+        "key_path": "/tmp/key",
+        "command": "ssh -i /tmp/key root@remote.example.com",
+    }
+    ssh_line = _make_host_ssh_info_line(_HOST_CALLBACK_TEST, ssh_data)
+    manager._handle_discovery_line(ssh_line)
+
+    # Callback is re-fired with the actual SSH info
+    assert len(ssh_infos) == 1
+    assert ssh_infos[0] is not None

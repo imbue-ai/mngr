@@ -462,11 +462,21 @@ class MngrStreamManager(MutableModel):
             port=event.ssh.port,
             key_path=event.ssh.key_path,
         )
+        host_id_str = str(event.host_id)
         with self._lock:
-            self._ssh_by_host_id[str(event.host_id)] = ssh_info
+            self._ssh_by_host_id[host_id_str] = ssh_info
             agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
+            # Find agents on this host so we can notify discovery callbacks with SSH info
+            agents_on_host = tuple(
+                AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str
+            )
 
         self._update_resolver(agent_ids)
+
+        # Re-fire callbacks for agents on this host now that SSH info is available.
+        # This handles the case where agent discovery fires before SSH info arrives.
+        for agent_id in agents_on_host:
+            self._fire_agent_discovered_callbacks(agent_id, ssh_info)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         """Incrementally add or update a single agent in the resolver."""
