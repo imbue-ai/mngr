@@ -48,6 +48,7 @@ test-offload args="":
     echo '.git/' >> .dockerignore
     echo '.offload-image-cache' >> .dockerignore
     echo '.offload-cache-key' >> .dockerignore
+    echo '.offload-release-cache-key' >> .dockerignore
 
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
