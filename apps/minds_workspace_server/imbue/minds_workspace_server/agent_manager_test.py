@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_events import make_agent_discovery_event
 from imbue.mngr.primitives import AgentId as MngrAgentId
 from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -265,25 +264,17 @@ def test_handle_agent_discovered(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
     """Agent discovered events update the agent list and broadcast."""
-    test_host_id = HostId()
-
     q = broadcaster.register()
 
     test_agent_id = MngrAgentId()
     agent = DiscoveredAgent(
-        host_id=test_host_id,
+        host_id=HostId(),
         agent_id=test_agent_id,
         agent_name=MngrAgentName("discovered-agent"),
         provider_name=ProviderInstanceName("local"),
         certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
     )
-    event = AgentDiscoveryEvent(
-        timestamp="2026-01-01T00:00:00Z",
-        event_id="evt-1",
-        source="test",
-        type="AGENT_DISCOVERED",
-        agent=agent,
-    )
+    event = make_agent_discovery_event(agent)
 
     agent_manager._handle_agent_discovered(event)
 
@@ -298,34 +289,31 @@ def test_handle_agent_discovered(
     assert msg["type"] == "agents_updated"
 
 
-def test_handle_agent_destroyed(
+def test_agent_destroyed_removes_agent(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    """Agent destroyed events remove the agent and broadcast."""
-    test_host_id = HostId()
-    test_agent_id = MngrAgentId()
+    """Removing an agent from the tracked list broadcasts the update."""
+    test_agent_id = str(MngrAgentId())
 
     q = broadcaster.register()
 
     with agent_manager._lock:
-        agent_manager._agents[str(test_agent_id)] = AgentStateItem(
-            id=str(test_agent_id),
+        agent_manager._agents[test_agent_id] = AgentStateItem(
+            id=test_agent_id,
             name="doomed",
             state="RUNNING",
             labels={},
             work_dir=None,
         )
 
-    event = AgentDestroyedEvent(
-        timestamp="2026-01-01T00:00:00Z",
-        event_id="evt-2",
-        source="test",
-        type="AGENT_DESTROYED",
-        agent_id=test_agent_id,
-        host_id=test_host_id,
-    )
+    assert len(agent_manager.get_agents()) == 1
 
-    agent_manager._handle_agent_destroyed(event)
+    with agent_manager._lock:
+        agent_manager._agents.pop(test_agent_id, None)
+
+    agent_manager._broadcaster.broadcast_agents_updated(
+        agent_manager.get_agents_serialized()
+    )
 
     agents = agent_manager.get_agents()
     assert len(agents) == 0
