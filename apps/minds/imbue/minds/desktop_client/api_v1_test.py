@@ -626,3 +626,74 @@ def test_telegram_setup_with_non_dict_json_body(tmp_path: Path) -> None:
     assert response.status_code == 200
 
 
+# -- Cloudflare success path tests --
+
+
+class _AlwaysSucceedCloudflareClient(CloudflareForwardingClient):
+    """CloudflareForwardingClient subclass that always returns True without making HTTP calls."""
+
+    def add_service(self, agent_id: AgentId, service_name: str, service_url: str) -> bool:
+        return True
+
+    def remove_service(self, agent_id: AgentId, service_name: str) -> bool:
+        return True
+
+
+def _create_test_api_client_with_succeeding_cloudflare(
+    tmp_path: Path,
+    agent_id: AgentId,
+) -> tuple[TestClient, str, WorkspacePaths]:
+    """Create a client with a CloudflareForwardingClient that always succeeds."""
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    auth_store = FileAuthStore(data_directory=paths.auth_dir)
+
+    api_key = generate_api_key()
+    save_api_key_hash(paths.data_dir, agent_id, hash_api_key(api_key))
+
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"web": "http://127.0.0.1:9000"}},
+    )
+    notification_dispatcher = NotificationDispatcher(is_electron=True)
+    cloudflare_client = _AlwaysSucceedCloudflareClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        username=CloudflareUsername("testuser"),
+        secret=CloudflareSecret("testsecret"),
+        owner_email=OwnerEmail("test@example.com"),
+    )
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        notification_dispatcher=notification_dispatcher,
+        cloudflare_client=cloudflare_client,
+        paths=paths,
+    )
+    client = TestClient(app)
+    return client, api_key, paths
+
+
+def test_cloudflare_enable_returns_200_on_success(tmp_path: Path) -> None:
+    """When Cloudflare API succeeds, enable returns 200 with ok=True."""
+    agent_id = AgentId()
+    client, api_key, _paths = _create_test_api_client_with_succeeding_cloudflare(tmp_path, agent_id)
+    response = client.put(
+        f"/api/v1/agents/{agent_id}/servers/web/cloudflare",
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_cloudflare_disable_returns_200_on_success(tmp_path: Path) -> None:
+    """When Cloudflare API succeeds, disable returns 200 with ok=True."""
+    agent_id = AgentId()
+    client, api_key, _paths = _create_test_api_client_with_succeeding_cloudflare(tmp_path, agent_id)
+    response = client.delete(
+        f"/api/v1/agents/{agent_id}/servers/web/cloudflare",
+        headers=_auth_headers(api_key),
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
