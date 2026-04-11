@@ -32,9 +32,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 
 
 def test_parse_source_string_with_agent_only() -> None:
-    parsed = parse_source_string(
-        source="my-agent",
-    )
+    parsed = parse_source_string("my-agent")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -44,9 +42,7 @@ def test_parse_source_string_with_agent_only() -> None:
 
 
 def test_parse_source_string_with_agent_and_host() -> None:
-    parsed = parse_source_string(
-        source="my-agent@my-host",
-    )
+    parsed = parse_source_string("my-agent@my-host")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -56,9 +52,7 @@ def test_parse_source_string_with_agent_and_host() -> None:
 
 
 def test_parse_source_string_with_agent_host_and_provider() -> None:
-    parsed = parse_source_string(
-        source="my-agent@my-host.modal",
-    )
+    parsed = parse_source_string("my-agent@my-host.modal")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -68,9 +62,7 @@ def test_parse_source_string_with_agent_host_and_provider() -> None:
 
 
 def test_parse_source_string_with_agent_host_and_path() -> None:
-    parsed = parse_source_string(
-        source="my-agent@my-host:/path/to/dir",
-    )
+    parsed = parse_source_string("my-agent@my-host:/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -80,9 +72,7 @@ def test_parse_source_string_with_agent_host_and_path() -> None:
 
 
 def test_parse_source_string_with_host_and_path() -> None:
-    parsed = parse_source_string(
-        source="@my-host:/path/to/dir",
-    )
+    parsed = parse_source_string("@my-host:/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -92,9 +82,7 @@ def test_parse_source_string_with_host_and_path() -> None:
 
 
 def test_parse_source_string_with_absolute_path() -> None:
-    parsed = parse_source_string(
-        source="/path/to/dir",
-    )
+    parsed = parse_source_string("/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -104,9 +92,7 @@ def test_parse_source_string_with_absolute_path() -> None:
 
 
 def test_parse_source_string_with_relative_path() -> None:
-    parsed = parse_source_string(
-        source="./path/to/dir",
-    )
+    parsed = parse_source_string("./path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -116,9 +102,7 @@ def test_parse_source_string_with_relative_path() -> None:
 
 
 def test_parse_source_string_with_home_path() -> None:
-    parsed = parse_source_string(
-        source="~/path/to/dir",
-    )
+    parsed = parse_source_string("~/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -128,9 +112,7 @@ def test_parse_source_string_with_home_path() -> None:
 
 
 def test_parse_source_string_with_parent_path() -> None:
-    parsed = parse_source_string(
-        source="../path/to/dir",
-    )
+    parsed = parse_source_string("../path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -139,41 +121,26 @@ def test_parse_source_string_with_parent_path() -> None:
     )
 
 
-def test_parse_source_string_with_individual_parameters() -> None:
-    parsed = parse_source_string(
-        source=None,
-        source_agent="my-agent",
-        source_host="my-host",
-        source_path="/path/to/dir",
-    )
+def test_parse_source_string_bare_name_is_agent_not_path() -> None:
+    """A bare name like 'foo' refers to agent 'foo', not directory 'foo'."""
+    parsed = parse_source_string("foo")
 
     assert parsed == ParsedSourceLocation(
-        agent="my-agent",
-        host="my-host",
-        path="/path/to/dir",
-    )
-
-
-def test_parse_source_string_with_all_none() -> None:
-    parsed = parse_source_string(
-        source=None,
-    )
-
-    assert parsed == ParsedSourceLocation(
-        agent=None,
+        agent="foo",
         host=None,
         path=None,
     )
 
 
-def test_parse_source_string_raises_when_both_source_and_individual_params() -> None:
-    with pytest.raises(UserInputError, match="Specify either --source or the individual source parameters"):
-        parse_source_string(
-            source="my-agent",
-            source_agent="another-agent",
-            source_host=None,
-            source_path=None,
-        )
+def test_parse_source_string_colon_prefix_is_local_path() -> None:
+    """:dirname is how to specify a relative local directory."""
+    parsed = parse_source_string(":my-dir")
+
+    assert parsed == ParsedSourceLocation(
+        agent=None,
+        host=None,
+        path="my-dir",
+    )
 
 
 def test_resolve_host_reference_with_none() -> None:
@@ -394,9 +361,7 @@ def test_resolve_agent_reference_raises_when_multiple_agents_match() -> None:
 
 
 def test_parse_source_string_with_colons_in_path() -> None:
-    parsed = parse_source_string(
-        source="@my-host:/path/with:colons:in:it.txt",
-    )
+    parsed = parse_source_string("@my-host:/path/with:colons:in:it.txt")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -406,9 +371,7 @@ def test_parse_source_string_with_colons_in_path() -> None:
 
 
 def test_parse_source_string_with_agent_host_and_colons_in_path() -> None:
-    parsed = parse_source_string(
-        source="agent@host:/weird:path:file.txt",
-    )
+    parsed = parse_source_string("agent@host:/weird:path:file.txt")
 
     assert parsed == ParsedSourceLocation(
         agent="agent",
@@ -418,21 +381,17 @@ def test_parse_source_string_with_agent_host_and_colons_in_path() -> None:
 
 
 def test_parse_source_string_with_empty_path_after_colon() -> None:
-    parsed = parse_source_string(
-        source="@my-host:",
-    )
+    parsed = parse_source_string("@my-host:")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
         host="my-host",
-        path="",
+        path=None,
     )
 
 
 def test_parse_source_string_with_agent_and_path() -> None:
-    parsed = parse_source_string(
-        source="my-agent:http://example.com/path",
-    )
+    parsed = parse_source_string("my-agent:http://example.com/path")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -442,9 +401,7 @@ def test_parse_source_string_with_agent_and_path() -> None:
 
 
 def test_parse_source_string_with_agent_host_provider() -> None:
-    parsed = parse_source_string(
-        source="my-agent@my-host.docker",
-    )
+    parsed = parse_source_string("my-agent@my-host.docker")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -454,9 +411,7 @@ def test_parse_source_string_with_agent_host_provider() -> None:
 
 
 def test_parse_source_string_with_agent_host_provider_and_path() -> None:
-    parsed = parse_source_string(
-        source="my-agent@my-host.modal:/path/to/dir",
-    )
+    parsed = parse_source_string("my-agent@my-host.modal:/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent="my-agent",
@@ -466,9 +421,7 @@ def test_parse_source_string_with_agent_host_provider_and_path() -> None:
 
 
 def test_parse_source_string_with_host_provider_and_path() -> None:
-    parsed = parse_source_string(
-        source="@my-host.docker:/path/to/dir",
-    )
+    parsed = parse_source_string("@my-host.docker:/path/to/dir")
 
     assert parsed == ParsedSourceLocation(
         agent=None,
@@ -479,9 +432,7 @@ def test_parse_source_string_with_host_provider_and_path() -> None:
 
 def test_parse_source_string_with_agent_colon_path() -> None:
     """Agent name followed by colon and path (no host)."""
-    parsed = parse_source_string(
-        source="C:/Windows/path",
-    )
+    parsed = parse_source_string("C:/Windows/path")
 
     assert parsed == ParsedSourceLocation(
         agent="C",
@@ -596,7 +547,7 @@ def test_determine_resolved_path_raises_when_no_path_and_no_agent() -> None:
 
 def test_parse_source_string_with_empty_prefix_before_colon() -> None:
     """parse_source_string should handle :path format (empty prefix before colon)."""
-    parsed = parse_source_string(source=":/path/to/dir")
+    parsed = parse_source_string(":/path/to/dir")
     assert parsed == ParsedSourceLocation(
         agent=None,
         host=None,

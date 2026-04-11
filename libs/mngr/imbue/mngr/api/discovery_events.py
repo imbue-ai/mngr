@@ -24,7 +24,7 @@ from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -342,7 +342,7 @@ def emit_discovery_events_for_host(
         # Emit agent events with full certified_data from the host's filesystem
         for discovered_agent in discovered_agents:
             emit_agent_discovered(config, discovered_agent)
-    except (MngrError, OSError, ValueError) as e:
+    except (BaseMngrError, OSError, ValueError) as e:
         logger.warning("Failed to emit discovery events: {}", e)
 
 
@@ -622,7 +622,7 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior
     """Run an unfiltered full snapshot, logging any errors instead of raising."""
     try:
         _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-    except (MngrError, OSError) as e:
+    except (BaseMngrError, OSError) as e:
         logger.warning("Failed to write discovery snapshot: {}", e)
 
 
@@ -699,7 +699,7 @@ def run_discovery_stream(
             try:
                 _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
                 # The tail thread will pick up the new snapshot and emit it
-            except (MngrError, OSError) as e:
+            except (BaseMngrError, OSError) as e:
                 logger.warning("Discovery stream poll failed (continuing): {}", e)
     except KeyboardInterrupt:
         pass

@@ -562,12 +562,7 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
         ("create", "Create a new agent"),
         ("list", "List existing agents"),
         ("stop", "Stop running agents"),
-    ),
-    additional_sections=(
-        (
-            "Idle Modes",
-            "See [Idle Detection](../../concepts/idle_detection.md) for details on idle modes and activity sources.",
-        ),
+        ("idle_detection", "Idle detection modes and activity sources"),
     ),
 ).register()
 

@@ -86,6 +86,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
+from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
@@ -1306,8 +1307,7 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work dir in a thread to reduce latency
             track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
-            # Exclude .git if git options are present (the user is making an explicit
-            # choice about git handling, e.g. is_git_synced=False means "skip .git").
+            # Exclude .git if git options are present (git transfer handles it separately).
             exclude_git = options.git is not None
 
             self._rsync_files(
@@ -1337,12 +1337,8 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work dir in a thread to reduce latency
             track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
-            created_branch_name: str | None = None
-
-            is_git_synced = options.git is not None and options.git.is_git_synced
-            if is_git_synced:
-                created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
-                self._transfer_extra_files(source_host, source_path, target_path, options)
+            created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
+            self._transfer_extra_files(source_host, source_path, target_path, options)
 
             # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
             # not for full directory sync. By default, rsync does NOT use --delete, so existing files
@@ -1444,7 +1440,7 @@ class Host(BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from --mirror push),
+                    # Use set-url if origin already exists (e.g. from mirror push),
                     # otherwise add it.
                     set_or_add = (
                         f"git remote set-url origin {shlex.quote(origin_url)}"
@@ -1454,7 +1450,7 @@ class Host(BaseHost, OnlineHostInterface):
                     config_commands.append(set_or_add)
 
                 # Copy .git/info/exclude from source to target. This file is not
-                # transferred by git push --mirror since it lives outside the git
+                # transferred by the git push since it lives outside the git
                 # object store. We read it here and include it in the config command.
                 exclude_content = self._read_source_git_info_exclude(source_host, source_path)
                 if exclude_content is not None:
@@ -1510,7 +1506,7 @@ class Host(BaseHost, OnlineHostInterface):
         source_path: Path,
         target_path: Path,
     ) -> None:
-        """Push git repo from source to target using git push --mirror."""
+        """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
         target_ssh_info = self.get_ssh_connection_info()
 
@@ -1539,7 +1535,10 @@ class Host(BaseHost, OnlineHostInterface):
             user, hostname, port, key_path = target_ssh_info
             git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
 
-        # Build the environment and command for git push --mirror.
+        # Build the environment and command for a mirror-like push. We use
+        # explicit refspecs instead of --mirror to avoid pushing remote-tracking
+        # refs (refs/remotes/*), which cause "inconsistent aliased update"
+        # errors on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
         # --no-verify skips hooks, since they can sometimes fail on mirror pushes.
         env: dict[str, str] = {}
         if target_ssh_info is not None:
@@ -1554,7 +1553,17 @@ class Host(BaseHost, OnlineHostInterface):
 
         with log_span("Pushing git repo to target: {}", git_url):
             if source_host.is_local:
-                command_args = ["git", "-C", str(source_path), "push", "--no-verify", "--mirror", git_url]
+                command_args = [
+                    "git",
+                    "-C",
+                    str(source_path),
+                    "push",
+                    "--no-verify",
+                    "--force",
+                    "--prune",
+                    git_url,
+                    *GIT_MIRROR_PUSH_REFSPECS,
+                ]
                 try:
                     self.mngr_ctx.concurrency_group.run_process_to_completion(
                         command_args,
@@ -1562,10 +1571,11 @@ class Host(BaseHost, OnlineHostInterface):
                     )
                 except ProcessError as e:
                     raise MngrError(f"Failed to push git repo: {e}") from e
-                logger.trace("Ran git push --mirror from local source to target: {}", " ".join(command_args))
+                logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
             else:
                 env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-                push_cmd = f"{env_prefix} git push --no-verify --mirror {shlex.quote(git_url)}"
+                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
+                push_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
                 result = source_host.execute_idempotent_command(push_cmd, cwd=source_path)
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Final
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -7,6 +8,15 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
+
+# Refspecs that replicate `git push --mirror` behavior for branches and tags,
+# without pushing remote-tracking refs (refs/remotes/*). Pushing symbolic
+# remote-tracking refs like refs/remotes/origin/HEAD causes "inconsistent
+# aliased update" errors on git 2.45+.
+GIT_MIRROR_PUSH_REFSPECS: Final[list[str]] = [
+    "+refs/heads/*:refs/heads/*",
+    "+refs/tags/*:refs/tags/*",
+]
 
 
 @pure

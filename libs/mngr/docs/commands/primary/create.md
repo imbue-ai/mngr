@@ -32,7 +32,7 @@ directly to the agent command.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
-via git push --mirror. Use --transfer to override the default.
+by pushing all local branches and tags via git. Use --transfer to override the default.
 
 Alias: c
 
@@ -43,12 +43,14 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 ```
 ## Arguments
 
-- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]]` format (all parts optional):
+- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]][:PATH]` format (all parts optional):
   - `NAME` -- agent name only, creates on local host (default)
   - `NAME@HOST` -- agent on existing host
   - `NAME@HOST.PROVIDER` -- agent on existing host (with provider for disambiguation)
   - `NAME@.PROVIDER` -- agent on a new host (auto-generated host name); implies `--new-host`
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
+  - `NAME:PATH` -- agent with a target path for the working directory
+  - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
 - `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
 - `AGENT_ARGS`: Additional arguments passed to the agent
 
@@ -66,6 +68,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
+| `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
 
 ## Host Options
 
@@ -75,7 +78,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | ---- | ---- | ----------- | ------- |
 | `--provider` | text | Provider for the host (alternative to .PROVIDER in the address, e.g. --provider docker) | None |
 | `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider) | `False` |
-| `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
 | `--host-label` | text | Host metadata label KEY=VALUE [repeatable] | None |
 | `--host-name-style` | choice (`coolname` &#x7C; `astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `coolname` |
 
@@ -89,39 +91,32 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
 | `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
 
-## Agent Source Data (what to include in the new agent)
+## Source Data (what to include in the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--from`, `--source` | text | Directory to use as work_dir root [AGENT &#x7C; AGENT@HOST &#x7C; AGENT@HOST.PROVIDER:PATH &#x7C; @HOST:PATH]. Defaults to current dir if no other source args are given | None |
-| `--source-agent`, `--from-agent` | text | Source agent for cloning work_dir | None |
-| `--source-host` | text | Source host | None |
-| `--source-path` | text | Source path | None |
+| `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH]. A bare name refers to an agent; use :PATH for a directory. Defaults to git root if omitted | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
-| `--include-git`, `--no-include-git` | boolean | Include .git directory | `True` |
 
-## Agent Target (where to put the new agent)
+## Target (where to put the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | text | Target [HOST][:PATH]. Defaults to current dir if no other target args are given | None |
-| `--target-path` | text | Directory to mount source inside agent host. Incompatible with --transfer=none | None |
-| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: transfer via git push --mirror (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
+| `--target-path` | text | Directory to mount source inside agent host (alternative to :PATH in address). Incompatible with --transfer=none | None |
+| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: push all local branches and tags via git (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
 
-## Agent Git Configuration
+## Git Configuration
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--branch` | text | Branch spec as [BASE][:NEW]. BASE defaults to current branch. NEW creates a fresh branch (* is replaced by agent name). Omit :NEW to use BASE directly without creating a branch. Empty NEW (e.g. 'main:') defaults to mngr/*. | `:mngr/*` |
-| `--depth` | integer | Shallow clone depth [default: full] | None |
-| `--shallow-since` | text | Shallow clone since date | None |
 | `--ensure-clean`, `--no-ensure-clean` | boolean | Abort if working tree is dirty | `True` |
 | `--include-unclean`, `--exclude-unclean` | boolean | Include uncommitted files [default: include if --no-ensure-clean] | None |
 | `--include-gitignored`, `--no-include-gitignored` | boolean | Include gitignored files | `False` |
 | `--worktree-base-folder` | path | Base folder for git worktrees [default: ~/.mngr/worktrees/] | None |
 
-## Agent Environment Variables
+## Environment Variables
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
@@ -129,17 +124,13 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--env-file` | path | Load env | None |
 | `--pass-env` | text | Forward variable from shell | None |
 
-## Agent Provisioning
-
-See [Provision Options](../secondary/provision.md) for full details.
+## Provisioning
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--grant` | text | Grant a permission to the agent [repeatable] | None |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
-| `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
-| `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |
 
 ## New Host Environment Variables
 
@@ -173,12 +164,9 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--reconnect`, `--no-reconnect` | boolean | Automatically reconnect if dropped | `True` |
-| `--interactive`, `--no-interactive` | boolean | Enable interactive mode [default: yes if TTY] | None |
 | `--message` | text | Initial message to send after the agent starts | None |
 | `--message-file` | path | File containing initial message to send | None |
 | `--edit-message` | boolean | Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content. | `False` |
-| `--retry` | integer | Number of connection retries | `3` |
-| `--retry-delay` | text | Delay between retries (e.g., 5s, 1m) | `5s` |
 | `--attach-command` | text | Command to run instead of attaching to main session | None |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
@@ -197,20 +185,12 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
 | `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
 | `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
-| `--log-command-output`, `--no-log-command-output` | boolean | Log stdout/stderr from commands | None |
-| `--log-env-vars`, `--no-log-env-vars` | boolean | Log environment variables (security risk) | None |
 | `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
-| `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
-
-## Agent Limits
-
-See [Limit Options](../secondary/limit.md)
-
 
 ## Provider Build/Start Arguments
 
@@ -278,6 +258,7 @@ Provider: vultr
 - [mngr connect](./connect.md) - Connect to an existing agent
 - [mngr list](./list.md) - List existing agents
 - [mngr destroy](./destroy.md) - Destroy agents
+- [mngr limit](../secondary/limit.md) - Configure agent resource limits
 
 ## Examples
 

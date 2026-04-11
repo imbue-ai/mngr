@@ -25,11 +25,11 @@ from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
-from imbue.mngr.cli.create import _parse_source_string
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
+from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
@@ -457,7 +457,7 @@ def test_resolve_source_location_with_auto_start_enabled(
 ) -> None:
     """_resolve_source_location returns an online host when is_start_desired=True."""
     opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
+        to_update(default_create_cli_opts.field_ref().source, f":{temp_work_dir}"),
     )
 
     result = _resolve_source_location(
@@ -960,47 +960,6 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
 
 
 # =============================================================================
-# Tests for _parse_source_string
-# =============================================================================
-
-
-def test_parse_source_string_plain_path() -> None:
-    """A plain path without @ or : is treated as a filesystem path."""
-    result = _parse_source_string("./some/dir")
-
-    assert result.path == Path("./some/dir")
-    assert result.agent_name is None
-    assert result.host_name is None
-
-
-def test_parse_source_string_agent_at_host_without_colon() -> None:
-    """AGENT@HOST without a colon parses as an address with no path."""
-    result = _parse_source_string("my-agent@my-host")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host"
-    assert result.path is None
-
-
-def test_parse_source_string_agent_at_host_with_provider_without_colon() -> None:
-    """AGENT@HOST.PROVIDER without a colon parses as an address with no path."""
-    result = _parse_source_string("my-agent@my-host.modal")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host.modal"
-    assert result.path is None
-
-
-def test_parse_source_string_agent_at_host_with_colon_path() -> None:
-    """AGENT@HOST:PATH parses all three components."""
-    result = _parse_source_string("my-agent@my-host:/path/to/dir")
-
-    assert result.agent_name == "my-agent"
-    assert result.host_name == "my-host"
-    assert result.path == Path("/path/to/dir")
-
-
-# =============================================================================
 # Tests for parse_agent_address
 # =============================================================================
 
@@ -1266,7 +1225,7 @@ def test_create_accepts_name_flag_alone(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1297,7 +1256,7 @@ def test_create_provider_flag_sets_provider(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1338,7 +1297,7 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "true",
             "--no-connect",
             "--transfer=none",
-            "--source-path",
+            "--from",
             str(temp_work_dir),
         ],
         obj=plugin_manager,
@@ -1518,8 +1477,32 @@ def test_resolve_source_location_raises_outside_git_repo(
 
     with pytest.raises(UserInputError, match="Not inside a git repository"):
         _resolve_source_location(
-            default_create_cli_opts,
+            opts=default_create_cli_opts,
             agent_and_host_loader=lambda: {},
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,
         )
+
+
+# =============================================================================
+# Tests for _split_address_and_target_path
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_addr", "expected_path"),
+    [
+        pytest.param("foo", "foo", None, id="no_colon"),
+        pytest.param("", "", None, id="empty_string"),
+        pytest.param("foo:/tmp/work", "foo", Path("/tmp/work"), id="absolute_path"),
+        pytest.param(":./rel/path", "", Path("./rel/path"), id="relative_path"),
+        pytest.param("foo@host.modal:/root/work", "foo@host.modal", Path("/root/work"), id="full_address_with_path"),
+        pytest.param(":/tmp/work", "", Path("/tmp/work"), id="path_only"),
+        pytest.param("foo:", "foo", None, id="trailing_colon"),
+    ],
+)
+def test_split_address_and_target_path(raw: str, expected_addr: str, expected_path: Path | None) -> None:
+    """_split_address_and_target_path parses address and optional :PATH suffix."""
+    addr, path = _split_address_and_target_path(raw)
+    assert addr == expected_addr
+    assert path == expected_path

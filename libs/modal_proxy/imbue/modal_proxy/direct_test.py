@@ -4,6 +4,7 @@ from typing import Any
 from typing import Mapping
 from typing import Sequence
 
+import modal.exception
 import pytest
 from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
@@ -18,11 +19,13 @@ from imbue.modal_proxy.direct import DirectVolume
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
 from imbue.modal_proxy.direct import _translate_modal_cli_not_found
+from imbue.modal_proxy.direct import _translate_modal_error
 from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
@@ -170,3 +173,13 @@ def test_translate_modal_cli_not_found_raises_for_modal() -> None:
 def test_translate_modal_cli_not_found_reraises_for_other() -> None:
     with pytest.raises(FileNotFoundError):
         _translate_modal_cli_not_found(_make_file_not_found("other_binary"))
+
+
+# --- Error translation tests ---
+
+
+def test_translate_resource_exhausted_to_rate_limit_error() -> None:
+    modal_err = modal.exception.ResourceExhaustedError("VolumeListFiles rate limit exceeded")
+    result = _translate_modal_error(modal_err)
+    assert isinstance(result, ModalProxyRateLimitError)
+    assert "rate limit" in str(result)

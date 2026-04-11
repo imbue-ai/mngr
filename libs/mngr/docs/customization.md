@@ -85,7 +85,7 @@ Command defaults are particularly useful for:
 - Personal preferences (e.g., prefer fantasy names over english)
 - Team conventions (e.g., standard provider or host settings)
 
-**Note:** Some CLI arguments (like `--context`) affect which config file is loaded, so they are parsed before config defaults are applied. The implementation handles this correctly by loading the config first, then applying defaults only to parameters that weren't explicitly specified.
+**Note:** Config defaults are applied only to parameters that weren't explicitly specified on the command line.
 
 ### Create Templates
 

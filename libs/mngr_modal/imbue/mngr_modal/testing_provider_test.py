@@ -6,6 +6,7 @@ Modal credentials or SSH connections.
 """
 
 import contextlib
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
@@ -40,6 +41,7 @@ from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
 from imbue.mngr_modal.backend import register_provider_backend
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
 from imbue.mngr_modal.instance import HostRecord
@@ -64,10 +66,40 @@ from imbue.mngr_modal.testing import make_snapshot
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
 from imbue.mngr_modal.testing import setup_host_with_sandbox
+from imbue.mngr_modal.volume import ModalVolume
 from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
+from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyRateLimitError
+from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.testing import TestingModalInterface
+
+
+class _RateLimitingVolumeStub(VolumeInterface):
+    """Stub that raises ModalProxyRateLimitError on every operation."""
+
+    def get_name(self) -> str | None:
+        return None
+
+    def listdir(self, path: str) -> list[FileEntry]:
+        raise ModalProxyRateLimitError("rate limit exceeded")
+
+    def read_file(self, path: str) -> bytes:
+        raise ModalProxyRateLimitError("rate limit exceeded")
+
+    def remove_file(self, path: str, *, recursive: bool = False) -> None:
+        raise ModalProxyRateLimitError("rate limit exceeded")
+
+    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+        raise ModalProxyRateLimitError("rate limit exceeded")
+
+    def reload(self) -> None:
+        pass
+
+    def commit(self) -> None:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Host Record CRUD Tests
@@ -1216,6 +1248,13 @@ def test_modal_volume_wrapper(testing_provider: ModalProviderInstance) -> None:
     # Remove directory
     vol.write_files({"/rmdir/file.txt": b"x"})
     vol.remove_directory("/rmdir")
+
+
+def test_modal_volume_translates_rate_limit_error_to_mngr_error() -> None:
+    """ModalProxyRateLimitError from the proxy layer is translated to ModalMngrError."""
+    vol = ModalVolume.model_construct(modal_volume=_RateLimitingVolumeStub())
+    with pytest.raises(ModalMngrError, match="rate limit exceeded"):
+        vol.listdir("/any")
 
 
 # ---------------------------------------------------------------------------

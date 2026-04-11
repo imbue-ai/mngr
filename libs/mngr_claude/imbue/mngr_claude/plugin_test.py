@@ -35,15 +35,19 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -53,14 +57,22 @@ from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
+from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
+from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
+from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
+from imbue.mngr_claude.plugin import _preserve_session_files
+from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
+from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
+from imbue.mngr_claude.plugin import _should_preserve_sessions
+from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
@@ -87,7 +99,7 @@ def make_claude_agent(
         work_dir.mkdir()
 
     if agent_config is None:
-        agent_config = ClaudeAgentConfig(check_installation=False)
+        agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=False)
     if agent_type is None:
         agent_type = AgentTypeName("claude")
 
@@ -131,7 +143,7 @@ def _setup_git_worktree(tmp_path: Path) -> tuple[Path, Path]:
     source.mkdir()
     init_git_repo(source, initial_commit=True)
 
-    # Add .gitignore (needed by _configure_readiness_hooks in provision)
+    # Add .gitignore (needed by _configure_agent_hooks in provision)
     (source / ".gitignore").write_text(".claude/settings.local.json\n")
     subprocess.run(["git", "-C", str(source), "add", ".gitignore"], check=True, capture_output=True)
     subprocess.run(
@@ -634,6 +646,21 @@ def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> No
                 )
 
 
+def test_build_credential_sync_hooks_config_structure() -> None:
+    """build_credential_sync_hooks_config should return a Notification:auth_success hook."""
+    config = build_credential_sync_hooks_config()
+
+    assert "hooks" in config
+    assert "Notification" in config["hooks"]
+    assert len(config["hooks"]["Notification"]) == 1
+    hook_group = config["hooks"]["Notification"][0]
+    assert hook_group["matcher"] == "auth_success"
+    hook = hook_group["hooks"][0]
+    assert hook["type"] == "command"
+    assert "sync_keychain_credentials.py" in hook["command"]
+    assert "MNGR_AGENT_STATE_DIR" in hook["command"]
+
+
 def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -804,10 +831,71 @@ def test_preflight_check_skips_when_not_git_repo(
     )
 
 
-def test_configure_readiness_hooks_raises_when_not_gitignored(
+def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should pass when .claude is a symlink and the resolved path is gitignored."""
+    host = local_provider.create_host(HostName("localhost"))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the resolved path (what git actually sees)
+    (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
+
+    # Should not raise
+    _check_settings_local_gitignored(host, repo_dir)
+
+
+def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should raise when .claude is a symlink and the resolved path is not gitignored."""
+    host = local_provider.create_host(HostName("localhost"))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the symlink path (wrong -- git won't match this)
+    (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+
+    with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
+        _check_settings_local_gitignored(host, repo_dir)
+
+    # Error message should tell the user to add the resolved path, not the symlink path
+    assert ".agents/settings.local.json" in str(exc_info.value)
+
+
+def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should silently return when .claude symlink target is outside the repo."""
+    host = local_provider.create_host(HostName("localhost"))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create a directory outside the repo and symlink .claude to it
+    outside_dir = tmp_path / "outside_agents"
+    outside_dir.mkdir()
+    (repo_dir / ".claude").symlink_to(outside_dir)
+
+    # Should not raise -- target is outside the repo, git won't track it
+    _check_settings_local_gitignored(host, repo_dir)
+
+
+def test_configure_agent_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should raise when .claude/settings.local.json is not gitignored."""
+    """_configure_agent_hooks should raise when .claude/settings.local.json is not gitignored."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -828,13 +916,13 @@ def test_configure_readiness_hooks_raises_when_not_gitignored(
     )
 
     with pytest.raises(PluginMngrError, match="not gitignored"):
-        agent._configure_readiness_hooks(host)
+        agent._configure_agent_hooks(host)
 
 
-def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
+def test_configure_agent_hooks_skips_gitignore_check_when_not_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should skip gitignore check when the work_dir is not a git repo."""
+    """_configure_agent_hooks should skip gitignore check when the work_dir is not a git repo."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -853,7 +941,7 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     )
 
     # Should succeed without raising (no gitignore check needed for non-git dirs)
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the hooks file was still created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -863,10 +951,10 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     assert "SessionStart" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_creates_settings_file(
+def test_configure_agent_hooks_creates_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should create .claude/settings.local.json."""
+    """_configure_agent_hooks should create .claude/settings.local.json."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -884,7 +972,7 @@ def test_configure_readiness_hooks_creates_settings_file(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Verify the file was actually created
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -898,10 +986,10 @@ def test_configure_readiness_hooks_creates_settings_file(
     assert "Notification" in settings["hooks"]
 
 
-def test_configure_readiness_hooks_merges_with_existing_settings(
+def test_configure_agent_hooks_merges_with_existing_settings(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_readiness_hooks should merge with existing settings."""
+    """_configure_agent_hooks should merge with existing settings."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -925,7 +1013,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
         host=host,
     )
 
-    agent._configure_readiness_hooks(host)
+    agent._configure_agent_hooks(host)
 
     # Read the file and verify it was merged
     settings_path = work_dir / ".claude" / "settings.local.json"
@@ -939,6 +1027,133 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     assert "SessionStart" in settings["hooks"]
     assert "UserPromptSubmit" in settings["hooks"]
     assert "Notification" in settings["hooks"]
+
+
+def test_configure_agent_hooks_adds_credential_sync_on_macos(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should add credential sync hooks on macOS when sync_credentials_on_login is True."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should have credential sync hook under Notification with auth_success matcher
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 1
+    assert "sync_keychain_credentials.py" in auth_hooks[0]["hooks"][0]["command"]
+
+
+def test_configure_agent_hooks_skips_credential_sync_when_disabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should not add credential sync hooks when sync_credentials_on_login is False."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False),
+        host=host,
+    )
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
+        agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+
+    # Should NOT have credential sync hook
+    notification_hooks = settings["hooks"]["Notification"]
+    auth_hooks = [h for h in notification_hooks if h.get("matcher") == "auth_success"]
+    assert len(auth_hooks) == 0
+
+
+def test_provision_local_credentials_symlink(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials with symlink=True should create a symlink to the source credentials."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    (source_dir / ".credentials.json").write_text('{"token": "test"}')
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=True)
+
+    dest = config_dir / ".credentials.json"
+    assert dest.is_symlink()
+    assert dest.resolve() == (source_dir / ".credentials.json").resolve()
+
+
+def test_provision_local_credentials_copy(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials with symlink=False should copy the credentials file."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    (source_dir / ".credentials.json").write_text('{"token": "test"}')
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=False)
+
+    dest = config_dir / ".credentials.json"
+    assert dest.exists()
+    assert not dest.is_symlink()
+    assert dest.read_text() == '{"token": "test"}'
+    assert oct(dest.stat().st_mode & 0o777) == oct(0o600)
+
+
+def test_provision_local_credentials_missing_source(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """_provision_local_credentials should be a no-op when the source credentials file does not exist."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    source_dir = tmp_path / "source_claude"
+    source_dir.mkdir()
+    # Deliberately do NOT create .credentials.json
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=source_dir):
+        _provision_local_credentials(host, config_dir, symlink=True)
+
+    assert not (config_dir / ".credentials.json").exists()
 
 
 def test_configure_readiness_hooks_adds_permission_auto_allow_when_enabled(
@@ -1017,7 +1232,7 @@ def test_configure_readiness_hooks_does_not_add_permission_auto_allow_by_default
 def test_provision_configures_readiness_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should configure readiness hooks."""
+    """provision should configure agent hooks."""
     # check_installation=False avoids running `claude --version` which would fail in test env
     agent, host = make_claude_agent(
         local_provider,
@@ -1308,6 +1523,138 @@ def test_on_destroy_removes_trust(
     # Verify the trust entry was removed
     config_after = json.loads(config_path.read_text())
     assert str(agent.work_dir.resolve()) not in config_after.get("projects", {})
+
+
+def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
+    """Create fake session files in the agent's state directory for testing preservation.
+
+    Returns a dict mapping logical names to their paths.
+    """
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create session JSONL files in the per-agent Claude config dir
+    config_dir = agent.get_claude_config_dir()
+    project_name = encode_claude_project_dir_name(agent.work_dir)
+    projects_dir = config_dir / "projects" / project_name
+    projects_dir.mkdir(parents=True, exist_ok=True)
+
+    session_file = projects_dir / "abc123.jsonl"
+    session_file.write_text('{"type":"assistant","uuid":"u1"}\n')
+
+    # Create the raw transcript
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    raw_transcript_file = raw_transcript_dir / "events.jsonl"
+    raw_transcript_file.write_text('{"type":"message"}\n')
+
+    # Create the common transcript
+    common_transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
+    common_transcript_dir.mkdir(parents=True, exist_ok=True)
+    common_transcript_file = common_transcript_dir / "events.jsonl"
+    common_transcript_file.write_text('{"type":"user_message","text":"hello"}\n')
+
+    # Create the session history
+    history_file = agent_dir / "claude_session_id_history"
+    history_file.write_text("abc123 create\n")
+
+    return {
+        "session_file": session_file,
+        "raw_transcript_file": raw_transcript_file,
+        "common_transcript_file": common_transcript_file,
+        "history_file": history_file,
+    }
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_session_files(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """on_destroy should preserve session files when preserve_sessions_on_destroy is True."""
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
+    files = _populate_session_files(agent)
+    _write_mngr_trust_entry(agent.work_dir)
+
+    agent.on_destroy(host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
+
+    # Session JSONL files should be preserved (copy_directory copies the projects/ dir)
+    preserved_projects = dest_dir / "projects"
+    assert preserved_projects.exists()
+    preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(preserved_session_files) == 1
+    assert preserved_session_files[0].read_text() == files["session_file"].read_text()
+
+    # Raw transcript dir should be preserved (copy_directory copies the directory)
+    preserved_raw_transcript = dest_dir / "raw_transcript" / "events.jsonl"
+    assert preserved_raw_transcript.exists()
+    assert preserved_raw_transcript.read_text() == '{"type":"message"}\n'
+
+    # Common transcript dir should be preserved
+    preserved_common_transcript = dest_dir / "common_transcript" / "events.jsonl"
+    assert preserved_common_transcript.exists()
+    assert preserved_common_transcript.read_text() == '{"type":"user_message","text":"hello"}\n'
+
+    # Session history should be preserved (single file copy)
+    preserved_history = dest_dir / "claude_session_id_history"
+    assert preserved_history.exists()
+    assert preserved_history.read_text() == "abc123 create\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """on_destroy should not preserve sessions when preserve_sessions_on_destroy is False."""
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
+    _populate_session_files(agent)
+    _write_mngr_trust_entry(agent.work_dir)
+
+    agent.on_destroy(host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert not dest_dir.exists()
+
+
+def test_on_destroy_handles_no_session_data(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """on_destroy should not create a preserved_sessions dir when there is no session data."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    _write_mngr_trust_entry(agent.work_dir)
+
+    # No session files populated -- just destroy
+    agent.on_destroy(host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert not dest_dir.exists()
+
+
+@pytest.mark.rsync
+def test_preserve_session_files_partial_data(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Preservation should work when only some session data exists (e.g., only raw transcript)."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Only create the raw transcript, no projects, common transcript, or history
+    transcript_dir = agent_dir / "logs" / "claude_transcript"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
+
+    _preserve_session_files(agent, host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
+    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "projects").exists()
+    assert not (dest_dir / "common_transcript").exists()
+    assert not (dest_dir / "claude_session_id_history").exists()
 
 
 def test_provision_prompts_for_all_dialogs_when_interactive(
@@ -2518,9 +2865,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should find session by ID, copy project dir, and write session ID."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
-    _init_git_with_gitignore(agent.work_dir)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     # Set up a session under ~/.claude/ (HOME is already a temp dir via autouse fixture)
     project_dir = Path.home() / ".claude" / "projects" / "test-project"
@@ -2538,7 +2883,6 @@ def test_on_after_provisioning_adopts_session_by_id(
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
-        agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
         agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     # Session ID should be written
@@ -2590,9 +2934,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """Session lookup should find sessions in ~/.claude/ even when CLAUDE_CONFIG_DIR points elsewhere."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
-    _init_git_with_gitignore(agent.work_dir)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     # Session lives under ~/.claude/ (HOME is already a temp dir via autouse fixture)
     project_dir = Path.home() / ".claude" / "projects" / "test-project"
@@ -2616,7 +2958,6 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     with patch.dict(
         "os.environ", {"CLAUDE_CONFIG_DIR": str(agent_config_dir), "ORIGINAL_CLAUDE_CONFIG_DIR": home_claude}
     ):
-        agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
         agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
@@ -2632,9 +2973,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should accept a .jsonl file path and extract the session ID."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
-    _init_git_with_gitignore(agent.work_dir)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     # Create a session file at an arbitrary path
     project_dir = tmp_path / "my_sessions" / "some-project"
@@ -2650,7 +2989,6 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
         plugin_data={"adopt_session": (str(session_file),)},
     )
 
-    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
     agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     # Session ID should be the stem of the file
@@ -2864,6 +3202,35 @@ def test_rewrite_installed_plugins_paths_rewrites_similar_prefix_best_effort() -
     assert entry["installPath"] == "/remote/config/plugins/cache/org/plugin/1.0.0"
 
 
+def test_rewrite_installed_plugins_paths_best_effort_for_mngr_agent_path() -> None:
+    """installPath from an mngr agent is rewritten best-effort via /plugins/ marker."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    stale_path = (
+        "/Users/testuser/.mngr/agents/agent-abc123/plugin/claude/anthropic/plugins/cache/my-org/my-plugin/1.0.0"
+    )
+    content = json.dumps(
+        {
+            "version": 2,
+            "plugins": {
+                "my-plugin@my-org": [
+                    {
+                        "installPath": stale_path,
+                        "version": "1.0.0",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_installed_plugins_paths(content, local_claude_dir, remote_config_dir))
+
+    assert (
+        result["plugins"]["my-plugin@my-org"][0]["installPath"]
+        == "/remote/config/plugins/cache/my-org/my-plugin/1.0.0"
+    )
+
+
 # =============================================================================
 # _generate_installed_plugins_content Tests
 # =============================================================================
@@ -3034,3 +3401,202 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
+
+
+# =============================================================================
+# Volume-based session preservation tests
+# =============================================================================
+
+
+def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict[str, Path]:
+    """Create fake session files on a volume-backed directory for testing volume-based preservation.
+
+    Mirrors the structure that a real agent would create on the host volume.
+    Returns a dict mapping logical names to their on-volume paths.
+    """
+    agent_dir = volume_root / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Session JSONL files in the per-agent Claude config dir
+    projects_dir = agent_dir / "plugin" / "claude" / "anthropic" / "projects" / "encoded-project-name"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    session_file = projects_dir / "abc123.jsonl"
+    session_file.write_text('{"type":"assistant","uuid":"u1"}\n')
+
+    # Raw transcript
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    raw_transcript_file = raw_transcript_dir / "events.jsonl"
+    raw_transcript_file.write_text('{"type":"message"}\n')
+
+    # Common transcript
+    common_transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
+    common_transcript_dir.mkdir(parents=True, exist_ok=True)
+    common_transcript_file = common_transcript_dir / "events.jsonl"
+    common_transcript_file.write_text('{"type":"user_message","text":"hello"}\n')
+
+    # Session history
+    history_file = agent_dir / "claude_session_id_history"
+    history_file.write_text("abc123 create\n")
+
+    return {
+        "session_file": session_file,
+        "raw_transcript_file": raw_transcript_file,
+        "common_transcript_file": common_transcript_file,
+        "history_file": history_file,
+    }
+
+
+def test_preserve_session_files_from_volume_all_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """All 4 categories of session data are preserved from the volume."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-agent")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+
+    files = _populate_volume_session_files(volume_root, agent_id)
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert dest_dir.exists()
+
+    # Session JSONL files
+    preserved_projects = dest_dir / "projects"
+    assert preserved_projects.exists()
+    preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
+    assert len(preserved_session_files) == 1
+    assert preserved_session_files[0].read_text() == files["session_file"].read_text()
+
+    # Raw transcript
+    preserved_raw = dest_dir / "raw_transcript" / "events.jsonl"
+    assert preserved_raw.exists()
+    assert preserved_raw.read_text() == '{"type":"message"}\n'
+
+    # Common transcript
+    preserved_common = dest_dir / "common_transcript" / "events.jsonl"
+    assert preserved_common.exists()
+    assert preserved_common.read_text() == '{"type":"user_message","text":"hello"}\n'
+
+    # Session history
+    preserved_history = dest_dir / "claude_session_id_history"
+    assert preserved_history.exists()
+    assert preserved_history.read_text() == "abc123 create\n"
+
+
+def test_preserve_session_files_from_volume_partial_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Preservation works when only some session data exists on the volume."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-partial")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+
+    # Only create the raw transcript
+    agent_dir = volume_root / "agents" / str(agent_id)
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    (raw_transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
+
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "projects").exists()
+    assert not (dest_dir / "common_transcript").exists()
+    # History file was not created, so _copy_volume_file_to_local logs a warning
+    # but does not create the dest file
+    assert not (dest_dir / "claude_session_id_history").exists()
+
+
+def test_preserve_session_files_from_volume_no_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Empty volume produces no errors and no preserved dir."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-vol-empty")
+    volume_root = tmp_path / "volume"
+    volume_root.mkdir()
+    # Create the agent dir but leave it empty
+    (volume_root / "agents" / str(agent_id)).mkdir(parents=True, exist_ok=True)
+
+    volume = LocalVolume(root_path=volume_root)
+    agent_volume = volume.scoped(f"agents/{agent_id}")
+
+    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+
+    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    assert not dest_dir.exists()
+
+
+def test_should_preserve_sessions_true_for_claude_agent() -> None:
+    """_should_preserve_sessions returns True when preserve_sessions_on_destroy is True."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "type": "claude",
+            "agent_config": {"preserve_sessions_on_destroy": True},
+        },
+    )
+    assert _should_preserve_sessions(ref) is True
+
+
+def test_should_preserve_sessions_false_when_disabled() -> None:
+    """_should_preserve_sessions returns False when preserve_sessions_on_destroy is False."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "type": "claude",
+            "agent_config": {"preserve_sessions_on_destroy": False},
+        },
+    )
+    assert _should_preserve_sessions(ref) is False
+
+
+def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
+    """_should_preserve_sessions returns False when the field is absent (non-Claude agent)."""
+    ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"type": "echo"},
+    )
+    assert _should_preserve_sessions(ref) is False
+
+
+# =============================================================================
+# _write_generated_files Tests
+# =============================================================================
+
+
+def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """generated_files that don't include installed_plugins.json should not touch symlinked plugins."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_file = source_dir / "installed_plugins.json"
+    source_file.write_text('{"original": true}')
+
+    config_dir = tmp_path / "config"
+    plugins_dir = config_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    symlink = plugins_dir / "installed_plugins.json"
+    symlink.symlink_to(source_file)
+
+    host = cast(OnlineHostInterface, FakeHost())
+    # Only settings.json, no installed_plugins.json (as happens for local hosts)
+    generated_files = {Path("settings.json"): '{"some": "setting"}'}
+
+    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+
+    # The symlink and source file should both be untouched
+    assert symlink.is_symlink()
+    assert json.loads(source_file.read_text()) == {"original": True}
