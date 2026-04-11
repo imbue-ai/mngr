@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -18,7 +17,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.primitives import ServerName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -560,7 +558,7 @@ class MngrStreamManager(MutableModel):
         for callback in self._on_agent_discovered_callbacks:
             try:
                 callback(agent_id, ssh_info)
-            except (OSError, ValueError, RuntimeError, paramiko.SSHException, SSHTunnelError) as e:
+            except Exception as e:
                 logger.warning("Agent discovery callback failed for {}: {}", agent_id, e)
 
     def _update_resolver(
