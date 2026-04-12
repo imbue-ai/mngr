@@ -181,7 +181,8 @@ electron_restart() {
     export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
     echo "[electron] Starting desktop client (MINDS_WORKSPACE_GIT_URL=${TEMPLATE_DIR})..."
-    (cd "${MNGR_REPO_ROOT}/apps/minds" && npm start >> /tmp/minds-electron.log 2>&1) &
+    nohup bash -c "cd '${MNGR_REPO_ROOT}/apps/minds' && npm start" >> /tmp/minds-electron.log 2>&1 &
+    disown
 }
 
 # Run both tracks in parallel
