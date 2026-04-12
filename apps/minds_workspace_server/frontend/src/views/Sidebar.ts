@@ -5,6 +5,7 @@ import { getHostname } from "../base-path";
 import { AgentSelector } from "./ConversationSelector";
 import { getSidebarItems } from "../sidebar-items";
 import { CreateAgentModal } from "./CreateAgentModal";
+import { ShareModal } from "./ShareModal";
 import { selectAgent, getSelectedAgentId } from "../navigation";
 import type { SidebarItemDefinition } from "../sidebar-items";
 
@@ -18,6 +19,7 @@ function invokeSlotRendered(slotName: string, container: HTMLElement): void {
 
 const ICON_PANEL_LEFT_CLOSE = '<path d="M3 3h18v18H3z"/><path d="M9 3v18"/><path d="M16 9l-3 3 3 3"/>';
 const ICON_PANEL_LEFT_OPEN = '<path d="M3 3h18v18H3z"/><path d="M9 3v18"/><path d="M14 9l3 3-3 3"/>';
+const ICON_SHARE = '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
 
 const SIDEBAR_COLLAPSED_KEY = "sidebar-collapsed";
 
@@ -85,6 +87,7 @@ function inlineIconButton(label: string, onclick: () => void, svgPath: string): 
 }
 
 let showCreateModal = false;
+let showSidebarShareModal = false;
 
 export const Sidebar: m.Component = {
   view() {
@@ -138,6 +141,7 @@ export const Sidebar: m.Component = {
                       ? null
                       : m("span", { class: "sidebar-branding-title" }, getHostname()),
                   ),
+                  inlineIconButton("Share workspace", () => { showSidebarShareModal = true; }, ICON_SHARE),
                   inlineIconButton("Collapse sidebar", toggle, ICON_PANEL_LEFT_CLOSE),
                 ]),
                 m("div", { class: "sidebar-action-rows" }, [...getSidebarItems().map(sidebarItemActionRow)]),
@@ -169,6 +173,14 @@ export const Sidebar: m.Component = {
               },
               onCancel() {
                 showCreateModal = false;
+              },
+            })
+          : null,
+        showSidebarShareModal
+          ? m(ShareModal, {
+              serverName: "web",
+              onClose() {
+                showSidebarShareModal = false;
               },
             })
           : null,
