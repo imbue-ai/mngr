@@ -97,7 +97,8 @@ def _handle_cloudflare_status(
 
     services = cf_client.list_services(parsed_id)
     if services is None:
-        return _json_error("Failed to query Cloudflare services", 502)
+        # No tunnel exists yet or query failed -- treat as not enabled
+        return _json_response({"enabled": False, "url": None})
 
     hostname = services.get(server_name)
     if hostname:
