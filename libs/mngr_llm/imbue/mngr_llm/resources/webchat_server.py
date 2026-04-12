@@ -36,6 +36,7 @@ from imbue.mngr_llm.resources.webchat_plugins.webchat_agents import AgentsPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_default_model import DefaultModelPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_injected_messages import InjectedMessagesPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_register_conversations import RegisterConversationsPlugin
+from imbue.mngr_llm.resources.webchat_plugins.webchat_startup_notice import StartupNoticePlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_system_prompt import create_system_prompt_plugin
 
 _HOST_NAME: Final[str] = os.environ.get("MNG_HOST_NAME", "")
@@ -139,6 +140,13 @@ def _setup_default_model_plugin() -> None:
     get_plugin_manager().register(wrapped)
 
 
+def _setup_startup_notice_plugin() -> None:
+    """Create and register the startup-notice plugin with the llm-webchat plugin manager."""
+    plugin = StartupNoticePlugin()
+    wrapped = types.SimpleNamespace(endpoint=plugin.endpoint)
+    get_plugin_manager().register(wrapped)
+
+
 def _inject_plugin_static_files() -> None:
     """Register JS plugins and static files (CSS) with llm-webchat.
 
@@ -149,9 +157,10 @@ def _inject_plugin_static_files() -> None:
     agents_css = _resolve_resource_path("webchat_agents.css")
     injected_messages_js = _resolve_resource_path("webchat_injected_messages.js")
     default_model_js = _resolve_resource_path("webchat_default_model.js")
+    startup_notice_js = _resolve_resource_path("webchat_startup_notice.js")
     _prepend_to_env_list(
         "LLM_WEBCHAT_JAVASCRIPT_PLUGINS",
-        [agents_js, injected_messages_js, default_model_js],
+        [agents_js, injected_messages_js, default_model_js, startup_notice_js],
     )
     _prepend_to_env_list("LLM_WEBCHAT_STATIC_PATHS", [agents_css])
 
@@ -227,6 +236,7 @@ def main() -> None:
         _setup_default_model_plugin()
         _setup_injected_messages_plugin()
         _setup_register_conversations_plugin()
+        _setup_startup_notice_plugin()
         _setup_system_prompt_plugin()
         _inject_plugin_static_files()
         _bridge_web_server_port_env_var()
