@@ -482,6 +482,11 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
     assert response.status_code == 200
     assert "Loading..." in response.text
     assert "location.reload()" in response.text
+    # Convention links (terminal and agent) are always shown, even before those
+    # servers have registered with the backend resolver.
+    assert f"/agents/{agent_id}/terminal/" in response.text
+    assert f"/agents/{agent_id}/agent/" in response.text
+    assert 'target="_top"' in response.text
 
 
 def test_agent_proxy_returns_502_for_unknown_backend_non_html(tmp_path: Path) -> None:
