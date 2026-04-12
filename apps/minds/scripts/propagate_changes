@@ -155,25 +155,56 @@ agent_update() {
 
 electron_stop() {
     echo "[electron] Stopping desktop client..."
-    local electron_pid
-    electron_pid=$(pgrep -f "electron/dist/electron \\.$" 2>/dev/null | head -1)
-    if [[ -z "${electron_pid}" ]]; then
-        echo "[electron] No running electron app found."
+
+    # Find ALL electron main processes (the "electron ." ones, not zygotes)
+    local pids
+    pids=$(pgrep -f "electron/dist/electron \\.$" 2>/dev/null || true)
+
+    # Also find any orphaned Python backends from previous runs
+    local backend_pids
+    backend_pids=$(pgrep -f "uv run --package minds minds" 2>/dev/null || true)
+
+    if [[ -z "${pids}" && -z "${backend_pids}" ]]; then
+        echo "[electron] No running electron app or backend found."
         return
     fi
 
-    kill -TERM "${electron_pid}" 2>/dev/null || true
+    # Kill electron processes
+    for pid in ${pids}; do
+        echo "[electron] Sending SIGTERM to electron PID ${pid}"
+        kill -TERM "${pid}" 2>/dev/null || echo "[electron] ERROR: Failed to send SIGTERM to PID ${pid}"
+    done
 
-    # Wait for clean shutdown (typically ~1.5 seconds)
-    for i in $(seq 1 20); do
-        if ! ps -p "${electron_pid}" > /dev/null 2>&1; then
+    # Kill orphaned backends
+    for pid in ${backend_pids}; do
+        echo "[electron] Sending SIGTERM to orphaned backend PID ${pid}"
+        kill -TERM "${pid}" 2>/dev/null || echo "[electron] ERROR: Failed to send SIGTERM to backend PID ${pid}"
+    done
+
+    # Wait for all to exit
+    local all_pids="${pids} ${backend_pids}"
+    for attempt in $(seq 1 20); do
+        local still_running=false
+        for pid in ${all_pids}; do
+            if ps -p "${pid}" > /dev/null 2>&1; then
+                still_running=true
+                break
+            fi
+        done
+        if [[ "${still_running}" == "false" ]]; then
             echo "[electron] Desktop client stopped."
             return
         fi
         sleep 0.5
     done
 
-    echo "[electron] WARNING: Electron did not exit within 10 seconds after SIGTERM"
+    # Force kill anything still alive
+    for pid in ${all_pids}; do
+        if ps -p "${pid}" > /dev/null 2>&1; then
+            echo "[electron] ERROR: PID ${pid} did not exit after 10s SIGTERM, sending SIGKILL"
+            kill -9 "${pid}" 2>/dev/null || true
+        fi
+    done
 }
 
 electron_start() {
