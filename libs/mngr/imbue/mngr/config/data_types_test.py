@@ -249,10 +249,10 @@ def test_merge_list_fields_returns_base_when_override_none() -> None:
     assert result == [1, 2]
 
 
-def test_merge_list_fields_resets_on_empty_override() -> None:
-    """merge_list_fields should reset (clear base) when override is an explicit empty list."""
+def test_merge_list_fields_concatenates_empty_override() -> None:
+    """merge_list_fields should handle empty override list."""
     result = merge_list_fields([1, 2], [])
-    assert result == []
+    assert result == [1, 2]
 
 
 # =============================================================================
@@ -284,10 +284,10 @@ def test_merge_dict_fields_returns_override_when_base_empty() -> None:
     assert result == {"a": 1}
 
 
-def test_merge_dict_fields_resets_on_empty_override() -> None:
-    """merge_dict_fields should reset (clear base) when override is an explicit empty dict."""
+def test_merge_dict_fields_handles_empty_override() -> None:
+    """merge_dict_fields should return base when override is empty dict."""
     result = merge_dict_fields({"a": 1}, {})
-    assert result == {}
+    assert result == {"a": 1}
 
 
 # =============================================================================

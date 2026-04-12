@@ -75,18 +75,10 @@ def merge_cli_args(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[st
 
 @pure
 def merge_list_fields(base: list[T], override: list[T] | None) -> list[T]:
-    """Merge list fields with concatenation semantics.
-
-    None means "not set" (field absent from config) -- base is preserved.
-    An explicit empty list [] means "reset" -- clears everything from earlier
-    in the precedence chain.
-    A non-empty list is concatenated with the base.
-    """
-    if override is None:
-        return base
-    if not override:
-        return []
-    return list(base) + list(override)
+    """Merge list fields, concatenating if override is not None."""
+    if override is not None:
+        return list(base) + list(override)
+    return base
 
 
 K = TypeVar("K")
@@ -95,18 +87,10 @@ V = TypeVar("V")
 
 @pure
 def merge_dict_fields(base: dict[K, V], override: dict[K, V] | None) -> dict[K, V]:
-    """Merge dict fields with override-key-wins semantics.
-
-    None means "not set" (field absent from config) -- base is preserved.
-    An explicit empty dict {} means "reset" -- clears everything from earlier
-    in the precedence chain.
-    A non-empty dict is merged with the base (override keys take precedence).
-    """
-    if override is None:
-        return base
-    if not override:
-        return {}
-    return {**base, **override}
+    """Merge dict fields, with override keys taking precedence."""
+    if override is not None:
+        return {**base, **override}
+    return base
 
 
 # === Enums ===
