@@ -574,11 +574,6 @@ async def _handle_proxy_http(
         return HTMLResponse(content=html)
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-    all_servers = backend_resolver.list_servers_for_agent(parsed_id)
-    logger.info(
-        "Proxy request: agent={} server={} path={} backend_url={} known_servers={}",
-        agent_id, server_name, path, backend_url, all_servers,
-    )
     if backend_url is None:
         # Return immediately instead of holding the connection open.
         # For HTML-accepting requests, return a loading page that retries

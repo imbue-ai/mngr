@@ -580,7 +580,6 @@ class MngrStreamManager(MutableModel):
         stripped = line.strip()
         if not stripped:
             return
-        logger.info("Events stream output for {}: {}", agent_id, stripped[:200])
         aid_str = str(agent_id)
         try:
             raw = json.loads(stripped)
