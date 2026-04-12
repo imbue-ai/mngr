@@ -82,6 +82,29 @@ class _CloudflareEnableBody(FrozenModel):
 # -- Cloudflare forwarding routes --
 
 
+def _handle_cloudflare_status(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    _caller_agent_id: CallerAgentIdDep,
+) -> Response:
+    """Get Cloudflare forwarding status for a server."""
+    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    if cf_client is None:
+        return _json_error("Cloudflare forwarding not configured", 501)
+
+    parsed_id = AgentId(agent_id)
+
+    services = cf_client.list_services(parsed_id)
+    if services is None:
+        return _json_error("Failed to query Cloudflare services", 502)
+
+    hostname = services.get(server_name)
+    if hostname:
+        return _json_response({"enabled": True, "url": f"https://{hostname}"})
+    return _json_response({"enabled": False, "url": None})
+
+
 def _handle_cloudflare_enable(
     agent_id: str,
     server_name: str,
@@ -259,6 +282,9 @@ def create_api_v1_router() -> APIRouter:
     router = APIRouter()
 
     # Cloudflare forwarding
+    router.get(
+        "/agents/{agent_id}/servers/{server_name}/cloudflare",
+    )(_handle_cloudflare_status)
     router.put(
         "/agents/{agent_id}/servers/{server_name}/cloudflare",
     )(_handle_cloudflare_enable)
