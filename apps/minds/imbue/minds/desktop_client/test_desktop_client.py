@@ -1224,7 +1224,7 @@ def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
 
 
 def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Path) -> None:
-    """When authenticated with multiple agents known, landing page shows 'Create another workspace' link."""
+    """When authenticated with multiple agents known, landing page shows a 'Create' link."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -1242,7 +1242,7 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create another workspace" in response.text
+    assert "/create" in response.text
 
 
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:

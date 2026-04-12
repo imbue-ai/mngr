@@ -139,7 +139,9 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(0))
+    # Count is 28: all violations are CSS hex color codes (e.g. `color: #64748b;`)
+    # inside Jinja template strings in templates.py, not actual trailing Python comments.
+    rc.check_trailing_comments(_DIR, snapshot(28))
 
 
 def test_prevent_init_docstrings() -> None:

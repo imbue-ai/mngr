@@ -34,7 +34,7 @@ def short_tmp_path() -> Iterator[Path]:
 
 def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
     """Build a JSON string matching `mngr list --format json` output for the given agent IDs."""
-    effective_labels = labels if labels is not None else {"workspace": "true"}
+    effective_labels = labels if labels is not None else {"workspace": "true", "is_primary": "true"}
     return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 

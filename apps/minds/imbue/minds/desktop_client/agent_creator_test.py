@@ -146,7 +146,7 @@ def test_build_mngr_create_command_lima_mode() -> None:
 
 
 def test_build_mngr_create_command_cloud_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.CLOUD,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
