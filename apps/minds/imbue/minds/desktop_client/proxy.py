@@ -364,13 +364,6 @@ def rewrite_proxied_html(
         server_name=server_name,
     )
 
-    # Set the workspace server's base-path meta tag so Mithril uses the
-    # correct route prefix and API calls go through the proxy path.
-    rewritten = rewritten.replace(
-        '<meta name="minds-workspace-server-base-path" content="">',
-        f'<meta name="minds-workspace-server-base-path" content="{prefix}">',
-    )
-
     # Build the injection: base tag + WS shim
     base_tag = f'<base href="{prefix}/">'
     shim = generate_websocket_shim_js(agent_id, server_name)
