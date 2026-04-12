@@ -151,69 +151,29 @@ agent_update() {
     echo "      Agent started."
 }
 
-# --- Track B: Desktop client restart ---
-
-_find_electron_pid() {
-    # Find the top-level electron process (the one running "electron .")
-    # by looking for the dist/electron binary with " ." at the end.
-    # Avoids matching zygote helpers or other electron internals which
-    # have --type= flags after the binary name.
-    pgrep -f "electron/dist/electron \\.$" 2>/dev/null | head -1
-}
-
-_find_minds_backend_pids() {
-    # Find any minds forward / minds -vv backend processes (children of electron)
-    pgrep -f "minds.*forward|minds.*--format jsonl" 2>/dev/null
-}
-
-_find_mngr_stream_pids() {
-    # Find orphaned mngr observe / mngr events processes
-    pgrep -f "mngr (observe|events)" 2>/dev/null
-}
+# --- Track B: Desktop client stop and restart ---
 
 electron_stop() {
     echo "[electron] Stopping desktop client..."
-
-    # Send SIGTERM to the process group so electron, the Python backend,
-    # and all mngr subprocesses receive it simultaneously. This gives the
-    # Python backend the full shutdown window to clean up subprocesses,
-    # rather than waiting for SIGTERM to cascade through electron -> uv ->
-    # python (which can eat several seconds of the 5-second SIGKILL window).
     local electron_pid
-    electron_pid=$(_find_electron_pid)
-    if [[ -n "${electron_pid}" ]]; then
-        local pgid
-        pgid=$(ps -o pgid= -p "${electron_pid}" 2>/dev/null | tr -d ' ')
-        if [[ -n "${pgid}" ]] && [[ "${pgid}" != "0" ]]; then
-            kill -TERM -"${pgid}" 2>/dev/null || true
-        else
-            kill -TERM "${electron_pid}" 2>/dev/null || true
-        fi
+    electron_pid=$(pgrep -f "electron/dist/electron \\.$" 2>/dev/null | head -1)
+    if [[ -z "${electron_pid}" ]]; then
+        echo "[electron] No running electron app found."
+        return
     fi
 
-    # Wait up to 10 seconds for the full process tree to shut down
+    kill -TERM "${electron_pid}" 2>/dev/null || true
+
+    # Wait for clean shutdown (typically ~1.5 seconds)
     for i in $(seq 1 20); do
-        if [[ -z "$(_find_electron_pid)" ]] && [[ -z "$(_find_minds_backend_pids)" ]]; then
-            break
+        if ! ps -p "${electron_pid}" > /dev/null 2>&1; then
+            echo "[electron] Desktop client stopped."
+            return
         fi
         sleep 0.5
     done
 
-    # Verify everything is gone
-    local remaining_electron remaining_backend remaining_streams
-    remaining_electron=$(_find_electron_pid)
-    remaining_backend=$(_find_minds_backend_pids)
-    remaining_streams=$(_find_mngr_stream_pids)
-
-    if [[ -n "${remaining_electron}" ]]; then
-        echo "[electron] WARNING: Electron process ${remaining_electron} did not exit within 10 seconds after SIGTERM"
-    fi
-    if [[ -n "${remaining_backend}" ]]; then
-        echo "[electron] WARNING: minds backend process(es) still running: ${remaining_backend}"
-    fi
-    if [[ -n "${remaining_streams}" ]]; then
-        echo "[electron] WARNING: orphaned mngr observe/events process(es) still running: ${remaining_streams}"
-    fi
+    echo "[electron] WARNING: Electron did not exit within 10 seconds after SIGTERM"
 }
 
 electron_start() {
@@ -225,7 +185,6 @@ electron_start() {
         set +a
     fi
 
-    # Set env vars for the desktop client
     export MINDS_WORKSPACE_GIT_URL="${TEMPLATE_DIR}"
     export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
@@ -234,15 +193,13 @@ electron_start() {
     disown
 }
 
-# Stop electron first (runs in parallel with agent update)
+# Stop electron in parallel with agent update
 electron_stop &
 ELECTRON_STOP_PID=$!
 
-# Run agent update in parallel with electron shutdown
 agent_update &
 AGENT_PID=$!
 
-# Wait for both to finish
 wait "${ELECTRON_STOP_PID}"
 wait "${AGENT_PID}"
 AGENT_EXIT=$?
