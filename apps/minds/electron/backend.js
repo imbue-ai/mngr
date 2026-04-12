@@ -207,23 +207,30 @@ function startBackend(onProgress, onNotification) {
 function shutdown() {
   return new Promise((resolve) => {
     if (!backendProcess) {
+      console.log('[shutdown] No backend process to shut down');
       resolve();
       return;
     }
 
     const child = backendProcess;
     let isExited = false;
+    const startTime = Date.now();
 
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[shutdown] Backend exited after ${elapsed}ms (code=${code}, signal=${signal})`);
       isExited = true;
       backendProcess = null;
       resolve();
     });
 
+    console.log(`[shutdown] Sending SIGTERM to backend (PID ${child.pid})`);
     child.kill('SIGTERM');
 
     setTimeout(() => {
       if (!isExited) {
+        const elapsed = Date.now() - startTime;
+        console.log(`[shutdown] Backend still alive after ${elapsed}ms, sending SIGKILL`);
         try {
           child.kill('SIGKILL');
         } catch {
@@ -233,6 +240,8 @@ function shutdown() {
       // Resolve after SIGKILL attempt regardless
       setTimeout(() => {
         if (!isExited) {
+          const elapsed = Date.now() - startTime;
+          console.log(`[shutdown] Backend did not exit after SIGKILL (${elapsed}ms), giving up`);
           backendProcess = null;
           resolve();
         }

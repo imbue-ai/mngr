@@ -397,18 +397,24 @@ ipcMain.on('window-close', () => {
 let isShuttingDown = false;
 
 app.on('window-all-closed', async () => {
+  console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
   if (!isShuttingDown) {
     isShuttingDown = true;
+    console.log('[lifecycle] Starting shutdown from window-all-closed...');
     await shutdown();
+    console.log('[lifecycle] Shutdown complete, calling app.quit()');
     app.quit();
   }
 });
 
 app.on('before-quit', async (event) => {
+  console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   if (getBackendProcess() && !isShuttingDown) {
     isShuttingDown = true;
     event.preventDefault();
+    console.log('[lifecycle] Starting shutdown from before-quit...');
     await shutdown();
+    console.log('[lifecycle] Shutdown complete, calling app.quit()');
     app.quit();
   }
 });

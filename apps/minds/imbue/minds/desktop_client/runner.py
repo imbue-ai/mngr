@@ -160,11 +160,16 @@ def start_desktop_client(
         # Stop subprocesses. The stream manager's ConcurrencyGroup has a
         # 2-second exit timeout, which combined with uvicorn's 1-second
         # graceful shutdown fits within electron's 5-second SIGKILL window.
-        logger.info("Stopping stream manager subprocesses...")
+        import time as _time
+
+        _t0 = _time.monotonic()
+        logger.info("[cleanup] Finally block entered. Stopping stream manager...")
         stream_manager.stop()
-        logger.info("Stream manager stopped. Cleaning up tunnels...")
+        _t1 = _time.monotonic()
+        logger.info("[cleanup] Stream manager stopped in {:.2f}s. Cleaning up tunnels...", _t1 - _t0)
         tunnel_manager.cleanup()
-        logger.info("Subprocess cleanup complete.")
+        _t2 = _time.monotonic()
+        logger.info("[cleanup] Tunnels cleaned up in {:.2f}s. Total cleanup: {:.2f}s", _t2 - _t1, _t2 - _t0)
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:
