@@ -310,14 +310,55 @@ body {{ display: flex; flex-direction: column; font-family: system-ui, -apple-sy
 _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 
 
+_CONVENTION_SERVERS: Final[tuple[ServerName, ...]] = (
+    ServerName("terminal"),
+    ServerName("agent"),
+)
+
+
 @pure
-def generate_backend_loading_html() -> str:
+def generate_backend_loading_html(
+    agent_id: AgentId | None = None,
+    current_server: ServerName | None = None,
+    other_servers: tuple[ServerName, ...] = (),
+) -> str:
     """Generate a lightweight loading page that retries the current URL after a short delay.
 
     Returned when the backend server is not yet available. The page shows a
     "Loading..." message and uses JavaScript to reload the page after 1 second,
     which will either succeed (backend is now up) or return this page again.
+
+    When ``agent_id`` is provided, the page unconditionally includes links to
+    the terminal and agent servers (convention-based, always present) plus any
+    additional servers from ``other_servers``. These links go through the
+    desktop client proxy, so clicking one before the target server is ready
+    simply shows that server's own auto-retrying loading page.
     """
+    links_html = ""
+    if agent_id is not None:
+        # Build the set of servers to link: convention-based servers
+        # (always shown) plus any additional registered servers.
+        servers_to_show: list[ServerName] = []
+        for s in _CONVENTION_SERVERS:
+            if s != current_server:
+                servers_to_show.append(s)
+        for s in other_servers:
+            if s != current_server and s not in servers_to_show:
+                servers_to_show.append(s)
+
+        if servers_to_show:
+            link_items = "".join(
+                '<a href="/agents/{agent_id}/{server}/" target="_top"'
+                ' style="color: rgb(100, 149, 237); text-decoration: none;'
+                ' margin: 0 8px;">{server}</a>'.format(agent_id=agent_id, server=server)
+                for server in servers_to_show
+            )
+            links_html = (
+                '<div style="position: fixed; bottom: 40px; text-align: center;'
+                ' width: 100%; color: rgb(100, 100, 100); font-size: 14px;">'
+                "While waiting, you can open: {links}</div>"
+            ).format(links=link_items)
+
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -337,11 +378,12 @@ body {{
 </head>
 <body>
 <p>Loading...</p>
+{links}
 <script>
 setTimeout(function() {{ location.reload(); }}, {interval});
 </script>
 </body>
-</html>""".format(interval=_BACKEND_LOADING_RETRY_INTERVAL_MS)
+</html>""".format(interval=_BACKEND_LOADING_RETRY_INTERVAL_MS, links=links_html)
 
 
 @pure

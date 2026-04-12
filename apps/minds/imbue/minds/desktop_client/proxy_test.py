@@ -1,5 +1,6 @@
 from inline_snapshot import snapshot
 
+from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
 from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
@@ -262,3 +263,38 @@ def test_rewrite_proxied_html_without_head_tag() -> None:
     )
     assert result.startswith(f'<base href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/">')
     assert "<html><body>Hello</body></html>" in result
+
+
+def test_generate_backend_loading_html_no_agent_id_has_no_links() -> None:
+    html = generate_backend_loading_html()
+    assert "Loading..." in html
+    assert "location.reload()" in html
+    assert "/agents/" not in html
+
+
+def test_generate_backend_loading_html_with_agent_id_includes_convention_links() -> None:
+    html = generate_backend_loading_html(agent_id=_TEST_AGENT)
+    assert f"/agents/{_TEST_AGENT}/terminal/" in html
+    assert f"/agents/{_TEST_AGENT}/agent/" in html
+
+
+def test_generate_backend_loading_html_excludes_current_server_from_links() -> None:
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        current_server=ServerName("terminal"),
+    )
+    assert f"/agents/{_TEST_AGENT}/terminal/" not in html
+    assert f"/agents/{_TEST_AGENT}/agent/" in html
+
+
+def test_generate_backend_loading_html_includes_other_servers() -> None:
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(ServerName("web"),),
+    )
+    assert f"/agents/{_TEST_AGENT}/web/" in html
+
+
+def test_generate_backend_loading_html_links_use_target_top() -> None:
+    html = generate_backend_loading_html(agent_id=_TEST_AGENT)
+    assert 'target="_top"' in html

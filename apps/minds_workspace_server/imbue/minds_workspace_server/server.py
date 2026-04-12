@@ -24,7 +24,7 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
-from imbue.minds_workspace_server.agent_discovery import _read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -216,7 +216,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
 
     host_dir = _get_host_dir()
     agent_state_dir = host_dir / "agents" / agent_id
-    claude_config_dir = _read_claude_config_dir_from_env_file(agent_state_dir)
+    claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
     return AgentInfo(
         id=agent_state.id,

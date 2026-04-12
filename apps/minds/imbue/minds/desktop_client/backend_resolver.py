@@ -99,6 +99,14 @@ class BackendResolverInterface(MutableModel, ABC):
             return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
         return None
 
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        """Return the workspace label value for an agent, or None.
+
+        Default implementation returns None.
+        Subclasses with access to agent labels should override this.
+        """
+        return None
+
     def has_completed_initial_discovery(self) -> bool:
         """Whether any agent discovery data has been received.
 
@@ -483,9 +491,7 @@ class MngrStreamManager(MutableModel):
             self._ssh_by_host_id[host_id_str] = ssh_info
             agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
             # Find agents on this host so we can notify discovery callbacks with SSH info
-            agents_on_host = tuple(
-                AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str
-            )
+            agents_on_host = tuple(AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str)
 
         self._update_resolver(agent_ids)
 
