@@ -1,5 +1,6 @@
 import os
 import secrets
+import signal
 import time
 import webbrowser
 from pathlib import Path
@@ -12,6 +13,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -36,6 +38,35 @@ from imbue.mngr.primitives import AgentId
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
+
+
+class _SubprocessCleanupState(MutableModel):
+    """Tracks whether subprocess cleanup has run, ensuring it happens exactly once.
+
+    Used to coordinate between the SIGTERM signal handler and the finally block.
+    The signal handler runs cleanup immediately on SIGTERM (before uvicorn's own
+    shutdown completes), while the finally block serves as a fallback for normal
+    exits.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    stream_manager: MngrStreamManager = Field(frozen=True, description="Stream manager to stop on cleanup")
+    tunnel_manager: SSHTunnelManager = Field(frozen=True, description="Tunnel manager to clean up")
+    is_done: bool = Field(default=False, description="Whether cleanup has already run")
+
+    def run_cleanup(self) -> None:
+        if self.is_done:
+            return
+        self.is_done = True
+        logger.info("Stopping subprocesses...")
+        self.stream_manager.stop()
+        self.tunnel_manager.cleanup()
+        logger.info("Subprocess cleanup complete.")
+
+    def handle_sigterm(self, signum: int, frame: object) -> None:
+        self.run_cleanup()
+        raise SystemExit(0)
 
 
 class AgentDiscoveryHandler(FrozenModel):
@@ -150,11 +181,23 @@ def start_desktop_client(
         thread.daemon = True
         thread.start()
 
+    # Install a SIGTERM handler that immediately starts cleaning up
+    # subprocesses. Without this, the cleanup only happens in the finally
+    # block after uvicorn completes its own graceful shutdown, which can
+    # take longer than the 5 seconds before the electron wrapper sends
+    # SIGKILL. By stopping the stream manager in the signal handler, the
+    # mngr observe/events subprocesses are terminated before the process
+    # gets killed.
+    cleanup_state = _SubprocessCleanupState(
+        stream_manager=stream_manager,
+        tunnel_manager=tunnel_manager,
+    )
+    signal.signal(signal.SIGTERM, cleanup_state.handle_sigterm)
+
     try:
         uvicorn.run(app, host=host, port=port)
     finally:
-        stream_manager.stop()
-        tunnel_manager.cleanup()
+        cleanup_state.run_cleanup()
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:
