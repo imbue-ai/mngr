@@ -155,9 +155,10 @@ agent_update() {
 
 _find_electron_pid() {
     # Find the top-level electron process (the one running "electron .")
-    # by looking for the dist/electron binary. Avoid matching zygote
-    # helpers or other electron internals.
-    pgrep -f "electron/dist/electron \\.\\b" 2>/dev/null | head -1
+    # by looking for the dist/electron binary with " ." at the end.
+    # Avoids matching zygote helpers or other electron internals which
+    # have --type= flags after the binary name.
+    pgrep -f "electron/dist/electron \\.$" 2>/dev/null | head -1
 }
 
 _find_minds_backend_pids() {
@@ -170,7 +171,7 @@ _find_mngr_stream_pids() {
     pgrep -f "mngr (observe|events)" 2>/dev/null
 }
 
-electron_restart() {
+electron_stop() {
     echo "[electron] Stopping desktop client..."
 
     # Send SIGTERM to the top-level electron process only. Electron's
@@ -207,7 +208,9 @@ electron_restart() {
     if [[ -n "${remaining_streams}" ]]; then
         echo "[electron] WARNING: orphaned mngr observe/events process(es) still running: ${remaining_streams}"
     fi
+}
 
+electron_start() {
     # Source .env if it exists
     if [[ -f "${MNGR_REPO_ROOT}/.env" ]]; then
         set -a
@@ -225,28 +228,26 @@ electron_restart() {
     disown
 }
 
-# Run both tracks in parallel
+# Stop electron first (runs in parallel with agent update)
+electron_stop &
+ELECTRON_STOP_PID=$!
+
+# Run agent update in parallel with electron shutdown
 agent_update &
 AGENT_PID=$!
 
-electron_restart &
-ELECTRON_PID=$!
-
-# Wait for the agent update track to finish (electron runs in background)
+# Wait for both to finish
+wait "${ELECTRON_STOP_PID}"
 wait "${AGENT_PID}"
 AGENT_EXIT=$?
-
-# Don't wait for electron -- it runs until the user closes it
-# But do check that it started successfully (give it a moment)
-sleep 1
-if [[ -z "$(_find_electron_pid)" ]]; then
-    echo "WARNING: Electron app does not appear to be running"
-fi
 
 if [[ "${AGENT_EXIT}" -ne 0 ]]; then
     echo "ERROR: Agent update failed (exit code ${AGENT_EXIT})" >&2
     exit 1
 fi
+
+# Start electron after everything is clean
+electron_start
 
 echo ""
 echo "All changes propagated. Agent '${AGENT_NAME}' is running with updated code."
