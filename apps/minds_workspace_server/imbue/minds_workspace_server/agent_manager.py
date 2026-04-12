@@ -233,6 +233,8 @@ class AgentManager:
             "worktree",
             "--label",
             "user_created=true",
+            "--label",
+            f"workspace={name}",
             "--no-connect",
         ]
 
@@ -255,7 +257,7 @@ class AgentManager:
             parent_agent_id=None,
         )
 
-        labels = {"user_created": "true"}
+        labels = {"user_created": "true", "workspace": name}
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
