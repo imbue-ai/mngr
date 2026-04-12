@@ -331,8 +331,11 @@ function buildDropdownItems(
   // selected agent, not the primary one).
   const currentAgent = getAgentById(agentId);
   const terminalBaseUrl = getTerminalUrl();
+  // ttyd runs `bash -c "$DISPATCH_SCRIPT" <args...>`. In bash -c, the first
+  // arg after the script becomes $0 (not $1). The dispatch script reads $1,
+  // so we prepend a dummy arg for $0.
   const terminalUrl = currentAgent?.work_dir
-    ? `${terminalBaseUrl}?arg=workdir&arg=${encodeURIComponent(currentAgent.work_dir)}`
+    ? `${terminalBaseUrl}?arg=_&arg=workdir&arg=${encodeURIComponent(currentAgent.work_dir)}`
     : terminalBaseUrl;
   items.push({
     label: "terminal",
