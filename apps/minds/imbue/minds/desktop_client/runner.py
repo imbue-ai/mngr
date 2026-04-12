@@ -144,6 +144,7 @@ def start_desktop_client(
         telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
+        stream_manager=stream_manager,
     )
 
     if not is_no_browser:
@@ -151,25 +152,12 @@ def start_desktop_client(
         thread.daemon = True
         thread.start()
 
-    try:
-        # Set a short graceful shutdown timeout so uvicorn exits quickly on
-        # SIGTERM. The electron wrapper sends SIGKILL after 5 seconds, and
-        # we need time in the finally block to stop mngr subprocesses.
-        uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
-    finally:
-        # Stop subprocesses. The stream manager's ConcurrencyGroup has a
-        # 2-second exit timeout, which combined with uvicorn's 1-second
-        # graceful shutdown fits within electron's 5-second SIGKILL window.
-        import time as _time
-
-        _t0 = _time.monotonic()
-        logger.info("[cleanup] Finally block entered. Stopping stream manager...")
-        stream_manager.stop()
-        _t1 = _time.monotonic()
-        logger.info("[cleanup] Stream manager stopped in {:.2f}s. Cleaning up tunnels...", _t1 - _t0)
-        tunnel_manager.cleanup()
-        _t2 = _time.monotonic()
-        logger.info("[cleanup] Tunnels cleaned up in {:.2f}s. Total cleanup: {:.2f}s", _t2 - _t1, _t2 - _t0)
+    # Subprocess cleanup (stream_manager.stop(), tunnel_manager.cleanup())
+    # happens in the ASGI lifespan shutdown hook inside create_desktop_client,
+    # NOT in a finally block here. Uvicorn re-raises the captured SIGTERM
+    # after shutdown (via signal.raise_signal), so a finally block around
+    # uvicorn.run() would never execute on signal-triggered shutdown.
+    uvicorn.run(app, host=host, port=port)
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:
