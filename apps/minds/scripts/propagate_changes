@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+#
+# propagate_changes -- sync code changes into a running minds agent and restart
+#
+# Syncs the local mngr repo into the template's vendor/mngr/, then syncs the
+# full template into the agent's work_dir (container or local), rebuilds the
+# frontend, restarts the agent, and restarts the Electron desktop client.
+#
+# Usage:
+#   # Remote (Docker container):
+#   propagate_changes --user root --host 127.0.0.1 --port 32768 --key ~/.mngr/.../id_ed25519
+#
+#   # Local (non-container agent):
+#   propagate_changes --target /path/to/agent/workdir
+#
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Path inference
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MNGR_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/forever-claude-template"
+
+if [[ ! -d "${TEMPLATE_DIR}" ]]; then
+    echo "ERROR: Template directory not found: ${TEMPLATE_DIR}" >&2
+    echo "       Create it with: cd ~/project/forever-claude-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Agent name
+# ---------------------------------------------------------------------------
+
+AGENT_NAME="${MINDS_WORKSPACE_NAME:-mindtest}"
+export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+SSH_USER=""
+SSH_HOST=""
+SSH_PORT=""
+SSH_KEY=""
+LOCAL_TARGET=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user)  SSH_USER="$2";  shift 2 ;;
+        --host)  SSH_HOST="$2";  shift 2 ;;
+        --port)  SSH_PORT="$2";  shift 2 ;;
+        --key)   SSH_KEY="$2";   shift 2 ;;
+        --target) LOCAL_TARGET="$2"; shift 2 ;;
+        *)
+            echo "ERROR: Unknown argument: $1" >&2
+            echo "Usage: propagate_changes [--user USER --host HOST --port PORT --key KEY | --target PATH]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Validate: need either SSH details or a local target
+if [[ -n "${SSH_HOST}" ]]; then
+    if [[ -z "${SSH_USER}" || -z "${SSH_PORT}" || -z "${SSH_KEY}" ]]; then
+        echo "ERROR: --host requires --user, --port, and --key" >&2
+        exit 1
+    fi
+    MODE="remote"
+elif [[ -n "${LOCAL_TARGET}" ]]; then
+    if [[ ! -d "${LOCAL_TARGET}" ]]; then
+        echo "ERROR: Local target directory does not exist: ${LOCAL_TARGET}" >&2
+        exit 1
+    fi
+    MODE="local"
+else
+    echo "ERROR: Must specify either --host (remote) or --target (local)" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Shared rsync exclusions
+# ---------------------------------------------------------------------------
+
+RSYNC_EXCLUDES=(
+    --exclude='.git'
+    --exclude='__pycache__'
+    --exclude='.venv'
+    --exclude='node_modules'
+    --exclude='.test_output'
+    --exclude='.mypy_cache'
+    --exclude='.ruff_cache'
+    --exclude='.pytest_cache'
+    --exclude='uv.lock'
+    --exclude='.external_worktrees'
+)
+
+# ---------------------------------------------------------------------------
+# Step 1: Sync mngr repo into template's vendor/mngr/
+# ---------------------------------------------------------------------------
+
+echo "[1/4] Syncing mngr repo into template vendor/mngr/..."
+rsync -a --delete \
+    "${RSYNC_EXCLUDES[@]}" \
+    "${MNGR_REPO_ROOT}/" "${TEMPLATE_DIR}/vendor/mngr/"
+echo "      Done."
+
+# ---------------------------------------------------------------------------
+# Step 2 (parallel): Agent update + Desktop client restart
+# ---------------------------------------------------------------------------
+
+# Track background PIDs for parallel execution
+AGENT_PID=""
+ELECTRON_PID=""
+
+# --- Track A: Agent stop -> sync -> frontend build -> start ---
+agent_update() {
+    echo "[2/4] Stopping agent '${AGENT_NAME}'..."
+    uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1 || echo "      (agent may not have been running)"
+
+    echo "[3/4] Syncing template into agent work_dir..."
+    if [[ "${MODE}" == "remote" ]]; then
+        rsync -avz --delete \
+            "${RSYNC_EXCLUDES[@]}" \
+            --filter='protect runtime/' \
+            --filter='protect .mngr/' \
+            -e "ssh -p ${SSH_PORT} -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+            "${TEMPLATE_DIR}/" "${SSH_USER}@${SSH_HOST}:/code/"
+    else
+        rsync -a --delete \
+            "${RSYNC_EXCLUDES[@]}" \
+            --filter='protect runtime/' \
+            --filter='protect .mngr/' \
+            "${TEMPLATE_DIR}/" "${LOCAL_TARGET}/"
+    fi
+    echo "      Done."
+
+    echo "[3.5/4] Rebuilding minds_workspace_server frontend..."
+    if [[ "${MODE}" == "remote" ]]; then
+        ssh -p "${SSH_PORT}" -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "${SSH_USER}@${SSH_HOST}" "cd /code/vendor/mngr/apps/minds_workspace_server/frontend && npm run build" 2>&1
+    else
+        (cd "${LOCAL_TARGET}/vendor/mngr/apps/minds_workspace_server/frontend" && npm run build) 2>&1
+    fi
+    echo "      Frontend rebuilt."
+
+    echo "[4/4] Starting agent '${AGENT_NAME}'..."
+    uv run --directory "${MNGR_REPO_ROOT}" mngr start "${AGENT_NAME}" 2>&1
+    echo "      Agent started."
+}
+
+# --- Track B: Desktop client stop and restart ---
+
+electron_stop() {
+    echo "[electron] Stopping desktop client..."
+    local electron_pid
+    electron_pid=$(pgrep -f "electron/dist/electron \\.$" 2>/dev/null | head -1)
+    if [[ -z "${electron_pid}" ]]; then
+        echo "[electron] No running electron app found."
+        return
+    fi
+
+    kill -TERM "${electron_pid}" 2>/dev/null || true
+
+    # Wait for clean shutdown (typically ~1.5 seconds)
+    for i in $(seq 1 20); do
+        if ! ps -p "${electron_pid}" > /dev/null 2>&1; then
+            echo "[electron] Desktop client stopped."
+            return
+        fi
+        sleep 0.5
+    done
+
+    echo "[electron] WARNING: Electron did not exit within 10 seconds after SIGTERM"
+}
+
+electron_start() {
+    # Source .env if it exists
+    if [[ -f "${MNGR_REPO_ROOT}/.env" ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source "${MNGR_REPO_ROOT}/.env"
+        set +a
+    fi
+
+    export MINDS_WORKSPACE_GIT_URL="${TEMPLATE_DIR}"
+    export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
+
+    echo "[electron] Starting desktop client (MINDS_WORKSPACE_GIT_URL=${TEMPLATE_DIR})..."
+    setsid bash -c "cd '${MNGR_REPO_ROOT}/apps/minds' && npm start" >> /tmp/minds-electron.log 2>&1 &
+    disown
+}
+
+# Stop electron in parallel with agent update
+electron_stop &
+ELECTRON_STOP_PID=$!
+
+agent_update &
+AGENT_PID=$!
+
+wait "${ELECTRON_STOP_PID}"
+wait "${AGENT_PID}"
+AGENT_EXIT=$?
+
+if [[ "${AGENT_EXIT}" -ne 0 ]]; then
+    echo "ERROR: Agent update failed (exit code ${AGENT_EXIT})" >&2
+    exit 1
+fi
+
+# Start electron after everything is clean
+electron_start
+
+echo ""
+echo "All changes propagated. Agent '${AGENT_NAME}' is running with updated code."

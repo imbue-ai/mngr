@@ -13,6 +13,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -378,6 +379,7 @@ class MngrStreamManager(MutableModel):
     _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _observe_process: RunningProcess | None = PrivateAttr(default=None)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None], None]] = PrivateAttr(
@@ -399,15 +401,30 @@ class MngrStreamManager(MutableModel):
         self._cg.__enter__()
         # Run from $HOME so mngr uses its global config, not any project-specific
         # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
-        self._cg.run_process_in_background(
+        self._observe_process = self._cg.run_process_in_background(
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
             cwd=Path.home(),
         )
 
     def stop(self) -> None:
-        """Stop all streaming subprocesses."""
+        """Stop all streaming subprocesses.
+
+        Terminates the mngr observe and mngr events processes first so
+        that the threads reading their output unblock immediately, then
+        exits the ConcurrencyGroup (which joins the threads).
+        """
+        for process in self._all_managed_processes():
+            process.terminate()
         self._cg.__exit__(None, None, None)
+
+    def _all_managed_processes(self) -> list[RunningProcess]:
+        """Return all managed subprocess handles (observe + per-agent events)."""
+        result: list[RunningProcess] = []
+        if self._observe_process is not None:
+            result.append(self._observe_process)
+        result.extend(self._events_processes.values())
+        return result
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
         """Handle a line of output from mngr observe --discovery-only."""
@@ -658,13 +675,20 @@ class MngrStreamManager(MutableModel):
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
         """Start mngr events <agent-id> servers --follow for a single workspace agent."""
+        if self._cg.is_shutting_down():
+            logger.debug("Skipping events stream for {} -- shutting down", agent_id)
+            return
+
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 
         logger.info("Starting events stream for agent {}", aid_str)
-        process = self._cg.run_process_in_background(
-            command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
-            on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
-            cwd=Path.home(),
-        )
-        self._events_processes[aid_str] = process
+        try:
+            process = self._cg.run_process_in_background(
+                command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
+                on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
+                cwd=Path.home(),
+            )
+            self._events_processes[aid_str] = process
+        except InvalidConcurrencyGroupStateError:
+            logger.debug("Cannot start events stream for {} -- concurrency group is no longer active", agent_id)

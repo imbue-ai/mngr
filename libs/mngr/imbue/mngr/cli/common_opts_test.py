@@ -29,8 +29,11 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
+
+hookimpl = pluggy.HookimplMarker("mngr")
 
 
 def _make_click_context(
@@ -872,3 +875,75 @@ def test_setting_flag_sets_command_defaults_in_config(
     )
     assert result.exit_code == 0
     assert captured_config[0].commands["create"].defaults["connect"] is False
+
+
+def test_disable_plugin_in_command_defaults_blocks_override_hook(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """A plugin disabled via [commands.create] disable_plugin should not have
+    its override_command_options hook fire.
+
+    Regression test: the ttyd plugin was injecting a duplicate 'terminal'
+    extra_window even though disable_plugin=["ttyd"] was set in the project
+    settings under [commands.create]. The root cause was that disable_plugin
+    from command defaults only updated CLI params but never called
+    block_disabled_plugins on the plugin manager, so the plugin's hooks
+    still fired.
+    """
+
+    class FakeTerminalPlugin:
+        @hookimpl
+        def override_command_options(
+            self,
+            command_name: str,
+            command_class: type,
+            params: dict[str, Any],
+        ) -> None:
+            if command_name == "create":
+                existing = params.get("extra_window", ())
+                params["extra_window"] = (*existing, 'terminal="fake-ttyd-command"')
+
+    # Set up a project settings file that disables our plugin via command defaults
+    project_dir = tmp_path / ".mngr"
+    project_dir.mkdir(exist_ok=True)
+    settings_path = project_dir / "settings.toml"
+    settings_path.write_text(
+        '[commands.create]\n'
+        'disable_plugin = ["fake_terminal"]\n'
+    )
+
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    pm.register(FakeTerminalPlugin(), name="fake_terminal")
+
+    captured_params: list[dict[str, Any]] = []
+
+    @click.command()
+    @click.option("--extra-window", multiple=True, default=())
+    @add_common_options
+    @click.pass_context
+    def test_create(ctx: click.Context, **kwargs: Any) -> None:
+        _mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="create",
+            command_class=CommonCliOptions,
+        )
+        captured_params.append(ctx.params.copy())
+
+    result = cli_runner.invoke(
+        test_create,
+        [],
+        obj=pm,
+        catch_exceptions=False,
+        env={"MNGR_PROJECT_DIR": str(tmp_path)},
+    )
+    assert result.exit_code == 0
+    assert len(captured_params) == 1
+
+    extra_window = captured_params[0].get("extra_window", ())
+    terminal_entries = [e for e in extra_window if "fake-ttyd" in str(e)]
+    assert terminal_entries == [], (
+        f"Disabled plugin's override_command_options hook still fired, "
+        f"injecting: {terminal_entries}. extra_window={extra_window}"
+    )

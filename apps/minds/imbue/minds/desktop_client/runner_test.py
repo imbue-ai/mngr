@@ -4,6 +4,7 @@ from pathlib import Path
 from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
+from imbue.minds.desktop_client.runner import _DEFAULT_MNGR_HOST_DIR
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -66,10 +67,10 @@ def test_build_cloudflare_client_returns_client_when_configured() -> None:
 
 
 def test_agent_discovery_handler_default_mngr_host_dir() -> None:
-    """Verify the default mngr_host_dir is ~/.mngr."""
+    """Verify the default mngr_host_dir matches the module-level constant."""
     tunnel_manager = SSHTunnelManager()
     handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=9000)
-    assert handler.mngr_host_dir == Path.home() / ".mngr"
+    assert handler.mngr_host_dir == _DEFAULT_MNGR_HOST_DIR
     tunnel_manager.cleanup()
 
 

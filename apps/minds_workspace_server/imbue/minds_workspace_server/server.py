@@ -23,8 +23,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
-from imbue.minds_workspace_server.agent_discovery import _read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -216,7 +217,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
 
     host_dir = _get_host_dir()
     agent_state_dir = host_dir / "agents" / agent_id
-    claude_config_dir = _read_claude_config_dir_from_env_file(agent_state_dir)
+    claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
     return AgentInfo(
         id=agent_state.id,
@@ -411,6 +412,42 @@ async def _save_layout(agent_id: str, request: Request) -> Response:
     return JSONResponse(content={"status": "ok"})
 
 
+async def _get_screen_capture(agent_id: str, request: Request) -> Response:
+    """Capture the tmux pane content for an agent.
+
+    Returns the visible screen content (and optionally scrollback) as plain
+    text. Useful for seeing what's on an agent's terminal when it has no
+    Claude session data (e.g., the agent crashed on startup).
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    prefix = os.environ.get("MNGR_PREFIX", "mngr-")
+    session_name = f"{prefix}{agent_info.name}"
+    include_scrollback = request.query_params.get("scrollback", "false").lower() == "true"
+    scrollback_flag = ["-S", "-"] if include_scrollback else []
+    command = ["tmux", "capture-pane", "-t", session_name, *scrollback_flag, "-p"]
+
+    def _run_capture() -> tuple[bool, str]:
+        result = run_local_command_modern_version(
+            command=command,
+            cwd=None,
+            is_checked=False,
+            timeout=5.0,
+        )
+        succeeded = result.returncode == 0
+        return succeeded, result.stdout if succeeded else result.stderr
+
+    success, output = await run_in_threadpool(_run_capture)
+    if not success:
+        return JSONResponse(
+            content={"screen": None, "error": f"tmux session not found: {session_name}"},
+            status_code=200,
+        )
+    return JSONResponse(content={"screen": output})
+
+
 def _serve_static_file(basename: str, request: Request) -> Response:
     config: Config = request.app.state.config
     file_path_string = config.static_file_basename_to_path.get(basename)
@@ -572,6 +609,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/layout", _get_layout, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )
