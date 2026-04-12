@@ -373,7 +373,9 @@ class MngrStreamManager(MutableModel):
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
     mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary")
 
-    _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mngr-stream-manager"))
+    _cg: ConcurrencyGroup = PrivateAttr(
+        default_factory=lambda: ConcurrencyGroup(name="mngr-stream-manager", exit_timeout_seconds=2.0)
+    )
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
