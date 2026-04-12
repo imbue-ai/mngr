@@ -135,16 +135,14 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     # Write session history
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=claude_config_dir,
-            )
-        ]
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         response = client.get("/api/agents/agent-123/events")
 
     assert response.status_code == 200
