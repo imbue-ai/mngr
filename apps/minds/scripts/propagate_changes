@@ -94,6 +94,7 @@ RSYNC_EXCLUDES=(
     --exclude='.ruff_cache'
     --exclude='.pytest_cache'
     --exclude='uv.lock'
+    --exclude='.external_worktrees'
 )
 
 # ---------------------------------------------------------------------------
