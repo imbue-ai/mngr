@@ -64,13 +64,17 @@ Source `.env` from the mngr repo root and set these env vars:
 - `MINDS_WORKSPACE_NAME` -- agent name (default: `mindtest`)
 - `MINDS_WORKSPACE_BRANCH` -- branch to use (set to the template worktree's branch if not `main`)
 
+**IMPORTANT**: `MINDS_WORKSPACE_BRANCH` MUST match the branch the template worktree is on. Get it with `cd .external_worktrees/forever-claude-template && git branch --show-current`. If this is wrong, agent creation will fail with `git checkout failed for branch`.
+
 ```bash
+TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch --show-current)
 (
   set -a
   source .env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
+  export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
   setsid bash -c "cd apps/minds && npm start" >> /tmp/minds-electron.log 2>&1 &
 )
 ```
