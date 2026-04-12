@@ -86,6 +86,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
 (
   set -a
   source .env
+  source .test_env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
