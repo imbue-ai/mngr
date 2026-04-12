@@ -671,7 +671,11 @@ class ForwardingCtx:
         self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
-        rules.append({"hostname": hostname, "service": service_url})
+        rules.append({
+            "hostname": hostname,
+            "service": service_url,
+            "originRequest": {"noTLSVerify": True},
+        })
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
         self._apply_default_access_policy(tunnel_name, hostname)
