@@ -25,6 +25,7 @@ import {
   getChatProtoAgentsForParent,
   getProtoAgents,
   getSidebarAgents,
+  removeAgentLocally,
 } from "../models/AgentManager";
 import { selectAgent } from "../navigation";
 
@@ -764,6 +765,13 @@ async function executeDestroy(
     alert(`Failed to destroy agent: ${(e as Error).message}`);
     return;
   }
+
+  // Remove destroyed agents from the frontend's local state immediately
+  // so the sidebar updates without waiting for the WebSocket broadcast.
+  for (const child of chatChildren) {
+    removeAgentLocally(child.id);
+  }
+  removeAgentLocally(agentId);
 
   // Remove the panel from dockview
   const state = agentDockviews.get(dockviewAgentId);

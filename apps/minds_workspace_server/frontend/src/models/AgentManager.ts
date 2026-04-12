@@ -146,6 +146,11 @@ export function getAgentById(id: string): AgentState | undefined {
   return agents.find((a) => a.id === id);
 }
 
+export function removeAgentLocally(agentId: string): void {
+  agents = agents.filter((a) => a.id !== agentId);
+  delete applications[agentId];
+}
+
 export function getApplicationsForAgent(agentId: string): ApplicationEntry[] {
   return applications[agentId] ?? [];
 }
