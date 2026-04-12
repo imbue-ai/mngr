@@ -296,9 +296,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return self._agents_result.agent_ids
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the workspace label set."""
+        """Return agent IDs that are primary workspace agents.
+
+        Filters for agents with both ``workspace`` and ``is_primary`` labels.
+        """
         with self._lock:
-            return tuple(agent.agent_id for agent in self._agents_result.discovered_agents if "workspace" in agent.labels)
+            return tuple(
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels and "is_primary" in agent.labels
+            )
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        """Return the workspace label value for an agent, or None."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return agent.labels.get("workspace")
+            return None
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
@@ -565,6 +580,7 @@ class MngrStreamManager(MutableModel):
         stripped = line.strip()
         if not stripped:
             return
+        logger.info("Events stream output for {}: {}", agent_id, stripped[:200])
         aid_str = str(agent_id)
         try:
             raw = json.loads(stripped)

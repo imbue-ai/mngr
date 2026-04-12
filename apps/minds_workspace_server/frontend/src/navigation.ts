@@ -6,5 +6,5 @@ export function getSelectedAgentId(): string | null {
 }
 
 export function selectAgent(agentId: string): void {
-  m.route.set("/agents/:agentId", { agentId });
+  m.route.set("/agents/:agentId/", { agentId });
 }

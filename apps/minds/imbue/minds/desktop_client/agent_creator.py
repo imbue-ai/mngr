@@ -218,6 +218,10 @@ def _build_mngr_create_command(
         "--update",
         "--label",
         f"workspace={agent_name}",
+        "--label",
+        "user_created=true",
+        "--label",
+        "is_primary=true",
         "--template",
         "main",
     ]

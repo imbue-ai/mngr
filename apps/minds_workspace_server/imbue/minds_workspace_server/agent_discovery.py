@@ -28,6 +28,8 @@ class AgentInfo(FrozenModel):
     state: str = Field(description="The agent's lifecycle state (e.g. RUNNING, STOPPED)")
     agent_state_dir: Path = Field(description="Path to the agent's state directory on the local host")
     claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
+    labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
+    work_dir: str | None = Field(default=None, description="Agent working directory path")
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
@@ -105,6 +107,8 @@ def discover_agents(
                 state=state,
                 agent_state_dir=agent_state_dir,
                 claude_config_dir=claude_config_dir,
+                labels=dict(agent_details.labels),
+                work_dir=str(agent_details.work_dir),
             )
         )
 

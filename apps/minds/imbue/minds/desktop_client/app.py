@@ -279,9 +279,18 @@ def _handle_landing_page(
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
+        agent_names: dict[str, str] = {}
+        for aid in all_agent_ids:
+            ws_name = backend_resolver.get_workspace_name(aid)
+            if ws_name:
+                agent_names[str(aid)] = ws_name
+            else:
+                info = backend_resolver.get_agent_display_info(aid)
+                agent_names[str(aid)] = info.agent_name if info else str(aid)
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             telegram_status_by_agent_id=telegram_status,
+            agent_names=agent_names,
         )
         return HTMLResponse(content=html)
 
@@ -565,6 +574,11 @@ async def _handle_proxy_http(
         return HTMLResponse(content=html)
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+    all_servers = backend_resolver.list_servers_for_agent(parsed_id)
+    logger.info(
+        "Proxy request: agent={} server={} path={} backend_url={} known_servers={}",
+        agent_id, server_name, path, backend_url, all_servers,
+    )
     if backend_url is None:
         # Return immediately instead of holding the connection open.
         # For HTML-accepting requests, return a loading page that retries
@@ -778,22 +792,22 @@ def _get_tunnel_http_client(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection."""
+    """Get an httpx client configured for SSH tunneling, or None for direct connection.
+
+    Creates a fresh client each time to avoid stale connections when SSH
+    tunnels are recreated after a broken pipe.
+    """
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
     if socket_path is None:
         return None
 
-    clients: dict[str, httpx.AsyncClient] = app.state.ssh_http_clients
-    key = str(socket_path)
-    if key not in clients:
-        transport = httpx.AsyncHTTPTransport(uds=key)
-        clients[key] = httpx.AsyncClient(
-            transport=transport,
-            follow_redirects=False,
-            timeout=_PROXY_TIMEOUT_SECONDS,
-        )
-    return clients[key]
+    transport = httpx.AsyncHTTPTransport(uds=str(socket_path))
+    return httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        timeout=_PROXY_TIMEOUT_SECONDS,
+    )
 
 
 # -- Agent creation route handlers --

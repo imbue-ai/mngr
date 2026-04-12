@@ -1,6 +1,12 @@
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
-import { fetchAgents, getAgents, getAgentsLoaded, getLoadingError, type Agent } from "../models/Conversation";
+import {
+  getSidebarAgents,
+  getWorktreeProtoAgents,
+  isConnected,
+  type AgentState,
+  type ProtoAgent,
+} from "../models/AgentManager";
 import { getSelectedAgentId, selectAgent } from "../navigation";
 import { EmptySlot } from "./EmptySlot";
 
@@ -19,7 +25,7 @@ function stateLabel(state: string): string {
   }
 }
 
-function renderAgentItem(agent: Agent, isActive: boolean, isClaimed: boolean): m.Vnode {
+function renderAgentItem(agent: AgentState, isActive: boolean, isClaimed: boolean): m.Vnode {
   const itemClass = ["conversation-selector-item", isActive ? "conversation-selector-item--active" : ""]
     .filter(Boolean)
     .join(" ");
@@ -44,28 +50,54 @@ function renderAgentItem(agent: Agent, isActive: boolean, isClaimed: boolean): m
   );
 }
 
+function renderProtoAgentItem(proto: ProtoAgent, isActive: boolean): m.Vnode {
+  const itemClass = ["conversation-selector-item", isActive ? "conversation-selector-item--active" : ""]
+    .filter(Boolean)
+    .join(" ");
+
+  return m(
+    "li",
+    {
+      key: proto.agent_id,
+      class: itemClass,
+      "data-agent-id": proto.agent_id,
+      onclick: () => selectAgent(proto.agent_id),
+    },
+    [
+      m("div", { class: "conversation-selector-item-name" }, proto.name),
+      m("div", { class: "conversation-selector-item-meta" }, [
+        m("span", { class: "conversation-selector-item-model", style: "color: #b45309;" }, "creating..."),
+      ]),
+    ],
+  );
+}
+
 export const AgentSelector: m.Component = {
-  oninit() {
-    fetchAgents();
-  },
   view() {
     const currentAgentId = getSelectedAgentId();
-    const agents = getAgents();
-    const loadingError = getLoadingError();
+    const agents = getSidebarAgents();
+    const protoAgents = getWorktreeProtoAgents();
     const selectorItemClaimed = isSlotClaimed("conversation-selector-item");
+    const wsConnected = isConnected();
+
+    const hasItems = agents.length > 0 || protoAgents.length > 0;
 
     return m(
       "div",
       { class: "conversation-selector flex flex-col flex-1 min-h-0", "data-slot": "conversation-selector" },
       [
         m(EmptySlot, { name: "sidebar-before-list" }),
-        loadingError
-          ? m("p", { class: "conversation-selector-error mt-2 text-sm text-red-500" }, `Error: ${loadingError}`)
-          : agents.length === 0
+        !wsConnected && !hasItems
+          ? m(
+              "p",
+              { class: "conversation-selector-empty mt-2 px-5 text-sm text-text-secondary" },
+              "Connecting...",
+            )
+          : !hasItems
             ? m(
                 "p",
                 { class: "conversation-selector-empty mt-2 px-5 text-sm text-text-secondary" },
-                getAgentsLoaded() ? "No agents found." : "Loading agents...",
+                "No agents found.",
               )
             : m(
                 "div",
@@ -73,7 +105,14 @@ export const AgentSelector: m.Component = {
                 m(
                   "ul",
                   { class: "conversation-selector-list" },
-                  agents.map((agent) => renderAgentItem(agent, agent.id === currentAgentId, selectorItemClaimed)),
+                  [
+                    ...agents.map((agent) =>
+                      renderAgentItem(agent, agent.id === currentAgentId, selectorItemClaimed),
+                    ),
+                    ...protoAgents.map((proto) =>
+                      renderProtoAgentItem(proto, proto.agent_id === currentAgentId),
+                    ),
+                  ],
                 ),
               ),
       ],

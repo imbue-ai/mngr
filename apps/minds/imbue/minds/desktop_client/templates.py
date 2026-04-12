@@ -35,123 +35,166 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     """
     + _COMMON_STYLES
     + """
-    .agent-list { list-style: none; }
-    .agent-list li {
-      margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+    body { background: #f8fafc; padding: 0; font-size: 14px; }
+    .page { max-width: 800px; margin: 0 auto; padding: 48px 0; }
+    .create-btn {
+      padding: 6px 16px; background: #1e293b; color: white; border: none;
+      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+      text-decoration: none; display: inline-block; font-family: inherit;
     }
-    .agent-list a { """
-    + """
-      display: inline-block; padding: 12px 20px;
-      background: rgb(26, 26, 46); color: white; text-decoration: none;
-      border-radius: 6px; font-size: 16px;
+    .create-btn:hover { background: #334155; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 400;
+      color: #94a3b8; border-bottom: 1px solid #e2e8f0;
     }
-    .agent-list a:hover { background: rgb(42, 42, 78); }
-    .telegram-btn {
-      padding: 8px 14px; border-radius: 6px; font-size: 13px;
-      border: 1px solid rgb(200, 200, 210); cursor: pointer;
-      background: white; color: rgb(60, 60, 80);
+    thead th:last-child { text-align: right; }
+    tbody tr { cursor: pointer; transition: background 0.1s; }
+    tbody tr:hover { background: #f1f5f9; }
+    tbody td {
+      padding: 20px 16px; font-size: 14px; color: #334155;
+      border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
-    .telegram-btn:hover { background: rgb(240, 240, 245); }
-    .telegram-btn.active {
-      background: rgb(220, 252, 231); border-color: rgb(134, 239, 172);
-      color: rgb(22, 101, 52); cursor: default;
+    tbody td:last-child { text-align: right; }
+    .ws-name { font-weight: 500; color: #0f172a; }
+    .shared-with { color: #94a3b8; }
+    .menu-wrapper { position: relative; display: inline-block; }
+    .menu-btn {
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      cursor: pointer; padding: 4px 6px; color: #94a3b8; line-height: 1;
+      display: flex; align-items: center;
     }
-    .telegram-btn:disabled { cursor: wait; opacity: 0.7; }
-    .empty-state { color: gray; font-size: 16px; }
-    .create-section { margin-top: 32px; }
-    .create-section a { color: rgb(26, 26, 46); text-decoration: underline; }
+    .menu-btn:hover { background: #e2e8f0; border-color: #cbd5e1; color: #64748b; }
+    .menu-btn svg { width: 16px; height: 16px; }
+    .menu-dropdown {
+      display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
+      background: white; border: 1px solid #e2e8f0; border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08); min-width: 160px; z-index: 10;
+      padding: 4px 0;
+    }
+    .menu-dropdown.open { display: block; }
+    .menu-item {
+      display: block; width: 100%; padding: 8px 14px; font-size: 13px;
+      text-align: left; background: none; border: none; cursor: pointer;
+      color: #334155;
+    }
+    .menu-item:hover { background: #f1f5f9; }
+    .menu-item.destructive { color: #dc2626; }
+    .menu-item.destructive:hover { background: #fef2f2; }
+    .empty-state { color: #94a3b8; font-size: 15px; text-align: center; padding: 48px 0; }
   </style>
 </head>
 <body>
-  <h1>Your Workspaces</h1>
-  {% if agent_ids %}
-  <ul class="agent-list">
-    {% for agent_id in agent_ids %}
-    <li>
-      <a href="/agents/{{ agent_id }}/">{{ agent_id }}</a>
-      {% if telegram_enabled %}
-        {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
-      <span class="telegram-btn active">Telegram active</span>
-        {% else %}
-      <button class="telegram-btn" id="tg-btn-{{ agent_id }}"
-              onclick="setupTelegram('{{ agent_id }}')">Setup Telegram</button>
-        {% endif %}
-      {% endif %}
-    </li>
-    {% endfor %}
-  </ul>
-  <div class="create-section">
-    <a href="/create">Create another workspace</a>
-  </div>
-  <script>
-  async function setupTelegram(agentId) {
-    var btn = document.getElementById('tg-btn-' + agentId);
-    btn.disabled = true;
-    btn.textContent = 'Setting up...';
-    try {
-      var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
-      if (!resp.ok) {
-        var data = await resp.json();
-        alert('Failed to start Telegram setup: ' + (data.error || resp.statusText));
+  <div class="page">
+    {% if agent_ids %}
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Shared with</th>
+          <th style="text-align: right;"><a href="/create" class="create-btn">Create</a></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for agent_id in agent_ids %}
+        <tr onclick="window.location='/agents/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
+          <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
+          <td><span class="shared-with">No one</span></td>
+          <td>
+            <div class="menu-wrapper">
+              <button class="menu-btn" onclick="event.stopPropagation(); toggleMenu('{{ agent_id }}')"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+              <div class="menu-dropdown" id="menu-{{ agent_id }}">
+                {% if telegram_enabled %}
+                  {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
+                <span class="menu-item" style="color: #16a34a; cursor: default;">Telegram active</span>
+                  {% else %}
+                <button class="menu-item" id="tg-btn-{{ agent_id }}"
+                        onclick="event.stopPropagation(); setupTelegram('{{ agent_id }}')">Setup Telegram</button>
+                  {% endif %}
+                {% endif %}
+                <button class="menu-item destructive"
+                        onclick="event.stopPropagation(); alert('Not implemented')">Delete</button>
+              </div>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <script>
+    function toggleMenu(agentId) {
+      document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
+        if (el.id !== 'menu-' + agentId) el.classList.remove('open');
+      });
+      document.getElementById('menu-' + agentId).classList.toggle('open');
+    }
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.menu-wrapper')) {
+        document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
+          el.classList.remove('open');
+        });
+      }
+    });
+    async function setupTelegram(agentId) {
+      var btn = document.getElementById('tg-btn-' + agentId);
+      btn.disabled = true;
+      btn.textContent = 'Setting up...';
+      try {
+        var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
+        if (!resp.ok) {
+          var data = await resp.json();
+          alert('Failed: ' + (data.error || resp.statusText));
+          btn.disabled = false;
+          btn.textContent = 'Setup Telegram';
+          return;
+        }
+        pollTelegramStatus(agentId, btn);
+      } catch (e) {
+        alert('Failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Setup Telegram';
-        return;
       }
-      pollTelegramStatus(agentId, btn);
-    } catch (e) {
-      alert('Failed: ' + e.message);
-      btn.disabled = false;
-      btn.textContent = 'Setup Telegram';
     }
-  }
-
-  function pollTelegramStatus(agentId, btn) {
-    var interval = setInterval(async function() {
-      try {
-        var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
-        if (!resp.ok) { return; }
-        var data = await resp.json();
-        btn.textContent = formatStatus(data.status);
-        if (data.status === 'DONE') {
-          clearInterval(interval);
-          btn.className = 'telegram-btn active';
-          btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
-          btn.disabled = false;
-        } else if (data.status === 'FAILED') {
-          clearInterval(interval);
-          btn.textContent = 'Setup failed';
-          btn.disabled = false;
-          btn.className = 'telegram-btn';
-          alert('Telegram setup failed: ' + (data.error || 'unknown error'));
-        }
-      } catch (e) {
-        // Ignore polling errors
-      }
-    }, 2000);
-  }
-
-  function formatStatus(status) {
-    var labels = {
-      'CHECKING_CREDENTIALS': 'Checking credentials...',
-      'WAITING_FOR_LOGIN': 'Waiting for browser login...',
-      'CREATING_BOT': 'Creating bot...',
-      'INJECTING_CREDENTIALS': 'Injecting credentials...',
-      'DONE': 'Done',
-      'FAILED': 'Failed'
-    };
-    return labels[status] || status;
-  }
-  </script>
-  {% else %}
-    {% if is_discovering %}
-  <p class="empty-state">Discovering agents...</p>
-  <script>setTimeout(function() { location.reload(); }, 2000);</script>
+    function pollTelegramStatus(agentId, btn) {
+      var interval = setInterval(async function() {
+        try {
+          var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
+          if (!resp.ok) return;
+          var data = await resp.json();
+          btn.textContent = formatStatus(data.status);
+          if (data.status === 'DONE') {
+            clearInterval(interval);
+            btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
+            btn.disabled = false;
+            btn.style.color = '#16a34a';
+            btn.style.cursor = 'default';
+          } else if (data.status === 'FAILED') {
+            clearInterval(interval);
+            btn.textContent = 'Setup failed';
+            btn.disabled = false;
+            alert('Telegram setup failed: ' + (data.error || 'unknown error'));
+          }
+        } catch (e) {}
+      }, 2000);
+    }
+    function formatStatus(s) {
+      return {'CHECKING_CREDENTIALS':'Checking credentials...','WAITING_FOR_LOGIN':'Waiting for login...',
+        'CREATING_BOT':'Creating bot...','INJECTING_CREDENTIALS':'Injecting credentials...',
+        'DONE':'Done','FAILED':'Failed'}[s] || s;
+    }
+    </script>
     {% else %}
-  <p class="empty-state">
-    No workspaces are accessible. Use a login link to authenticate with a workspace.
-  </p>
+      {% if is_discovering %}
+    <p class="empty-state">Discovering agents...</p>
+    <script>setTimeout(function() { location.reload(); }, 2000);</script>
+      {% else %}
+    <div style="text-align: center; padding: 48px 0;">
+      <p class="empty-state" style="margin-bottom: 24px;">No workspaces yet</p>
+      <a href="/create" class="create-btn">Create</a>
+    </div>
+      {% endif %}
     {% endif %}
-  {% endif %}
+  </div>
 </body>
 </html>"""
 )
@@ -165,50 +208,81 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     """
     + _COMMON_STYLES
     + """
-    .form-group { margin-bottom: 16px; }
-    label { display: block; margin-bottom: 6px; font-size: 14px; color: rgb(60, 60, 80); }
-    input[type="text"], select {
-      width: 100%; max-width: 500px; padding: 10px 14px;
-      border: 1px solid rgb(200, 200, 210); border-radius: 6px; font-size: 16px;
+    body { background: #f8fafc; padding: 0; font-size: 14px; }
+    .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; padding-top: 10px; }
+    .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
+    .page-header a:hover { color: #334155; }
+    .submit-btn {
+      padding: 6px 16px; background: #1e293b; color: white; border: none;
+      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+      font-family: inherit;
     }
-    input[type="text"]:focus, select:focus { outline: none; border-color: rgb(26, 26, 46); }
-    .help-text { margin-top: 4px; font-size: 13px; color: gray; }
-    .back-link { margin-top: 24px; }
-    .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
+    .submit-btn:hover { background: #334155; }
+    .form-group { display: flex; gap: 24px; margin-bottom: 16px; align-items: flex-start; }
+    .form-label { flex: 0 0 200px; padding-top: 10px; }
+    .form-label label { font-size: 14px; color: #334155; font-weight: 500; display: block; }
+    .form-label .help-text { margin-top: 2px; font-size: 13px; color: #94a3b8; }
+    .form-input { flex: 1; }
+    input[type="text"], select {
+      width: 100%; padding: 10px 12px;
+      border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;
+      font-family: inherit; background: white; color: #0f172a;
+    }
+    input[type="text"]:focus, select:focus { outline: none; border-color: #94a3b8; }
   </style>
 </head>
 <body>
-  <h1>Create a Workspace</h1>
-  <form action="/create" method="post">
-    <div class="form-group">
-      <label for="agent_name">Name</label>
-      <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
-             placeholder="selene" required>
+  <div class="page">
+    <div class="page-header">
+      <a href="/">Back to workspace list</a>
+      <button type="submit" form="create-form" class="submit-btn">Create</button>
     </div>
-    <div class="form-group">
-      <label for="git_url">Git repository URL or local path</label>
-      <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
-             placeholder="https://github.com/user/repo.git or /path/to/repo" required>
-      <p class="help-text">A git URL will be cloned to a temp directory. A local path will be used directly.</p>
-    </div>
-    <div class="form-group">
-      <label for="branch">Branch</label>
-      <input type="text" id="branch" name="branch" value="{{ branch }}"
-             placeholder="main">
-      <p class="help-text">The branch to check out after cloning. Leave empty to use the repository's default branch.</p>
-    </div>
-    <div class="form-group">
-      <label for="launch_mode">Launch mode</label>
-      <select id="launch_mode" name="launch_mode">
-        {% for mode in launch_modes %}
-        <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
-        {% endfor %}
-      </select>
-      <p class="help-text">Local: run in a Docker container. Lima: run in a Lima VM. Dev: run directly on this host. Cloud: run on a cloud provider (not yet supported).</p>
-    </div>
-    <button type="submit" class="btn">Create</button>
-  </form>
-  <div class="back-link"><a href="/">Back</a></div>
+    <form id="create-form" action="/create" method="post">
+      <div class="form-group">
+        <div class="form-label">
+          <label for="agent_name">Name</label>
+        </div>
+        <div class="form-input">
+          <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
+                 placeholder="selene" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">
+          <label for="git_url">Repository</label>
+          <p class="help-text">Git URL or local path</p>
+        </div>
+        <div class="form-input">
+          <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
+                 placeholder="https://github.com/user/repo.git" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">
+          <label for="branch">Branch</label>
+          <p class="help-text">Leave empty for default</p>
+        </div>
+        <div class="form-input">
+          <input type="text" id="branch" name="branch" value="{{ branch }}"
+                 placeholder="main">
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">
+          <label for="launch_mode">Launch mode</label>
+          <p class="help-text">Local: Docker. Dev: this host.</p>
+        </div>
+        <div class="form-input">
+          <select id="launch_mode" name="launch_mode">
+            {% for mode in launch_modes %}
+            <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </form>
+  </div>
 </body>
 </html>"""
 )
@@ -350,11 +424,14 @@ def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
+    agent_names: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
     telegram_status_by_agent_id maps agent ID strings to whether they have
     active Telegram bot credentials. When None, no telegram buttons are shown.
+
+    agent_names maps agent ID strings to human-readable workspace names.
 
     When is_discovering is True, the page shows a "Discovering agents..." message
     with auto-refresh instead of the empty state. This is used when the stream
@@ -366,6 +443,7 @@ def render_landing_page(
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
+        agent_names=agent_names or {},
     )
 
 

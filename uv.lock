@@ -2302,6 +2302,7 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
     { name = "watchdog" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -2320,6 +2321,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=0.45" },
     { name = "uvicorn", specifier = ">=0.34" },
     { name = "watchdog", specifier = ">=4.0" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [package.metadata.requires-dev]

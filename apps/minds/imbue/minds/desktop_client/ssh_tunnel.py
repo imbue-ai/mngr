@@ -254,6 +254,9 @@ def _tunnel_accept_loop(
             except (paramiko.SSHException, OSError) as e:
                 logger.warning("Failed to open SSH channel to {}:{}: {}", remote_host, remote_port, e)
                 client_sock.close()
+                if not transport.is_active():
+                    logger.warning("SSH transport is dead, stopping tunnel accept loop")
+                    break
                 continue
 
             threading.Thread(
