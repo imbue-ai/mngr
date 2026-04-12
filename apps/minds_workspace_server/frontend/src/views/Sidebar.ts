@@ -177,7 +177,7 @@ export const Sidebar: m.Component = {
             })
           : null,
         showSidebarShareModal
-          ? m(ShareModal, {
+          ? m(ShareModal(), {
               serverName: "web",
               onClose() {
                 showSidebarShareModal = false;

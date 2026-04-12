@@ -838,7 +838,7 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
         : null,
 
       showShareModal && shareServerName
-        ? m(ShareModal, {
+        ? m(ShareModal(), {
             serverName: shareServerName,
             onClose() {
               showShareModal = false;

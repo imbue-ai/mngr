@@ -16,81 +16,6 @@ interface SharingStatus {
   url: string | null;
 }
 
-export const ShareModal: m.Component<ShareModalAttrs> = {
-  oninit(vnode) {
-    const state = {
-      loading: true,
-      status: null as SharingStatus | null,
-      error: null as string | null,
-      actionInProgress: false,
-      copied: false,
-    };
-    (vnode as unknown as { state: typeof state }).state = state;
-    fetchStatus(vnode.attrs.serverName, state);
-  },
-
-  view(vnode) {
-    const { serverName, onClose } = vnode.attrs;
-    const state = (vnode as unknown as { state: {
-      loading: boolean;
-      status: SharingStatus | null;
-      error: string | null;
-      actionInProgress: boolean;
-      copied: boolean;
-    } }).state;
-
-    return m("div.share-modal-overlay", { onclick: (e: Event) => { if (e.target === e.currentTarget) onClose(); } }, [
-      m("div.share-modal", [
-        m("h3.share-modal-title", `Share: ${serverName}`),
-
-        state.loading
-          ? m("p.share-modal-loading", "Loading...")
-          : state.error
-            ? m("div", [
-                m("p.share-modal-error", state.error),
-                m("button.share-modal-btn.share-modal-btn-secondary", { onclick: () => { state.error = null; state.loading = true; fetchStatus(serverName, state); } }, "Retry"),
-              ])
-            : state.status?.enabled
-              ? m("div", [
-                  m("p.share-modal-label", "This application is shared globally:"),
-                  m("div.share-modal-url-row", [
-                    m("input.share-modal-url-input", {
-                      type: "text",
-                      readonly: true,
-                      value: state.status.url ?? "(URL not available)",
-                      onclick: (e: Event) => (e.target as HTMLInputElement).select(),
-                    }),
-                    m("button.share-modal-btn.share-modal-btn-primary", {
-                      onclick: () => {
-                        if (state.status?.url) {
-                          navigator.clipboard.writeText(state.status.url);
-                          state.copied = true;
-                          setTimeout(() => { state.copied = false; m.redraw(); }, 2000);
-                        }
-                      },
-                    }, state.copied ? "Copied" : "Copy"),
-                  ]),
-                  m("button.share-modal-btn.share-modal-btn-destructive", {
-                    disabled: state.actionInProgress,
-                    onclick: () => disableSharing(serverName, state),
-                  }, state.actionInProgress ? "Disabling..." : "Disable sharing"),
-                ])
-              : m("div", [
-                  m("p.share-modal-label", "This application is not currently shared."),
-                  m("button.share-modal-btn.share-modal-btn-primary", {
-                    disabled: state.actionInProgress,
-                    onclick: () => enableSharing(serverName, state),
-                  }, state.actionInProgress ? "Enabling..." : "Enable sharing"),
-                ]),
-
-        m("div.share-modal-actions", [
-          m("button.share-modal-btn.share-modal-btn-secondary", { onclick: onClose }, "Close"),
-        ]),
-      ]),
-    ]);
-  },
-};
-
 interface ModalState {
   loading: boolean;
   status: SharingStatus | null;
@@ -149,4 +74,79 @@ async function disableSharing(serverName: string, state: ModalState): Promise<vo
   }
   state.actionInProgress = false;
   m.redraw();
+}
+
+export function ShareModal(): m.Component<ShareModalAttrs> {
+  const state: ModalState = {
+    loading: true,
+    status: null,
+    error: null,
+    actionInProgress: false,
+    copied: false,
+  };
+
+  let initialized = false;
+
+  return {
+    view(vnode) {
+      const { serverName, onClose } = vnode.attrs;
+
+      if (!initialized) {
+        initialized = true;
+        fetchStatus(serverName, state);
+      }
+
+      return m("div.share-modal-overlay", { onclick: (e: Event) => { if (e.target === e.currentTarget) onClose(); } }, [
+        m("div.share-modal", [
+          m("h3.share-modal-title", `Share: ${serverName}`),
+
+          state.loading
+            ? m("p.share-modal-loading", "Loading...")
+            : state.error
+              ? m("div", [
+                  m("p.share-modal-error", state.error),
+                  m("button.share-modal-btn.share-modal-btn-secondary", {
+                    onclick: () => { state.error = null; state.loading = true; fetchStatus(serverName, state); },
+                  }, "Retry"),
+                ])
+              : state.status?.enabled
+                ? m("div", [
+                    m("p.share-modal-label", "This application is shared globally:"),
+                    m("div.share-modal-url-row", [
+                      m("input.share-modal-url-input", {
+                        type: "text",
+                        readonly: true,
+                        value: state.status.url ?? "(URL not available)",
+                        onclick: (e: Event) => (e.target as HTMLInputElement).select(),
+                      }),
+                      m("button.share-modal-btn.share-modal-btn-primary", {
+                        onclick: () => {
+                          if (state.status?.url) {
+                            navigator.clipboard.writeText(state.status.url);
+                            state.copied = true;
+                            setTimeout(() => { state.copied = false; m.redraw(); }, 2000);
+                          }
+                        },
+                      }, state.copied ? "Copied" : "Copy"),
+                    ]),
+                    m("button.share-modal-btn.share-modal-btn-destructive", {
+                      disabled: state.actionInProgress,
+                      onclick: () => disableSharing(serverName, state),
+                    }, state.actionInProgress ? "Disabling..." : "Disable sharing"),
+                  ])
+                : m("div", [
+                    m("p.share-modal-label", "This application is not currently shared."),
+                    m("button.share-modal-btn.share-modal-btn-primary", {
+                      disabled: state.actionInProgress,
+                      onclick: () => enableSharing(serverName, state),
+                    }, state.actionInProgress ? "Enabling..." : "Enable sharing"),
+                  ]),
+
+          m("div.share-modal-actions", [
+            m("button.share-modal-btn.share-modal-btn-secondary", { onclick: onClose }, "Close"),
+          ]),
+        ]),
+      ]);
+    },
+  };
 }
