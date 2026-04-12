@@ -40,36 +40,21 @@ class SharingStatus(FrozenModel):
 def _read_minds_api_url() -> str:
     """Read the minds desktop client API URL from the agent state directory.
 
-    The desktop client writes the URL to ``~/.mngr/agents/{agent_id}/minds_api_url``
-    (using the SSH user's home directory), which may differ from the path in
-    ``$MNGR_AGENT_STATE_DIR`` (which uses ``$MNGR_HOST_DIR``). We check both
-    locations.
-
     Raises SharingProxyError if the file is missing or unreadable.
     """
-    agent_id = os.environ.get("MNGR_AGENT_ID", "")
-    candidates: list[Path] = []
-
-    # Primary: ~/.mngr/agents/{agent_id}/ (where the desktop client writes via SSH)
-    if agent_id:
-        candidates.append(Path.home() / ".mngr" / "agents" / agent_id / _MINDS_API_URL_FILENAME)
-
-    # Fallback: $MNGR_AGENT_STATE_DIR/ (mngr host dir convention)
     agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
-    if agent_state_dir:
-        candidates.append(Path(agent_state_dir) / _MINDS_API_URL_FILENAME)
+    if not agent_state_dir:
+        raise SharingProxyError("MNGR_AGENT_STATE_DIR environment variable is not set")
 
-    if not candidates:
-        raise SharingProxyError("Neither MNGR_AGENT_ID nor MNGR_AGENT_STATE_DIR is set")
+    url_file = Path(agent_state_dir) / _MINDS_API_URL_FILENAME
+    if not url_file.exists():
+        raise SharingProxyError(f"Minds API URL file not found: {url_file}")
 
-    for url_file in candidates:
-        if url_file.exists():
-            url = url_file.read_text().strip()
-            if url:
-                return url
+    url = url_file.read_text().strip()
+    if not url:
+        raise SharingProxyError(f"Minds API URL file is empty: {url_file}")
 
-    tried = ", ".join(str(p) for p in candidates)
-    raise SharingProxyError(f"Minds API URL file not found (checked: {tried})")
+    return url
 
 
 def _get_desktop_client_auth_headers() -> dict[str, str]:
