@@ -117,7 +117,7 @@ ELECTRON_PID=""
 # --- Track A: Agent stop -> sync -> frontend build -> start ---
 agent_update() {
     echo "[2/4] Stopping agent '${AGENT_NAME}'..."
-    uv run mngr stop "${AGENT_NAME}" 2>&1 || echo "      (agent may not have been running)"
+    uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1 || echo "      (agent may not have been running)"
 
     echo "[3/4] Syncing template into agent work_dir..."
     if [[ "${MODE}" == "remote" ]]; then
@@ -137,12 +137,12 @@ agent_update() {
     echo "      Done."
 
     echo "[3.5/4] Starting agent '${AGENT_NAME}'..."
-    uv run mngr start "${AGENT_NAME}" 2>&1
+    uv run --directory "${MNGR_REPO_ROOT}" mngr start "${AGENT_NAME}" 2>&1
     echo "      Agent started."
 
     echo "[4/4] Rebuilding minds_workspace_server frontend..."
     if [[ "${MODE}" == "remote" ]]; then
-        uv run mngr exec "${AGENT_NAME}" "cd /code/vendor/mngr/apps/minds_workspace_server/frontend && npm run build" 2>&1
+        uv run --directory "${MNGR_REPO_ROOT}" mngr exec "${AGENT_NAME}" "cd /code/vendor/mngr/apps/minds_workspace_server/frontend && npm run build" 2>&1
     else
         (cd "${LOCAL_TARGET}/vendor/mngr/apps/minds_workspace_server/frontend" && npm run build) 2>&1
     fi
