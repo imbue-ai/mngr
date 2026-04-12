@@ -382,17 +382,18 @@ class MngrStreamManager(MutableModel):
     _observe_process: RunningProcess | None = PrivateAttr(default=None)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None], None]] = PrivateAttr(
+    _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None, str], None]] = PrivateAttr(
         default_factory=list
     )
 
     def add_on_agent_discovered_callback(
         self,
-        callback: Callable[[AgentId, RemoteSSHInfo | None], None],
+        callback: Callable[[AgentId, RemoteSSHInfo | None, str], None],
     ) -> None:
         """Register a callback invoked when an agent is discovered.
 
-        The callback receives the agent ID and SSH info (None for local agents).
+        The callback receives the agent ID, SSH info (None for local agents),
+        and the provider name (e.g. "docker", "local").
         """
         self._on_agent_discovered_callbacks.append(callback)
 
@@ -493,7 +494,7 @@ class MngrStreamManager(MutableModel):
         # Notify callbacks for all discovered agents
         for agent in event.agents:
             ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
-            self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info)
+            self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info, str(agent.provider_name))
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Update SSH info for a host and refresh the resolver."""
@@ -515,7 +516,8 @@ class MngrStreamManager(MutableModel):
         # Re-fire callbacks for agents on this host now that SSH info is available.
         # This handles the case where agent discovery fires before SSH info arrives.
         for agent_id in agents_on_host:
-            self._fire_agent_discovered_callbacks(agent_id, ssh_info)
+            provider = self._get_provider_name_for_agent(agent_id)
+            self._fire_agent_discovered_callbacks(agent_id, ssh_info, provider)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         """Incrementally add or update a single agent in the resolver."""
@@ -540,7 +542,7 @@ class MngrStreamManager(MutableModel):
 
         # Notify callbacks
         ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
-        self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info)
+        self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info, str(agent.provider_name))
 
     def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
         """Remove a destroyed agent from the resolver and stop its events stream."""
@@ -581,6 +583,14 @@ class MngrStreamManager(MutableModel):
         for agent_id in event.agent_ids:
             self.resolver.update_servers(agent_id, {})
 
+    def _get_provider_name_for_agent(self, agent_id: AgentId) -> str:
+        """Look up the provider name for an agent. Returns 'unknown' if not found."""
+        with self._lock:
+            for agent in self._discovered_agents:
+                if agent.agent_id == agent_id:
+                    return str(agent.provider_name)
+        return "unknown"
+
     def _get_ssh_info_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Look up SSH info for an agent from the host mapping."""
         with self._lock:
@@ -593,11 +603,12 @@ class MngrStreamManager(MutableModel):
         self,
         agent_id: AgentId,
         ssh_info: RemoteSSHInfo | None,
+        provider_name: str,
     ) -> None:
         """Invoke all registered on_agent_discovered callbacks."""
         for callback in self._on_agent_discovered_callbacks:
             try:
-                callback(agent_id, ssh_info)
+                callback(agent_id, ssh_info, provider_name)
             except (OSError, ValueError, RuntimeError, paramiko.SSHException, SSHTunnelError) as e:
                 logger.warning("Agent discovery callback failed for {}: {}", agent_id, e)
 

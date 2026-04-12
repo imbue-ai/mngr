@@ -39,6 +39,12 @@ _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 
 
 
+_PROVIDER_HOST_DIR: Final[dict[str, str]] = {
+    "docker": "/mngr",
+    "modal": "/mngr",
+}
+
+
 class AgentDiscoveryHandler(FrozenModel):
     """Handles agent discovery events by setting up reverse tunnels and writing URL files."""
 
@@ -49,15 +55,21 @@ class AgentDiscoveryHandler(FrozenModel):
         description="Base mngr host directory for local agents (defaults to ~/.mngr)",
     )
 
-    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None) -> None:
+    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         if ssh_info is not None:
-            self._handle_remote_agent(agent_id, ssh_info)
+            self._handle_remote_agent(agent_id, ssh_info, provider_name)
         else:
             self._handle_local_agent(agent_id)
 
-    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
+    @staticmethod
+    def _remote_host_dir(provider_name: str) -> str:
+        """Return the mngr host directory for a provider, defaulting to ~/.mngr."""
+        return _PROVIDER_HOST_DIR.get(provider_name, "~/.mngr")
+
+    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, provider_name: str) -> None:
+        host_dir = self._remote_host_dir(provider_name)
+        agent_state_dir = f"{host_dir}/agents/{agent_id}"
         try:
-            agent_state_dir = self.tunnel_manager.read_remote_agent_state_dir(ssh_info, agent_id)
             remote_port = self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
                 local_port=self.server_port,

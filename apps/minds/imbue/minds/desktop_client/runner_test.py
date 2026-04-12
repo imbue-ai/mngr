@@ -24,7 +24,7 @@ def test_agent_discovery_handler_writes_local_url_file(tmp_path: Path) -> None:
     agent_id = AgentId()
 
     # Call the handler with no SSH info (local agent)
-    handler(agent_id, None)
+    handler(agent_id, None, "local")
 
     url_file = tmp_path / "agents" / str(agent_id) / "minds_api_url"
     assert url_file.exists(), "minds_api_url file was not written"
@@ -89,7 +89,7 @@ def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> No
         mngr_host_dir=tmp_path,
     )
     agent_id = AgentId()
-    handler(agent_id, None)
+    handler(agent_id, None, "local")
     tunnel_manager.cleanup()
 
 
@@ -119,9 +119,6 @@ class _FakeTunnelManager(SSHTunnelManager):
             raise SSHTunnelError("simulated failure")
         return self._fake_remote_port
 
-    def read_remote_agent_state_dir(self, ssh_info: RemoteSSHInfo, agent_id: AgentId) -> str:
-        return f"~/.mngr/agents/{agent_id}"
-
     def write_api_url_to_remote(
         self,
         ssh_info: RemoteSSHInfo,
@@ -146,12 +143,12 @@ def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
         mngr_host_dir=tmp_path,
     )
     agent_id = AgentId()
-    handler(agent_id, ssh_info)
+    handler(agent_id, ssh_info, "docker")
 
     assert len(fake_manager._reverse_tunnel_calls) == 1
     _, local_port, agent_state_dir = fake_manager._reverse_tunnel_calls[0]
     assert local_port == 8420
-    assert str(agent_id) in agent_state_dir
+    assert agent_state_dir == f"/mngr/agents/{agent_id}"
 
     assert len(fake_manager._write_remote_calls) == 1
     _, _, url = fake_manager._write_remote_calls[0]
@@ -175,6 +172,6 @@ def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Pat
     )
     agent_id = AgentId()
     # Should not raise even though setup_reverse_tunnel raises SSHTunnelError
-    handler(agent_id, ssh_info)
+    handler(agent_id, ssh_info, "docker")
     assert len(fake_manager._write_remote_calls) == 0
     fake_manager.cleanup()

@@ -15,7 +15,6 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.primitives import AgentId
 from imbue.imbue_common.mutable_model import MutableModel
 
 _BUFFER_SIZE: Final[int] = 65536
@@ -238,41 +237,6 @@ class SSHTunnelManager(MutableModel):
             thread.start()
 
             return remote_port
-
-    def read_remote_agent_state_dir(self, ssh_info: RemoteSSHInfo, agent_id: AgentId) -> str:
-        """Read MNGR_AGENT_STATE_DIR from the agent's env file on the remote host.
-
-        Checks well-known host dir locations (``/mngr`` for Docker containers,
-        then ``~/.mngr``) for the agent env file containing ``MNGR_AGENT_STATE_DIR``.
-        Falls back to ``~/.mngr/agents/{agent_id}`` if not found.
-        """
-        fallback = f"~/.mngr/agents/{agent_id}"
-        with self._lock:
-            client = self._get_or_create_connection(ssh_info)
-
-        # Try /mngr first (Docker convention), then ~/.mngr (default)
-        command = (
-            f'for d in /mngr "$HOME/.mngr"; do '
-            f'f="$d/agents/{agent_id}/env"; '
-            f'if [ -f "$f" ]; then grep "^MNGR_AGENT_STATE_DIR=" "$f" 2>/dev/null | head -1 | cut -d= -f2-; exit 0; fi; '
-            f"done"
-        )
-        try:
-            _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
-            _stdin.close()
-            try:
-                result = stdout.read().decode().strip()
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status == 0 and result:
-                    return result
-                return fallback
-            finally:
-                stdout.channel.close()
-                stdout.close()
-                stderr.close()
-        except (paramiko.SSHException, OSError) as e:
-            logger.warning("Failed to read agent state dir from remote {}: {}", ssh_info.host, e)
-            return fallback
 
     def write_api_url_to_remote(
         self,
