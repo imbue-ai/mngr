@@ -173,6 +173,48 @@ def checkout_branch(
         )
 
 
+def _rsync_worktree_over_clone(
+    worktree_dir: Path,
+    clone_dir: Path,
+    on_output: OutputCallback | None = None,
+) -> None:
+    """Rsync a worktree's working directory over a shallow clone.
+
+    Copies all files from the worktree into the clone, preserving the
+    clone's ``.git`` directory (which is a proper standalone git dir,
+    unlike the worktree's ``.git`` file). This ensures uncommitted
+    changes in the worktree are present in the clone.
+    """
+    logger.debug("Rsyncing worktree {} over clone {}", worktree_dir, clone_dir)
+    command = [
+        "rsync",
+        "-a",
+        "--exclude=.git",
+        "--exclude=__pycache__",
+        "--exclude=.venv",
+        "--exclude=node_modules",
+        "--exclude=.mypy_cache",
+        "--exclude=.ruff_cache",
+        "--exclude=.pytest_cache",
+        "--exclude=.test_output",
+        f"{worktree_dir}/",
+        f"{clone_dir}/",
+    ]
+    cg = ConcurrencyGroup(name="rsync-worktree")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        logger.warning(
+            "rsync worktree over clone exited with code {}: {}",
+            result.returncode,
+            result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+        )
+
+
 def _make_host_name(agent_name: AgentName) -> str:
     """Build the host name for an agent.
 
@@ -432,6 +474,11 @@ class AgentCreator(MutableModel):
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
                         clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
+                        # The shallow clone only contains committed content. Rsync
+                        # the worktree's working directory over so that uncommitted
+                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
+                        # in the Docker build context.
+                        _rsync_worktree_over_clone(resolved_path, clone_target, on_output=emit_log)
                         workspace_dir = clone_target
                     else:
                         workspace_dir = resolved_path

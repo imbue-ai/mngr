@@ -446,7 +446,7 @@ def test_run_creation_logs_header_and_completion(
     done_event = threading.Event()
 
     def run_and_signal() -> None:
-        agent_manager._run_creation("test-id", cmd, tmp_path, log_q)
+        agent_manager._run_creation("test-id", "test-agent", cmd, tmp_path, log_q, {})
         done_event.set()
 
     t = threading.Thread(target=run_and_signal, daemon=True)

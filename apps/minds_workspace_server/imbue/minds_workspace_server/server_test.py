@@ -135,16 +135,14 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     # Write session history
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=claude_config_dir,
-            )
-        ]
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         response = client.get("/api/agents/agent-123/events")
 
     assert response.status_code == 200
@@ -158,19 +156,17 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
 
 def test_send_message_success(client: TestClient) -> None:
     """Sending a message to a known agent succeeds."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
     with (
-        patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover,
+        patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info),
         patch("imbue.minds_workspace_server.server.send_message", return_value=True) as mock_send,
     ):
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=Path("/tmp/test"),
-                claude_config_dir=Path("/tmp/.claude"),
-            )
-        ]
         response = client.post("/api/agents/agent-123/message", json={"message": "hello"})
 
     assert response.status_code == 200
@@ -190,16 +186,14 @@ def test_get_layout_returns_404_when_no_layout_saved(client: TestClient, tmp_pat
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=Path("/tmp/.claude"),
-            )
-        ]
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         response = client.get("/api/agents/agent-123/layout")
 
     assert response.status_code == 404
@@ -212,17 +206,14 @@ def test_save_and_get_layout(client: TestClient, tmp_path: Path) -> None:
 
     layout_data = {"dockview": {"panels": {}}, "panelParams": {"chat-1": {"panelType": "chat"}}}
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=Path("/tmp/.claude"),
-            )
-        ]
-
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         save_response = client.post("/api/agents/agent-123/layout", json=layout_data)
         assert save_response.status_code == 200
         assert save_response.json()["status"] == "ok"
@@ -237,16 +228,14 @@ def test_save_layout_creates_directory(client: TestClient, tmp_path: Path) -> No
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=Path("/tmp/.claude"),
-            )
-        ]
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         client.post("/api/agents/agent-123/layout", json={"test": True})
 
     assert (agent_state_dir / "workspace_layout" / "layout.json").exists()
@@ -257,16 +246,14 @@ def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path) ->
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
 
-    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        mock_discover.return_value = [
-            AgentInfo(
-                id="agent-123",
-                name="test-agent",
-                state="RUNNING",
-                agent_state_dir=agent_state_dir,
-                claude_config_dir=Path("/tmp/.claude"),
-            )
-        ]
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
         response = client.post(
             "/api/agents/agent-123/layout",
             content=b"not valid json",

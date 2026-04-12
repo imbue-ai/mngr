@@ -38,6 +38,7 @@ _ONE_TIME_CODE_LENGTH: Final[int] = 32
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 
 
+
 class AgentDiscoveryHandler(FrozenModel):
     """Handles agent discovery events by setting up reverse tunnels and writing URL files."""
 
@@ -143,6 +144,7 @@ def start_desktop_client(
         telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
+        stream_manager=stream_manager,
     )
 
     if not is_no_browser:
@@ -150,11 +152,16 @@ def start_desktop_client(
         thread.daemon = True
         thread.start()
 
-    try:
-        uvicorn.run(app, host=host, port=port)
-    finally:
-        stream_manager.stop()
-        tunnel_manager.cleanup()
+    # Subprocess cleanup (stream_manager.stop(), tunnel_manager.cleanup())
+    # happens in the ASGI lifespan shutdown hook inside create_desktop_client,
+    # NOT in a finally block here. Uvicorn re-raises the captured SIGTERM
+    # after shutdown (via signal.raise_signal), so a finally block around
+    # uvicorn.run() would never execute on signal-triggered shutdown.
+    #
+    # timeout_graceful_shutdown=1 ensures uvicorn cancels in-flight tasks
+    # quickly, giving the lifespan shutdown hook time to run within
+    # electron's 5-second SIGKILL window.
+    uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:

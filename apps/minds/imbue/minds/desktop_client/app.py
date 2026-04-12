@@ -32,6 +32,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
@@ -211,6 +212,16 @@ async def _managed_lifespan(
         inner_app.state.ssh_http_clients.clear()
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
+        # Stop mngr observe/events subprocesses before cleaning up tunnels.
+        # This runs inside uvicorn's lifespan shutdown, which happens BEFORE
+        # uvicorn re-raises the captured SIGTERM signal. A finally block
+        # around uvicorn.run() would never execute because uvicorn calls
+        # signal.raise_signal(SIGTERM) after shutdown, killing the process.
+        stream_manager: MngrStreamManager | None = inner_app.state.stream_manager
+        if stream_manager is not None:
+            logger.info("Stopping stream manager subprocesses...")
+            stream_manager.stop()
+            logger.info("Stream manager stopped.")
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
@@ -1116,6 +1127,7 @@ def create_desktop_client(
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
+    stream_manager: MngrStreamManager | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1153,6 +1165,7 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
+    app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
     app.state.telegram_orchestrator = telegram_orchestrator

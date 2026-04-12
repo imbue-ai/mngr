@@ -674,7 +674,7 @@ def test_check_and_repair_tunnels_skips_alive_tunnel(tmp_path: Path) -> None:
     fake_client = FakeSSHClient.create(active=True)
     with manager._lock:
         manager._reverse_tunnels[conn_key] = tunnel_info
-        manager._connections[conn_key] = fake_client  # ty: ignore[arg-type]
+        manager._connections[conn_key] = fake_client
 
     manager._check_and_repair_tunnels()
 
@@ -699,7 +699,7 @@ def _make_manager_with_fake_connection(
     manager = SSHTunnelManager()
     conn_key = f"{ssh_info.host}:{ssh_info.port}"
     with manager._lock:
-        manager._connections[conn_key] = fake_client  # ty: ignore[arg-type]
+        manager._connections[conn_key] = fake_client
     return manager
 
 
