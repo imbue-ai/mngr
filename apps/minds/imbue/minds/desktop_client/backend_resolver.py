@@ -13,6 +13,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -658,13 +659,20 @@ class MngrStreamManager(MutableModel):
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
         """Start mngr events <agent-id> servers --follow for a single workspace agent."""
+        if self._cg.is_shutting_down():
+            logger.debug("Skipping events stream for {} -- shutting down", agent_id)
+            return
+
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 
         logger.info("Starting events stream for agent {}", aid_str)
-        process = self._cg.run_process_in_background(
-            command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
-            on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
-            cwd=Path.home(),
-        )
-        self._events_processes[aid_str] = process
+        try:
+            process = self._cg.run_process_in_background(
+                command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
+                on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
+                cwd=Path.home(),
+            )
+            self._events_processes[aid_str] = process
+        except InvalidConcurrencyGroupStateError:
+            logger.debug("Cannot start events stream for {} -- concurrency group is no longer active", agent_id)
