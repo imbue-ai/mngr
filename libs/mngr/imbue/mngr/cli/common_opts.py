@@ -27,6 +27,7 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
@@ -194,6 +195,14 @@ def setup_command_context(
     # Apply create template if this is the create command and a template was specified
     if command_name == "create":
         updated_params = apply_create_template(ctx, updated_params, mngr_ctx.config)
+
+    # Block plugins that were disabled via command defaults or create templates
+    # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
+    # only blocks plugins from CLI args and [plugins] config sections; command
+    # defaults are applied later and need a second blocking pass.
+    updated_disable_plugin = updated_params.get("disable_plugin", ())
+    if updated_disable_plugin:
+        block_disabled_plugins(pm, frozenset(updated_disable_plugin))
 
     # Allow plugins to override command options before creating the options object
     _apply_plugin_option_overrides(pm, command_name, command_class, updated_params)
