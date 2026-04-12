@@ -129,6 +129,15 @@ def _handle_cloudflare_enable(
             return _json_error("Server not found locally", 404)
         service_url = backend_url
 
+    # Ensure the tunnel exists before adding a service.
+    # The tunnel is normally created during agent creation, but may not exist
+    # if the agent was created without Cloudflare configured.
+    services = cf_client.list_services(parsed_id)
+    if services is None:
+        token, message = cf_client.create_tunnel(parsed_id)
+        if token is None:
+            return _json_error(f"Failed to create Cloudflare tunnel: {message}", 502)
+
     is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
 
     if is_success:
