@@ -94,8 +94,8 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
 
     // Fetch once when the modal opens for a new server
     if (modalFetchedFor !== serverName) {
-      modalFetchedFor = serverName;
       resetModalState();
+      modalFetchedFor = serverName;
       fetchStatus(serverName);
     }
 
