@@ -119,8 +119,8 @@ class _FakeTunnelManager(SSHTunnelManager):
             raise SSHTunnelError("simulated failure")
         return self._fake_remote_port
 
-    def read_remote_mngr_host_dir(self, ssh_info: RemoteSSHInfo) -> str:
-        return "~/.mngr"
+    def read_remote_agent_state_dir(self, ssh_info: RemoteSSHInfo, agent_id: AgentId) -> str:
+        return f"~/.mngr/agents/{agent_id}"
 
     def write_api_url_to_remote(
         self,

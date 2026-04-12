@@ -57,8 +57,7 @@ class AgentDiscoveryHandler(FrozenModel):
 
     def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
         try:
-            remote_host_dir = self.tunnel_manager.read_remote_mngr_host_dir(ssh_info)
-            agent_state_dir = f"{remote_host_dir}/agents/{agent_id}"
+            agent_state_dir = self.tunnel_manager.read_remote_agent_state_dir(ssh_info, agent_id)
             remote_port = self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
                 local_port=self.server_port,
