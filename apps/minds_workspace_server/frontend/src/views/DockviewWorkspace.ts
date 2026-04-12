@@ -579,11 +579,10 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
     const agentId = vnode.attrs.agentId;
 
     if (!agentId) {
-      return m(
-        "div",
-        { class: "dockview-workspace flex items-center justify-center h-full" },
-        m("p", { class: "text-text-secondary" }, "Select an agent to view its conversation."),
-      );
+      // Don't show anything while waiting for the WebSocket to deliver
+      // the agent list and auto-select. This avoids a flash of
+      // "Select an agent" text on initial page load.
+      return m("div", { class: "dockview-workspace", style: "width: 100%; height: 100%;" });
     }
 
     return m("div", {
