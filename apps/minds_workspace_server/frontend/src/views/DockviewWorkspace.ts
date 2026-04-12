@@ -17,7 +17,7 @@ import { SubagentView } from "./SubagentView";
 // ProtoAgentLogView is no longer used as a separate panel type.
 // Build logs are now shown inline by ChatPanel when the agent is a proto-agent.
 import { CreateAgentModal } from "./CreateAgentModal";
-import { apiUrl } from "../base-path";
+import { apiUrl, getBasePath } from "../base-path";
 import {
   getAgentById,
   getChatAgentsForParent,
@@ -28,7 +28,7 @@ import {
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-function getApplicationUrl(appName: string, rawUrl: string, agentId: string): string {
+function getApplicationUrl(appName: string, rawUrl: string): string {
   const hostname = window.location.hostname;
 
   // Cloudflare proxy: server--agentid--username.domain
@@ -39,10 +39,10 @@ function getApplicationUrl(appName: string, rawUrl: string, agentId: string): st
     return `${proto}//${appName}--${cfMatch[1]}${port}/`;
   }
 
-  // Local forwarding server: /agents/{id}/{server_name}/
-  const pathMatch = window.location.pathname.match(/^(.*\/agents\/[^/]+)\//);
-  if (pathMatch) {
-    return `${pathMatch[1]}/${appName}/`;
+  // Forwarding server: basePath is "/agents/{id}/web", swap "web" for the app name
+  const basePath = getBasePath();
+  if (basePath) {
+    return `${basePath.replace(/\/[^/]+$/, "")}/${appName}/`;
   }
 
   // Dev mode (no forwarding server): use the raw URL from applications.toml
@@ -151,7 +151,7 @@ function buildDropdownItems(
   // (e.g., worktree agents) are kept so you can preview their changes.
   const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web");
   for (const app of apps) {
-    const proxyUrl = getApplicationUrl(app.name, app.url, agentId);
+    const proxyUrl = getApplicationUrl(app.name, app.url);
     items.push({
       label: app.name,
       action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
