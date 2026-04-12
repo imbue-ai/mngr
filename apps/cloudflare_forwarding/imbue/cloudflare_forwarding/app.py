@@ -619,6 +619,10 @@ class ForwardingCtx:
             tid = existing["id"]
             token = self.ops.get_tunnel_token(tid)
             services = self._list_services(tid, name, username)
+            # Update the default auth policy if provided (may have been missing
+            # from the original creation or may need updating)
+            if default_auth_policy is not None:
+                self.ops.kv_put(name, default_auth_policy.model_dump_json())
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
         result = self.ops.create_tunnel(name)
