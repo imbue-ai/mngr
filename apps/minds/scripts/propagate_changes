@@ -152,20 +152,60 @@ agent_update() {
 }
 
 # --- Track B: Desktop client restart ---
+
+_find_electron_pid() {
+    # Find the top-level electron process (the one running "electron .")
+    # by looking for the dist/electron binary. Avoid matching zygote
+    # helpers or other electron internals.
+    pgrep -f "electron/dist/electron \\.\\b" 2>/dev/null | head -1
+}
+
+_find_minds_backend_pids() {
+    # Find any minds forward / minds -vv backend processes (children of electron)
+    pgrep -f "minds.*forward|minds.*--format jsonl" 2>/dev/null
+}
+
+_find_mngr_stream_pids() {
+    # Find orphaned mngr observe / mngr events processes
+    pgrep -f "mngr (observe|events)" 2>/dev/null
+}
+
 electron_restart() {
     echo "[electron] Stopping desktop client..."
-    pkill -TERM -f "minds.*electron|electron.*minds" 2>/dev/null || true
 
-    # Wait up to 5 seconds for graceful shutdown
-    for i in $(seq 1 10); do
-        if ! pgrep -f "minds.*electron|electron.*minds" > /dev/null 2>&1; then
+    # Send SIGTERM to the top-level electron process only. Electron's
+    # before-quit handler calls shutdown() which SIGTERMs the Python
+    # backend, which then gracefully stops uvicorn, runs the finally
+    # block (stream_manager.stop()), and terminates all mngr observe /
+    # mngr events children.
+    local electron_pid
+    electron_pid=$(_find_electron_pid)
+    if [[ -n "${electron_pid}" ]]; then
+        kill -TERM "${electron_pid}" 2>/dev/null || true
+    fi
+
+    # Wait up to 10 seconds for the full process tree to shut down
+    for i in $(seq 1 20); do
+        if [[ -z "$(_find_electron_pid)" ]] && [[ -z "$(_find_minds_backend_pids)" ]]; then
             break
         fi
         sleep 0.5
     done
 
-    if pgrep -f "minds.*electron|electron.*minds" > /dev/null 2>&1; then
-        echo "[electron] WARNING: Electron app did not exit within 5 seconds after SIGTERM"
+    # Verify everything is gone
+    local remaining_electron remaining_backend remaining_streams
+    remaining_electron=$(_find_electron_pid)
+    remaining_backend=$(_find_minds_backend_pids)
+    remaining_streams=$(_find_mngr_stream_pids)
+
+    if [[ -n "${remaining_electron}" ]]; then
+        echo "[electron] WARNING: Electron process ${remaining_electron} did not exit within 10 seconds after SIGTERM"
+    fi
+    if [[ -n "${remaining_backend}" ]]; then
+        echo "[electron] WARNING: minds backend process(es) still running: ${remaining_backend}"
+    fi
+    if [[ -n "${remaining_streams}" ]]; then
+        echo "[electron] WARNING: orphaned mngr observe/events process(es) still running: ${remaining_streams}"
     fi
 
     # Source .env if it exists
@@ -199,7 +239,7 @@ AGENT_EXIT=$?
 # Don't wait for electron -- it runs until the user closes it
 # But do check that it started successfully (give it a moment)
 sleep 1
-if ! pgrep -f "minds.*electron|electron.*minds" > /dev/null 2>&1; then
+if [[ -z "$(_find_electron_pid)" ]]; then
     echo "WARNING: Electron app does not appear to be running"
 fi
 
