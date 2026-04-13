@@ -767,6 +767,11 @@ class VpsDockerProvider(BaseProviderInstance):
         host_store = self._get_host_store(docker_ssh)
         host_store.write_host_record(host_record)
 
+        # Cache so that persist_agent_data (called moments later) can find
+        # the record without re-querying the Vultr API, which would return
+        # a stale instance list that doesn't include the VPS we just created.
+        self._host_record_cache[host_id] = host_record
+
         return host
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
