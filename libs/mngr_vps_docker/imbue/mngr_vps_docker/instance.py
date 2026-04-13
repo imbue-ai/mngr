@@ -222,6 +222,14 @@ class VpsDockerProvider(BaseProviderInstance):
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
 
+    def _evict_cached_host(self, host_id: HostId, replacement: HostInterface | None = None) -> None:
+        """Remove a Host from the cache, disconnecting it if it holds an SSH connection."""
+        old_host = self._host_by_id_cache.pop(host_id, None)
+        if old_host is not None and old_host is not replacement and isinstance(old_host, Host):
+            old_host.disconnect()
+        if replacement is not None:
+            self._host_by_id_cache[host_id] = replacement
+
     @property
     def supports_snapshots(self) -> bool:
         return True
@@ -239,7 +247,8 @@ class VpsDockerProvider(BaseProviderInstance):
         return False
 
     def reset_caches(self) -> None:
-        self._host_by_id_cache.clear()
+        for host_id in list(self._host_by_id_cache):
+            self._evict_cached_host(host_id)
         self._host_record_cache.clear()
         self._container_running_cache.clear()
 
@@ -338,7 +347,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 callback_host_id, certified_data, vps_ip
             ),
         )
-        self._host_by_id_cache[host_id] = host
+        self._evict_cached_host(host_id, replacement=host)
         return host
 
     def _create_offline_host(
@@ -357,7 +366,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 callback_host_id, certified_data, vps_ip
             ),
         )
-        self._host_by_id_cache[host_id] = offline
+        self._evict_cached_host(host_id, replacement=offline)
         return offline
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
@@ -929,7 +938,7 @@ class VpsDockerProvider(BaseProviderInstance):
         updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
         host_store.write_host_record(updated_record)
 
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         logger.info("Host {} stopped", host_id)
 
     # =========================================================================
@@ -1021,16 +1030,15 @@ class VpsDockerProvider(BaseProviderInstance):
             except Exception as e:
                 logger.trace("Failed to clean up container known_hosts: {}", e)
 
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""
-        host_id = host.id
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     # =========================================================================
     # Discovery
