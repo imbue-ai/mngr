@@ -1028,9 +1028,13 @@ class _FakeSSHClient:
 
     def __init__(self, transport_return: object = None) -> None:
         self._transport = transport_return
+        self.close_call_count = 0
 
     def get_transport(self) -> object:
         return self._transport
+
+    def close(self) -> None:
+        self.close_call_count += 1
 
 
 class _FakeSSHConnector:
