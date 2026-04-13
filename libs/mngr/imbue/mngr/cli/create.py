@@ -154,25 +154,62 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
 
 
 @pure
-def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
-    """Extract the agent type name from CLI options, or None if defaulting.
+def _resolve_agent_type_name(
+    type_flag: str | None,
+    positional_agent_type: str | None,
+    command: str | None,
+) -> str | None:
+    """Resolve the agent type name from CLI options.
 
-    Uses the same resolution logic as _parse_agent_opts: --type flag takes
-    precedence, then the positional agent type argument. Returns None when
-    neither is set (meaning the create flow will default to "claude").
+    Shared logic for both the early headless detection path and the full
+    _parse_agent_opts path. Returns the resolved type name, or None when
+    neither --type nor positional agent type is set and no --command flag
+    implies "generic".
 
-    When --command is set without an explicit type, the type is "generic"
-    (not a headless type). But an explicit --type always takes precedence,
-    allowing --type headless_command -c "echo hello" to use the headless path.
+    Precedence: --type flag > positional argument > --command implying "generic".
     """
-    resolved = opts.type
-    if opts.positional_agent_type and resolved is None:
-        resolved = opts.positional_agent_type
+    resolved = type_flag
+    if positional_agent_type and resolved is None:
+        resolved = positional_agent_type
     if resolved is not None:
         return resolved
-    if opts.command:
+    if command:
         return "generic"
     return None
+
+
+@pure
+def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
+    """Extract the agent type name from CLI options for early headless detection.
+
+    Returns the resolved type name, or None when defaulting to "claude".
+    """
+    return _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
+
+
+def _resolve_online_host(
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+) -> OnlineHostInterface:
+    """Resolve CLI options and address into an online host.
+
+    Consolidates the three-step host resolution chain used by both the normal
+    create path and the headless path: _parse_target_host -> _resolve_target_host
+    -> api_resolve_target_host (for NewHostOptions).
+    """
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    lifecycle = _parse_host_lifecycle_options(opts)
+    target_host = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=agent_and_host_loader,
+        lifecycle=lifecycle,
+    )
+    resolved = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    if isinstance(resolved, NewHostOptions):
+        return api_resolve_target_host(resolved, mngr_ctx)
+    return resolved
 
 
 def _create_headless(
@@ -189,24 +226,8 @@ def _create_headless(
     streams its output, and destroys it when done. Driven by the agent type
     implementing StreamingHeadlessAgentMixin.
     """
-    # Resolve target host using the same logic as the normal create path
-    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
-    lifecycle = _parse_host_lifecycle_options(opts)
-    target_host = _parse_target_host(
-        opts=opts,
-        address=address,
-        agent_and_host_loader=agent_and_host_loader,
-        lifecycle=lifecycle,
-    )
-    resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    host = _resolve_online_host(opts, address, mngr_ctx)
 
-    # If the resolved target is NewHostOptions, create the host first
-    if isinstance(resolved_target_host, NewHostOptions):
-        host = api_resolve_target_host(resolved_target_host, mngr_ctx)
-    else:
-        host = resolved_target_host
-
-    # Extract options from CreateCliOptions
     command_override = CommandString(opts.command) if opts.command else None
     agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
@@ -1398,34 +1419,28 @@ def _parse_agent_opts(
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
-    # Determine agent type: --type and positional are equivalent; specifying both
-    # with different values is an error. _CreateCommand.parse_args handles --
-    # correctly so positional_agent_type is always a real positional.
-    #
-    # Special case: --command implies using the "generic" agent type, which simply
-    # runs the provided command. If --type is also specified to something other
-    # than "generic", that's an error (they are mutually exclusive).
-    resolved_agent_type = opts.type
+    # Determine agent type using the shared resolution logic.
+    # Additional validation: conflicting positional vs --type, and --command
+    # mutual exclusivity with non-generic --type.
     resolved_agent_args = opts.agent_args
 
-    if opts.positional_agent_type and resolved_agent_type and resolved_agent_type != opts.positional_agent_type:
+    if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
         raise UserInputError(
             f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
-            f"but --type says '{resolved_agent_type}'. Use one or the other."
+            f"but --type says '{opts.type}'. Use one or the other."
         )
-    if opts.positional_agent_type and resolved_agent_type is None:
-        resolved_agent_type = opts.positional_agent_type
 
     # Handle --command: it implies using the "generic" agent type
     if opts.command:
-        if resolved_agent_type is not None and resolved_agent_type != "generic":
+        explicit_type = opts.type or opts.positional_agent_type
+        if explicit_type is not None and explicit_type != "generic":
             raise UserInputError(
                 f"--command and --type are mutually exclusive. "
                 f"Use --command to run a literal command (implicitly uses 'generic' agent type), "
-                f"or use --type to specify an agent type like '{resolved_agent_type}'."
+                f"or use --type to specify an agent type like '{explicit_type}'."
             )
-        # Automatically use the "generic" agent type when --command is provided
-        resolved_agent_type = "generic"
+
+    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
 
     is_clone = source_agent_state_dir is not None
 

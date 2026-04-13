@@ -28,6 +28,7 @@ from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
+from imbue.mngr.cli.create import _resolve_agent_type_name
 from imbue.mngr.cli.create import _resolve_early_agent_type
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -699,6 +700,31 @@ def test_split_cli_args_preserves_separate_flag_and_value() -> None:
 def test_split_cli_args_empty() -> None:
     """Empty input should produce empty output."""
     assert _split_cli_args(()) == []
+
+
+# =============================================================================
+# Tests for _resolve_agent_type_name (shared resolution logic)
+# =============================================================================
+
+
+def test_resolve_agent_type_name_type_flag_wins() -> None:
+    """--type flag takes precedence over positional and command."""
+    assert _resolve_agent_type_name("headless_command", "claude", "echo") == "headless_command"
+
+
+def test_resolve_agent_type_name_positional_fallback() -> None:
+    """Positional arg used when --type is None."""
+    assert _resolve_agent_type_name(None, "headless_claude", None) == "headless_claude"
+
+
+def test_resolve_agent_type_name_command_implies_generic() -> None:
+    """--command without explicit type resolves to 'generic'."""
+    assert _resolve_agent_type_name(None, None, "echo hello") == "generic"
+
+
+def test_resolve_agent_type_name_all_none() -> None:
+    """All None returns None (default to claude)."""
+    assert _resolve_agent_type_name(None, None, None) is None
 
 
 # =============================================================================
