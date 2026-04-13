@@ -1,6 +1,7 @@
 """Tests for create module helper functions."""
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -851,7 +852,7 @@ def test_create_rejects_command_for_headless_non_command_accepting_type(
         def output(self) -> str:
             return ""
 
-        def stream_output(self):  # type: ignore[override]
+        def stream_output(self) -> Iterator[str]:
             return iter([])
 
     register_agent_class("mock_headless_no_cmd", _MockHeadlessNoCommand)
