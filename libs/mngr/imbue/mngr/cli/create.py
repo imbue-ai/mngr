@@ -345,7 +345,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--command",
     "-c",
-    help="Shell command for the agent to run [default --type: generic]",
+    help="Shell command for the agent to run (default --type: generic)",
 )
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
