@@ -1089,7 +1089,7 @@ class VpsDockerProvider(BaseProviderInstance):
         try:
             all_records = self._discover_host_records()
         except Exception as e:
-            logger.warning("Failed to discover hosts: {}", e)
+            logger.error("Failed to discover hosts: {}", e)
             return []
 
         for record in all_records:
@@ -1129,7 +1129,7 @@ class VpsDockerProvider(BaseProviderInstance):
             try:
                 all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
             except Exception as e:
-                logger.warning("Failed to discover VPS Docker hosts: {}", e)
+                logger.error("Failed to discover VPS Docker hosts: {}", e)
                 return {}
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
@@ -1504,7 +1504,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            return []
+            raise HostNotFoundError(host_id)
 
         snapshots = host_record.certified_host_data.snapshots
         return [
@@ -1536,7 +1536,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            return {}
+            raise HostNotFoundError(host_id)
         return dict(host_record.certified_host_data.user_tags)
 
     def set_host_tags(self, host: HostInterface | HostId, tags: Mapping[str, str]) -> None:
@@ -1605,36 +1605,26 @@ class VpsDockerProvider(BaseProviderInstance):
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            return []
+            raise HostNotFoundError(host_id)
 
-        try:
-            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-            host_store = self._get_host_store(docker_ssh)
-            return host_store.list_persisted_agent_data_for_host(host_id)
-        except (VpsConnectionError, ContainerSetupError) as e:
-            logger.warning("Failed to read persisted agent data: {}", e)
-            return []
+        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
+        host_store = self._get_host_store(docker_ssh)
+        return host_store.list_persisted_agent_data_for_host(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            return
+            raise HostNotFoundError(host_id)
 
-        try:
-            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-            host_store = self._get_host_store(docker_ssh)
-            host_store.persist_agent_data(host_id, agent_data)
-        except (VpsConnectionError, ContainerSetupError) as e:
-            logger.warning("Failed to persist agent data: {}", e)
+        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
+        host_store = self._get_host_store(docker_ssh)
+        host_store.persist_agent_data(host_id, agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            return
+            raise HostNotFoundError(host_id)
 
-        try:
-            docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-            host_store = self._get_host_store(docker_ssh)
-            host_store.remove_persisted_agent_data(host_id, agent_id)
-        except (VpsConnectionError, ContainerSetupError) as e:
-            logger.warning("Failed to remove agent data: {}", e)
+        docker_ssh = self._make_docker_ssh(host_record.vps_ip)
+        host_store = self._get_host_store(docker_ssh)
+        host_store.remove_persisted_agent_data(host_id, agent_id)
