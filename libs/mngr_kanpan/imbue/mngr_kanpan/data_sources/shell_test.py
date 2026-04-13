@@ -3,13 +3,13 @@ from typing import cast
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
-from imbue.mngr_kanpan.data_source import CommitsAheadField
 from imbue.mngr_kanpan.data_source import FieldValue
-from imbue.mngr_kanpan.data_source import PrField
-from imbue.mngr_kanpan.data_source import PrState
 from imbue.mngr_kanpan.data_source import StringField
+from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_sources.shell import _build_shell_env

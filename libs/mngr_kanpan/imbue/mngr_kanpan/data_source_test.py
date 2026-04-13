@@ -1,17 +1,17 @@
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CellDisplay
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
-from imbue.mngr_kanpan.data_source import CommitsAheadField
-from imbue.mngr_kanpan.data_source import ConflictsField
-from imbue.mngr_kanpan.data_source import CreatePrUrlField
 from imbue.mngr_kanpan.data_source import FieldValue
-from imbue.mngr_kanpan.data_source import PrField
-from imbue.mngr_kanpan.data_source import PrState
-from imbue.mngr_kanpan.data_source import RepoPathField
 from imbue.mngr_kanpan.data_source import StringField
-from imbue.mngr_kanpan.data_source import UnresolvedField
 from imbue.mngr_kanpan.data_source import deserialize_fields
+from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import ConflictsField
+from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
+from imbue.mngr_kanpan.data_sources.github import UnresolvedField
+from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 
 # === CellDisplay ===
 

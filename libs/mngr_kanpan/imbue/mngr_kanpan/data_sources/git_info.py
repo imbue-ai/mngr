@@ -3,6 +3,7 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
@@ -11,9 +12,25 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
-from imbue.mngr_kanpan.data_source import CommitsAheadField
+from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FieldValue
+
+
+class CommitsAheadField(FieldValue):
+    """Number of commits ahead of the remote tracking branch."""
+
+    count: int | None = Field(description="Commits ahead count, None if unknown")
+    has_work_dir: bool = Field(default=True, description="Whether the agent has a local work directory")
+
+    def display(self) -> CellDisplay:
+        if not self.has_work_dir:
+            return CellDisplay(text="")
+        if self.count is None:
+            return CellDisplay(text="[not pushed]")
+        if self.count == 0:
+            return CellDisplay(text="[up to date]")
+        return CellDisplay(text=f"[{self.count} unpushed]")
 
 
 class GitInfoDataSource:
