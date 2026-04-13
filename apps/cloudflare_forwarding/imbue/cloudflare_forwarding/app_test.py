@@ -424,10 +424,9 @@ def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.M
     """Creating a tunnel with a too-long username returns 400, not 500."""
     long_name = "a_very_long_username_exceeds_max"
     encoded = base64.b64encode(f"{long_name}:secret".encode()).decode()
+    client = _make_test_client(monkeypatch)
+    # Override USER_CREDENTIALS to include the long username (supersedes _make_test_client's setting)
     monkeypatch.setenv("USER_CREDENTIALS", json.dumps({long_name: "secret"}))
-    fake_ctx = make_fake_forwarding_ctx()
-    monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
-    client = TestClient(web_app)
     resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers={"Authorization": f"Basic {encoded}"})
     assert resp.status_code == 400
 
