@@ -44,8 +44,12 @@ def test_agent_discovery_handler_callable() -> None:
 
 def test_build_cloudflare_client_returns_none_when_not_configured() -> None:
     """Without env vars, _build_cloudflare_client returns None."""
-    for key in ("CLOUDFLARE_FORWARDING_URL", "CLOUDFLARE_FORWARDING_USERNAME",
-                "CLOUDFLARE_FORWARDING_SECRET", "OWNER_EMAIL"):
+    for key in (
+        "CLOUDFLARE_FORWARDING_URL",
+        "CLOUDFLARE_FORWARDING_USERNAME",
+        "CLOUDFLARE_FORWARDING_SECRET",
+        "OWNER_EMAIL",
+    ):
         os.environ.pop(key, None)
     result = _build_cloudflare_client()
     assert result is None
@@ -61,8 +65,12 @@ def test_build_cloudflare_client_returns_client_when_configured() -> None:
         result = _build_cloudflare_client()
         assert result is not None
     finally:
-        for key in ("CLOUDFLARE_FORWARDING_URL", "CLOUDFLARE_FORWARDING_USERNAME",
-                    "CLOUDFLARE_FORWARDING_SECRET", "OWNER_EMAIL"):
+        for key in (
+            "CLOUDFLARE_FORWARDING_URL",
+            "CLOUDFLARE_FORWARDING_USERNAME",
+            "CLOUDFLARE_FORWARDING_SECRET",
+            "OWNER_EMAIL",
+        ):
             os.environ.pop(key, None)
 
 

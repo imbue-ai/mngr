@@ -62,7 +62,8 @@ class _ApplicationsFileHandler(FileSystemEventHandler):
 
 
 def _make_applications_file_handler(
-    agent_id: str, on_change: Any,
+    agent_id: str,
+    on_change: Any,
 ) -> _ApplicationsFileHandler:
     """Create an applications file handler for the given agent."""
     handler = _ApplicationsFileHandler()
@@ -398,9 +399,7 @@ class AgentManager:
             error = str(e)
             _loguru_logger.exception("Error creating agent {}", agent_id)
 
-        log_queue.put(
-            json.dumps({"done": True, "success": success, "error": error})
-        )
+        log_queue.put(json.dumps({"done": True, "success": success, "error": error}))
         log_queue.put(None)
 
         with self._lock:
@@ -419,9 +418,7 @@ class AgentManager:
         if success:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
-        self._broadcaster.broadcast_proto_agent_completed(
-            agent_id=agent_id, success=success, error=error
-        )
+        self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
     def _initial_discover(self) -> None:
         """Perform initial agent discovery and start application watchers."""
@@ -505,8 +502,7 @@ class AgentManager:
             )
         except (OSError, InvalidConcurrencyGroupStateError):
             _loguru_logger.warning(
-                "Could not start mngr observe subprocess. "
-                "Agent lifecycle events will not be detected."
+                "Could not start mngr observe subprocess. Agent lifecycle events will not be detected."
             )
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
@@ -631,9 +627,7 @@ class AgentManager:
                     return
                 self._app_observers[agent_id] = observer
         except OSError:
-            _loguru_logger.exception(
-                "Failed to start application watcher for agent {}", agent_id
-            )
+            _loguru_logger.exception("Failed to start application watcher for agent {}", agent_id)
 
     def _stop_app_watcher(self, agent_id: str) -> None:
         """Stop watching applications.toml for an agent."""
@@ -653,9 +647,7 @@ class AgentManager:
 
         toml_path = Path(work_dir) / _APPLICATIONS_TOML_FILENAME
         self._read_applications(agent_id, toml_path)
-        self._broadcaster.broadcast_applications_updated(
-            self.get_applications_serialized()
-        )
+        self._broadcaster.broadcast_applications_updated(self.get_applications_serialized())
 
     def _read_applications(self, agent_id: str, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for an agent."""
@@ -669,9 +661,7 @@ class AgentManager:
                     if name and url:
                         apps.append(ApplicationEntry(name=name, url=url))
             except (OSError, tomllib.TOMLDecodeError, KeyError, ValueError):
-                _loguru_logger.exception(
-                    "Failed to parse {} for agent {}", toml_path, agent_id
-                )
+                _loguru_logger.exception("Failed to parse {} for agent {}", toml_path, agent_id)
 
         with self._lock:
             self._applications[agent_id] = apps

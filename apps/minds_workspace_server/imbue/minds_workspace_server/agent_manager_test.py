@@ -7,6 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds_workspace_server.agent_manager import AgentManager
+from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
+from imbue.minds_workspace_server.models import AgentCreationError
+from imbue.minds_workspace_server.models import AgentStateItem
+from imbue.minds_workspace_server.models import ApplicationEntry
+from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
@@ -17,12 +23,6 @@ from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
-from imbue.minds_workspace_server.models import AgentCreationError
-from imbue.minds_workspace_server.models import AgentStateItem
-from imbue.minds_workspace_server.models import ApplicationEntry
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
@@ -217,9 +217,7 @@ def test_create_worktree_agent_broadcasts_proto_created(
     assert proto_msg["parent_agent_id"] is None
 
 
-def test_get_log_queue_for_proto_agent(
-    agent_manager: AgentManager, git_work_dir: Path
-) -> None:
+def test_get_log_queue_for_proto_agent(agent_manager: AgentManager, git_work_dir: Path) -> None:
     """The log queue is available immediately after create_worktree_agent returns."""
     with agent_manager._lock:
         agent_manager._agents["parent-id"] = AgentStateItem(
@@ -246,9 +244,7 @@ def test_stop_without_start(agent_manager: AgentManager) -> None:
     agent_manager.stop()
 
 
-def test_handle_agent_discovered(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
-) -> None:
+def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Agent discovered events update the agent list and broadcast."""
     q = broadcaster.register()
 
@@ -275,9 +271,7 @@ def test_handle_agent_discovered(
     assert msg["type"] == "agents_updated"
 
 
-def test_agent_destroyed_removes_agent(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
-) -> None:
+def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Destroying an agent removes it from the tracked list and broadcasts."""
     test_agent_id = MngrAgentId()
     str_id = str(test_agent_id)
@@ -340,9 +334,7 @@ def test_on_applications_changed(
     assert msg["type"] == "applications_updated"
 
 
-def test_read_applications_handles_invalid_toml(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_read_applications_handles_invalid_toml(agent_manager: AgentManager, tmp_path: Path) -> None:
     """Invalid TOML files are handled gracefully."""
     toml_file = tmp_path / "bad.toml"
     toml_file.write_text("this is [[ not valid toml {{")
@@ -394,17 +386,13 @@ def test_initial_discover_handles_errors(
     assert isinstance(manager.get_agents(), list)
 
 
-def test_refresh_agents_does_not_crash(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
-) -> None:
+def test_refresh_agents_does_not_crash(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Refresh agents handles errors gracefully and does not raise."""
     agent_manager._refresh_agents()
     assert isinstance(agent_manager.get_agents(), list)
 
 
-def test_handle_full_snapshot(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
-) -> None:
+def test_handle_full_snapshot(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Full snapshot events replace the entire agent list."""
     q = broadcaster.register()
 
@@ -436,9 +424,7 @@ def test_handle_full_snapshot(
     assert len(msg["agents"]) == 2
 
 
-def test_run_creation_logs_header_and_completion(
-    agent_manager: AgentManager, tmp_path: Path
-) -> None:
+def test_run_creation_logs_header_and_completion(agent_manager: AgentManager, tmp_path: Path) -> None:
     """Creation thread logs a header line and a done message."""
     log_q: queue.Queue[str | None] = queue.Queue(maxsize=10000)
     cmd = ["true"]
@@ -550,31 +536,33 @@ def test_handle_discovery_event_dispatches_agent_discovered(
 
 def _make_agent_destroyed_event(agent_id: MngrAgentId, host_id: HostId) -> AgentDestroyedEvent:
     """Build an AgentDestroyedEvent for testing."""
-    return AgentDestroyedEvent.model_validate({
-        "timestamp": "2026-01-01T00:00:00.000000000Z",
-        "type": DiscoveryEventType.AGENT_DESTROYED,
-        "event_id": "test-event-id",
-        "source": "mngr/discovery",
-        "agent_id": str(agent_id),
-        "host_id": str(host_id),
-    })
+    return AgentDestroyedEvent.model_validate(
+        {
+            "timestamp": "2026-01-01T00:00:00.000000000Z",
+            "type": DiscoveryEventType.AGENT_DESTROYED,
+            "event_id": "test-event-id",
+            "source": "mngr/discovery",
+            "agent_id": str(agent_id),
+            "host_id": str(host_id),
+        }
+    )
 
 
 def _make_host_destroyed_event(host_id: HostId, agent_ids: list[MngrAgentId]) -> HostDestroyedEvent:
     """Build a HostDestroyedEvent for testing."""
-    return HostDestroyedEvent.model_validate({
-        "timestamp": "2026-01-01T00:00:00.000000000Z",
-        "type": DiscoveryEventType.HOST_DESTROYED,
-        "event_id": "test-event-id",
-        "source": "mngr/discovery",
-        "host_id": str(host_id),
-        "agent_ids": [str(a) for a in agent_ids],
-    })
+    return HostDestroyedEvent.model_validate(
+        {
+            "timestamp": "2026-01-01T00:00:00.000000000Z",
+            "type": DiscoveryEventType.HOST_DESTROYED,
+            "event_id": "test-event-id",
+            "source": "mngr/discovery",
+            "host_id": str(host_id),
+            "agent_ids": [str(a) for a in agent_ids],
+        }
+    )
 
 
-def test_handle_agent_destroyed_removes_agent(
-    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
-) -> None:
+def test_handle_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """_handle_agent_destroyed removes the agent and broadcasts the update."""
     test_agent_id = MngrAgentId()
     host_id = HostId()
