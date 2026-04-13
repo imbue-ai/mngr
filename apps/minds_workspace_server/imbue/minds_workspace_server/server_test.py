@@ -274,7 +274,7 @@ def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
         test_client = TestClient(test_app)
         response = test_client.get("/")
         assert response.status_code == 200
-        assert 'minds-workspace-server-hostname' in response.text
+        assert "minds-workspace-server-hostname" in response.text
 
 
 def test_random_name_endpoint(client: TestClient) -> None:

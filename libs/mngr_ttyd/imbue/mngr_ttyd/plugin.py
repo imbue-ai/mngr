@@ -100,7 +100,7 @@ def _build_ttyd_install_command() -> str:
         "ARCH=$(uname -m) && "
         '_SUDO=""; [ "$(id -u)" != "0" ] && _SUDO=sudo && '
         f'curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}/ttyd.${{ARCH}}" '
-        '-o /tmp/ttyd.$$ && $_SUDO mv /tmp/ttyd.$$ /usr/local/bin/ttyd && '
+        "-o /tmp/ttyd.$$ && $_SUDO mv /tmp/ttyd.$$ /usr/local/bin/ttyd && "
         "$_SUDO chmod +x /usr/local/bin/ttyd"
     )
 
