@@ -76,9 +76,7 @@ def _emit_output(output: str, output_format: OutputFormat) -> None:
         return
 
     match output_format:
-        case OutputFormat.JSON:
-            emit_final_json({"output": output})
-        case OutputFormat.JSONL:
+        case OutputFormat.JSON | OutputFormat.JSONL:
             emit_final_json({"output": output})
         case OutputFormat.HUMAN:
             write_human_line("{}", output.rstrip("\n"))
