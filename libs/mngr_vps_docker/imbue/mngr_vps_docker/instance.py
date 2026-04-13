@@ -316,11 +316,12 @@ class VpsDockerProvider(BaseProviderInstance):
             state_container_name=state_container_name,
         )
 
-    def _get_host_store_readonly(self, docker_ssh: DockerOverSsh) -> VpsDockerHostStore | None:
-        """Get a read-only handle to the host store on the VPS.
+    def _get_existing_host_store(self, docker_ssh: DockerOverSsh) -> VpsDockerHostStore | None:
+        """Get a handle to an existing host store on the VPS.
 
         Returns None if the state container does not exist or is not running.
-        Unlike _get_host_store, this never creates the state container.
+        Unlike _get_host_store, this never creates the state container --
+        only _setup_container_on_vps should do that.
         """
         container_name = self._state_container_name()
         if not docker_ssh.container_is_running(container_name):
@@ -388,7 +389,10 @@ class VpsDockerProvider(BaseProviderInstance):
         """Callback when host data.json is updated -- sync to state volume."""
         try:
             docker_ssh = self._make_docker_ssh(vps_ip)
-            host_store = self._get_host_store(docker_ssh)
+            host_store = self._get_existing_host_store(docker_ssh)
+            if host_store is None:
+                logger.warning("State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id)
+                return
             existing = host_store.read_host_record(host_id)
             if existing is not None:
                 updated = existing.model_copy(update={"certified_host_data": certified_data})
@@ -787,7 +791,12 @@ class VpsDockerProvider(BaseProviderInstance):
             ),
             container_id=container_id,
         )
-        host_store = self._get_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is None:
+            raise ContainerSetupError(
+                f"State container not found on VPS {docker_ssh.vps_ip} during host finalization -- "
+                "it should have been created by _setup_container_on_vps"
+            )
         host_store.write_host_record(host_record)
 
         # Cache so that persist_agent_data (called moments later) can find
@@ -961,11 +970,12 @@ class VpsDockerProvider(BaseProviderInstance):
             docker_ssh.stop_container(host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
         # Update host record
-        host_store = self._get_host_store(docker_ssh)
-        now = datetime.now(timezone.utc)
-        updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
-        updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
-        host_store.write_host_record(updated_record)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is not None:
+            now = datetime.now(timezone.utc)
+            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            host_store.write_host_record(updated_record)
 
         self._host_by_id_cache.pop(host_id, None)
         logger.info("Host {} stopped", host_id)
@@ -1027,8 +1037,9 @@ class VpsDockerProvider(BaseProviderInstance):
 
             # Delete host record from state volume
             try:
-                host_store = self._get_host_store(docker_ssh)
-                host_store.delete_host_record(host_id)
+                host_store = self._get_existing_host_store(docker_ssh)
+                if host_store is not None:
+                    host_store.delete_host_record(host_id)
             except (VpsConnectionError, ContainerSetupError) as e:
                 logger.warning("Failed to delete host record from state volume: {}", e)
 
@@ -1514,7 +1525,9 @@ class VpsDockerProvider(BaseProviderInstance):
         )
         updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
-        host_store = self._get_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is None:
+            raise ContainerSetupError(f"State container not found on VPS {docker_ssh.vps_ip} -- cannot save snapshot record")
         host_store.write_host_record(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
@@ -1581,7 +1594,9 @@ class VpsDockerProvider(BaseProviderInstance):
 
         if host_record.vps_ip is not None:
             docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-            host_store = self._get_host_store(docker_ssh)
+            host_store = self._get_existing_host_store(docker_ssh)
+            if host_store is None:
+                raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip} -- cannot rename host")
             host_store.write_host_record(updated_record)
 
         return self.get_host(host_id)
@@ -1628,7 +1643,9 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(host_id)
 
         docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is None:
+            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
         return host_store.list_persisted_agent_data_for_host(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
@@ -1637,7 +1654,9 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(host_id)
 
         docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is None:
+            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
         host_store.persist_agent_data(host_id, agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
@@ -1646,5 +1665,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(host_id)
 
         docker_ssh = self._make_docker_ssh(host_record.vps_ip)
-        host_store = self._get_host_store(docker_ssh)
+        host_store = self._get_existing_host_store(docker_ssh)
+        if host_store is None:
+            raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip}")
         host_store.remove_persisted_agent_data(host_id, agent_id)

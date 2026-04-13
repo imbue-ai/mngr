@@ -82,7 +82,7 @@ class VultrProvider(VpsDockerProvider):
         """
         try:
             docker_ssh = self._make_docker_ssh(vps_ip)
-            host_store = self._get_host_store_readonly(docker_ssh)
+            host_store = self._get_existing_host_store(docker_ssh)
             if host_store is None:
                 logger.debug("State container not ready on VPS {}, skipping", vps_ip)
                 return [], {}
