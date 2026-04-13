@@ -450,11 +450,15 @@ def test_tunnel_component_too_long_error_message() -> None:
 class _FakeSession:
     """Minimal mock for supertokens SessionContainer."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, user_id: str, email_verified: bool = True) -> None:
         self._user_id = user_id
+        self._email_verified = email_verified
 
     def get_user_id(self) -> str:
         return self._user_id
+
+    def get_access_token_payload(self) -> dict[str, object]:
+        return {"st-ev": {"v": self._email_verified, "t": 0}}
 
 
 def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
@@ -465,10 +469,44 @@ def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
     result = _authenticate_supertokens(
         "valid-token",
-        session_getter=lambda **kwargs: _FakeSession(user_id),
+        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
     )
     assert isinstance(result, AdminAuth)
     assert result.username == "a1b2c3d4e5f67890"
+
+
+def test_authenticate_supertokens_raises_401_when_email_not_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the email is not verified, raises 401."""
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens(
+            "valid-token",
+            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
+        )
+    assert exc_info.value.status_code == 401
+    assert "verified" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_raises_401_when_email_verification_claim_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the email verification claim is absent from the payload, raises 401."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    class _SessionNoClaim:
+        def get_user_id(self) -> str:
+            return "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+
+        def get_access_token_payload(self) -> dict[str, object]:
+            return {}
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens("valid-token", session_getter=lambda **kwargs: _SessionNoClaim())
+    assert exc_info.value.status_code == 401
+    assert "verified" in exc_info.value.detail
 
 
 def test_authenticate_supertokens_raises_401_when_connection_uri_not_set() -> None:

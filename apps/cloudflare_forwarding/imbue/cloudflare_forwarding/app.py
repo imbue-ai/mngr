@@ -31,6 +31,7 @@ from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe import session as st_session_recipe
+from supertokens_python.recipe.emailverification import EmailVerificationClaim
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 from supertokens_python.recipe.session.syncio import get_session_without_request_response
 
@@ -977,6 +978,12 @@ def _authenticate_supertokens(
 
     if session is None:
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
+
+    # Reject tokens where the email is not verified
+    payload = session.get_access_token_payload()
+    is_verified = EmailVerificationClaim.get_value_from_payload(payload)
+    if not is_verified:
+        raise HTTPException(status_code=401, detail="Email not verified")
 
     user_id = session.get_user_id()
     # Derive 16-char hex prefix from UUID
