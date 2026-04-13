@@ -21,6 +21,41 @@ from imbue.mngr.primitives import CommandString
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
 
 
+def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
+    """Extract the known_hosts file path from a host's SSH configuration.
+
+    Returns None if no known_hosts file is configured, or if it is set to /dev/null
+    (which indicates host key checking was explicitly disabled at provisioning time).
+    """
+    known_hosts = host.connector.host.data.get("ssh_known_hosts_file")
+    if known_hosts and known_hosts != "/dev/null":
+        return Path(known_hosts)
+    return None
+
+
+@pure
+def build_ssh_transport_command(
+    key_path: Path,
+    port: int,
+    known_hosts_file: Path | None,
+) -> str:
+    """Build an SSH transport command string for use with rsync -e or GIT_SSH_COMMAND.
+
+    Always uses StrictHostKeyChecking=yes, which refuses connections to hosts not
+    present in the known_hosts file. When known_hosts_file is provided, that file is
+    used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
+    is used without setting UserKnownHostsFile.
+    """
+    parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
+    if known_hosts_file is not None:
+        parts.extend(
+            ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
+        )
+    else:
+        parts.extend(["-o", "StrictHostKeyChecking=yes"])
+    return " ".join(parts)
+
+
 def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
     """Add a git safe.directory entry on a remote host.
 

@@ -2,7 +2,7 @@
 """Simple HTTP server for the hello-world mind.
 
 Serves a basic web page with some interactive elements to demonstrate
-that the forwarding server is working correctly.
+that the desktop client is working correctly.
 
 Reads the PORT environment variable (default: 9100).
 """
@@ -69,7 +69,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   <h1>Hello World Mind</h1>
   <div class="status">
     This mind is running and serving HTTP traffic.
-    If you can see this page through the forwarding server,
+    If you can see this page through the desktop client,
     the proxy is working correctly.
   </div>
 
@@ -155,7 +155,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _write_server_log(port: int) -> None:
-    """Write a server log record so the forwarding server can discover this agent.
+    """Write a server log record so the desktop client can discover this agent.
 
     Writes to $MNGR_AGENT_STATE_DIR/events/servers/events.jsonl following the convention
     that agents self-report their running servers. Includes EventEnvelope fields

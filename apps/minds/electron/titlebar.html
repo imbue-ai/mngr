@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1e293b;
+    }
+    #titlebar {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      user-select: none;
+      padding: 0 4px;
+    }
+    #titlebar button {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      width: 32px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    #titlebar button:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+    #titlebar button:active { background: rgba(255,255,255,0.12); }
+    #titlebar svg {
+      width: 16px; height: 16px; fill: none; stroke: currentColor;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .nav-buttons { display: flex; gap: 2px; }
+    .title-area {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      min-width: 0; padding: 0 8px;
+    }
+    #page-title {
+      color: #cbd5e1; font-size: 12px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .window-controls { display: flex; }
+    .window-controls button { border-radius: 0; width: 36px; height: 100%; }
+    .window-controls button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
+    .window-controls #close-btn:hover { background: #dc2626; color: white; }
+
+    body.platform-darwin #titlebar { padding-left: 72px; }
+    body.platform-darwin .window-controls { display: none; }
+  </style>
+</head>
+<body>
+  <div id="titlebar">
+    <div class="nav-buttons">
+      <button id="home-btn" title="Home">
+        <svg viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4"/></svg>
+      </button>
+      <button id="back-btn" title="Back">
+        <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button id="forward-btn" title="Forward">
+        <svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+      </button>
+    </div>
+    <div class="title-area">
+      <span id="page-title">Minds</span>
+    </div>
+    <button id="external-btn" title="Open in browser">
+      <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+    </button>
+    <div class="window-controls">
+      <button id="min-btn" title="Minimize">
+        <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+      </button>
+      <button id="max-btn" title="Maximize">
+        <svg viewBox="0 0 12 12" style="width:12px;height:12px"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
+      </button>
+      <button id="close-btn" title="Close">
+        <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    if (window.minds && window.minds.platform) {
+      document.body.classList.add('platform-' + window.minds.platform);
+    }
+
+    document.getElementById('home-btn').onclick = function() { if (window.minds) window.minds.goHome(); };
+    document.getElementById('back-btn').onclick = function() { if (window.minds) window.minds.goBack(); };
+    document.getElementById('forward-btn').onclick = function() { if (window.minds) window.minds.goForward(); };
+    document.getElementById('external-btn').onclick = function() { if (window.minds) window.minds.openExternal(); };
+    document.getElementById('min-btn').onclick = function() { if (window.minds) window.minds.minimize(); };
+    document.getElementById('max-btn').onclick = function() { if (window.minds) window.minds.maximize(); };
+    document.getElementById('close-btn').onclick = function() { if (window.minds) window.minds.close(); };
+
+    if (window.minds) {
+      window.minds.onTitleUpdate(function(title) {
+        document.getElementById('page-title').textContent = title || 'Minds';
+      });
+    }
+  </script>
+</body>
+</html>

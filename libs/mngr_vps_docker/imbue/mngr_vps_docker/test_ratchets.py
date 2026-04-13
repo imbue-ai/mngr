@@ -51,7 +51,9 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(8))
+    # 9 = 8 existing + 1 in _build_agent_details_from_raw for resilient listing
+    # (skip malformed agent data rather than crash the list command)
+    rc.check_broad_exception_catch(_DIR, snapshot(9))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -208,7 +210,10 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(2))
+    # 3 = run_ssh (subprocess.run), upload_directory (subprocess.run),
+    #     run_ssh_streaming (subprocess.Popen) -- all in docker_over_ssh.py,
+    #     the low-level SSH transport layer where direct subprocess is appropriate
+    rc.check_direct_subprocess(_DIR, snapshot(3))
 
 
 # --- AST-based ratchets ---

@@ -1,6 +1,7 @@
 import json
 import shlex
 import subprocess
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -66,6 +67,46 @@ class DockerOverSsh(MutableModel):
                 raise VpsConnectionError(f"Cannot reach VPS at {self.vps_ip}: {error_msg}")
             raise ContainerSetupError(f"Remote command failed (exit {result.returncode}): {error_msg}")
         return result.stdout
+
+    def run_ssh_streaming(
+        self,
+        remote_command: str,
+        on_output: Callable[[str], None],
+        timeout_seconds: float = 600.0,
+    ) -> None:
+        """Run a command on the VPS via SSH, streaming stdout/stderr line by line.
+
+        Each line is passed to on_output as it arrives. Raises ContainerSetupError
+        if the command exits non-zero (with all captured output in the message).
+        """
+        cmd = self._build_ssh_command(remote_command)
+        logger.trace("SSH streaming: {}", remote_command)
+        collected_output: list[str] = []
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except OSError as e:
+            raise VpsConnectionError(f"SSH command failed: {e}") from e
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stripped = line.rstrip("\n")
+                collected_output.append(stripped)
+                on_output(stripped)
+            returncode = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise VpsConnectionError(
+                f"SSH command timed out after {timeout_seconds}s: {remote_command}"
+            ) from None
+        if returncode != 0:
+            error_output = "\n".join(collected_output[-50:])
+            raise ContainerSetupError(f"Remote command failed (exit {returncode}): {error_output}")
 
     def run_docker(self, docker_args: Sequence[str], timeout_seconds: float = 60.0) -> str:
         """Run a docker command on the VPS and return stdout."""
@@ -199,11 +240,20 @@ class DockerOverSsh(MutableModel):
             raise ContainerSetupError(f"Upload failed: {result.stderr.strip()}")
 
     def build_image(
-        self, tag: str, build_context_path: str, docker_build_args: Sequence[str], timeout_seconds: float = 600.0
+        self,
+        tag: str,
+        build_context_path: str,
+        docker_build_args: Sequence[str],
+        timeout_seconds: float = 600.0,
+        on_output: Callable[[str], None] | None = None,
     ) -> str:
         """Build a Docker image on the VPS from a remote build context. Returns the image tag."""
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
-        self.run_docker(args, timeout_seconds=timeout_seconds)
+        remote_cmd = "docker " + " ".join(shlex.quote(a) for a in args)
+        if on_output is not None:
+            self.run_ssh_streaming(remote_cmd, on_output=on_output, timeout_seconds=timeout_seconds)
+        else:
+            self.run_ssh(remote_cmd, timeout_seconds=timeout_seconds)
         return tag
 
     def check_file_exists(self, path: str) -> bool:
