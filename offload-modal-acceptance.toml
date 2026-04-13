@@ -24,9 +24,9 @@ run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 2
-# Exclude docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
+# Exclude docker/docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
 # Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
-filters = "-m 'acceptance and not docker_sdk'"
+filters = "-m 'acceptance and not docker and not docker_sdk'"
 
 [report]
 output_dir = "test-results"
