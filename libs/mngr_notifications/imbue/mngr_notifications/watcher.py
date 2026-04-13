@@ -23,6 +23,7 @@ def watch_for_waiting_agents(
     notifier: Notifier,
     stop_event: threading.Event | None = None,
     observe_process: RunningProcess | None = None,
+    ready_event: threading.Event | None = None,
 ) -> None:
     """Watch the mngr observe event stream for RUNNING -> WAITING transitions.
 
@@ -32,6 +33,10 @@ def watch_for_waiting_agents(
 
     If observe_process is provided, periodically checks that it is still alive
     and exits with a warning if it has died.
+
+    If ready_event is provided, it is set after the initial file offset has
+    been captured.  Callers can wait on it to know the watcher is ready to
+    detect new events.
     """
     if stop_event is None:
         stop_event = threading.Event()
@@ -40,6 +45,9 @@ def watch_for_waiting_agents(
     logger.info("Watching for agent state transitions in {}", events_path)
 
     last_size = _get_file_size(events_path)
+
+    if ready_event is not None:
+        ready_event.set()
 
     while not stop_event.is_set():
         if observe_process is not None and observe_process.returncode is not None:

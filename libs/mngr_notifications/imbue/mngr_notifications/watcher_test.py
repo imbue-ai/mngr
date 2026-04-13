@@ -186,6 +186,7 @@ def test_watch_processes_events_then_stops(temp_mngr_ctx: MngrContext) -> None:
 
     notifier = RecordingNotifier()
     stop_event = threading.Event()
+    ready_event = threading.Event()
 
     # Write an event before starting
     event = _make_state_change_event(agent_name="pre-agent")
@@ -198,11 +199,15 @@ def test_watch_processes_events_then_stops(temp_mngr_ctx: MngrContext) -> None:
             "plugin_config": NotificationsPluginConfig(),
             "notifier": notifier,
             "stop_event": stop_event,
+            "ready_event": ready_event,
         },
     )
     watcher_thread.start()
 
     try:
+        # Wait for the watcher to capture its initial file offset before writing
+        assert ready_event.wait(timeout=5), "Watcher did not become ready"
+
         # Append a new event after the watcher starts
         with events_path.open("a") as f:
             f.write(_make_state_change_event(agent_name="new-agent") + "\n")
