@@ -27,6 +27,7 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
@@ -194,6 +195,14 @@ def setup_command_context(
     # Apply create template if this is the create command and a template was specified
     if command_name == "create":
         updated_params = apply_create_template(ctx, updated_params, mngr_ctx.config)
+
+    # Block plugins that were disabled via command defaults or create templates
+    # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
+    # only blocks plugins from CLI args and [plugins] config sections; command
+    # defaults are applied later and need a second blocking pass.
+    updated_disable_plugin = updated_params.get("disable_plugin", ())
+    if updated_disable_plugin:
+        block_disabled_plugins(pm, frozenset(updated_disable_plugin))
 
     # Allow plugins to override command options before creating the options object
     _apply_plugin_option_overrides(pm, command_name, command_class, updated_params)
@@ -469,13 +478,14 @@ def apply_create_template(
 
     Templates are named presets of create command arguments that can be applied
     using --template <name>. Multiple templates can be specified and are applied
-    in order, stacking their values. Template values act as defaults - they only
-    override parameters that came from DEFAULT source, not user-specified values.
+    in order, stacking their values.
 
-    When multiple templates are specified, later templates override earlier ones
-    for the same parameter.
-
-    CLI arguments always take precedence over template values.
+    Merge semantics (matching config file merge behavior):
+    - Scalar params: latest template wins; CLI arguments always take precedence.
+    - List/tuple params (env, pass_env, etc.): concatenated with existing values
+      (from config defaults, earlier templates, or CLI). An explicit empty list
+      [] resets the parameter, clearing all values from earlier in the chain
+      (but not CLI-specified values).
 
     This function should only be called for the 'create' command.
     """
@@ -486,7 +496,7 @@ def apply_create_template(
     # Start with existing params
     updated_params = params.copy()
 
-    # Apply each template in order (later templates override earlier ones)
+    # Apply each template in order
     for template_name in template_names:
         try:
             template_key = CreateTemplateName(template_name)
@@ -507,15 +517,32 @@ def apply_create_template(
 
         template = config.create_templates[template_key]
 
-        # Apply template options only for parameters that came from defaults (not CLI)
         for param_name, template_value in template.options.items():
             if template_value is None:
                 continue
             if param_name not in params:
                 continue
             source = ctx.get_parameter_source(param_name)
-            if source == ParameterSource.DEFAULT:
+            existing_value = updated_params[param_name]
+
+            # List/tuple params: concatenate (or reset on explicit empty list)
+            if isinstance(template_value, (list, tuple)) and isinstance(existing_value, (list, tuple)):
+                if not template_value:
+                    # Explicit empty list resets values from config defaults and
+                    # earlier templates, but CLI-specified values are preserved
+                    if source == ParameterSource.DEFAULT:
+                        updated_params[param_name] = ()
+                    else:
+                        pass
+                else:
+                    # Concatenate existing values with template values
+                    updated_params[param_name] = tuple(existing_value) + tuple(template_value)
+            elif source == ParameterSource.DEFAULT:
+                # Scalar params from defaults: template value wins
                 updated_params[param_name] = template_value
+            else:
+                # CLI-specified scalar params: CLI wins (no change)
+                pass
 
     return updated_params
 

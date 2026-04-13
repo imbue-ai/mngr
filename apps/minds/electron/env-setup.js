@@ -6,9 +6,17 @@ const paths = require('./paths');
  * Run `uv sync` using the bundled uv binary and the bundled pyproject.toml.
  * Reports progress to the renderer process via the provided callback.
  *
+ * In dev mode, the monorepo workspace venv is used directly, so env setup
+ * is skipped entirely.
+ *
  * Returns a promise that resolves on success or rejects with error details.
  */
 function runEnvSetup(onProgress) {
+  if (paths.isDev()) {
+    onProgress('Dev mode -- using monorepo environment');
+    return Promise.resolve();
+  }
+
   return new Promise((resolve, reject) => {
     const uvPath = paths.getUvPath();
     const pyprojectDir = paths.getPyprojectDir();

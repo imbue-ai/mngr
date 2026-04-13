@@ -264,6 +264,9 @@
 # Stuck agent tracking (stop hook escape valve)
 **/.claude/blocked_stop_commits
 
+# Scheduled tasks lock file
+**/.claude/scheduled_tasks.lock
+
 # Demo recordings (asciinema .cast, .txt, and scripts)
 **/.demos/
 
