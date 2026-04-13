@@ -31,7 +31,9 @@ from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
 from supertokens_python.recipe.thirdparty.syncio import get_provider
 from supertokens_python.recipe.thirdparty.syncio import manually_create_or_update_user
 from supertokens_python.syncio import get_user
+from supertokens_python.syncio import list_users_by_account_info
 from supertokens_python.types import RecipeUserId
+from supertokens_python.types.base import AccountInfoInput
 
 from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
 from imbue.minds.desktop_client.templates_auth import render_auth_page
@@ -337,13 +339,25 @@ async def _handle_forgot_password_api(request: Request) -> Response:
     if not email:
         return _json_response({"status": "FIELD_ERROR", "message": "Email is required"}, 400)
 
-    # Don't reveal whether the email exists
-    create_reset_password_token(
+    # Look up the user by email. Always return a success-looking response to
+    # avoid leaking whether an account exists for the given address.
+    _success = _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
+    users = list_users_by_account_info(
         tenant_id=_TENANT_ID,
-        user_id="",
+        account_info=AccountInfoInput(email=email),
+    )
+    if not users:
+        return _success
+
+    user_id = users[0].id
+    result = create_reset_password_token(
+        tenant_id=_TENANT_ID,
+        user_id=user_id,
         email=email,
     )
-    return _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
+    if not hasattr(result, "token"):
+        logger.warning("Failed to create password reset token for user {}", user_id)
+    return _success
 
 
 def _handle_reset_password_page(request: Request, token: str = "") -> HTMLResponse:
