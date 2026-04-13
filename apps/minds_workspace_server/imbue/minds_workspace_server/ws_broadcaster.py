@@ -50,9 +50,7 @@ class WebSocketBroadcaster(MutableModel):
         """Broadcast an agents_updated event."""
         self.broadcast({"type": "agents_updated", "agents": agents})
 
-    def broadcast_applications_updated(
-        self, applications: dict[str, list[dict[str, str]]]
-    ) -> None:
+    def broadcast_applications_updated(self, applications: dict[str, list[dict[str, str]]]) -> None:
         """Broadcast an applications_updated event."""
         self.broadcast({"type": "applications_updated", "applications": applications})
 
@@ -74,9 +72,7 @@ class WebSocketBroadcaster(MutableModel):
             }
         )
 
-    def broadcast_proto_agent_completed(
-        self, agent_id: str, success: bool, error: str | None
-    ) -> None:
+    def broadcast_proto_agent_completed(self, agent_id: str, success: bool, error: str | None) -> None:
         """Broadcast a proto_agent_completed event."""
         self.broadcast(
             {

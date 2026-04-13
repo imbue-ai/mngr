@@ -389,4 +389,3 @@ def test_run_tkinter_toast_with_fake_tk_succeeds() -> None:
         agent_display_name="test-agent",
         tk=tk,
     )
-

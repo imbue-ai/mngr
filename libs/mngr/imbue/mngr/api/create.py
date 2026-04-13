@@ -1,5 +1,6 @@
 from typing import Final
 from typing import cast
+from uuid import uuid4
 
 from loguru import logger
 
@@ -7,6 +8,8 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.lifecycle_events import LifecycleEventType
+from imbue.mngr.api.lifecycle_events import emit_agent_lifecycle_event
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
@@ -163,24 +166,22 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Send initial message if one is configured
+        # Start the agent, wait for readiness, and emit lifecycle events.
         initial_message = agent.get_initial_message()
+        logger.info("Starting agent {} ...", agent.name)
+        start_id = f"start-{uuid4().hex}"
+        emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_STARTING, start_id)
+        timeout = agent_options.ready_timeout_seconds
+        agent.wait_for_ready_signal(
+            is_creating=True,
+            start_action=lambda: host.start_agents([agent.id]),
+            timeout=timeout,
+        )
+        emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
+
         if initial_message is not None:
-            # Start agent with signal-based readiness detection
-            # Raises AgentStartError if the agent doesn't signal readiness in time
-            logger.info("Starting agent {} ...", agent.name)
-            timeout = agent_options.ready_timeout_seconds
-            agent.wait_for_ready_signal(
-                is_creating=True,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=timeout,
-            )
             logger.info("Sending initial message...")
             agent.send_message(initial_message)
-        else:
-            # No initial message - just start the agent
-            logger.info("Starting agent {} ...", agent.name)
-            host.start_agents([agent.id])
 
         # Build and return the result
         result = CreateAgentResult(agent=agent, host=host)

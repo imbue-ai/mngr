@@ -40,7 +40,6 @@ from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -58,6 +57,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -105,7 +105,9 @@ class _ParsedVpsBuildOptions(FrozenModel):
     region: str = Field(description="VPS region")
     plan: str = Field(description="VPS plan")
     os_id: int = Field(description="VPS OS image ID")
-    git_depth: int | None = Field(default=None, description="Git clone depth for build context, or None for full clone")
+    git_depth: int | None = Field(
+        default=None, description="Git clone depth for build context, or None for full clone"
+    )
     docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
 
 
@@ -139,7 +141,9 @@ def _parse_build_args(
             elif arg.startswith("--git-depth="):
                 git_depth = int(arg.split("=", 1)[1])
             elif arg.startswith("--vps-"):
-                raise MngrError(f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth=")
+                raise MngrError(
+                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth="
+                )
             else:
                 docker_build_args.append(arg)
 
@@ -176,7 +180,7 @@ def _resolve_dockerfile_paths(
         else:
             for prefix in ("--file=", "-f=", "--dockerfile="):
                 if arg.startswith(prefix):
-                    dockerfile_path = arg[len(prefix):]
+                    dockerfile_path = arg[len(prefix) :]
                     if not dockerfile_path.startswith("/"):
                         arg = f"{prefix}{remote_build_dir}/{dockerfile_path}"
                     break
@@ -828,13 +832,15 @@ class VpsDockerProvider(BaseProviderInstance):
                         timeout=120.0,
                     )
                 if clone_result.returncode != 0:
-                    raise ContainerSetupError(
-                        f"Failed to clone build context: {clone_result.stderr.strip()}"
-                    )
+                    raise ContainerSetupError(f"Failed to clone build context: {clone_result.stderr.strip()}")
                 context_args[-1] = str(local_clone_dir / "repo")
 
         try:
-            logger.log(LogLevel.BUILD.value, "Building Docker image on VPS (this may take several minutes)...", source="docker")
+            logger.log(
+                LogLevel.BUILD.value,
+                "Building Docker image on VPS (this may take several minutes)...",
+                source="docker",
+            )
             if context_args:
                 upload_context = Path(context_args[-1])
                 logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")

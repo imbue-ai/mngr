@@ -101,9 +101,7 @@ class DockerOverSsh(MutableModel):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
-            raise VpsConnectionError(
-                f"SSH command timed out after {timeout_seconds}s: {remote_command}"
-            ) from None
+            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {remote_command}") from None
         if returncode != 0:
             error_output = "\n".join(collected_output[-50:])
             raise ContainerSetupError(f"Remote command failed (exit {returncode}): {error_output}")

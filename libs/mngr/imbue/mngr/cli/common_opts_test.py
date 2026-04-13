@@ -1050,10 +1050,7 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
     project_dir = tmp_path / ".mngr"
     project_dir.mkdir(exist_ok=True)
     settings_path = project_dir / "settings.toml"
-    settings_path.write_text(
-        '[commands.create]\n'
-        'disable_plugin = ["fake_terminal"]\n'
-    )
+    settings_path.write_text('[commands.create]\ndisable_plugin = ["fake_terminal"]\n')
 
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
