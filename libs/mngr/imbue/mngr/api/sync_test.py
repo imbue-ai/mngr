@@ -17,7 +17,6 @@ from imbue.mngr.api.sync import UncommittedChangesError
 from imbue.mngr.api.sync import _build_remote_rsync_command
 from imbue.mngr.api.sync import _build_rsync_command
 from imbue.mngr.api.sync import _build_ssh_git_url
-from imbue.mngr.api.sync import _build_ssh_transport_args
 from imbue.mngr.api.sync import sync_git
 from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
@@ -433,21 +432,6 @@ def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
 # =============================================================================
 
 
-def test_build_ssh_transport_args_produces_correct_ssh_command() -> None:
-    ssh_info = ("root", "example.com", 2222, Path("/tmp/test_key"))
-    result = _build_ssh_transport_args(ssh_info)
-    assert "ssh" in result
-    assert "-i /tmp/test_key" in result
-    assert "-p 2222" in result
-    assert "-o StrictHostKeyChecking=no" in result
-
-
-def test_build_ssh_transport_args_quotes_key_path_with_spaces() -> None:
-    ssh_info = ("user", "host.com", 22, Path("/path with spaces/key"))
-    result = _build_ssh_transport_args(ssh_info)
-    assert "'/path with spaces/key'" in result
-
-
 def test_build_ssh_git_url_produces_correct_url() -> None:
     ssh_info = ("root", "example.com", 2222, Path("/tmp/key"))
     result = _build_ssh_git_url(ssh_info, Path("/home/user/project"))
@@ -489,6 +473,7 @@ def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
         source_path=Path("/local/src"),
         destination_path=Path("/remote/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=False,
         is_delete=False,
@@ -504,6 +489,7 @@ def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
         source_path=Path("/remote/src"),
         destination_path=Path("/local/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PULL,
         is_dry_run=False,
         is_delete=False,
@@ -518,6 +504,7 @@ def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=True,
         is_delete=True,

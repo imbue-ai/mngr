@@ -65,11 +65,7 @@ _GIT_BRANCH_OPTIONS: Final[frozenset[str]] = frozenset(
 
 # Options whose values should complete against host names from the discovery
 # event stream. Uses the same "command.--option" notation.
-_HOST_NAME_OPTIONS: Final[frozenset[str]] = frozenset(
-    {
-        "create.--target",
-    }
-)
+_HOST_NAME_OPTIONS: Final[frozenset[str]] = frozenset()
 
 # Click option names (--long forms) that should complete against plugin names.
 _PLUGIN_NAME_OPTION_NAMES: Final[frozenset[str]] = frozenset(

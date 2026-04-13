@@ -10,6 +10,7 @@ from imbue.cloudflare_forwarding.app import AuthPolicy
 from imbue.cloudflare_forwarding.app import CloudflareApiError
 from imbue.cloudflare_forwarding.app import InvalidTunnelComponentError
 from imbue.cloudflare_forwarding.app import ServiceNotFoundError
+from imbue.cloudflare_forwarding.app import TunnelComponentTooLongError
 from imbue.cloudflare_forwarding.app import TunnelNotFoundError
 from imbue.cloudflare_forwarding.app import TunnelOwnershipError
 from imbue.cloudflare_forwarding.app import cf_check
@@ -46,7 +47,7 @@ def test_make_tunnel_name_format() -> None:
 
 
 def test_make_tunnel_name_allows_single_hyphen_in_agent_id() -> None:
-    assert make_tunnel_name("alice", "agent-abc123") == "alice--agent-abc123"
+    assert make_tunnel_name("alice", "agent-abc123") == "alice--abc123"
 
 
 def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
@@ -54,9 +55,9 @@ def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
         make_tunnel_name("alice--bob", "agent1")
 
 
-def test_make_tunnel_name_rejects_double_hyphen_in_agent_id() -> None:
-    with pytest.raises(InvalidTunnelComponentError, match="Agent ID"):
-        make_tunnel_name("alice", "agent--1")
+def test_make_tunnel_name_truncates_agent_id() -> None:
+    result = make_tunnel_name("alice", "agent--1")
+    assert result == "alice---1"
 
 
 def test_make_hostname_format() -> None:
@@ -189,6 +190,38 @@ def test_add_service_applies_default_access_policy() -> None:
     assert len(ctx.fake.access_apps) == 1
     app_id = list(ctx.fake.access_apps.keys())[0]
     assert len(ctx.fake.access_policies.get(app_id, [])) == 1
+
+
+def test_add_service_passes_allowed_idps_to_access_app() -> None:
+    """When ForwardingCtx has allowed_idps configured, they are passed to created Access Applications."""
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123"])
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123"]
+
+
+def test_add_service_no_allowed_idps_when_not_configured() -> None:
+    """When allowed_idps is None, it is not included in the Access Application."""
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_tunnel_auth("alice--agent1", policy)
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert "allowed_idps" not in ctx.fake.access_apps[app_id]
+
+
+def test_set_service_auth_passes_allowed_idps() -> None:
+    """set_service_auth creates Access Applications with allowed_idps when configured."""
+    ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123", "otp-idp-uuid-456"])
+    ctx.create_tunnel("alice", "agent1")
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "web", policy)
+    app_id = list(ctx.fake.access_apps.keys())[0]
+    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123", "otp-idp-uuid-456"]
 
 
 def test_remove_service_deletes_access_app() -> None:
@@ -385,3 +418,22 @@ def test_route_malformed_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _make_test_client(monkeypatch)
     resp = client.get("/tunnels/foo--bar/services", headers={"Authorization": "Bearer not-valid-base64!!!"})
     assert resp.status_code == 401
+
+
+def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a tunnel with a too-long username returns 400, not 500."""
+    long_name = "a_very_long_username_exceeds_max"
+    encoded = base64.b64encode(f"{long_name}:secret".encode()).decode()
+    client = _make_test_client(monkeypatch)
+    # Override USER_CREDENTIALS to include the long username (supersedes _make_test_client's setting)
+    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({long_name: "secret"}))
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers={"Authorization": f"Basic {encoded}"})
+    assert resp.status_code == 400
+
+
+def test_tunnel_component_too_long_error_message() -> None:
+    with pytest.raises(TunnelComponentTooLongError) as exc_info:
+        raise TunnelComponentTooLongError("Username", "toolong", 5)
+    assert "Username" in str(exc_info.value)
+    assert "toolong" in str(exc_info.value)
+    assert "5" in str(exc_info.value)

@@ -20,13 +20,13 @@ import uvicorn
 from loguru import logger
 from playwright.sync_api import sync_playwright
 
-from imbue.minds.config.data_types import MindPaths
-from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
-from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.agent_creator import LOG_SENTINEL
-from imbue.minds.forwarding_server.app import create_forwarding_server
-from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
+from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -49,7 +49,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     port = _find_free_port()
     code = OneTimeCode("test-sse-code-abc123")
 
-    paths = MindPaths(data_dir=tmp_path)
+    paths = WorkspacePaths(data_dir=tmp_path)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
     resolver = MngrCliBackendResolver()
@@ -63,7 +63,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         creator._statuses[str(agent_id)] = AgentCreationStatus.CLONING
         creator._log_queues[str(agent_id)] = log_queue
 
-    app = create_forwarding_server(
+    app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,

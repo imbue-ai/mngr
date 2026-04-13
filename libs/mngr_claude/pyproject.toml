@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-claude"
-version = "0.2.3"
+version = "0.2.4"
 description = "Claude agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.3",
+    "imbue-mngr==0.2.4",
 ]
 
 [dependency-groups]

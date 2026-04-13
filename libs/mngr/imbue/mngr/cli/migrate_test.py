@@ -38,20 +38,20 @@ def test_migrate_requires_source_agent(
     assert "SOURCE_AGENT" in result.output
 
 
-def test_migrate_rejects_from_agent_option(
+def test_migrate_rejects_from_option(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Migrate should reject --from-agent in remaining args."""
+    """Migrate should reject --from in remaining args."""
     result = cli_runner.invoke(
         migrate,
-        ["source-agent", "--from-agent", "other-agent"],
+        ["source-agent", "--from", "other-agent"],
         obj=plugin_manager,
         catch_exceptions=True,
     )
 
     assert result.exit_code != 0
-    assert "--from-agent" in result.output
+    assert "--from" in result.output
 
 
 def test_migrate_nonexistent_source_agent(

@@ -21,6 +21,7 @@ def test_watcher_detects_running_to_waiting_via_observe_events(
 
     notifier = RecordingNotifier()
     stop_event = threading.Event()
+    ready_event = threading.Event()
 
     watcher_thread = threading.Thread(
         target=watch_for_waiting_agents,
@@ -29,12 +30,13 @@ def test_watcher_detects_running_to_waiting_via_observe_events(
             "plugin_config": NotificationsPluginConfig(),
             "notifier": notifier,
             "stop_event": stop_event,
+            "ready_event": ready_event,
         },
     )
     watcher_thread.start()
 
     try:
-        stop_event.wait(timeout=0.5)
+        assert ready_event.wait(timeout=5), "Watcher did not become ready"
 
         event = json.dumps(
             {

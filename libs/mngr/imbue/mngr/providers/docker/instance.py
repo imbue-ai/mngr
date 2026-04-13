@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import docker
+import docker.context
 import docker.errors
 import docker.models.containers
 import docker.models.images
@@ -169,6 +170,49 @@ def _get_ssh_host_from_docker_config(docker_host_url: str) -> str:
     return "127.0.0.1"
 
 
+def _get_docker_context_host() -> str | None:
+    """Read the Docker endpoint from the active Docker context.
+
+    Returns the ``Host`` URL (e.g. ``unix:///Users/x/.docker/run/docker.sock``)
+    if a non-default context is active, or ``None`` if the context cannot be
+    read or the default context is selected (in which case ``docker.from_env``
+    already does the right thing).
+    """
+    try:
+        ctx = docker.context.ContextAPI.get_current_context()
+    except Exception as e:
+        # The Docker SDK raises bare ``Exception`` when context metadata is
+        # corrupted, so we must catch broadly here.  This is a best-effort
+        # lookup; any failure falls back to ``docker.from_env()``.
+        logger.debug("Failed to read Docker context (falling back to default): {}", e)
+        return None
+
+    if ctx is None or ctx.Name == "default":
+        return None
+
+    host: str | None = ctx.Host
+    return host if host else None
+
+
+def create_docker_client() -> docker.DockerClient:
+    """Create a Docker client using the same resolution order as the Docker CLI.
+
+    1. ``DOCKER_HOST`` environment variable (via ``docker.from_env()``).
+    2. The active Docker context (read from ``~/.docker/config.json``).
+    3. Platform default (via ``docker.from_env()``).
+
+    Use this instead of ``docker.from_env()`` directly to avoid connection
+    failures on macOS Docker Desktop, where the default socket path
+    (``/var/run/docker.sock``) may not exist but the Docker context points
+    to the correct socket.
+    """
+    if not os.environ.get("DOCKER_HOST"):
+        context_host = _get_docker_context_host()
+        if context_host is not None:
+            return docker.DockerClient(base_url=context_host)
+    return docker.from_env()
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -207,6 +251,11 @@ class DockerProviderInstance(BaseProviderInstance):
     def _docker_client(self) -> docker.DockerClient:
         """Lazily create a Docker client.
 
+        When ``self.config.host`` is set, connects to that explicit URL.
+        Otherwise delegates to ``create_docker_client()`` which resolves
+        via DOCKER_HOST, then the active Docker context, then the platform
+        default.
+
         Raises ProviderUnavailableError (a MngrError subclass) instead of
         DockerException when the daemon is unreachable, so callers that catch
         MngrError handle the failure gracefully.
@@ -214,7 +263,7 @@ class DockerProviderInstance(BaseProviderInstance):
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
-            return docker.from_env()
+            return create_docker_client()
         except docker.errors.DockerException as e:
             raise ProviderUnavailableError(self.name, str(e)) from e
 
@@ -788,6 +837,16 @@ kill -TERM 1
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
+        # Fail fast if a container with this name already exists, before the
+        # expensive image build step.
+        container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        existing = self._find_container_by_name(name)
+        if existing is not None:
+            raise MngrError(
+                f"A container named '{container_name}' already exists (id: {existing.short_id}). "
+                f"Remove it with 'mngr destroy {name}' or 'docker rm -f {container_name}' first."
+            )
+
         base_image = str(image) if image else (self.config.default_image or DEFAULT_IMAGE)
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
@@ -814,7 +873,6 @@ kill -TERM 1
                 image_name = self._pull_image(base_image)
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
-            container_name = f"{self.mngr_ctx.config.prefix}{name}"
 
             # Create the per-host volume directory before starting the container
             # so the symlink target exists when the setup script runs.

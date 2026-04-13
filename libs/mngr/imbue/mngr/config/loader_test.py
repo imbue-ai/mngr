@@ -273,6 +273,35 @@ def test_parse_providers_unknown_backend_mentions_disabled_plugins() -> None:
         _parse_providers(raw, disabled_plugins=frozenset({"modal"}))
 
 
+def test_parse_providers_skips_disabled_provider_with_unknown_backend() -> None:
+    """_parse_providers should skip providers with is_enabled=false when backend is unknown."""
+    raw = {"my-cloud": {"backend": "nonexistent", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert len(result) == 0
+
+
+def test_parse_providers_preserves_disabled_provider_with_known_backend() -> None:
+    """_parse_providers should preserve is_enabled=false when backend is known (for merge)."""
+    raw = {"my-local": {"backend": "local", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert ProviderInstanceName("my-local") in result
+    assert result[ProviderInstanceName("my-local")].is_enabled is False
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_enabled() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not false."""
+    raw = {"my-provider": {"backend": "nonexistent", "is_enabled": True}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_is_enabled_unset() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not set."""
+    raw = {"my-provider": {"backend": "nonexistent"}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
 # =============================================================================
 # Tests for _parse_agent_types
 # =============================================================================
@@ -749,6 +778,8 @@ def test_load_config_threads_every_field_from_toml(
     assert config.is_nested_tmux_allowed is True
     assert config.is_error_reporting_enabled is False
     assert config.default_destroyed_host_persisted_seconds == 12345.0
+    assert config.retry.connect_retry_times == 5
+    assert config.retry.connect_retry_delay == "10s"
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
@@ -770,6 +801,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "create_templates": {"modal": {"new_host": "modal"}},
     "pre_command_scripts": {"create": ["echo hello"]},
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
+    "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
@@ -803,6 +835,10 @@ create = ["echo hello"]
 [work_dir_extra_paths]
 ".venv" = "SHARE"
 ".test_output" = "COPY"
+
+[retry]
+connect_retry_times = 5
+connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"
