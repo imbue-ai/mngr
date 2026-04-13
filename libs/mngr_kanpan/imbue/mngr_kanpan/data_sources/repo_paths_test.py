@@ -3,7 +3,7 @@ from typing import cast
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
-from imbue.mngr_kanpan.data_source import RepoPathField
+from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
 from imbue.mngr_kanpan.testing import make_agent_details
 

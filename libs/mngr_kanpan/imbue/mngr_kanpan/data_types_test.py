@@ -4,10 +4,10 @@ from pydantic import ValidationError
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
-from imbue.mngr_kanpan.data_source import PrField
-from imbue.mngr_kanpan.data_source import PrState
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot

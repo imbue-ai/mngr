@@ -6,7 +6,6 @@ from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic import Field
@@ -22,16 +21,16 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import BoolField
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
-from imbue.mngr_kanpan.data_source import PrField
-from imbue.mngr_kanpan.data_source import PrState
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
@@ -272,74 +271,6 @@ def _is_agent_muted(certified_data: Any) -> bool:
     return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
 
 
-@pure
-def _parse_github_repo_path(remote_url: str) -> str | None:
-    """Extract owner/repo from a GitHub remote URL.
-
-    Supports SSH (git@github.com:owner/repo.git) and
-    HTTPS (https://github.com/owner/repo.git) formats.
-    """
-    # SSH format: git@github.com:owner/repo.git
-    if remote_url.startswith("git@github.com:"):
-        path = remote_url[len("git@github.com:") :]
-        if path.endswith(".git"):
-            path = path[:-4]
-        return path
-
-    # HTTPS format: https://github.com/owner/repo.git
-    parsed = urlparse(remote_url)
-    if parsed.hostname == "github.com":
-        path = parsed.path.lstrip("/")
-        if path.endswith(".git"):
-            path = path[:-4]
-        return path
-
-    return None
-
-
-@pure
-def repo_path_from_labels(labels: dict[str, str]) -> str | None:
-    """Extract GitHub 'owner/repo' from a labels dict's 'remote' entry."""
-    remote_url = labels.get("remote")
-    if remote_url is None:
-        return None
-    return _parse_github_repo_path(remote_url)
-
-
-def collect_data_sources(
-    mngr_ctx: MngrContext,
-) -> list[KanpanDataSource]:
-    """Collect all data sources from plugins and config.
-
-    Calls pm.hook.kanpan_data_sources() to get plugin-registered sources,
-    then filters by enabled status from config.
-    """
-    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-
-    raw_results = mngr_ctx.pm.hook.kanpan_data_sources(mngr_ctx=mngr_ctx)
-
-    all_sources: list[KanpanDataSource] = []
-    for result in raw_results:
-        if result is None:
-            continue
-        for source in result:
-            all_sources.append(source)
-
-    # Filter by enabled status in config
-    enabled_sources: list[KanpanDataSource] = []
-    for source in all_sources:
-        source_config = config.data_sources.get(source.name)
-        if isinstance(source_config, dict):
-            if not source_config.get("enabled", True):
-                continue
-        elif source_config is not None and hasattr(source_config, "enabled"):
-            if not source_config.enabled:
-                continue
-        enabled_sources.append(source)
-
-    return enabled_sources
-
-
 def _cache_file_path(mngr_ctx: MngrContext) -> Path:
     """Get the path to the kanpan field cache file."""
     return mngr_ctx.profile_dir / "kanpan" / "field_cache.json"
@@ -417,3 +348,37 @@ def load_field_cache(
     except Exception as e:
         logger.debug("Failed to load field cache: {}", e)
         return {}
+
+
+def collect_data_sources(
+    mngr_ctx: MngrContext,
+) -> list[KanpanDataSource]:
+    """Collect all data sources from plugins and config.
+
+    Calls pm.hook.kanpan_data_sources() to get plugin-registered sources,
+    then filters by enabled status from config.
+    """
+    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
+
+    raw_results = mngr_ctx.pm.hook.kanpan_data_sources(mngr_ctx=mngr_ctx)
+
+    all_sources: list[KanpanDataSource] = []
+    for result in raw_results:
+        if result is None:
+            continue
+        for source in result:
+            all_sources.append(source)
+
+    # Filter by enabled status in config
+    enabled_sources: list[KanpanDataSource] = []
+    for source in all_sources:
+        source_config = config.data_sources.get(source.name)
+        if isinstance(source_config, dict):
+            if not source_config.get("enabled", True):
+                continue
+        elif source_config is not None and hasattr(source_config, "enabled"):
+            if not source_config.enabled:
+                continue
+        enabled_sources.append(source)
+
+    return enabled_sources

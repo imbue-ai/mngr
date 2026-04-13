@@ -22,13 +22,13 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_kanpan.data_source import BoolField
-from imbue.mngr_kanpan.data_source import CommitsAheadField
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
-from imbue.mngr_kanpan.data_source import RepoPathField
+from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
+from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection

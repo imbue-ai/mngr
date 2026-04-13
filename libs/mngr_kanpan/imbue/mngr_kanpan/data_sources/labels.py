@@ -60,7 +60,7 @@ class LabelsDataSource(FrozenModel):
         cached_fields: dict[AgentName, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
     ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
-        label_key = self.config.label_key or self.field_key
+        label_key = self.config.label_key
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             value = agent.labels.get(label_key, "")

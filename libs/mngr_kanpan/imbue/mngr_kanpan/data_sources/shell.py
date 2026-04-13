@@ -10,10 +10,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
-from imbue.mngr_kanpan.data_source import CiField
 from imbue.mngr_kanpan.data_source import FieldValue
-from imbue.mngr_kanpan.data_source import PrField
 from imbue.mngr_kanpan.data_source import StringField
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import PrField
 
 _SHELL_TIMEOUT_SECONDS = 30.0
 

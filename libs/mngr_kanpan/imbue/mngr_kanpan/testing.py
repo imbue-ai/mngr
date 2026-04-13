@@ -11,10 +11,10 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_kanpan.data_source import CiField
-from imbue.mngr_kanpan.data_source import CiStatus
-from imbue.mngr_kanpan.data_source import PrField
-from imbue.mngr_kanpan.data_source import PrState
+from imbue.mngr_kanpan.data_sources.github import CiField
+from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
 
 
 def make_host_details(provider_name: str = "local") -> HostDetails:
