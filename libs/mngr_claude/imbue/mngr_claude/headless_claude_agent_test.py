@@ -285,6 +285,7 @@ def test_stream_output_yields_text_deltas(
     assert chunks == ["Hello ", "world!"]
 
 
+@pytest.mark.tmux
 def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
