@@ -1,5 +1,7 @@
 """Unit tests for the help command and topic pages."""
 
+from io import StringIO
+
 import pluggy
 from click.testing import CliRunner
 from loguru import logger
@@ -9,7 +11,6 @@ from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help import get_all_topics
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.main import cli
-from imbue.mngr.utils.logging import _dynamic_stderr_sink
 
 # =============================================================================
 # Topic registry tests
@@ -243,18 +244,17 @@ def test_help_nonexistent_topic(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """'mngr help nonexistent' exits with an error message."""
-    # Loguru's default handler stores a reference to the original sys.stderr at import
-    # time, so it doesn't follow CliRunner's sys.stderr replacement. Replace it with
-    # a dynamic sink that resolves sys.stderr at write time, matching the production
-    # _dynamic_stderr_sink used by setup_logging.
-    logger.remove()
-    handler_id = logger.add(_dynamic_stderr_sink, level="ERROR", format="{message}\n")
+    # The error message is written via logger.error(), which goes to loguru's handlers
+    # (not CliRunner's captured stdout). Capture it with a StringIO sink, matching the
+    # pattern used in exec_test.py::test_emit_human_output_failed_agents_logs_errors.
+    log_output = StringIO()
+    handler_id = logger.add(log_output, level="ERROR", format="{message}")
     try:
         result = cli_runner.invoke(cli, ["help", "nonexistent-xyz"], obj=plugin_manager, catch_exceptions=False)
-        assert result.exit_code != 0
-        assert "No help found" in result.output
     finally:
         logger.remove(handler_id)
+    assert result.exit_code != 0
+    assert "No help found" in log_output.getvalue()
 
 
 def test_help_help_shows_self(
