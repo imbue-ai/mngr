@@ -44,23 +44,6 @@ def reset_backend_registry() -> None:
     _registry_state["backends_loaded"] = False
 
 
-def register_backend_for_testing(
-    backend_class: type[ProviderBackendInterface],
-    config_class: type[ProviderInstanceConfig],
-) -> None:
-    """Register a backend class and its config class directly into the registry.
-
-    Stores the given backend and config under backend_class.get_name(), replacing
-    any existing entry. This is intended for tests that need to inject custom
-    backend implementations without going through the plugin load pipeline.
-
-    Call reset_backend_registry() during teardown to restore a clean state.
-    """
-    backend_name = backend_class.get_name()
-    _backend_registry[backend_name] = backend_class
-    register_provider_config(str(backend_name), config_class)
-
-
 def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_docker: bool) -> None:
     """Load provider backends from the specified modules.
 
