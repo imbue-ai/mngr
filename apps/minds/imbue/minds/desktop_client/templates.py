@@ -447,7 +447,9 @@ def render_landing_page(
     )
 
 
-_DEFAULT_GIT_URL: Final[str] = os.getenv("MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git")
+_DEFAULT_GIT_URL: Final[str] = os.getenv(
+    "MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git"
+)
 
 
 _DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "selene")
