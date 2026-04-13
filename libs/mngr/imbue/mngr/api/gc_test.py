@@ -1561,13 +1561,6 @@ def test_gc_machines_handles_mngr_error_with_abort(temp_host_dir: Path, temp_mng
 # =========================================================================
 
 
-class _GetHostSnapshotErrorProvider(MockProviderInstance):
-    """Provider that raises MngrError from get_host (for snapshot GC tests)."""
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        raise MngrError("simulated snapshot get_host failure")
-
-
 def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_snapshots records inner MngrError per-host and continues when CONTINUE behavior."""
     host = _make_offline_host(
@@ -1581,7 +1574,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path
         stop_reason=HostState.DESTROYED.value,
     )
 
-    error_provider = _GetHostSnapshotErrorProvider(
+    error_provider = _GetHostErrorProvider(
         name=ProviderInstanceName("snapshot-error"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
@@ -1598,7 +1591,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path
     )
 
     assert len(result.errors) == 1
-    assert "simulated snapshot get_host failure" in result.errors[0]
+    assert "simulated get_host failure" in result.errors[0]
     assert len(result.snapshots_destroyed) == 0
 
 
@@ -1615,7 +1608,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_abort(temp_host_dir: Path, t
         stop_reason=HostState.DESTROYED.value,
     )
 
-    error_provider = _GetHostSnapshotErrorProvider(
+    error_provider = _GetHostErrorProvider(
         name=ProviderInstanceName("snapshot-error-abort"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
@@ -1624,7 +1617,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_abort(temp_host_dir: Path, t
     )
 
     result = GcResult()
-    with pytest.raises(MngrError, match="simulated snapshot get_host failure"):
+    with pytest.raises(MngrError, match="simulated get_host failure"):
         gc_snapshots(
             hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
             dry_run=False,
