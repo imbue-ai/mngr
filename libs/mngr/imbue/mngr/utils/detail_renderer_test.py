@@ -213,8 +213,7 @@ def test_render_tutorial_block_html_special_chars_are_escaped() -> None:
 
 def test_render_tutorial_block_leading_whitespace_comment_still_matches() -> None:
     """A comment line with leading whitespace is still classified as a comment."""
-    # The line "   # indented comment" has leading spaces before the hash.
-    # render_tutorial_block must still detect it as a comment (via lstrip).
+    # Build a line with spaces then a hash; render_tutorial_block uses lstrip.
     input_line = "   " + "# indented comment"
     result = render_tutorial_block(input_line)
     assert '<span class="comment">' in result
