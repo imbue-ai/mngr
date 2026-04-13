@@ -362,7 +362,7 @@ def _parse_providers(
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
