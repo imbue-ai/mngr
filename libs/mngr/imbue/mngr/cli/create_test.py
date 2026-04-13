@@ -168,6 +168,7 @@ def test_parse_host_lifecycle_options_all_none(default_create_cli_opts: CreateCl
     assert result.idle_timeout_seconds is None
     assert result.idle_mode is None
     assert result.activity_sources is None
+    assert result.disable_session_shutdown is None
 
 
 def test_parse_host_lifecycle_options_with_idle_timeout(default_create_cli_opts: CreateCliOptions) -> None:
@@ -244,12 +245,26 @@ def test_parse_host_lifecycle_options_with_activity_sources_whitespace(
     assert result.activity_sources == (ActivitySource.BOOT, ActivitySource.SSH, ActivitySource.AGENT)
 
 
+def test_parse_host_lifecycle_options_with_disable_session_shutdown(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """disable_session_shutdown should be passed through from CLI options."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().disable_session_shutdown, True),
+    )
+
+    result = _parse_host_lifecycle_options(opts)
+
+    assert result.disable_session_shutdown is True
+
+
 def test_parse_host_lifecycle_options_all_provided(default_create_cli_opts: CreateCliOptions) -> None:
     """All options should be correctly parsed when all are provided."""
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().idle_timeout, "30m"),
         to_update(default_create_cli_opts.field_ref().idle_mode, "disabled"),
         to_update(default_create_cli_opts.field_ref().activity_sources, "create,process"),
+        to_update(default_create_cli_opts.field_ref().disable_session_shutdown, True),
     )
 
     result = _parse_host_lifecycle_options(opts)
@@ -257,6 +272,7 @@ def test_parse_host_lifecycle_options_all_provided(default_create_cli_opts: Crea
     assert result.idle_timeout_seconds == 1800
     assert result.idle_mode == IdleMode.DISABLED
     assert result.activity_sources == (ActivitySource.CREATE, ActivitySource.PROCESS)
+    assert result.disable_session_shutdown is True
 
 
 # =============================================================================

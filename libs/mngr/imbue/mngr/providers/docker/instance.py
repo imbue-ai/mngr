@@ -928,6 +928,7 @@ kill -TERM 1
             user_tags=dict(tags) if tags else {},
             snapshots=[],
             tmux_session_prefix=self.mngr_ctx.config.prefix,
+            disable_session_shutdown=lifecycle_options.disable_session_shutdown or False,
             created_at=now,
             updated_at=now,
         )

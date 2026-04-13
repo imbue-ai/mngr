@@ -404,6 +404,12 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--activity-sources", help="Activity sources for idle detection (comma-separated)")
 @optgroup.option(
+    "--disable-session-shutdown/--no-disable-session-shutdown",
+    "disable_session_shutdown",
+    default=None,
+    help="Keep host running even when all agent sessions exit [default: no]",
+)
+@optgroup.option(
     "--start-on-boot/--no-start-on-boot", "start_on_boot", default=None, help="Restart on host boot [default: no]"
 )
 @optgroup.group("Connection Options")
@@ -1381,6 +1387,7 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
         idle_timeout_seconds=parsed_idle_timeout,
         idle_mode=parsed_idle_mode,
         activity_sources=parsed_activity_sources,
+        disable_session_shutdown=opts.disable_session_shutdown,
     )
 
 

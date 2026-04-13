@@ -329,6 +329,10 @@ class CertifiedHostData(FrozenModel):
         default=None,
         description="Prefix for tmux session names on this host (e.g., 'mngr-'). Used by the activity watcher to detect when no agents are running.",
     )
+    disable_session_shutdown: bool = Field(
+        default=False,
+        description="When true, the activity watcher will not shut down the host when all agent tmux sessions have exited. Useful for persistent hosts that should always remain running.",
+    )
     stop_reason: str | None = Field(
         default=None,
         description="Reason for last shutdown: 'PAUSED' (idle), 'STOPPED' (user requested or all agents exited), or None (crashed)",
@@ -559,6 +563,10 @@ class HostLifecycleOptions(FrozenModel):
     activity_sources: tuple[ActivitySource, ...] | None = Field(
         default=None,
         description="Activity sources for idle detection (None for provider default)",
+    )
+    disable_session_shutdown: bool | None = Field(
+        default=None,
+        description="When true, the host will not shut down when all agent tmux sessions exit (None for provider default)",
     )
 
     def to_activity_config(
