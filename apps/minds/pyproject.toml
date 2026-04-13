@@ -24,6 +24,8 @@ dependencies = [
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
+    "supertokens-python>=0.27.0",
+    "PyJWT[crypto]>=2.8.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [

@@ -1128,6 +1128,9 @@ def create_desktop_client(
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     stream_manager: MngrStreamManager | None = None,
+    supertokens_session_store: "SuperTokensSessionStore | None" = None,
+    server_port: int = 0,
+    output_format: "OutputFormat | None" = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1170,10 +1173,23 @@ def create_desktop_client(
     app.state.cloudflare_client = cloudflare_client
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
+    app.state.supertokens_session_store = supertokens_session_store
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
+
+    # Mount the SuperTokens auth routes
+    if supertokens_session_store is not None:
+        from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
+        from imbue.minds.primitives import OutputFormat as _OutputFormat
+
+        supertokens_router = create_supertokens_router(
+            session_store=supertokens_session_store,
+            server_port=server_port,
+            output_format=output_format or _OutputFormat.JSONL,
+        )
+        app.include_router(supertokens_router)
 
     # Mount the REST API v1 router
     if paths is not None:

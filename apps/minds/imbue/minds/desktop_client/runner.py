@@ -26,9 +26,10 @@ from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -137,6 +138,13 @@ def start_desktop_client(
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
+    # Initialize SuperTokens if configured
+    supertokens_session_store = _init_supertokens(
+        data_directory=data_directory,
+        host=host,
+        port=port,
+    )
+
     # Generate a one-time login URL for the user
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
     auth_store.add_one_time_code(code=code)
@@ -175,6 +183,9 @@ def start_desktop_client(
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         stream_manager=stream_manager,
+        supertokens_session_store=supertokens_session_store,
+        server_port=port,
+        output_format=output_format,
     )
 
     if not is_no_browser:
@@ -192,6 +203,90 @@ def start_desktop_client(
     # quickly, giving the lifespan shutdown hook time to run within
     # electron's 5-second SIGKILL window.
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+
+
+def _init_supertokens(
+    data_directory: Path,
+    host: str,
+    port: int,
+) -> SuperTokensSessionStore | None:
+    """Initialize the SuperTokens SDK and return a session store, or None if not configured."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        logger.info("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
+        return None
+
+    from supertokens_python import InputAppInfo
+    from supertokens_python import SupertokensConfig
+    from supertokens_python import init as supertokens_init
+    from supertokens_python.recipe import emailpassword
+    from supertokens_python.recipe import emailverification
+    from supertokens_python.recipe import session
+    from supertokens_python.recipe import thirdparty
+    from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
+    from supertokens_python.recipe.thirdparty.provider import ProviderConfig
+    from supertokens_python.recipe.thirdparty.provider import ProviderInput
+
+    api_key = os.environ.get("SUPERTOKENS_API_KEY")
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    github_client_id = os.environ.get("GITHUB_CLIENT_ID")
+    github_client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+
+    # Build OAuth provider list
+    providers: list[ProviderInput] = []
+    if google_client_id and google_client_secret:
+        providers.append(ProviderInput(
+            config=ProviderConfig(
+                third_party_id="google",
+                clients=[ProviderClientConfig(
+                    client_id=google_client_id,
+                    client_secret=google_client_secret,
+                )],
+            ),
+        ))
+    if github_client_id and github_client_secret:
+        providers.append(ProviderInput(
+            config=ProviderConfig(
+                third_party_id="github",
+                clients=[ProviderClientConfig(
+                    client_id=github_client_id,
+                    client_secret=github_client_secret,
+                )],
+            ),
+        ))
+
+    api_domain = f"http://{host}:{port}"
+
+    supertokens_init(
+        supertokens_config=SupertokensConfig(
+            connection_uri=connection_uri,
+            api_key=api_key,
+        ),
+        app_info=InputAppInfo(
+            app_name="Minds",
+            api_domain=api_domain,
+            website_domain=api_domain,
+            api_base_path="/auth",
+            website_base_path="/auth",
+        ),
+        framework="fastapi",
+        recipe_list=[
+            session.init(),
+            emailpassword.init(),
+            thirdparty.init(
+                sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=providers),
+            ) if providers else thirdparty.init(),
+            emailverification.init(mode="REQUIRED"),
+        ],
+        mode="asgi",
+    )
+
+    session_store = SuperTokensSessionStore(
+        data_directory=data_directory / "supertokens",
+    )
+    logger.info("SuperTokens initialized (core: {})", connection_uri)
+    return session_store
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:
