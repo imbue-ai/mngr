@@ -399,9 +399,7 @@ class GitHubDataSource(FrozenModel):
                 if self.config.ci and pr is not None:
                     agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
                 if self.config.create_pr_url and agent_prs_loaded and pr is None:
-                    create_url = _build_create_pr_url(agent_repo, branch)
-                    if create_url is not None:
-                        agent_fields[FIELD_CREATE_PR_URL] = CreatePrUrlField(url=create_url)
+                    agent_fields[FIELD_CREATE_PR_URL] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
 
             if agent_fields:
                 fields[agent.name] = agent_fields
@@ -499,7 +497,7 @@ def _lookup_pr(
 
 
 @pure
-def _build_create_pr_url(repo_path: str, branch: str) -> str | None:
+def _build_create_pr_url(repo_path: str, branch: str) -> str:
     """Build a GitHub URL for creating a new PR from the given branch."""
     return f"https://github.com/{repo_path}/compare/{branch}?expand=1"
 
