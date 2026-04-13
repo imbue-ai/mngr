@@ -49,17 +49,7 @@ Only after doing all of the above should you begin writing code.
 - Avoid using the `TYPE_CHECKING` guard. Do not add it to files that do not already contain it, and never put imports inside of it yourself--you MUST ask for explicit permission to do this (it's generally a sign of bad architecture that should be fixed some other way).
 - Do NOT write code in `__init__.py`--leave them completely blank (the only exception is for a line like "hookimpl = pluggy.HookimplMarker("mngr")", which should go at the very root __init__.py of a library).
 - Do NOT make constructs like module-level usage of `__all__`
-- Before finishing your response, if you have made any changes, then you must ensure that you have run ALL tests and that they all pass. DO NOT just run a subset of the tests! However, while iterating (e.g. fixing a failing test, developing a feature), run only the relevant tests locally for rapid feedback -- save the full test run for the final check.
-- To run the full test suite, use `just test-offload` from the root of the git checkout. This fans out all unit and integration tests across isolated Modal sandboxes in parallel.
-- While iterating locally on specific tests, you can run `uv run pytest --no-cov --cov-fail-under=0 <path>::<test_name>` for rapid feedback on individual tests. To run all tests for a single project locally, use a subshell: `(cd libs/mngr && uv run pytest --no-cov --cov-fail-under=0)`. You can also add `-m 'not tmux and not modal and not docker and not docker_sdk and not acceptance and not release'` to skip slow infrastructure tests when running locally.
-- When running pytest locally with a Bash tool timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 uv run pytest ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
-- Offload produces results in test-results/ (junit.xml and .coverage files). Local pytest produces files in .test_output/ for things like slow tests and coverage reports.
 - If tests fail because of a lack of coverage, you should add tests for the new code that you wrote.
-- Acceptance tests also run in CI via offload (`just test-offload-acceptance`). Do *not* run all acceptance tests locally to validate changes--just allow CI to run them automatically after you finish responding.
-- If you need to run a specific acceptance or release test to write or fix it, iterate on that specific test locally by calling "just test <full_path>::<test_name>" from the root of the git checkout. Do this rather than re-running all tests in CI.
-- Note that tasks are *not* allowed to finish without A) all tests passing in CI, B) running /autofix to verify and fix code issues, and C) running /verify-conversation to review the conversation for behavioral issues.
-- Before finishing your response, create a draft PR for the current branch using `gh pr create --draft`. If a PR already exists for the branch, skip this step. The stop hook will then poll CI checks on the PR.
-- To help verify that you ran the tests, report the exact command you used to run the tests, as well as the total number of tests that passed and failed (and the number that failed had better be 0).
 - When adding tests, consider whether it should be a unit test (in a _test.py file) or an integration/acceptance/release test (in a test_*.py file, and marked with @pytest.mark.acceptance or @pytest.mark.release, no marks needed for integration).  See the style_guide.md for exact details on the types of tests. In general, most slow tests of all functionality should be release tests, and only important / core functionality should be acceptance tests.
 - Use the shared fixtures (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of creating your own.
 - Do NOT create tests for test utilities (e.g. never create `testing_test.py`). Code in `testing.py` and `conftest.py` is exercised by the tests that use it and does not need its own test file.
@@ -68,6 +58,19 @@ Only after doing all of the above should you begin writing code.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
+
+# Running tests
+
+- Before finishing your response, if you have made any changes, then you must ensure that you have run ALL tests and that they all pass. DO NOT just run a subset of the tests! However, while iterating (e.g. fixing a failing test, developing a feature), run only the relevant tests locally for rapid feedback -- save the full test run for the final check.
+- To run the full test suite, use `just test-offload` from the root of the git checkout. This fans out all unit and integration tests across isolated Modal sandboxes in parallel.
+- While iterating locally on specific tests, you can run `uv run pytest --no-cov --cov-fail-under=0 <path>::<test_name>` for rapid feedback on individual tests. To run all tests for a single project locally, use a subshell: `(cd libs/mngr && uv run pytest --no-cov --cov-fail-under=0)`. You can also add `-m 'not tmux and not modal and not docker and not docker_sdk and not acceptance and not release'` to skip slow infrastructure tests when running locally.
+- When running pytest locally with a Bash tool timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 uv run pytest ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
+- Offload produces results in test-results/ (junit.xml and .coverage files). Local pytest produces files in .test_output/ for things like slow tests and coverage reports.
+- Acceptance tests also run in CI via offload (`just test-offload-acceptance`). Do *not* run all acceptance tests locally to validate changes--just allow CI to run them automatically after you finish responding.
+- If you need to run a specific acceptance or release test to write or fix it, iterate on that specific test locally by calling "just test <full_path>::<test_name>" from the root of the git checkout. Do this rather than re-running all tests in CI.
+- Note that tasks are *not* allowed to finish without A) all tests passing in CI, B) running /autofix to verify and fix code issues, and C) running /verify-conversation to review the conversation for behavioral issues.
+- Before finishing your response, create a draft PR for the current branch using `gh pr create --draft`. If a PR already exists for the branch, skip this step. The stop hook will then poll CI checks on the PR.
+- To help verify that you ran the tests, report the exact command you used to run the tests, as well as the total number of tests that passed and failed (and the number that failed had better be 0).
 
 # Remote hosts
 
