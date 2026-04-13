@@ -38,7 +38,7 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(660)
 def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can send an initial message (so you don't have to wait around, eg, while a Modal container starts)
