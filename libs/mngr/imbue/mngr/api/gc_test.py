@@ -1352,7 +1352,7 @@ def test_gc_work_dirs_dry_run_reports_but_does_not_delete(
 # =========================================================================
 
 
-class _HostOfflineErrorProvider(MockProviderInstance):
+class _FirstMockHostProvider(MockProviderInstance):
     """Provider that returns the first host in mock_hosts from get_host."""
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
@@ -1401,7 +1401,7 @@ def test_gc_single_host_work_dir_skips_host_offline_error(
     """_gc_single_host_work_dir skips hosts that raise HostOfflineError."""
     erroring_host = _make_erroring_host(local_provider, _OfflineErroringHost)
 
-    provider = _HostOfflineErrorProvider(
+    provider = _FirstMockHostProvider(
         name=ProviderInstanceName("test-offline"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
@@ -1430,7 +1430,7 @@ def test_gc_single_host_work_dir_skips_host_auth_error(
     """_gc_single_host_work_dir skips hosts that raise HostAuthenticationError."""
     erroring_host = _make_erroring_host(local_provider, _AuthErroringHost)
 
-    provider = _HostOfflineErrorProvider(
+    provider = _FirstMockHostProvider(
         name=ProviderInstanceName("test-auth"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
