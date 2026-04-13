@@ -1,8 +1,7 @@
 """Shared utilities for agent supporting service scripts.
 
 Provides common watchdog integration, logging, and polling infrastructure
-used by supporting services in mngr_llm (conversation_watcher, webchat_server)
-and mngr_claude_mind (event_watcher).
+used by supporting services that need watcher infrastructure.
 
 Lives in mngr_recursive so that all plugins that need watcher infrastructure
 can depend on it without introducing circular dependencies.

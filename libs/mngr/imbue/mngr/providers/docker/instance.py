@@ -837,6 +837,16 @@ kill -TERM 1
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
+        # Fail fast if a container with this name already exists, before the
+        # expensive image build step.
+        container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        existing = self._find_container_by_name(name)
+        if existing is not None:
+            raise MngrError(
+                f"A container named '{container_name}' already exists (id: {existing.short_id}). "
+                f"Remove it with 'mngr destroy {name}' or 'docker rm -f {container_name}' first."
+            )
+
         base_image = str(image) if image else (self.config.default_image or DEFAULT_IMAGE)
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
@@ -863,7 +873,6 @@ kill -TERM 1
                 image_name = self._pull_image(base_image)
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
-            container_name = f"{self.mngr_ctx.config.prefix}{name}"
 
             # Create the per-host volume directory before starting the container
             # so the symlink target exists when the setup script runs.

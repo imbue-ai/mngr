@@ -36,6 +36,7 @@ class ShellCommandDataSource(FrozenModel):
 
     field_key: str = Field(description="Field key for this shell command's output")
     config: ShellCommandConfig = Field(description="Shell command configuration")
+    timeout_seconds: float = Field(default=_SHELL_TIMEOUT_SECONDS, description="Per-process timeout in seconds")
 
     @property
     def name(self) -> str:
@@ -67,13 +68,13 @@ class ShellCommandDataSource(FrozenModel):
         try:
             with cg.make_concurrency_group(
                 name=f"shell-{self.field_key}",
-                exit_timeout_seconds=_SHELL_TIMEOUT_SECONDS,
+                exit_timeout_seconds=self.timeout_seconds,
             ) as child_cg:
                 for agent in agents:
                     env = _build_shell_env(agent, cached_fields.get(agent.name, {}))
                     proc = child_cg.run_process_in_background(
                         ["sh", "-c", self.config.command],
-                        timeout=_SHELL_TIMEOUT_SECONDS,
+                        timeout=self.timeout_seconds,
                         is_checked_by_group=False,
                         env=env,
                     )
@@ -85,11 +86,11 @@ class ShellCommandDataSource(FrozenModel):
 
         for agent_name, proc in processes:
             rc = proc.returncode
-            if rc is not None and rc == 0:
+            if rc == 0:
                 stdout = proc.read_stdout().strip()
                 if stdout:
                     fields[agent_name] = {self.field_key: StringField(value=stdout)}
-            elif rc is not None and rc != 0:
+            else:
                 stderr = proc.read_stderr().strip()
                 msg = f"Shell '{self.config.name}' failed for {agent_name} (exit {rc})"
                 if stderr:

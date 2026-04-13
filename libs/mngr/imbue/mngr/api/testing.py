@@ -3,6 +3,7 @@
 import shlex
 import shutil
 import subprocess
+import types
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,18 @@ class FakeHost(MutableModel):
         default=None,
         description="SSH connection info (user, hostname, port, key_path) for remote hosts",
     )
+    ssh_known_hosts_file: str | None = Field(
+        default=None,
+        description="Path to known_hosts file for SSH host key verification",
+    )
+
+    @property
+    def connector(self) -> types.SimpleNamespace:
+        """Provide a connector-like attribute with host data for SSH configuration."""
+        data: dict[str, str] = {}
+        if self.ssh_known_hosts_file is not None:
+            data["ssh_known_hosts_file"] = self.ssh_known_hosts_file
+        return types.SimpleNamespace(host=types.SimpleNamespace(data=data))
 
     def _execute_command(
         self,

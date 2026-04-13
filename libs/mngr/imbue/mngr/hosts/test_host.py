@@ -57,6 +57,7 @@ from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import build_test_known_hosts_file
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
 from imbue.mngr.utils.testing import local_sshd
@@ -86,13 +87,16 @@ def ssh_host_factory(
     private_key, public_key = generate_ssh_keypair(tmp_path)
     public_key_content = public_key.read_text()
 
-    with local_sshd(public_key_content, tmp_path) as (port, _host_key):
+    with local_sshd(public_key_content, tmp_path) as (port, host_key_path):
+        known_hosts_path = build_test_known_hosts_file(host_key_path, port, tmp_path / "known_hosts")
+
         current_user = os.environ.get("USER", "root")
         ssh_config = SSHHostConfig(
             address="127.0.0.1",
             port=port,
             user=current_user,
             key_file=private_key,
+            known_hosts_file=known_hosts_path,
         )
 
         def create_ssh_host(name: str) -> Host:

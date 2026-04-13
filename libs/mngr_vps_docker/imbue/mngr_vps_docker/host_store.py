@@ -17,6 +17,7 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # State container configuration
 STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
+_FILE_SEP: Final[str] = "---MNGR_FILE_SEP---"
 STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
 CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
 
@@ -158,26 +159,18 @@ class VpsDockerHostStore:
         self._cache.pop(host_id, None)
 
     def list_all_host_records(self) -> list[VpsDockerHostRecord]:
-        """List all host records stored on the state volume."""
-        records: list[VpsDockerHostRecord] = []
+        """List all host records stored on the state volume in a single SSH command."""
         state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
+        script = (
+            f'for f in \'{state_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
+        )
         try:
-            output = self._exec(f"ls '{state_dir}'/*.json 2>/dev/null || true")
+            output = self._exec(script)
         except ContainerSetupError as e:
             logger.debug("No host records found on state volume: {}", e)
             return []
 
-        for line in output.strip().splitlines():
-            if not line.endswith(".json") or "/" not in line:
-                continue
-            filename = line.rsplit("/", 1)[-1]
-            host_id_str = filename.removesuffix(".json")
-            host_id = HostId(host_id_str)
-            record = self.read_host_record(host_id, is_cache_enabled=False)
-            if record is not None:
-                records.append(record)
-
-        return records
+        return self._parse_batched_host_records(output)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Write agent data for offline listing."""
@@ -193,27 +186,18 @@ class VpsDockerHostStore:
         logger.trace("Persisted agent data: {}", path)
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Read persisted agent data for a host."""
+        """Read persisted agent data for a host in a single SSH command."""
         agent_dir = self._agent_data_dir(host_id)
+        script = (
+            f'for f in \'{agent_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
+        )
         try:
-            output = self._exec(f"ls '{agent_dir}'/*.json 2>/dev/null || true")
+            output = self._exec(script)
         except ContainerSetupError as e:
             logger.debug("No agent data found for host {}: {}", host_id, e)
             return []
 
-        agent_records: list[dict[str, Any]] = []
-        for line in output.strip().splitlines():
-            if not line.endswith(".json"):
-                continue
-            try:
-                content = self._exec(f"cat '{line}'")
-                agent_data = json.loads(content)
-                agent_records.append(agent_data)
-            except (json.JSONDecodeError, ContainerSetupError) as e:
-                logger.trace("Skipped invalid agent record {}: {}", line, e)
-                continue
-
-        return agent_records
+        return self._parse_batched_json_files(output)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         """Remove persisted agent data."""
@@ -222,6 +206,94 @@ class VpsDockerHostStore:
             self._exec(f"rm -f '{path}'")
         except ContainerSetupError as e:
             logger.warning("Failed to remove agent data {}: {}", path, e)
+
+    def list_all_host_records_with_agents(
+        self,
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+        """Read all host records and their agent data in a single SSH command.
+
+        Returns (host_records, agent_data_by_host_id).
+        """
+        state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
+        # Read all .json files at the top level (host records) and in subdirs (agent data)
+        script = (
+            f"for f in '{state_dir}'/*.json '{state_dir}'/*/*.json; do "
+            f'[ -f "$f" ] || continue; '
+            f"echo '{_FILE_SEP}'\"$f\"; "
+            f'cat "$f"; '
+            f"done"
+        )
+        try:
+            output = self._exec(script)
+        except ContainerSetupError as e:
+            logger.debug("No records found on state volume: {}", e)
+            return [], {}
+
+        host_records = self._parse_batched_host_records(output)
+        agent_data_by_host_id: dict[HostId, list[dict[str, Any]]] = {}
+        # Parse agent data files (those in subdirectories like /host_state/<host-id>/<agent-id>.json)
+        # Agent data lives in subdirectories: /host_state/<host-id>/<agent-id>.json
+        for file_path, content in self._split_batched_output(output):
+            relative = file_path.removeprefix(f"{state_dir}/")
+            parts = relative.split("/")
+            if len(parts) == 2 and parts[1].endswith(".json"):
+                host_id = HostId(parts[0])
+                try:
+                    agent_data = json.loads(content)
+                    agent_data_by_host_id.setdefault(host_id, []).append(agent_data)
+                except json.JSONDecodeError as e:
+                    logger.trace("Skipped invalid agent record {}: {}", file_path, e)
+
+        return host_records, agent_data_by_host_id
+
+    def _split_batched_output(self, output: str) -> list[tuple[str, str]]:
+        """Split batched output into (file_path, content) pairs."""
+        results: list[tuple[str, str]] = []
+        if not output.strip():
+            return results
+
+        parts = output.split(_FILE_SEP)
+        # Skip content before first separator
+        for part in parts[1:]:
+            lines = part.split("\n", 1)
+            if len(lines) < 2:
+                continue
+            file_path = lines[0].strip()
+            content = lines[1].strip()
+            if file_path and content:
+                results.append((file_path, content))
+        return results
+
+    def _parse_batched_host_records(self, output: str) -> list[VpsDockerHostRecord]:
+        """Parse host records from batched output."""
+        state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
+        records: list[VpsDockerHostRecord] = []
+        for file_path, content in self._split_batched_output(output):
+            # Only parse top-level .json files (host records), not agent subdirs
+            relative = file_path.removeprefix(f"{state_dir}/")
+            if "/" in relative:
+                continue
+            if not relative.endswith(".json"):
+                continue
+            host_id_str = relative.removesuffix(".json")
+            try:
+                host_record = VpsDockerHostRecord.model_validate_json(content)
+                host_id = HostId(host_id_str)
+                self._cache[host_id] = host_record
+                records.append(host_record)
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning("Failed to parse host record {}: {}", file_path, e)
+        return records
+
+    def _parse_batched_json_files(self, output: str) -> list[dict[str, Any]]:
+        """Parse JSON files from batched output."""
+        results: list[dict[str, Any]] = []
+        for file_path, content in self._split_batched_output(output):
+            try:
+                results.append(json.loads(content))
+            except json.JSONDecodeError as e:
+                logger.trace("Skipped invalid JSON file {}: {}", file_path, e)
+        return results
 
     def clear_cache(self) -> None:
         """Clear the in-memory cache."""

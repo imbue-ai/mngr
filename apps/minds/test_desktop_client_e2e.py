@@ -1,0 +1,357 @@
+"""End-to-end test for the minds desktop client.
+
+Creates an agent from the forever-claude-template repo via the desktop
+client API, verifies it starts and its web server is accessible through
+the desktop client proxy.
+
+Set MINDS_TEMPLATE_REPO to a local checkout of the forever-claude-template
+repo for faster iteration (avoids cloning). If unset, the tests clone
+from the GitHub repo into a temporary directory.
+
+Run from the repo root:
+    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_e2e
+    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_dev_mode_e2e
+
+The Docker E2E test waits for /tmp/minds-e2e-done before tearing down:
+    touch /tmp/minds-e2e-done
+"""
+
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+import dotenv
+import httpx
+import pytest
+import uvicorn
+from loguru import logger
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
+from imbue.minds.primitives import OneTimeCode
+from imbue.minds.testing import clean_env
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_TEMPLATE_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"
+_SIGNAL_FILE = Path("/tmp/minds-e2e-done")
+_AGENT_NAME = "forever"
+
+
+def _get_template_repo() -> str:
+    """Return the template repo source: a local path (from MINDS_TEMPLATE_REPO) or the git URL.
+
+    When MINDS_TEMPLATE_REPO is set, returns the expanded local path.
+    Otherwise returns the GitHub URL so the AgentCreator clones it into a temp directory.
+    """
+    env_value = os.environ.get("MINDS_TEMPLATE_REPO")
+    if env_value is not None:
+        return str(Path(env_value).expanduser())
+    return _TEMPLATE_GIT_URL
+
+
+def _configure_logging() -> None:
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG",
+        format="{time:HH:mm:ss.SSS} | {level:<7} | {name}:{function}:{line} - {message}",
+    )
+
+
+def _load_env() -> None:
+    env_file = _REPO_ROOT / ".env"
+    if env_file.exists():
+        dotenv.load_dotenv(env_file)
+    test_env_file = _REPO_ROOT / ".test_env"
+    if test_env_file.exists():
+        dotenv.load_dotenv(test_env_file)
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _destroy_agent(agent_name: str) -> None:
+    try:
+        subprocess.run(
+            ["uv", "run", "mngr", "destroy", agent_name, "--force"],
+            capture_output=True,
+            timeout=30,
+            text=True,
+            cwd=_REPO_ROOT,
+            env=clean_env(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.debug("mngr destroy {} failed (best-effort cleanup): {}", agent_name, exc)
+
+    # Clean up any leftover worktree branch from dev-mode agents.
+    # mngr destroy removes the worktree directory but not the git branch.
+    # Only relevant when using a local checkout (not a cloned URL).
+    template_repo = os.environ.get("MINDS_TEMPLATE_REPO")
+    if template_repo is not None:
+        branch_name = f"mngr/{agent_name}"
+        try:
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                capture_output=True,
+                timeout=5,
+                text=True,
+                cwd=str(Path(template_repo).expanduser()),
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.debug("git branch -D {} failed (best-effort cleanup): {}", branch_name, exc)
+
+
+class DesktopClientFixture:
+    def __init__(self, tmp_dir: Path) -> None:
+        self.host = "127.0.0.1"
+        self.port = _find_free_port()
+        self.code = OneTimeCode("test-code-for-e2e-12345")
+        self.tmp_dir = tmp_dir
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
+        self._stream_manager: MngrStreamManager | None = None
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def start(self) -> None:
+        paths = WorkspacePaths(data_dir=self.tmp_dir)
+        auth_store = FileAuthStore(data_directory=paths.auth_dir)
+        auth_store.add_one_time_code(code=self.code)
+
+        backend_resolver = MngrCliBackendResolver()
+        self._stream_manager = MngrStreamManager(resolver=backend_resolver)
+        agent_creator = AgentCreator(paths=paths)
+
+        app = create_desktop_client(
+            auth_store=auth_store,
+            backend_resolver=backend_resolver,
+            http_client=None,
+            agent_creator=agent_creator,
+        )
+
+        self._stream_manager.start()
+
+        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
+        self._server = uvicorn.Server(config)
+
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+
+        for _ in range(50):
+            try:
+                with socket.create_connection((self.host, self.port), timeout=0.1):
+                    logger.info("Desktop client started on {}:{}", self.host, self.port)
+                    return
+            except (ConnectionRefusedError, OSError):
+                threading.Event().wait(0.1)
+
+        pytest.fail("Desktop client did not start within 5 seconds")
+
+    def stop(self) -> None:
+        if self._stream_manager is not None:
+            try:
+                self._stream_manager.stop()
+            except ConcurrencyExceptionGroup:
+                # Stranded --follow processes may not terminate in time during teardown.
+                logger.debug("Stream manager stop raised (expected during teardown)")
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+def _create_agent_with_retry(
+    client: httpx.Client,
+    max_attempts: int = 2,
+    agent_name: str = _AGENT_NAME,
+    launch_mode: str = "LOCAL",
+) -> str:
+    """Create an agent via API, retrying on failure (e.g. provisioning timeout)."""
+    for attempt in range(max_attempts):
+        logger.info("Creating agent (attempt {}/{})", attempt + 1, max_attempts)
+        resp = client.post(
+            "/api/create-agent",
+            json={
+                "git_url": _get_template_repo(),
+                "agent_name": agent_name,
+                "launch_mode": launch_mode,
+            },
+        )
+        assert resp.status_code == 200, f"Create API failed: {resp.status_code} {resp.text}"
+        agent_id = resp.json()["agent_id"]
+
+        for i in range(300):
+            resp = client.get(f"/api/create-agent/{agent_id}/status")
+            if resp.status_code == 200:
+                data = resp.json()
+                status = data.get("status")
+                if status == "DONE":
+                    logger.info("Agent created in {} seconds", i)
+                    return agent_id
+                if status == "FAILED":
+                    error = data.get("error", "unknown")
+                    logger.warning("Creation failed: {}", error)
+                    if attempt < max_attempts - 1:
+                        logger.info("Retrying...")
+                        _destroy_agent(agent_name)
+                        break
+                    pytest.fail(f"Agent creation failed after {max_attempts} attempts: {error}")
+            threading.Event().wait(1)
+        else:
+            if attempt < max_attempts - 1:
+                logger.warning("Creation timed out, retrying...")
+                _destroy_agent(agent_name)
+                continue
+            pytest.fail(f"Agent creation timed out after {max_attempts} attempts")
+
+    pytest.fail("Unreachable")
+
+
+def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: int) -> None:
+    """Poll the desktop client until the agent's web server is discovered, then verify the proxy."""
+    logger.info("Waiting for server discovery (up to {}s)...", timeout_seconds)
+    for i in range(timeout_seconds):
+        resp = client.get(f"/agents/{agent_id}/servers/")
+        if resp.status_code == 200 and "web" in resp.text:
+            logger.info("Web server discovered after {} seconds", i)
+            break
+        if i % 10 == 0 and i > 0:
+            logger.debug("Still waiting for discovery ({} seconds)...", i)
+        threading.Event().wait(1)
+    else:
+        resp = client.get(f"/agents/{agent_id}/servers/")
+        logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
+        pytest.fail(f"Web server not discovered within {timeout_seconds} seconds")
+
+    resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
+    assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
+    logger.info("Web server accessible via proxy (status {})", resp.status_code)
+
+
+@pytest.mark.release
+@pytest.mark.timeout(600)
+def test_create_agent_e2e(tmp_path: Path) -> None:
+    """Create an agent and verify its web server is accessible through the desktop client."""
+    _configure_logging()
+    _load_env()
+    os.environ["MINDS_WORKSPACE_NAME"] = _AGENT_NAME
+
+    _SIGNAL_FILE.unlink(missing_ok=True)
+    _destroy_agent(_AGENT_NAME)
+
+    server = DesktopClientFixture(tmp_path)
+    server.start()
+
+    client = httpx.Client(
+        base_url=server.base_url,
+        cookies={"minds_session": "skip"},
+        timeout=15.0,
+    )
+    os.environ["SKIP_AUTH"] = "1"
+
+    try:
+        # Create agent via API (with retry for transient provisioning failures)
+        agent_id = _create_agent_with_retry(client, max_attempts=2)
+        logger.info("Agent ready: {}", agent_id)
+
+        # Wait for the desktop client to discover the agent's web server
+        # and verify it is accessible through the proxy.
+        _wait_for_web_server(client, agent_id, timeout_seconds=120)
+
+        logger.info("Server: {}", server.base_url)
+        logger.info("Agent servers: {}/agents/{}/servers/", server.base_url, agent_id)
+        logger.info("Waiting for signal file: {}", _SIGNAL_FILE)
+        logger.info("Create it to finish: touch {}", _SIGNAL_FILE)
+
+        while not _SIGNAL_FILE.exists():
+            threading.Event().wait(1)
+
+        logger.info("Signal received, tearing down...")
+
+    finally:
+        client.close()
+        _destroy_agent(_AGENT_NAME)
+        server.stop()
+        _SIGNAL_FILE.unlink(missing_ok=True)
+
+
+_DEV_AGENT_NAME = "forever-dev"
+
+
+@pytest.mark.release
+@pytest.mark.timeout(120)
+def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
+    """Create a DEV-mode agent (local provider, no Docker) and verify its web server is proxied.
+
+    This is faster than the Docker E2E test because it skips the Docker build.
+    The agent runs in a local git worktree with its own UV tool installation.
+    """
+    _configure_logging()
+    _load_env()
+    os.environ["MINDS_WORKSPACE_NAME"] = _DEV_AGENT_NAME
+
+    # Set up isolated UV tool directories so the extra_provision_command
+    # installs mngr into a temp location instead of clobbering the host's install.
+    uv_tool_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-tool-")
+    uv_tool_bin_dir = tempfile.mkdtemp(prefix="minds-e2e-uv-bin-")
+    orig_uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    orig_uv_tool_bin_dir = os.environ.get("UV_TOOL_BIN_DIR")
+    os.environ["UV_TOOL_DIR"] = uv_tool_dir
+    os.environ["UV_TOOL_BIN_DIR"] = uv_tool_bin_dir
+
+    server = DesktopClientFixture(tmp_path)
+    client: httpx.Client | None = None
+
+    try:
+        _destroy_agent(_DEV_AGENT_NAME)
+        server.start()
+
+        client = httpx.Client(
+            base_url=server.base_url,
+            cookies={"minds_session": "skip"},
+            timeout=15.0,
+        )
+        os.environ["SKIP_AUTH"] = "1"
+
+        agent_id = _create_agent_with_retry(
+            client,
+            max_attempts=2,
+            agent_name=_DEV_AGENT_NAME,
+            launch_mode="DEV",
+        )
+        logger.info("Agent ready: {}", agent_id)
+
+        # Wait for the desktop client to discover the agent's web server
+        # and verify it is accessible through the proxy.
+        _wait_for_web_server(client, agent_id, timeout_seconds=60)
+
+    finally:
+        if client is not None:
+            client.close()
+        _destroy_agent(_DEV_AGENT_NAME)
+        server.stop()
+        shutil.rmtree(uv_tool_dir, ignore_errors=True)
+        shutil.rmtree(uv_tool_bin_dir, ignore_errors=True)
+        if orig_uv_tool_dir is None:
+            os.environ.pop("UV_TOOL_DIR", None)
+        else:
+            os.environ["UV_TOOL_DIR"] = orig_uv_tool_dir
+        if orig_uv_tool_bin_dir is None:
+            os.environ.pop("UV_TOOL_BIN_DIR", None)
+        else:
+            os.environ["UV_TOOL_BIN_DIR"] = orig_uv_tool_bin_dir

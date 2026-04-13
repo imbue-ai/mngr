@@ -831,6 +831,51 @@ def test_preflight_check_skips_when_not_git_repo(
     )
 
 
+def test_preflight_check_raises_when_only_global_gitignore(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should raise when .claude/settings.local.json is only in global gitignore.
+
+    Remote hosts don't have the user's global gitignore, so a rule that only
+    lives in the global config would cause provisioning to fail after expensive
+    host creation.
+    """
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    init_git_repo(source_dir, initial_commit=False)
+
+    # Set up a "global" gitignore that covers the file, but no repo .gitignore
+    global_gitignore = tmp_path / "global_gitignore"
+    global_gitignore.write_text(".claude/settings.local.json\n")
+    subprocess.run(
+        ["git", "config", "core.excludesFile", str(global_gitignore)],
+        cwd=source_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    # Verify the file IS ignored (via global)
+    check = subprocess.run(
+        ["git", "check-ignore", "-q", ".claude/settings.local.json"],
+        cwd=source_dir,
+        capture_output=True,
+    )
+    assert check.returncode == 0, "File should be ignored via global gitignore"
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    with pytest.raises(PluginMngrError, match="only gitignored via your global gitignore"):
+        ClaudeAgent.preflight_check(
+            source_host=host,
+            source_path=source_dir,
+            agent_options=options,
+            agent_config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
 def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -848,7 +893,7 @@ def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitigno
     (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
 
     # Should not raise
-    _check_settings_local_gitignored(host, repo_dir)
+    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
 
 
 def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
@@ -868,7 +913,7 @@ def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_git
     (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
 
     with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
-        _check_settings_local_gitignored(host, repo_dir)
+        _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
 
     # Error message should tell the user to add the resolved path, not the symlink path
     assert ".agents/settings.local.json" in str(exc_info.value)
@@ -889,7 +934,7 @@ def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
     (repo_dir / ".claude").symlink_to(outside_dir)
 
     # Should not raise -- target is outside the repo, git won't track it
-    _check_settings_local_gitignored(host, repo_dir)
+    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
 
 
 def test_configure_agent_hooks_raises_when_not_gitignored(
@@ -1156,7 +1201,80 @@ def test_provision_local_credentials_missing_source(local_provider: LocalProvide
     assert not (config_dir / ".credentials.json").exists()
 
 
-def test_provision_configures_agent_hooks(
+def test_configure_agent_hooks_adds_permission_auto_allow_when_enabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should add permission auto-allow hook when auto_allow_permissions is True."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True),
+        host=host,
+    )
+
+    agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+
+    # Should have readiness hooks
+    assert "SessionStart" in settings["hooks"]
+    assert "UserPromptSubmit" in settings["hooks"]
+
+    # Should have the permission auto-allow hook
+    permission_hooks = settings["hooks"]["PermissionRequest"]
+    auto_allow_hooks = [h for h in permission_hooks if h.get("matcher") == "*"]
+    assert len(auto_allow_hooks) == 1
+    inner = auto_allow_hooks[0]["hooks"][0]
+    assert "allow" in inner["command"]
+    assert inner["timeout"] == 5
+
+
+def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_configure_agent_hooks should not add permission auto-allow hook when auto_allow_permissions is False."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _init_git_with_gitignore(work_dir)
+
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False),
+        host=host,
+    )
+
+    agent._configure_agent_hooks(host)
+
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = json.loads(settings_path.read_text())
+
+    # The readiness PermissionRequest hook (no matcher) should exist
+    permission_hooks = settings["hooks"]["PermissionRequest"]
+    # No hook with matcher="*" should exist
+    auto_allow_hooks = [h for h in permission_hooks if h.get("matcher") == "*"]
+    assert len(auto_allow_hooks) == 0
+
+
+def test_provision_configures_readiness_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """provision should configure agent hooks."""

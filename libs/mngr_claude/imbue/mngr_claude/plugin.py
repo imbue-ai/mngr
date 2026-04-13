@@ -73,6 +73,7 @@ from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
@@ -233,6 +234,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=False,
         description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
         "before startup. When False, the interactive flow prompts.",
+    )
+    auto_allow_permissions: bool = Field(
+        default=False,
+        description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
+        "This means Claude Code will never pause for permission approval.",
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
@@ -1031,7 +1037,11 @@ def _has_api_credentials_available(
     return False
 
 
-def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+def _check_settings_local_gitignored(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    require_repo_rule: bool = False,
+) -> None:
     """Verify .claude/settings.local.json is gitignored in the given repo path.
 
     When .claude is a symlink, resolves it and checks the resolved path against
@@ -1040,6 +1050,12 @@ def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path)
     Raises PluginMngrError if the file is not gitignored. Silently returns
     if the path is not a git repository or if the .claude symlink target is
     outside the repo (since git won't track it).
+
+    When require_repo_rule is True, also verifies that the ignore rule comes
+    from the repository itself (not the user's global gitignore). This is
+    important for preflight checks: a global gitignore entry won't exist on
+    remote hosts, so the provisioning check would fail after expensive host
+    creation.
     """
     settings_relative = Path(".claude") / "settings.local.json"
 
@@ -1083,6 +1099,22 @@ def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path)
             "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
             f"Add '{settings_relative}' to your .gitignore and try again. (original error: {result.stderr})"
         )
+
+    if require_repo_rule:
+        # Re-check with global excludes disabled to see if the rule is from
+        # the repo itself. If only the global gitignore covers it, the remote
+        # host (which has no global gitignore) will fail during provisioning.
+        repo_only_result = host.execute_idempotent_command(
+            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(settings_relative))}",
+            cwd=repo_path,
+            timeout_seconds=5.0,
+        )
+        if not repo_only_result.success:
+            raise PluginMngrError(
+                f".claude/settings.local.json is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
+                "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
+                "Add '.claude/settings.local.json' to your repository's .gitignore and try again."
+            )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -1197,8 +1229,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         mngr writes readiness hooks to this file during provisioning. If it's not
         gitignored, it would appear as an unstaged change. Checking early avoids
         wasting time on host creation and work_dir setup before surfacing this error.
+
+        Uses require_repo_rule=True so that rules only in the user's global
+        gitignore are rejected -- remote hosts won't have the global config.
         """
-        _check_settings_local_gitignored(source_host, source_path)
+        _check_settings_local_gitignored(source_host, source_path, require_repo_rule=True)
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.
@@ -1492,7 +1527,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
           Notification:auth_success hook that propagates keychain credentials
           to all per-agent entries after login.
 
-        Skips if all hooks already exist.
+        When auto_allow_permissions is True, also adds a hook that auto-allows
+        all permission dialogs so Claude never pauses for approval.
+
+        Skips if hooks already exist.
         """
         # Future improvement: use `claude --settings <path>` to load hooks from
         # outside the worktree (e.g. the agent state dir), eliminating the need
@@ -1502,7 +1540,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # Check gitignore. During create(), preflight_check already verified
         # this on the source, but this covers other code paths (e.g. mngr provision).
-        _check_settings_local_gitignored(host, self.work_dir)
+        _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
 
         hooks_config = build_readiness_hooks_config()
 
@@ -1514,7 +1552,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         except FileNotFoundError:
             pass
 
-        # Merge hooks, checking for duplicates
+        # Merge readiness hooks, checking for duplicates
+        is_changed = False
         merged = merge_hooks_config(existing_settings, hooks_config)
 
         # Conditionally add credential sync hooks (macOS only)
@@ -1525,7 +1564,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 merged = merged_with_creds
 
         if merged is None:
-            logger.debug("Agent hooks already configured in {}", settings_path)
+            logger.debug("Readiness hooks already configured in {}", settings_path)
+            merged = existing_settings
+        else:
+            is_changed = True
+
+        # Merge permission auto-allow hooks if configured
+        if self.agent_config.auto_allow_permissions:
+            permission_hooks = build_permission_auto_allow_hooks_config()
+            merged_with_permissions = merge_hooks_config(merged, permission_hooks)
+            if merged_with_permissions is not None:
+                merged = merged_with_permissions
+                is_changed = True
+
+        if not is_changed:
             return
 
         # Write the merged settings

@@ -9,10 +9,10 @@ import pytest
 
 from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
-from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -25,6 +25,46 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
+from imbue.mngr_claude.plugin import ClaudeAgent
+
+# =============================================================================
+# MRO invariant test
+# =============================================================================
+
+
+def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
+    """Ensure HeadlessClaude explicitly resolves any method defined on both ClaudeAgent and BaseHeadlessAgent.
+
+    HeadlessClaude has diamond inheritance: it extends both
+    NoPermissionsClaudeAgent (-> ClaudeAgent -> BaseAgent) and
+    BaseHeadlessAgent (-> BaseAgent). When both ClaudeAgent and
+    BaseHeadlessAgent define the same method, the MRO silently picks
+    ClaudeAgent's version (which appears first). HeadlessClaude must
+    explicitly override any such method to select the correct behavior.
+    """
+
+    def _callable_method_names(cls: type) -> set[str]:
+        return {
+            name
+            for name, val in cls.__dict__.items()
+            if not name.startswith("__") and (callable(val) or isinstance(val, (classmethod, staticmethod)))
+        }
+
+    base_headless_methods = _callable_method_names(BaseHeadlessAgent)
+    claude_methods = _callable_method_names(ClaudeAgent)
+    headless_claude_methods = _callable_method_names(HeadlessClaude)
+
+    # Methods defined on both sides of the diamond
+    shared = base_headless_methods & claude_methods
+
+    # HeadlessClaude must explicitly override every shared method
+    unresolved = shared - headless_claude_methods
+    assert not unresolved, (
+        f"BaseHeadlessAgent and ClaudeAgent both define these methods, but HeadlessClaude "
+        f"does not explicitly override them: {unresolved}. Without an explicit override on "
+        f"HeadlessClaude, the MRO silently picks ClaudeAgent's version. Add overrides to "
+        f"HeadlessClaude that delegate to the correct base class."
+    )
 
 
 def _make_headless_agent(
@@ -89,7 +129,6 @@ class _AlwaysFinishedHeadlessClaude(HeadlessClaude):
     """
 
     _startup_grace_seconds: float = 0.3
-    _stdout_poll_timeout: float = 1.5
 
     def _is_agent_finished(self) -> bool:
         return True
@@ -113,47 +152,6 @@ class _CreatesFileOnSecondPollAgent(_AlwaysFinishedHeadlessClaude):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("")
         return super()._file_exists_on_host(path)
-
-
-# =============================================================================
-# Tests for HeadlessClaude overrides
-# =============================================================================
-
-
-def test_preflight_send_message_raises(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    """_preflight_send_message should raise SendMessageError for headless agents."""
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent._preflight_send_message("some-target")
-
-
-def test_send_message_raises(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    """send_message should raise SendMessageError because _preflight blocks it."""
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent.send_message("hello")
-
-
-def test_uses_paste_detection_send_returns_false(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
-    assert agent.uses_paste_detection_send() is False
-
-
-def test_get_tui_ready_indicator_returns_none(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
-    assert agent.get_tui_ready_indicator() is None
 
 
 # =============================================================================
