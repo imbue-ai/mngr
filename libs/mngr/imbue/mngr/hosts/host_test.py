@@ -1688,6 +1688,51 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
 
 
 # =========================================================================
+# Tests for disconnect / _close_paramiko_client
+# =========================================================================
+
+
+def test_disconnect_closes_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must call close() on the underlying paramiko SSH client.
+
+    pyinfra's disconnect() only clears its SFTP cache and sets connected=False.
+    It does not close the paramiko SSHClient, which would leak the TCP socket.
+    """
+    ssh_client = _FakeSSHClient(transport_return=_FakeTransport())
+    fake = _FakeHostWithSSH(ssh_client=ssh_client)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    host.disconnect()
+
+    assert ssh_client.close_call_count == 1
+
+
+def test_disconnect_is_safe_without_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must not raise when the pyinfra host has no SSH client."""
+    fake = _FakeHostWithSSH(ssh_client=None)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    # Should not raise
+    host.disconnect()
+
+
+# =========================================================================
 # Tests for _format_env_file
 # =========================================================================
 
