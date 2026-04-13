@@ -1406,7 +1406,7 @@ class _AuthErroringHost(Host):
         raise HostAuthenticationError("authentication failed")
 
 
-def _make_erroring_host(provider: LocalProviderInstance, host_cls: type) -> Host:
+def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -> Host:
     """Create an instance of host_cls using the local provider's connector and ID."""
     # Build the same way as LocalProviderInstance._create_host does.
     names_data = (["@local"], {})
