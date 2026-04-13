@@ -60,18 +60,18 @@ def _read_target_from_stdin(
     return line
 
 
-def _validate_event_type(event_str: str) -> str:
-    """Validate an event type string against LifecycleEventType.
+def _validate_event_type(event_str: str) -> LifecycleEventType:
+    """Parse an event type string into a LifecycleEventType.
 
-    Returns the uppercased event type string.
     Raises click.UsageError if the event type is not recognized.
     """
-    uppercased = event_str.upper()
-    valid_types = {e.value for e in LifecycleEventType}
-    if uppercased not in valid_types:
-        sorted_valid = sorted(valid_types)
-        raise click.UsageError(f"Invalid event type: '{event_str}'. Valid event types: {', '.join(sorted_valid)}")
-    return uppercased
+    try:
+        return LifecycleEventType(event_str.upper())
+    except ValueError as exc:
+        sorted_valid = sorted(e.value for e in LifecycleEventType)
+        raise click.UsageError(
+            f"Invalid event type: '{event_str}'. Valid event types: {', '.join(sorted_valid)}"
+        ) from exc
 
 
 def _emit_state_change(change: StateChange, output_format: OutputFormat) -> None:
@@ -347,14 +347,13 @@ Exit codes:
   2 - Timeout expired""",
     examples=(
         ("Wait for an agent to finish", "mngr wait my-agent DONE"),
-        ("Wait for agent to be ready", "mngr wait my-agent --event AGENT_READY"),
-        ("Wait for ready with timeout", "mngr wait my-agent --event AGENT_READY --timeout 2m"),
         ("Wait for any terminal state", "mngr wait agent-abc123"),
         ("Wait for agent to enter WAITING", "mngr wait my-agent WAITING"),
         ("Wait with timeout", "mngr wait my-agent DONE --timeout 5m"),
         ("Wait for host to stop", "mngr wait host-xyz789 STOPPED"),
         ("Read target from stdin", "echo agent-abc123 | mngr wait"),
         ("Multiple states", "mngr wait my-agent --state WAITING --state DONE"),
+        ("Wait for agent to be ready", "mngr wait my-agent --event AGENT_READY"),
     ),
     see_also=(("list", "List agents and their current states"),),
 ).register()

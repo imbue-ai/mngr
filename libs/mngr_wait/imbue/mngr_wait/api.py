@@ -351,25 +351,42 @@ def _detect_state_changes(
             on_state_change(change)
 
 
-def _check_latest_lifecycle_event(
+def _check_lifecycle_event_by_start_id(
     host: OnlineHostInterface,
     events_file: Path,
     event_type: str,
 ) -> bool:
-    """Check if the most recent event in the lifecycle file matches event_type.
+    """Check if the lifecycle file contains a matching event for the latest start cycle.
 
-    Reads only the last line of the events file to determine the latest event.
-    Returns False if the file doesn't exist, is empty, or the last event doesn't match.
+    Reads the file and finds the start_id of the most recent AGENT_STARTING event,
+    then checks if an event matching event_type exists with that same start_id.
+    Returns False if the file doesn't exist, has no AGENT_STARTING, or no matching
+    event is found for the current start cycle.
     """
-    result = host.execute_idempotent_command(f"tail -1 {shlex.quote(str(events_file))} 2>/dev/null || true")
-    last_line = result.stdout.strip()
-    if not last_line:
+    result = host.execute_idempotent_command(f"cat {shlex.quote(str(events_file))} 2>/dev/null || true")
+    content = result.stdout.strip()
+    if not content:
         return False
-    try:
-        data = json.loads(last_line)
-        return data.get("type") == event_type
-    except json.JSONDecodeError:
-        return False
+
+    # Parse all events, find the latest AGENT_STARTING's start_id,
+    # then check if a matching event_type exists with that start_id.
+    latest_start_id: str | None = None
+    matched = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") == "AGENT_STARTING":
+            latest_start_id = data.get("start_id")
+            # New start cycle invalidates any previous match
+            matched = False
+        if data.get("type") == event_type and data.get("start_id") == latest_start_id:
+            matched = True
+    return matched
 
 
 def wait_for_event(
@@ -380,9 +397,9 @@ def wait_for_event(
 ) -> WaitResult:
     """Poll until the agent's lifecycle event stream contains the target event type.
 
-    Checks the last line of the agent's mngr/lifecycle/events.jsonl file each
-    iteration. The match requires the most recent event's type field to equal
-    event_type, so an AGENT_STARTING event invalidates a previous AGENT_READY.
+    Uses start_id correlation: finds the most recent AGENT_STARTING event and checks
+    if a matching event_type with the same start_id exists. This is robust against
+    additional events being appended after the target event.
     """
     if resolved.agent_id is None:
         raise UserInputError("--event requires an agent target, not a host target")
@@ -400,7 +417,7 @@ def wait_for_event(
         elapsed = time.monotonic() - start_time
 
         try:
-            if _check_latest_lifecycle_event(host_interface, events_file, event_type):
+            if _check_lifecycle_event_by_start_id(host_interface, events_file, event_type):
                 return WaitResult(
                     target=resolved.target,
                     is_matched=True,
