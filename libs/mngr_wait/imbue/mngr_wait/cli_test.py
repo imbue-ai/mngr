@@ -289,7 +289,6 @@ def _create_local_agent_dir(host_dir: Path, agent_id: AgentId) -> None:
     (agent_dir / "data.json").write_text(json.dumps(data))
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_flag_returns_success_when_event_exists(
     cli_runner: CliRunner,
     temp_host_dir: Path,
@@ -306,7 +305,6 @@ def test_wait_cli_event_flag_returns_success_when_event_exists(
     assert result.exit_code == 0
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_flag_times_out_when_event_missing(
     cli_runner: CliRunner,
     temp_host_dir: Path,
@@ -326,7 +324,6 @@ def test_wait_cli_event_flag_times_out_when_event_missing(
     assert result.exit_code == 2
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_and_state_are_mutually_exclusive(
     cli_runner: CliRunner,
     temp_host_dir: Path,
