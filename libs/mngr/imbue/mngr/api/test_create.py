@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import cast
 
-import pluggy
 import pytest
 
 from imbue.imbue_common.model_update import to_update
@@ -29,7 +28,6 @@ from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -39,6 +37,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -1048,15 +1047,7 @@ def test_on_before_create_hook_modifies_agent_options(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create hook can modify agent_options."""
-    # Create a new plugin manager with our test plugin
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginModifyingAgentOptions())
-
-    # Create a modified context with our test plugin manager
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginModifyingAgentOptions()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1081,13 +1072,7 @@ def test_on_before_create_hook_modifies_create_work_dir(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create hook can modify create_work_dir."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginModifyingCreateWorkDir())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginModifyingCreateWorkDir()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1110,13 +1095,7 @@ def test_on_before_create_hook_returning_none_passes_through(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create returning None passes values unchanged."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginReturningNone())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginReturningNone()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1141,15 +1120,8 @@ def test_on_before_create_hooks_chain_in_order(
     temp_work_dir: Path,
 ) -> None:
     """Test that multiple on_before_create hooks chain properly."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
     # Register plugins in order A, B
-    pm.register(PluginChainA())
-    pm.register(PluginChainB())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginChainA(), PluginChainB()])
 
     local_host = _get_local_host_for_test(test_ctx)
 

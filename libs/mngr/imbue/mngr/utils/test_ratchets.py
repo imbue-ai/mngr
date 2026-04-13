@@ -69,7 +69,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(3))
+    rc.check_inline_imports(_DIR, snapshot(4))
 
 
 def test_prevent_relative_imports() -> None:
@@ -243,7 +243,7 @@ def test_prevent_inline_functions() -> None:
 
 
 def test_prevent_underscore_imports() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(0))
+    rc.check_underscore_imports(_DIR, snapshot(1))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:

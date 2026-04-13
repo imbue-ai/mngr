@@ -6,7 +6,6 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
-import pluggy
 import pytest
 
 from imbue.imbue_common.model_update import to_update
@@ -16,7 +15,6 @@ from imbue.mngr.api.cleanup import execute_cleanup
 from imbue.mngr.api.cleanup import find_agents_for_cleanup
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.data_types import CleanupResult
-from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
@@ -27,7 +25,6 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -42,7 +39,9 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import make_test_agent_details
+from imbue.mngr.utils.testing import override_provider_instance
 
 
 class _DestroyErrorPlugin:
@@ -51,14 +50,6 @@ class _DestroyErrorPlugin:
     @hookimpl
     def on_before_agent_destroy(self, agent: Any, host: Any) -> None:
         raise MngrError("Simulated destroy hook error")
-
-
-def _make_ctx_with_plugin(temp_mngr_ctx: MngrContext, plugin: object) -> MngrContext:
-    """Create a MngrContext that has the given plugin registered in its plugin manager."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(plugin)
-    return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().pm, pm))
 
 
 class _OfflineHostProvider(LocalProviderInstance):
@@ -94,8 +85,7 @@ class _OfflineHostSuccessProvider(_OfflineHostProvider):
     """Provider that returns an offline HostInterface from get_host() and
     whose destroy_host() succeeds (no-op).
 
-    Used to test the success path in _execute_destroy for offline hosts
-    (lines 135-139 of cleanup.py).
+    Used to test the success path in _execute_destroy for offline hosts.
     """
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
@@ -370,11 +360,10 @@ def test_execute_cleanup_destroy_agent_not_found_on_host_treated_as_destroyed(
 ) -> None:
     """When the agent is not found on the host during destroy, it is treated as already destroyed.
 
-    This exercises lines 119-123 of cleanup.py (the for/else branch).
+    Covers the case where the agent has already been removed from the host.
     """
     # Create an AgentDetails that references the real local host but with a
-    # non-existent agent ID.  get_agents() on the local host will return an
-    # empty list, so the for-loop's else clause fires.
+    # non-existent agent ID so the host won't find it during destroy.
     agent_details = make_test_agent_details(
         name="cleanup-not-found-agent",
         host_id=local_provider.host_id,
@@ -405,7 +394,6 @@ def test_execute_cleanup_destroy_hook_error_with_abort_stops_processing(
     """When on_before_agent_destroy raises MngrError with ABORT, the error is recorded and
     processing stops immediately without destroying subsequent agents.
 
-    This exercises lines 124-129 of cleanup.py.
     """
     # Create a real agent state so get_agents() finds it and fires the hook.
     real_agent = local_host.create_agent_state(
@@ -444,7 +432,7 @@ def test_execute_cleanup_destroy_hook_error_with_abort_stops_processing(
             provider_name=LOCAL_PROVIDER_NAME,
         )
 
-        ctx = _make_ctx_with_plugin(temp_mngr_ctx, _DestroyErrorPlugin())
+        ctx = make_ctx_with_plugins(temp_mngr_ctx, [_DestroyErrorPlugin()])
 
         result = execute_cleanup(
             mngr_ctx=ctx,
@@ -474,7 +462,6 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
     """When destroying an offline host raises MngrError with ABORT, the error is
     recorded and processing stops immediately.
 
-    This exercises lines 140-145 of cleanup.py.
     """
     # Register a custom provider that always returns an OfflineHost from get_host().
     # LocalProviderInstance.destroy_host() always raises LocalHostNotDestroyableError
@@ -485,10 +472,8 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
-    cache_key = (provider_name, id(temp_mngr_ctx))
-    _instance_cache[cache_key] = offline_provider
 
-    try:
+    with override_provider_instance(provider_name, temp_mngr_ctx, offline_provider):
         # Create two agents on the fake offline host so we can verify ABORT stops
         # processing after the first host's error.
         first_agent = make_test_agent_details(
@@ -515,17 +500,13 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
         assert any("Cannot destroy the local host" in e for e in result.errors)
         # No agents should have been reported as destroyed.
         assert result.destroyed_agents == []
-    finally:
-        _instance_cache.pop(cache_key, None)
 
 
 def test_execute_cleanup_destroy_unknown_provider_with_abort_stops_processing(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When accessing a provider during destroy raises MngrError with ABORT, the error is
-    recorded and processing stops, leaving subsequent hosts unprocessed.
-
-    This exercises lines 148-153 of cleanup.py.
+    """When an agent references a non-existent provider, the destroy path catches the
+    MngrError from get_provider_instance() and returns early in ABORT mode.
     """
     unknown_provider = ProviderInstanceName("unknown-destroy-provider")
     first_agent = make_test_agent_details(
@@ -563,7 +544,6 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
     """When stop_agents raises MngrError with ABORT, the error is recorded and
     processing stops immediately.
 
-    This exercises lines 178-183 of cleanup.py.
 
     The error is triggered by injecting a _StopFailingProvider into the instance
     cache.  Its get_host() returns a _StopFailingHost whose stop_agents() always
@@ -575,10 +555,8 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
-    cache_key = (provider_name, id(temp_mngr_ctx))
-    _instance_cache[cache_key] = stop_provider
 
-    try:
+    with override_provider_instance(provider_name, temp_mngr_ctx, stop_provider):
         first_agent = make_test_agent_details(
             name="stop-error-agent-one",
             host_id=stop_provider.host_id,
@@ -604,17 +582,13 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
         assert len(result.errors) == 1
         assert "Error stopping agents on host" in result.errors[0]
         assert result.stopped_agents == []
-    finally:
-        _instance_cache.pop(cache_key, None)
 
 
 def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When accessing a provider during stop raises MngrError with ABORT, the error is
-    recorded and processing stops, leaving subsequent hosts unprocessed.
-
-    This exercises lines 193-198 of cleanup.py.
+    """When an agent references a non-existent provider, the stop path catches the
+    MngrError from get_provider_instance() and returns early in ABORT mode.
     """
     unknown_provider = ProviderInstanceName("unknown-stop-provider")
     first_agent = make_test_agent_details(
@@ -650,7 +624,6 @@ def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     """When get_all_provider_instances raises MngrError, _run_post_cleanup_gc
     catches it and appends a descriptive error to the result.
 
-    This exercises lines 227-230 of cleanup.py.
     """
     # Inject a provider config with a non-existent backend.  When
     # get_all_provider_instances() iterates configured providers and tries to
@@ -677,21 +650,15 @@ def test_execute_cleanup_destroy_offline_host_success(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When destroying an offline host succeeds, agents are added to destroyed_agents.
-
-    This exercises lines 135-139 of cleanup.py (the success path in the offline host
-    destroy branch).
-    """
+    """When destroying an offline host succeeds, agents are added to destroyed_agents."""
     provider_name = ProviderInstanceName("offline-success-provider")
     success_provider = _OfflineHostSuccessProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
-    cache_key = (provider_name, id(temp_mngr_ctx))
-    _instance_cache[cache_key] = success_provider
 
-    try:
+    with override_provider_instance(provider_name, temp_mngr_ctx, success_provider):
         first_agent = make_test_agent_details(
             name="offline-success-agent-one",
             host_id=HostId.generate(),
@@ -714,29 +681,21 @@ def test_execute_cleanup_destroy_offline_host_success(
         assert result.errors == []
         assert AgentName("offline-success-agent-one") in result.destroyed_agents
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
-    finally:
-        _instance_cache.pop(cache_key, None)
 
 
 def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When a STOP action is attempted on an offline host, the host is skipped with a warning.
-
-    This exercises lines 184-192 of cleanup.py (the offline-host skip branch in
-    _execute_stop).
-    """
+    """When a STOP action is attempted on an offline host, the host is skipped with a warning."""
     provider_name = ProviderInstanceName("offline-stop-provider")
     offline_provider = _OfflineHostProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
-    cache_key = (provider_name, id(temp_mngr_ctx))
-    _instance_cache[cache_key] = offline_provider
 
-    try:
+    with override_provider_instance(provider_name, temp_mngr_ctx, offline_provider):
         agent = make_test_agent_details(
             name="offline-stop-agent",
             host_id=HostId.generate(),
@@ -756,5 +715,3 @@ def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
         assert len(result.errors) == 1
         assert "Skipping" in result.errors[0]
         assert "offline host" in result.errors[0]
-    finally:
-        _instance_cache.pop(cache_key, None)
