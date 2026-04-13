@@ -592,6 +592,16 @@ sudo poweroff
         else:
             logger.debug("No host record found for {}", host_id)
 
+        if host_record is not None:
+            updated_certified_data = host_record.certified_host_data.model_copy_update(
+                to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.STOPPED.value),
+            )
+            self._host_store.write_host_record(
+                host_record.model_copy_update(
+                    to_update(host_record.field_ref().certified_host_data, updated_certified_data),
+                )
+            )
+
     def start_host(
         self,
         host: HostInterface | HostId,
