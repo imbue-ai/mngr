@@ -1,16 +1,14 @@
 """Unit tests for the help command and topic pages."""
 
-from io import StringIO
-
 import pluggy
 from click.testing import CliRunner
-from loguru import logger
 
 from imbue.mngr.cli.help import TopicHelpPage
 from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help import get_all_topics
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.main import cli
+from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
 # Topic registry tests
@@ -244,14 +242,8 @@ def test_help_nonexistent_topic(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """'mngr help nonexistent' exits with an error message."""
-    # The error message is written via logger.error(), which goes to loguru's handlers
-    # and not to CliRunner's captured stdout, so capture it with a StringIO sink.
-    log_output = StringIO()
-    sink_id = logger.add(log_output, level="ERROR", format="{message}")
-    try:
+    with capture_loguru(level="ERROR") as log_output:
         result = cli_runner.invoke(cli, ["help", "nonexistent-xyz"], obj=plugin_manager, catch_exceptions=False)
-    finally:
-        logger.remove(sink_id)
     assert result.exit_code != 0
     assert "No help found" in log_output.getvalue()
 

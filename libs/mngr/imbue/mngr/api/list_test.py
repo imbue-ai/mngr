@@ -1,15 +1,11 @@
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pluggy
 import pytest
-from loguru import logger
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
@@ -42,6 +38,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
 # Helpers
@@ -96,17 +93,6 @@ def _make_discovered_agent(host_id: HostId, provider_name: str = "modal") -> Dis
     )
 
 
-@contextmanager
-def _capture_loguru_warnings() -> Iterator[StringIO]:
-    """Capture loguru WARNING-level output into a StringIO buffer."""
-    log_output = StringIO()
-    sink_id = logger.add(log_output, level="WARNING", format="{message}")
-    try:
-        yield log_output
-    finally:
-        logger.remove(sink_id)
-
-
 def test_warn_on_duplicate_host_names_no_warning_for_unique_names() -> None:
     """warn_on_duplicate_host_names should not warn when all host names are unique."""
     ref_alpha = _make_discovered_host("host-alpha")
@@ -118,7 +104,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_unique_names() -> None:
         ref_gamma: [_make_discovered_agent(ref_gamma.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -135,7 +121,7 @@ def test_warn_on_duplicate_host_names_warns_on_duplicate_within_same_provider() 
         ref_unique: [_make_discovered_agent(ref_unique.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     output = log_output.getvalue()
@@ -153,7 +139,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_same_name_on_different_prov
         ref_docker: [_make_discovered_agent(ref_docker.host_id, "docker")],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -161,7 +147,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_same_name_on_different_prov
 
 def test_warn_on_duplicate_host_names_empty_input() -> None:
     """warn_on_duplicate_host_names should not warn with an empty input."""
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names({})
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -176,7 +162,7 @@ def test_warn_on_duplicate_host_names_no_warning_when_destroyed_host_shares_name
         ref_active: [_make_discovered_agent(ref_active.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
