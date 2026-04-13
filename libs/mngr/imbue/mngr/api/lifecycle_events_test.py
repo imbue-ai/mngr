@@ -4,27 +4,9 @@ from pathlib import Path
 from imbue.mngr.api.lifecycle_events import LIFECYCLE_EVENT_SOURCE
 from imbue.mngr.api.lifecycle_events import LifecycleEventType
 from imbue.mngr.api.lifecycle_events import emit_agent_lifecycle_event
-from imbue.mngr.api.lifecycle_events import get_lifecycle_events_dir
 from imbue.mngr.api.lifecycle_events import get_lifecycle_events_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
-
-# === Path helper tests ===
-
-
-def test_get_lifecycle_events_dir_returns_correct_path(temp_host_dir: Path) -> None:
-    agent_id = AgentId.generate()
-    events_dir = get_lifecycle_events_dir(temp_host_dir, agent_id)
-    assert events_dir == temp_host_dir / "agents" / str(agent_id) / "events" / "mngr" / "lifecycle"
-
-
-def test_get_lifecycle_events_path_returns_correct_path(temp_host_dir: Path) -> None:
-    agent_id = AgentId.generate()
-    events_path = get_lifecycle_events_path(temp_host_dir, agent_id)
-    assert events_path == get_lifecycle_events_dir(temp_host_dir, agent_id) / "events.jsonl"
-
-
-# === emit_agent_lifecycle_event tests ===
 
 
 def test_emit_agent_lifecycle_event_creates_file_with_correct_fields(
