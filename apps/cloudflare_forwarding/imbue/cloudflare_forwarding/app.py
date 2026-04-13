@@ -915,7 +915,13 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
         if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
             assert agent_exc is not None
             raise agent_exc
-        return _authenticate_supertokens(token)
+        # If SuperTokens also fails, re-raise the original agent auth error so
+        # callers receive the most specific and useful error message.
+        try:
+            return _authenticate_supertokens(token)
+        except HTTPException:
+            assert agent_exc is not None
+            raise agent_exc from None
 
     if auth_header.lower().startswith("basic "):
         return _authenticate_admin(auth_header)
