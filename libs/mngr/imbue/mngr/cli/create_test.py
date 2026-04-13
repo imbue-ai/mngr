@@ -36,11 +36,13 @@ from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
+from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -826,6 +828,43 @@ def test_create_headless_streams_output(
 
     captured = capsys.readouterr()
     assert "headless-test-output" in captured.out
+
+
+# =============================================================================
+# Tests for -c/--command validation in the early headless detection path
+# =============================================================================
+
+
+def test_create_rejects_command_for_headless_non_command_accepting_type(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The early headless path must reject -c for types that are not CommandAcceptingAgentMixin.
+
+    When a StreamingHeadlessAgentMixin type that does NOT implement
+    CommandAcceptingAgentMixin receives -c/--command, create must raise
+    a UserInputError before reaching _create_headless.
+    """
+
+    # Create a mock headless type that is NOT CommandAcceptingAgentMixin.
+    # We register it so is_agent_class_registered() returns True.
+    class _MockHeadlessNoCommand(StreamingHeadlessAgentMixin):
+        def output(self) -> str:
+            return ""
+
+        def stream_output(self):  # type: ignore[override]
+            return iter([])
+
+    register_agent_class("mock_headless_no_cmd", _MockHeadlessNoCommand)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create,
+        ["--type", "mock_headless_no_cmd", "--command", "echo should-not-run"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "does not accept -c/--command" in result.output
 
 
 # =============================================================================

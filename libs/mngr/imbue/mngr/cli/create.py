@@ -611,6 +611,14 @@ def create(ctx: click.Context, **kwargs) -> None:
         if resolved_agent_type is not None:
             agent_class = get_agent_class(resolved_agent_type)
             if issubclass(agent_class, StreamingHeadlessAgentMixin):
+                # Validate that -c/--command is only used with agent types that accept it.
+                # This mirrors the same check in _parse_agent_opts for the non-headless path.
+                if opts.command and is_agent_class_registered(resolved_agent_type):
+                    if not issubclass(agent_class, CommandAcceptingAgentMixin):
+                        raise UserInputError(
+                            f"Agent type '{resolved_agent_type}' does not accept -c/--command. "
+                            f"Only command-accepting agent types (like 'generic' or 'headless_command') support -c."
+                        )
                 _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
                 return
 
