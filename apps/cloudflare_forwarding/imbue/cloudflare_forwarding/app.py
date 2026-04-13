@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import secrets as secrets_module
+from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
@@ -28,6 +29,7 @@ from pydantic import Field
 from supertokens_python import InputAppInfo
 from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe import session as st_session_recipe
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 from supertokens_python.recipe.session.syncio import get_session_without_request_response
@@ -956,18 +958,21 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
 _USER_ID_PREFIX_LENGTH = 16
 
 
-def _authenticate_supertokens(token: str) -> AdminAuth:
+def _authenticate_supertokens(
+    token: str,
+    session_getter: Callable[..., Any] = get_session_without_request_response,
+) -> AdminAuth:
     """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
 
     try:
-        session = get_session_without_request_response(
+        session = session_getter(
             access_token=token,
             anti_csrf_check=False,
         )
-    except (ValueError, TypeError, SuperTokensSessionError) as exc:
+    except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     if session is None:
