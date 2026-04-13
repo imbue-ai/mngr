@@ -18,6 +18,7 @@ from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
+from imbue.mngr.cli.create import _create_headless
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -27,6 +28,7 @@ from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
+from imbue.mngr.cli.create import _resolve_early_agent_type
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
 from imbue.mngr.cli.create import _split_address_and_target_path
@@ -35,6 +37,7 @@ from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -696,6 +699,107 @@ def test_split_cli_args_preserves_separate_flag_and_value() -> None:
 def test_split_cli_args_empty() -> None:
     """Empty input should produce empty output."""
     assert _split_cli_args(()) == []
+
+
+# =============================================================================
+# Tests for _resolve_early_agent_type
+# =============================================================================
+
+
+def test_resolve_early_agent_type_from_type_flag(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag should be returned as the agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_from_positional(default_create_cli_opts: CreateCliOptions) -> None:
+    """Positional agent type should be returned when --type is not set."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_claude"
+
+
+def test_resolve_early_agent_type_flag_takes_precedence(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag takes precedence over positional agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_returns_none_when_unset(default_create_cli_opts: CreateCliOptions) -> None:
+    """Returns None when neither --type nor positional agent type is set."""
+    result = _resolve_early_agent_type(default_create_cli_opts)
+
+    assert result is None
+
+
+def test_resolve_early_agent_type_command_implies_generic(default_create_cli_opts: CreateCliOptions) -> None:
+    """--command flag without --type implies 'generic' agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "generic"
+
+
+def test_resolve_early_agent_type_explicit_type_overrides_command(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--type flag takes precedence over --command implying 'generic'."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+# =============================================================================
+# Tests for _create_headless
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_headless_streams_output(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """_create_headless should stream output from a headless_command agent."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().command, "echo headless-test-output"),
+    )
+    output_opts = OutputOptions()
+
+    _create_headless(
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=output_opts,
+        opts=opts,
+        address=AgentAddress(),
+        agent_type_name="headless_command",
+    )
+
+    captured = capsys.readouterr()
+    assert "headless-test-output" in captured.out
 
 
 # =============================================================================

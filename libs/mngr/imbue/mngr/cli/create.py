@@ -28,6 +28,7 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
+from imbue.mngr.api.create import resolve_target_host as api_resolve_target_host
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -42,11 +43,14 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
+from imbue.mngr.cli.headless_runner import headless_agent_output
+from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -55,6 +59,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -146,6 +151,80 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
     address_part, path_str = raw.split(":", 1)
     path = Path(path_str) if path_str else None
     return address_part, path
+
+
+@pure
+def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
+    """Extract the agent type name from CLI options, or None if defaulting.
+
+    Uses the same resolution logic as _parse_agent_opts: --type flag takes
+    precedence, then the positional agent type argument. Returns None when
+    neither is set (meaning the create flow will default to "claude").
+
+    When --command is set without an explicit type, the type is "generic"
+    (not a headless type). But an explicit --type always takes precedence,
+    allowing --type headless_command -c "echo hello" to use the headless path.
+    """
+    resolved = opts.type
+    if opts.positional_agent_type and resolved is None:
+        resolved = opts.positional_agent_type
+    if resolved is not None:
+        return resolved
+    if opts.command:
+        return "generic"
+    return None
+
+
+def _create_headless(
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    agent_type_name: str,
+) -> None:
+    """Run a headless agent via create, streaming output and auto-destroying.
+
+    This is the headless alternative to the normal create flow. Instead of
+    creating a persistent interactive agent, it creates a temporary agent,
+    streams its output, and destroys it when done. Driven by the agent type
+    implementing StreamingHeadlessAgentMixin.
+    """
+    # Resolve target host using the same logic as the normal create path
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    lifecycle = _parse_host_lifecycle_options(opts)
+    target_host = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=agent_and_host_loader,
+        lifecycle=lifecycle,
+    )
+    resolved_target_host = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+
+    # If the resolved target is NewHostOptions, create the host first
+    if isinstance(resolved_target_host, NewHostOptions):
+        host = api_resolve_target_host(resolved_target_host, mngr_ctx)
+    else:
+        host = resolved_target_host
+
+    # Extract options from CreateCliOptions
+    command_override = CommandString(opts.command) if opts.command else None
+    agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
+    label_options = AgentLabelOptions(labels={"internal": "create-headless"})
+
+    with headless_agent_output(
+        host=host,
+        mngr_ctx=mngr_ctx,
+        agent_type=AgentTypeName(agent_type_name),
+        agent_args=opts.agent_args,
+        command=command_override,
+        label_options=label_options,
+        name=agent_name,
+    ) as agent:
+        chunks = agent.stream_output()
+        stream_or_accumulate_response(
+            chunks=chunks,
+            output_format=output_opts.output_format,
+        )
 
 
 @pure
@@ -242,7 +321,9 @@ class _CreateCommand(click.Command):
 @optgroup.option("--type", help="Which type of agent to run [default: claude]")
 @optgroup.option(
     "--command",
-    help="Run a literal command using the generic agent type (mutually exclusive with --type)",
+    "-c",
+    help="Shell command for the agent to run. With headless agent types (e.g. --type headless_command), "
+    "streams output and auto-destroys. Without --type, implies 'generic' agent type (mutually exclusive with --type)",
 )
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
@@ -499,6 +580,16 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Validate --update requires --reuse
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
+
+        # Detect headless agent types and use the headless flow instead of the
+        # normal interactive create path. The agent type (via StreamingHeadlessAgentMixin)
+        # drives this -- no new CLI flags needed.
+        resolved_agent_type = _resolve_early_agent_type(opts)
+        if resolved_agent_type is not None:
+            agent_class = get_agent_class(resolved_agent_type)
+            if issubclass(agent_class, StreamingHeadlessAgentMixin):
+                _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
+                return
 
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
@@ -1619,6 +1710,12 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+For headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude), create automatically uses the
+headless flow: it creates a temporary directory, streams the agent's output
+to stdout, and destroys the agent when done. No --connect/--no-connect flag
+applies in this mode.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.""",
@@ -1638,12 +1735,15 @@ by pushing all local branches and tags via git. Use --transfer to override the d
         ("Create without connecting", "mngr create my-agent --no-connect"),
         ("Add extra tmux windows", 'mngr create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mngr create my-agent --reuse"),
+        ("Run a shell command (headless)", 'mngr create --type headless_command -c "echo hello world"'),
+        ("Run claude non-interactively (headless)", 'mngr create --type headless_claude -- "what is 2+2"'),
     ),
     see_also=(
         ("connect", "Connect to an existing agent"),
         ("list", "List existing agents"),
         ("destroy", "Destroy agents"),
         ("limit", "Configure agent resource limits"),
+        ("ask", "Ask mngr for help (uses headless_claude internally)"),
     ),
     group_intros=(
         (

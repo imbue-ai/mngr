@@ -30,6 +30,12 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+For headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude), create automatically uses the
+headless flow: it creates a temporary directory, streams the agent's output
+to stdout, and destroys the agent when done. No --connect/--no-connect flag
+applies in this mode.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.
@@ -65,7 +71,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
-| `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
+| `--command`, `-c` | text | Shell command for the agent to run. With headless agent types (e.g. --type headless_command), streams output and auto-destroys. Without --type, implies 'generic' agent type (mutually exclusive with --type) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
@@ -198,6 +204,19 @@ Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: lima
+  Supported build arguments for the lima provider:
+    --file PATH           Path to a Lima YAML config file for full VM customization.
+                          When not specified, a default config is generated with the
+                          mngr pre-built image.
+  Start args are passed directly to 'limactl start'. Common options:
+    --cpus=N              Number of CPU cores (default: 4)
+    --memory=NGiB         Memory size (default: 4GiB)
+    --disk=NGiB           Disk size (default: 100GiB)
+    --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
+    --mount-writable      Make default mounts writable
+  Run 'limactl start --help' for the full list.
+
 Provider: local
   No build arguments are supported for the local provider.
   No start arguments are supported for the local provider.
@@ -243,10 +262,11 @@ Provider: ssh
   No start arguments are supported for the SSH provider.
 
 Provider: vultr
-  VPS-specific args (--vps- prefix, consumed by provider):
+  VPS-specific args (consumed by provider, not passed to docker):
     --vps-region=REGION  Vultr region (default: ewr)
     --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
     --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
+    --git-depth=N        Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
   Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
@@ -259,6 +279,7 @@ Provider: vultr
 - [mngr list](./list.md) - List existing agents
 - [mngr destroy](./destroy.md) - Destroy agents
 - [mngr limit](../secondary/limit.md) - Configure agent resource limits
+- [mngr ask](../secondary/ask.md) - Ask mngr for help (uses headless_claude internally)
 
 ## Examples
 
@@ -350,4 +371,16 @@ $ mngr create my-agent -w server="npm run dev"
 
 ```bash
 $ mngr create my-agent --reuse
+```
+
+**Run a shell command (headless)**
+
+```bash
+$ mngr create --type headless_command -c "echo hello world"
+```
+
+**Run claude non-interactively (headless)**
+
+```bash
+$ mngr create --type headless_claude -- "what is 2+2"
 ```

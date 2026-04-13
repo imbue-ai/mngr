@@ -28,7 +28,6 @@ from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.pull import pull
 from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
-from imbue.mngr.cli.run import run_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
@@ -233,7 +232,6 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (pull, ["--help"], "pull"),
     (push, ["--help"], "push"),
     (rename, ["--help"], "rename"),
-    (run_command, ["--help"], "run"),
     (start, ["--help"], "start"),
     (stop, ["--help"], "stop"),
     (cli, ["snapshot", "create", "--help"], "snapshot_create"),
