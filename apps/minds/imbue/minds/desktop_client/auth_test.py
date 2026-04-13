@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -119,7 +120,7 @@ def test_get_signing_key_raises_on_read_error(monkeypatch: pytest.MonkeyPatch, t
     # because Modal sandboxes run as root, which bypasses permission checks.
     original_read_text = Path.read_text
 
-    def _raise_on_key_file(self: Path, *args: object, **kwargs: object) -> str:
+    def _raise_on_key_file(self: Path, *args: Any, **kwargs: Any) -> str:
         if self.name == "signing_key":
             raise OSError("simulated read failure")
         return original_read_text(self, *args, **kwargs)
@@ -140,7 +141,7 @@ def test_get_signing_key_raises_on_write_error(monkeypatch: pytest.MonkeyPatch, 
     # because Modal sandboxes run as root, which bypasses permission checks.
     original_write_text = Path.write_text
 
-    def _raise_on_key_file(self: Path, *args: object, **kwargs: object) -> int:
+    def _raise_on_key_file(self: Path, *args: Any, **kwargs: Any) -> int:
         if self.name == "signing_key":
             raise OSError("simulated write failure")
         return original_write_text(self, *args, **kwargs)
