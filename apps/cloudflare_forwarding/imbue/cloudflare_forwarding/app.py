@@ -25,6 +25,11 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 from pydantic import Field
+from supertokens_python import InputAppInfo
+from supertokens_python import SupertokensConfig
+from supertokens_python import init as supertokens_init
+from supertokens_python.recipe import session as st_session_recipe
+from supertokens_python.recipe.session.syncio import get_session_without_request_response
 
 logger = logging.getLogger(__name__)
 
@@ -957,8 +962,6 @@ def _authenticate_supertokens(token: str) -> AdminAuth:
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
 
     try:
-        from supertokens_python.recipe.session.syncio import get_session_without_request_response
-
         session = get_session_without_request_response(
             access_token=token,
             anti_csrf_check=False,
@@ -1182,11 +1185,6 @@ def _init_supertokens() -> None:
     if not connection_uri:
         return
 
-    from supertokens_python import InputAppInfo
-    from supertokens_python import SupertokensConfig
-    from supertokens_python import init as supertokens_init
-    from supertokens_python.recipe import session
-
     api_key = os.environ.get("SUPERTOKENS_API_KEY")
 
     supertokens_init(
@@ -1202,7 +1200,7 @@ def _init_supertokens() -> None:
             website_base_path="/auth",
         ),
         framework="fastapi",
-        recipe_list=[session.init()],
+        recipe_list=[st_session_recipe.init()],
         mode="asgi",
     )
     logger.info("SuperTokens SDK initialized for JWT validation")
