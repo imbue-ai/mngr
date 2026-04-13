@@ -1086,11 +1086,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # First, try to find any VPS instances for this provider
         # We'll need the host records from each VPS
-        try:
-            all_records = self._discover_host_records()
-        except Exception as e:
-            logger.error("Failed to discover hosts: {}", e)
-            return []
+        all_records = self._discover_host_records()
 
         for record in all_records:
             host_id = HostId(record.certified_host_data.host_id)
@@ -1126,11 +1122,7 @@ class VpsDockerProvider(BaseProviderInstance):
         per-host SSH calls into containers for agent discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
-            try:
-                all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
-            except Exception as e:
-                logger.error("Failed to discover VPS Docker hosts: {}", e)
-                return {}
+            all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for record in all_records:
