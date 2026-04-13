@@ -5,7 +5,6 @@ from threading import Lock
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -18,6 +17,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 def warn_on_duplicate_host_names(
@@ -93,7 +93,7 @@ def _run_discovery(
 
     # Process all providers in parallel using ConcurrencyGroupExecutor
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="discover_hosts_and_agents", max_workers=32
     ) as executor:
         for provider in providers:

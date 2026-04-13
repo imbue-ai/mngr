@@ -14,7 +14,6 @@ from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -48,6 +47,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 def _compute_idle_seconds(
@@ -407,7 +407,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
         future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
-        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
+        with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
                     _discover_agents_and_disconnect,

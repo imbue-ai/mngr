@@ -18,7 +18,6 @@ from click_option_group import optgroup
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -35,6 +34,7 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 # The set of built-in format names (case-insensitive). Any --format value not
 # matching one of these is treated as a format template string.
@@ -593,7 +593,7 @@ def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: Concurre
     # Run all scripts in parallel
     failures: list[tuple[str, int, str, str]] = []
     futures: list[Future[tuple[str, int, str, str]]] = []
-    with ConcurrencyGroupExecutor(parent_cg=cg, name="pre_command_scripts", max_workers=32) as executor:
+    with mngr_executor(parent_cg=cg, name="pre_command_scripts", max_workers=32) as executor:
         for script in scripts:
             futures.append(executor.submit(_run_single_script, script, cg, cwd))
     for future in futures:
