@@ -108,7 +108,7 @@ def _get_cf_client_with_auth(request: Request) -> tuple[CloudflareForwardingClie
     Otherwise falls back to the original Basic Auth client.
     """
     cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
-    session_store: SuperTokensSessionStore | None = getattr(request.app.state, "supertokens_session_store", None)
+    session_store: SuperTokensSessionStore | None = request.app.state.supertokens_session_store
 
     if cf_client is None and session_store is None:
         return None, _json_error("Cloudflare forwarding not configured", 501)
@@ -118,7 +118,7 @@ def _get_cf_client_with_auth(request: Request) -> tuple[CloudflareForwardingClie
         user_info = session_store.get_user_info()
         access_token = session_store.get_access_token()
         if user_info is None or access_token is None:
-            output_format = getattr(request.app.state, "supertokens_output_format", OutputFormat.JSONL)
+            output_format: OutputFormat = request.app.state.supertokens_output_format
             emit_event("auth_required", {"message": "Sign in required for sharing"}, output_format)
             return None, _json_response(
                 {"error": "Not signed in to Imbue", "auth_required": True},
