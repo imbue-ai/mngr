@@ -484,7 +484,7 @@ class AgentCreator(MutableModel):
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
-                    self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
+                    self._redirect_urls[aid] = "/forwarding/{}/".format(agent_id)
 
         except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
