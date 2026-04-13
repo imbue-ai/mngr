@@ -15,8 +15,10 @@ from fastapi.responses import Response
 from loguru import logger
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
+from supertokens_python.recipe.emailpassword.interfaces import PasswordPolicyViolationError
 from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
+from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
 from supertokens_python.recipe.emailpassword.syncio import consume_password_reset_token
 from supertokens_python.recipe.emailpassword.syncio import create_reset_password_token
@@ -382,10 +384,16 @@ async def _handle_reset_password_api(request: Request) -> Response:
     if not isinstance(result, ConsumePasswordResetTokenOkResult):
         return _json_response({"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"})
 
-    update_email_or_password(
+    update_result = update_email_or_password(
         recipe_user_id=RecipeUserId(result.user_id),
         password=new_password,
     )
+
+    if isinstance(update_result, PasswordPolicyViolationError):
+        return _json_response({"status": "FIELD_ERROR", "message": update_result.failure_reason}, 400)
+
+    if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
+        return _json_response({"status": "ERROR", "message": "Failed to update password"}, 500)
 
     return _json_response({"status": "OK", "message": "Password has been reset"})
 
