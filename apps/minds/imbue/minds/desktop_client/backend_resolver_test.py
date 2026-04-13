@@ -976,7 +976,7 @@ def test_add_on_agent_discovered_callback_fires_on_full_snapshot() -> None:
     """Registered callbacks are invoked when a DISCOVERY_FULL event is processed."""
     manager = _make_stream_manager()
     discovered: list[AgentId] = []
-    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info: discovered.append(agent_id))
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info, provider: discovered.append(agent_id))
 
     full_line = _make_discovery_full_line(
         agents=[(str(_AGENT_A), _HOST_CALLBACK_TEST)],
@@ -991,7 +991,7 @@ def test_add_on_agent_discovered_callback_fires_on_agent_discovered() -> None:
     """Registered callbacks are invoked when an AGENT_DISCOVERED event is processed."""
     manager = _make_stream_manager()
     discovered: list[AgentId] = []
-    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info: discovered.append(agent_id))
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh_info, provider: discovered.append(agent_id))
 
     # Use empty labels so no events stream is started (avoids needing to start _cg)
     disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
@@ -1004,7 +1004,7 @@ def test_fire_agent_discovered_callbacks_catches_exceptions() -> None:
     """Exceptions raised by callbacks are caught and logged without propagating."""
     manager = _make_stream_manager()
 
-    def failing_callback(agent_id: AgentId, ssh_info: object) -> None:
+    def failing_callback(agent_id: AgentId, ssh_info: object, provider: str) -> None:
         raise RuntimeError("callback error")
 
     manager.add_on_agent_discovered_callback(failing_callback)
@@ -1018,8 +1018,8 @@ def test_multiple_callbacks_all_invoked() -> None:
     manager = _make_stream_manager()
     results_a: list[AgentId] = []
     results_b: list[AgentId] = []
-    manager.add_on_agent_discovered_callback(lambda aid, ssh: results_a.append(aid))
-    manager.add_on_agent_discovered_callback(lambda aid, ssh: results_b.append(aid))
+    manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: results_a.append(aid))
+    manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: results_b.append(aid))
 
     disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})
     manager._handle_discovery_line(disc_line)
@@ -1032,7 +1032,7 @@ def test_callback_re_fired_with_ssh_info_when_host_ssh_info_arrives() -> None:
     """When SSH info arrives after agent discovery, callbacks are re-fired with ssh_info set."""
     manager = _make_stream_manager()
     ssh_infos: list[object] = []
-    manager.add_on_agent_discovered_callback(lambda aid, ssh_info: ssh_infos.append(ssh_info))
+    manager.add_on_agent_discovered_callback(lambda aid, ssh_info, prov: ssh_infos.append(ssh_info))
 
     # Discover the agent first (no SSH info yet); use empty labels to avoid events stream
     disc_line = _make_agent_discovered_line(str(_AGENT_A), _HOST_CALLBACK_TEST, labels={})

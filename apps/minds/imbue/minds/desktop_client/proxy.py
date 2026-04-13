@@ -19,7 +19,7 @@ _ABSOLUTE_PATH_ATTR_PATTERN: Final[re.Pattern[str]] = re.compile(
 @pure
 def _get_server_prefix(agent_id: AgentId, server_name: ServerName) -> str:
     """Return the URL prefix for a specific server of an agent."""
-    return f"/agents/{agent_id}/{server_name}"
+    return f"/forwarding/{agent_id}/{server_name}"
 
 
 @pure
@@ -164,7 +164,7 @@ def rewrite_absolute_paths_in_html(
 ) -> str:
     """Rewrite absolute-path URLs in HTML attributes to include the server prefix.
 
-    Handles href, src, action, formaction attributes. Rewrites /foo to /agents/{id}/{server}/foo
+    Handles href, src, action, formaction attributes. Rewrites /foo to /forwarding/{id}/{server}/foo
     but leaves already-prefixed paths and protocol-relative URLs (//...) unchanged.
     """
     prefix = _get_server_prefix(agent_id, server_name)
@@ -348,7 +348,7 @@ def generate_backend_loading_html(
 
         if servers_to_show:
             link_items = "".join(
-                '<a href="/agents/{agent_id}/{server}/" target="_top"'
+                '<a href="/forwarding/{agent_id}/{server}/" target="_top"'
                 ' style="color: rgb(100, 149, 237); text-decoration: none;'
                 ' margin: 0 8px;">{server}</a>'.format(agent_id=agent_id, server=server)
                 for server in servers_to_show

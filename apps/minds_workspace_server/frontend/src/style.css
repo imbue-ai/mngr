@@ -1310,3 +1310,366 @@ body {
 .custom-url-dialog-open:hover {
   background: var(--color-accent-hover);
 }
+
+/* ── Custom tab renderer ── */
+.dv-custom-tab {
+  gap: 4px;
+}
+
+.dv-custom-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.dv-custom-tab-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 80ms, color 80ms;
+  flex-shrink: 0;
+}
+
+.dv-custom-tab-action svg {
+  width: 12px;
+  height: 12px;
+}
+
+.dv-custom-tab-action:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--color-text-primary);
+}
+
+.dv-custom-tab-action-destructive:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+}
+
+.dv-custom-tab-action-disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.dv-custom-tab-action-disabled:hover {
+  background: none;
+  color: var(--color-text-secondary);
+}
+
+/* ── Destroy confirmation dialog ── */
+.destroy-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.destroy-dialog {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.destroy-dialog-title {
+  font-family: var(--font-family-heading);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 12px;
+}
+
+.destroy-dialog-message {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.destroy-dialog-children {
+  margin-bottom: 16px;
+}
+
+.destroy-dialog-children-warning {
+  font-size: 13px;
+  font-weight: 500;
+  color: #dc2626;
+  margin: 0 0 8px;
+}
+
+.destroy-dialog-children-list {
+  list-style: disc;
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.destroy-dialog-children-list li {
+  margin-bottom: 2px;
+}
+
+.destroy-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.destroy-dialog-btn {
+  padding: 8px 16px;
+  font-family: var(--font-family-base);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-base);
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+}
+
+.destroy-dialog-btn-cancel {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+}
+
+.destroy-dialog-btn-cancel:hover {
+  background: var(--color-bg-hover);
+}
+
+.destroy-dialog-btn-destroy {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.destroy-dialog-btn-destroy:hover {
+  background: #b91c1c;
+}
+
+/* ── Share modal ── */
+.share-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.share-modal {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 480px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.share-modal-title {
+  font-family: var(--font-family-heading);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 16px;
+}
+
+.share-modal-loading {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  margin: 0 0 16px;
+}
+
+.share-modal-error {
+  font-size: 14px;
+  color: #dc2626;
+  margin: 0 0 12px;
+}
+
+.share-modal-label {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  margin: 0 0 12px;
+}
+
+.share-modal-url-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.share-modal-url-input {
+  flex: 1;
+  padding: 8px 12px;
+  font-family: var(--font-family-mono, monospace);
+  font-size: 13px;
+  color: var(--color-text-primary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  outline: none;
+}
+
+.share-modal-btn {
+  padding: 6px 16px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  border: none;
+  background: #1e293b;
+  color: white;
+}
+
+.share-modal-btn:hover:not(:disabled) {
+  background: #334155;
+}
+
+.share-modal-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.share-modal-btn-secondary {
+  background: white;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+}
+
+.share-modal-btn-secondary:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.share-modal-btn-destructive {
+  background: white;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+}
+
+.share-modal-btn-destructive:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.share-modal-section {
+  margin: 16px 0;
+}
+
+.share-modal-empty {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+  margin: 8px 0;
+}
+
+.share-modal-email-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+
+.share-modal-email-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.share-modal-email-remove {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.share-modal-email-remove:hover {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.1);
+}
+
+.share-modal-add-email {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.share-modal-email-input {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--font-family-base);
+  font-size: 13px;
+  color: var(--color-text-primary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  outline: none;
+}
+
+.share-modal-email-input:focus {
+  border-color: var(--color-accent);
+}
+
+.share-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.share-modal-header .share-modal-title {
+  margin: 0;
+}
+
+.share-modal-close-x {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.share-modal-close-x:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.share-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.share-modal-footer-left {
+  display: flex;
+  gap: 8px;
+}
+
+/* share-modal-btn-create uses the base .share-modal-btn styling (dark button) */

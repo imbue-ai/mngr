@@ -6,6 +6,7 @@ per-agent API keys (Bearer tokens) with SHA-256 hash lookup.
 """
 
 import json
+import shlex
 from typing import Annotated
 
 from fastapi import APIRouter
@@ -13,13 +14,18 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import Response
+from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
+from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -55,6 +61,28 @@ def _authenticate_api_key(request: Request) -> AgentId:
 CallerAgentIdDep = Annotated[AgentId, Depends(_authenticate_api_key)]
 
 
+def _inject_tunnel_token_into_agent(agent_id: AgentId, token: str) -> None:
+    """Write the tunnel token to the agent's runtime/secrets via mngr exec.
+
+    This causes the cloudflare-tunnel service inside the agent to detect
+    the token and start cloudflared.
+    """
+    safe_token = shlex.quote(token)
+    cg = ConcurrencyGroup(name="inject-tunnel-token")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=[
+                MNGR_BINARY,
+                "exec",
+                str(agent_id),
+                f"mkdir -p runtime && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} > runtime/secrets",
+            ],
+            is_checked_after=False,
+        )
+    if result.returncode != 0:
+        logger.warning("Failed to inject tunnel token into agent {}: {}", agent_id, result.stderr.strip())
+
+
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
     return Response(
         content=json.dumps(data),
@@ -77,9 +105,50 @@ class _CloudflareEnableBody(FrozenModel):
         default=None,
         description="Service URL to register. If omitted, resolved from the backend resolver.",
     )
+    auth_rules: list[dict[str, object]] | None = Field(
+        default=None,
+        description="Auth policy rules to apply. If omitted, uses tunnel default.",
+    )
 
 
 # -- Cloudflare forwarding routes --
+
+
+def _handle_cloudflare_status(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    _caller_agent_id: CallerAgentIdDep,
+) -> Response:
+    """Get Cloudflare forwarding status for a server."""
+    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    if cf_client is None:
+        return _json_error("Cloudflare forwarding not configured", 501)
+
+    parsed_id = AgentId(agent_id)
+
+    # Build the default auth rules from the owner email for when no policy is stored
+    owner_default_rules = [
+        {"action": "allow", "include": [{"email": {"email": str(cf_client.owner_email)}}]},
+    ]
+
+    services = cf_client.list_services(parsed_id)
+    if services is None:
+        # No tunnel exists yet -- return owner email as the default
+        default_rules = cf_client.get_tunnel_auth(parsed_id)
+        return _json_response({"enabled": False, "url": None, "auth_rules": default_rules or owner_default_rules})
+
+    hostname = services.get(server_name)
+    if hostname:
+        # Service is enabled -- get its specific auth policy
+        auth_rules = cf_client.get_service_auth(parsed_id, server_name)
+        if auth_rules is None:
+            auth_rules = cf_client.get_tunnel_auth(parsed_id) or owner_default_rules
+        return _json_response({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules})
+
+    # Tunnel exists but this service isn't enabled -- return tunnel default or owner email
+    default_rules = cf_client.get_tunnel_auth(parsed_id)
+    return _json_response({"enabled": False, "url": None, "auth_rules": default_rules or owner_default_rules})
 
 
 def _handle_cloudflare_enable(
@@ -105,11 +174,28 @@ def _handle_cloudflare_enable(
             return _json_error("Server not found locally", 404)
         service_url = backend_url
 
-    is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
+    # Ensure the tunnel exists and we have a token for it.
+    # create_tunnel is idempotent -- if the tunnel already exists, it returns
+    # the existing token. We always need the token to inject into the agent.
+    paths: WorkspacePaths = request.app.state.api_v1_paths
+    stored_token = load_tunnel_token(paths.data_dir, parsed_id)
+    if stored_token is None:
+        token, message = cf_client.create_tunnel(parsed_id)
+        if token is None:
+            return _json_error(f"Failed to create Cloudflare tunnel: {message}", 502)
+        save_tunnel_token(paths.data_dir, parsed_id, token)
+        _inject_tunnel_token_into_agent(parsed_id, token)
 
-    if is_success:
-        return _json_response({"ok": True})
-    return _json_error("Cloudflare API call failed", 502)
+    is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
+    if not is_success:
+        return _json_error("Cloudflare API call failed", 502)
+
+    # Apply auth rules if provided
+    auth_rules = body.auth_rules if body is not None else None
+    if auth_rules is not None:
+        cf_client.set_service_auth(parsed_id, str(parsed_server), auth_rules)
+
+    return _json_response({"ok": True})
 
 
 def _handle_cloudflare_disable(
@@ -259,6 +345,9 @@ def create_api_v1_router() -> APIRouter:
     router = APIRouter()
 
     # Cloudflare forwarding
+    router.get(
+        "/agents/{agent_id}/servers/{server_name}/cloudflare",
+    )(_handle_cloudflare_status)
     router.put(
         "/agents/{agent_id}/servers/{server_name}/cloudflare",
     )(_handle_cloudflare_enable)

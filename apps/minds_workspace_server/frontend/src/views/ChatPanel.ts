@@ -47,6 +47,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let previousScrollTop = 0;
   let backfillStarted = false;
 
+  // Screen capture state (shown when agent has no conversation)
+  let screenContent: string | null = null;
+  let screenError: string | null = null;
+  let screenLoading = false;
+  let screenAgentId: string | null = null;
+
   // Proto-agent log state
   let logWs: WebSocket | null = null;
   let logLines: string[] = [];
@@ -54,6 +60,30 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let logSuccess = false;
   let logError: string | null = null;
   let logAgentId: string | null = null;
+
+  async function fetchScreenCapture(agentId: string): Promise<void> {
+    if (screenAgentId === agentId && (screenContent !== null || screenLoading)) {
+      return;
+    }
+    screenAgentId = agentId;
+    screenLoading = true;
+    screenContent = null;
+    screenError = null;
+    try {
+      const result = await m.request<{ screen: string | null; error?: string }>({
+        method: "GET",
+        url: apiUrl("/api/agents/:agentId/screen"),
+        params: { agentId, scrollback: "true" },
+      });
+      screenContent = result.screen;
+      screenError = result.error ?? null;
+    } catch {
+      screenError = "Failed to capture screen";
+    } finally {
+      screenLoading = false;
+      m.redraw();
+    }
+  }
 
   function connectLogWs(agentId: string): void {
     if (logWs !== null) {
@@ -247,9 +277,19 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     manageStreamConnection(agentId);
 
     if (isConversationNotFound(agentId)) {
-      return m("div", { class: "message-list-not-found flex flex-col items-center justify-center h-full gap-2" }, [
-        m("p", { class: "text-2xl font-semibold text-text-primary" }, "404"),
-        m("p", { class: "text-text-secondary" }, "Agent not found."),
+      fetchScreenCapture(agentId);
+      return m("div", { class: "message-list-not-found flex flex-col items-center justify-center h-full gap-4 p-8" }, [
+        m("p", { class: "text-lg font-semibold text-text-primary" }, "No conversation data"),
+        m("p", { class: "text-text-secondary" }, "This agent has no Claude session. It may have crashed on startup."),
+        screenLoading
+          ? m("p", { class: "text-text-secondary" }, "Loading terminal output...")
+          : screenContent
+            ? m("pre", {
+                class: "text-sm bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto w-full max-h-96 font-mono whitespace-pre",
+              }, screenContent)
+            : screenError
+              ? m("p", { class: "text-text-secondary text-sm" }, `Could not capture terminal: ${screenError}`)
+              : null,
       ]);
     }
 

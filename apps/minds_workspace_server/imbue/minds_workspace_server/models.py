@@ -85,3 +85,9 @@ class RandomNameResponse(FrozenModel):
     """Response from the random name endpoint."""
 
     name: str = Field(description="A random agent name")
+
+
+class DestroyAgentResponse(FrozenModel):
+    """Response from the agent destroy endpoint."""
+
+    status: str = Field(description="Result of the destroy operation")

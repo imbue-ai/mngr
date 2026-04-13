@@ -147,6 +147,19 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def remove_agent(self, agent_id: str) -> None:
+        """Remove an agent from the tracked state and broadcast the update.
+
+        Called after a successful mngr destroy to immediately reflect
+        the destruction without waiting for the observe subprocess.
+        """
+        with self._lock:
+            self._agents.pop(agent_id, None)
+            self._applications.pop(agent_id, None)
+
+        self._stop_app_watcher(agent_id)
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
     def get_applications(self) -> dict[str, list[ApplicationEntry]]:
         """Return per-agent application map."""
         with self._lock:
@@ -198,6 +211,8 @@ class AgentManager:
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(selected_agent_id)
+            parent = self._agents.get(selected_agent_id)
+            parent_labels = dict(parent.labels) if parent else {}
 
         if work_dir is None:
             msg = f"Cannot determine work directory for agent {selected_agent_id}"
@@ -220,8 +235,14 @@ class AgentManager:
             "worktree",
             "--label",
             "user_created=true",
+            "--label",
+            f"workspace={name}",
             "--no-connect",
         ]
+
+        # Inherit the project label from the parent agent
+        if "project" in parent_labels:
+            cmd.extend(["--label", f"project={parent_labels['project']}"])
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -242,7 +263,9 @@ class AgentManager:
             parent_agent_id=None,
         )
 
-        labels = {"user_created": "true"}
+        labels = {"user_created": "true", "workspace": name}
+        if "project" in parent_labels:
+            labels["project"] = parent_labels["project"]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id

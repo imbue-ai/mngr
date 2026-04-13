@@ -374,27 +374,57 @@ def cf_kv_ensure_namespace(client: httpx.Client, account_id: str, title: str) ->
 # ---------------------------------------------------------------------------
 
 
-def make_tunnel_name(username: str, agent_id: str) -> str:
+_MAX_USERNAME_LENGTH = 22
+_MAX_SERVICE_NAME_LENGTH = 21
+_AGENT_ID_PREFIX_LENGTH = 16
+
+
+def truncate_agent_id(agent_id: str) -> str:
+    """Truncate an agent ID to a short prefix for use in hostnames.
+
+    Strips the "agent-" prefix (if present) and takes the first 16 hex chars.
+    16 chars of hex provides sufficient uniqueness per user.
+    """
+    raw = agent_id.removeprefix("agent-")
+    return raw[:_AGENT_ID_PREFIX_LENGTH]
+
+
+def _validate_username(username: str) -> None:
     if TUNNEL_NAME_SEP in username:
         raise InvalidTunnelComponentError("Username", username, TUNNEL_NAME_SEP)
-    if TUNNEL_NAME_SEP in agent_id:
-        raise InvalidTunnelComponentError("Agent ID", agent_id, TUNNEL_NAME_SEP)
-    return f"{username}{TUNNEL_NAME_SEP}{agent_id}"
+    if len(username) > _MAX_USERNAME_LENGTH:
+        raise ValueError(f"Username '{username}' exceeds maximum length of {_MAX_USERNAME_LENGTH}")
+
+
+def _validate_service_name(service_name: str) -> None:
+    if TUNNEL_NAME_SEP in service_name:
+        raise InvalidTunnelComponentError("Service name", service_name, TUNNEL_NAME_SEP)
+    if len(service_name) > _MAX_SERVICE_NAME_LENGTH:
+        raise ValueError(f"Service name '{service_name}' exceeds maximum length of {_MAX_SERVICE_NAME_LENGTH}")
+
+
+def make_tunnel_name(username: str, agent_id: str) -> str:
+    _validate_username(username)
+    short_id = truncate_agent_id(agent_id)
+    return f"{username}{TUNNEL_NAME_SEP}{short_id}"
 
 
 def make_hostname(service_name: str, agent_id: str, username: str, domain: str) -> str:
-    return f"{service_name}--{agent_id}--{username}.{domain}"
+    _validate_service_name(service_name)
+    short_id = truncate_agent_id(agent_id)
+    return f"{service_name}--{short_id}--{username}.{domain}"
 
 
-def extract_agent_id(tunnel_name: str, username: str) -> str:
+def extract_agent_id_prefix(tunnel_name: str, username: str) -> str:
+    """Extract the truncated agent ID prefix from a tunnel name."""
     prefix = f"{username}{TUNNEL_NAME_SEP}"
     if not tunnel_name.startswith(prefix):
         raise TunnelOwnershipError(tunnel_name, username)
     return tunnel_name[len(prefix) :]
 
 
-def extract_service_name(hostname: str, agent_id: str, username: str, domain: str) -> str | None:
-    expected_suffix = f"--{agent_id}--{username}.{domain}"
+def extract_service_name(hostname: str, agent_id_prefix: str, username: str, domain: str) -> str | None:
+    expected_suffix = f"--{agent_id_prefix}--{username}.{domain}"
     if not hostname.endswith(expected_suffix):
         return None
     return hostname[: -len(expected_suffix)]
@@ -619,6 +649,10 @@ class ForwardingCtx:
             tid = existing["id"]
             token = self.ops.get_tunnel_token(tid)
             services = self._list_services(tid, name, username)
+            # Update the default auth policy if provided (may have been missing
+            # from the original creation or may need updating)
+            if default_auth_policy is not None:
+                self.ops.kv_put(name, default_auth_policy.model_dump_json())
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
         result = self.ops.create_tunnel(name)
@@ -662,12 +696,16 @@ class ForwardingCtx:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
-        rules.append({"hostname": hostname, "service": service_url})
+        rules.append({
+            "hostname": hostname,
+            "service": service_url,
+            "originRequest": {"noTLSVerify": True},
+        })
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
         self._apply_default_access_policy(tunnel_name, hostname)
@@ -678,7 +716,7 @@ class ForwardingCtx:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
@@ -702,7 +740,7 @@ class ForwardingCtx:
 
     def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
         """Get the auth policy for a specific service from its Access Application."""
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
@@ -712,7 +750,7 @@ class ForwardingCtx:
 
     def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
         """Set the auth policy for a specific service on its Access Application."""
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
@@ -732,7 +770,7 @@ class ForwardingCtx:
         return self._list_services(tunnel["id"], tunnel_name, username)
 
     def _list_services(self, tunnel_id: str, tunnel_name: str, username: str) -> list[ServiceInfo]:
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         config = self.ops.get_tunnel_config(tunnel_id)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         services: list[ServiceInfo] = []

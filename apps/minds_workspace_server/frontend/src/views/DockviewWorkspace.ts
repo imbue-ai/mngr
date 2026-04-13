@@ -14,19 +14,43 @@ import {
 import { ChatPanel } from "./ChatPanel";
 import { IframePanel } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
-// ProtoAgentLogView is no longer used as a separate panel type.
-// Build logs are now shown inline by ChatPanel when the agent is a proto-agent.
 import { CreateAgentModal } from "./CreateAgentModal";
-import { apiUrl } from "../base-path";
+import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
+import { ShareModal } from "./ShareModal";
+import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   getAgentById,
   getChatAgentsForParent,
   getApplicationsForAgent,
   getChatProtoAgentsForParent,
+  getProtoAgents,
+  getSidebarAgents,
+  removeAgentLocally,
 } from "../models/AgentManager";
-// selectAgent is not used here -- chat panels stay in the parent dockview
+import { selectAgent } from "../navigation";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
+
+type AccessMode = "cloudflare" | "local" | "dev";
+
+function getAccessMode(): AccessMode {
+  const hostname = window.location.hostname;
+  if (hostname.match(/^[^-]+--(.*)/)) {
+    return "cloudflare";
+  }
+  // Local mode: detected by Mithril's /agents/:agentId/ route in the pathname.
+  // The desktop client proxy uses /forwarding/ but Mithril's pushState sets
+  // the visible pathname to its own /agents/ route.
+  if (window.location.pathname.match(/^.*\/agents\/[^/]+\//)) {
+    return "local";
+  }
+  return "dev";
+}
+
+// SVG path constants for tab action icons
+const SVG_CLOSE = '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>';
+const SVG_TRASH = '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
+const SVG_SHARE = '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
 
 function getApplicationUrl(appName: string, rawUrl: string, agentId: string): string {
   const hostname = window.location.hostname;
@@ -39,14 +63,34 @@ function getApplicationUrl(appName: string, rawUrl: string, agentId: string): st
     return `${proto}//${appName}--${cfMatch[1]}${port}/`;
   }
 
-  // Local forwarding server: /agents/{id}/{server_name}/
-  const pathMatch = window.location.pathname.match(/^(.*\/agents\/[^/]+)\//);
-  if (pathMatch) {
-    return `${pathMatch[1]}/${appName}/`;
+  // Local forwarding server: construct /forwarding/{agentId}/{appName}/
+  if (window.location.pathname.match(/^.*\/agents\/[^/]+\//) && agentId) {
+    return `/forwarding/${agentId}/${appName}/`;
   }
 
   // Dev mode (no forwarding server): use the raw URL from applications.toml
   return rawUrl;
+}
+
+function getTerminalUrl(): string {
+  const hostname = window.location.hostname;
+
+  // Cloudflare proxy: terminal--agentid--username.domain
+  const cfMatch = hostname.match(/^[^-]+--(.*)/);
+  if (cfMatch) {
+    const proto = window.location.protocol;
+    const port = window.location.port ? `:${window.location.port}` : "";
+    return `${proto}//terminal--${cfMatch[1]}${port}/`;
+  }
+
+  // Local forwarding server: always use the primary agent's terminal
+  const primaryId = getPrimaryAgentId();
+  if (window.location.pathname.match(/^.*\/agents\/[^/]+\//) && primaryId) {
+    return `/forwarding/${primaryId}/terminal/`;
+  }
+
+  // Dev mode
+  return "http://localhost:7681";
 }
 
 type PanelType = "chat" | "iframe" | "subagent";
@@ -62,6 +106,17 @@ interface PanelParams {
 
 let showNewChatModal = false;
 let newChatParentAgentId: string | null = null;
+
+// Destroy dialog state
+let showDestroyDialog = false;
+let destroyTargetAgentId: string | null = null;
+let destroyTargetAgentName: string | null = null;
+let destroyTargetPanelId: string | null = null;
+let destroyTargetDockviewAgentId: string | null = null;
+
+// Share modal state
+let showShareModal = false;
+let shareServerName: string | null = null;
 
 interface SavedLayout {
   dockview: SerializedDockview;
@@ -98,6 +153,131 @@ function createMithrilRenderer(
     },
     dispose() {
       m.mount(element, null);
+    },
+  };
+}
+
+function makeSvgIcon(pathContent: string, viewBox: string = "0 0 24 24"): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${pathContent}</svg>`;
+}
+
+function createTabActionButton(
+  title: string,
+  svgPath: string,
+  onClick: (ev: MouseEvent) => void,
+  className: string = "",
+): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = `dv-custom-tab-action ${className}`.trim();
+  btn.title = title;
+  btn.innerHTML = makeSvgIcon(svgPath);
+  btn.addEventListener("pointerdown", (ev) => ev.preventDefault());
+  btn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    onClick(ev);
+  });
+  return btn;
+}
+
+interface CustomTabOptions {
+  panelParams: Map<string, PanelParams>;
+  dockviewAgentId: string;
+}
+
+function createCustomTab(
+  options: { id: string; name: string },
+  tabOptions: CustomTabOptions,
+): { element: HTMLElement; init: (params: { title: string; api: { close: () => void; onDidTitleChange: (cb: (e: { title: string }) => void) => { dispose: () => void }; isActive: boolean; onDidActiveChange: (cb: (e: { isActive: boolean }) => void) => { dispose: () => void } } }) => void; dispose: () => void } {
+  const element = document.createElement("div");
+  element.className = "dv-default-tab dv-custom-tab";
+
+  const content = document.createElement("div");
+  content.className = "dv-default-tab-content";
+  element.appendChild(content);
+
+  const actions = document.createElement("div");
+  actions.className = "dv-custom-tab-actions";
+  actions.style.display = "none";
+  element.appendChild(actions);
+
+  const disposables: Array<{ dispose: () => void }> = [];
+
+  return {
+    element,
+    init(params) {
+      content.textContent = params.title ?? "";
+      disposables.push(
+        params.api.onDidTitleChange((event) => {
+          content.textContent = event.title ?? "";
+        }),
+      );
+
+      const panelParams = tabOptions.panelParams.get(options.id);
+      const panelType = panelParams?.panelType ?? "chat";
+
+      // Share button -- only on iframe/application tabs
+      if (panelType === "iframe") {
+        const serverName = panelParams?.title ?? "web";
+        actions.appendChild(
+          createTabActionButton("Share", SVG_SHARE, () => {
+            shareServerName = serverName;
+            showShareModal = true;
+            m.redraw();
+          }),
+        );
+      }
+
+      // Destroy button -- only on chat/agent tabs
+      if (panelType === "chat") {
+        const chatAgentId = panelParams?.chatAgentId ?? panelParams?.agentId ?? tabOptions.dockviewAgentId;
+        const primaryAgentId = getPrimaryAgentId();
+        const isPrimary = chatAgentId === primaryAgentId;
+
+        const destroyBtn = createTabActionButton(
+          isPrimary ? "Cannot destroy the primary agent" : "Destroy agent",
+          SVG_TRASH,
+          () => {
+            if (isPrimary) return;
+            const agent = getAgentById(chatAgentId);
+            destroyTargetAgentId = chatAgentId;
+            destroyTargetAgentName = agent?.name ?? chatAgentId;
+            destroyTargetPanelId = options.id;
+            destroyTargetDockviewAgentId = tabOptions.dockviewAgentId;
+            showDestroyDialog = true;
+            m.redraw();
+          },
+          isPrimary ? "dv-custom-tab-action-disabled" : "dv-custom-tab-action-destructive",
+        );
+        if (isPrimary) {
+          destroyBtn.disabled = true;
+        }
+        actions.appendChild(destroyBtn);
+      }
+
+      // Close button -- on all tab types
+      actions.appendChild(
+        createTabActionButton("Close tab", SVG_CLOSE, () => {
+          params.api.close();
+        }),
+      );
+
+      // Show/hide actions based on active state
+      function updateActionsVisibility(isActive: boolean): void {
+        actions.style.display = isActive ? "flex" : "none";
+      }
+      updateActionsVisibility(params.api.isActive);
+      disposables.push(
+        params.api.onDidActiveChange((event) => {
+          updateActionsVisibility(event.isActive);
+        }),
+      );
+    },
+    dispose() {
+      for (const d of disposables) {
+        d.dispose();
+      }
+      disposables.length = 0;
     },
   };
 }
@@ -146,10 +326,26 @@ function buildDropdownItems(
   // --- Applications section ---
   items.push({ label: "Applications", action: () => {}, header: true });
 
-  // Filter out the "web" application for the currently selected agent,
-  // since that's what we're already looking at. Other agents' "web" apps
-  // (e.g., worktree agents) are kept so you can preview their changes.
-  const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web");
+  // Always show a terminal option. Uses the primary agent's ttyd instance
+  // with a workdir dispatch to cd into the selected agent's work directory.
+  // The terminal URL always routes through the primary agent since ttyd only
+  // runs there -- we can't use getApplicationUrl because in local mode it
+  // derives the agent ID from the current URL path (which points to the
+  // selected agent, not the primary one).
+  const currentAgent = getAgentById(agentId);
+  const terminalBaseUrl = getTerminalUrl();
+  // ttyd runs `bash -c "$DISPATCH_SCRIPT" <args...>`. In bash -c, the first
+  // arg after the script becomes $0 (not $1). The dispatch script reads $1,
+  // so we prepend a dummy arg for $0.
+  const terminalUrl = currentAgent?.work_dir
+    ? `${terminalBaseUrl}?arg=_&arg=workdir&arg=${encodeURIComponent(currentAgent.work_dir)}`
+    : terminalBaseUrl;
+  items.push({
+    label: "terminal",
+    action: () => openIframeTab(agentId, dockviewState, terminalUrl, "terminal"),
+  });
+
+  const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web" && app.name !== "terminal");
   for (const app of apps) {
     const proxyUrl = getApplicationUrl(app.name, app.url, agentId);
     items.push({
@@ -188,7 +384,6 @@ function createAddTabButton(agentId: string, dockviewState: AgentDockviewState):
     if (isVisible) {
       dropdown.style.display = "none";
     } else {
-      // Rebuild dropdown items each time (dynamic content)
       dropdown.innerHTML = "";
       const items = buildDropdownItems(agentId, dockviewState);
       for (const item of items) {
@@ -223,7 +418,6 @@ function createAddTabButton(agentId: string, dockviewState: AgentDockviewState):
     }
   });
 
-  // Close dropdown when clicking outside
   const closeDropdown = (e: MouseEvent) => {
     if (!element.contains(e.target as Node)) {
       dropdown.style.display = "none";
@@ -305,7 +499,6 @@ export function openSubagentTab(agentId: string, subagentSessionId: string, desc
   const state = agentDockviews.get(agentId);
   if (!state) return;
 
-  // Check if this subagent tab is already open
   const existingPanel = state.component.panels.find((p) => {
     const params = state.panelParams.get(p.id);
     return params?.panelType === "subagent" && params.subagentSessionId === subagentSessionId;
@@ -401,9 +594,10 @@ async function saveLayout(agentId: string, state: AgentDockviewState): Promise<v
     panelParams[id] = params;
   }
   const payload: SavedLayout = { dockview: dockviewJson, panelParams };
+  const mode = getAccessMode();
 
   try {
-    await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/layout`), {
+    await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/layout?mode=${mode}`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -424,8 +618,9 @@ function scheduleSave(agentId: string, state: AgentDockviewState): void {
 }
 
 async function loadLayout(agentId: string): Promise<SavedLayout | null> {
+  const mode = getAccessMode();
   try {
-    const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/layout`));
+    const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/layout?mode=${mode}`));
     if (!response.ok) return null;
     return (await response.json()) as SavedLayout;
   } catch {
@@ -453,6 +648,7 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
   const dockview = new DockviewComponent(container, {
     theme: themeLight,
     defaultRenderer: "always",
+    defaultTabComponent: "custom",
     createComponent(options) {
       const params = (options as unknown as { params?: PanelParams }).params ?? panelParams.get(options.id);
 
@@ -477,6 +673,9 @@ function createDockviewForAgent(agentId: string, parentElement: HTMLElement): Ag
         default:
           return createMithrilRenderer(ChatPanel, { agentId });
       }
+    },
+    createTabComponent(options) {
+      return createCustomTab(options, { panelParams, dockviewAgentId: agentId });
     },
     createLeftHeaderActionComponent() {
       return createAddTabButton(agentId, state);
@@ -505,7 +704,6 @@ async function initializeAgentDockview(agentId: string, parentElement: HTMLEleme
   const saved = await loadLayout(agentId);
 
   if (saved) {
-    // Restore panel params before fromJSON so createComponent can access them
     for (const [id, params] of Object.entries(saved.panelParams)) {
       state.panelParams.set(id, params);
     }
@@ -513,28 +711,104 @@ async function initializeAgentDockview(agentId: string, parentElement: HTMLEleme
       state.component.fromJSON(saved.dockview);
       return;
     } catch {
-      // If restore fails, fall through to default layout
       state.panelParams.clear();
     }
   }
 
-  // Default layout: single chat tab for this agent
   const agent = getAgentById(agentId);
-  addChatPanel(agentId, agentId, agent?.name ?? "Chat", state);
+  const proto = agent ? null : getProtoAgents().find((p) => p.agent_id === agentId);
+  const agentName = agent?.name ?? proto?.name ?? "Chat";
+  addChatPanel(agentId, agentId, agentName, state);
 }
 
 function showAgentDockview(agentId: string): void {
-  // Hide all agent containers
   for (const [id, state] of agentDockviews) {
     state.container.style.display = id === agentId ? "block" : "none";
     if (id === agentId) {
-      // Trigger layout recalculation after showing
       requestAnimationFrame(() => {
         const rect = state.container.getBoundingClientRect();
         state.component.layout(rect.width, rect.height);
       });
     }
   }
+}
+
+async function executeDestroy(
+  agentId: string,
+  panelId: string,
+  dockviewAgentId: string,
+): Promise<void> {
+  const chatChildren = getChatAgentsForParent(agentId);
+
+  // Cascade: destroy children first
+  for (const child of chatChildren) {
+    try {
+      await fetch(apiUrl(`/api/agents/${encodeURIComponent(child.id)}/destroy`), {
+        method: "POST",
+      });
+    } catch {
+      // Continue even if a child destroy fails
+    }
+  }
+
+  // Destroy the target agent
+  try {
+    const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/destroy`), {
+      method: "POST",
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const detail = (data as { detail?: string }).detail ?? "Unknown error";
+      alert(`Failed to destroy agent: ${detail}`);
+      return;
+    }
+  } catch (e) {
+    alert(`Failed to destroy agent: ${(e as Error).message}`);
+    return;
+  }
+
+  // Remove destroyed agents from the frontend's local state immediately
+  // so the sidebar updates without waiting for the WebSocket broadcast.
+  for (const child of chatChildren) {
+    removeAgentLocally(child.id);
+  }
+  removeAgentLocally(agentId);
+
+  // Remove the panel from dockview
+  const state = agentDockviews.get(dockviewAgentId);
+  if (state) {
+    const panel = state.component.panels.find((p) => p.id === panelId);
+    if (panel) {
+      state.component.removePanel(panel);
+    }
+
+    // Also remove any child chat panels
+    for (const child of chatChildren) {
+      const childPanelId = `chat-${child.id}`;
+      const childPanel = state.component.panels.find((p) => p.id === childPanelId);
+      if (childPanel) {
+        state.component.removePanel(childPanel);
+      }
+    }
+  }
+
+  // If the destroyed agent was a sidebar agent, auto-select another
+  const isSidebarAgent = agentId === dockviewAgentId;
+  if (isSidebarAgent) {
+    // Clean up the dockview for this agent
+    agentDockviews.delete(agentId);
+    state?.container.remove();
+
+    // Auto-select the first remaining sidebar agent
+    const remaining = getSidebarAgents().filter((a) => a.id !== agentId);
+    if (remaining.length > 0) {
+      selectAgent(remaining[0].id);
+    } else {
+      selectAgent("");
+    }
+  }
+
+  m.redraw();
 }
 
 export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
@@ -559,7 +833,6 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
     currentAgentId = agentId;
 
     if (!agentId) {
-      // Hide all
       for (const state of agentDockviews.values()) {
         state.container.style.display = "none";
       }
@@ -598,14 +871,46 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
               showNewChatModal = false;
               const state = agentDockviews.get(agentId);
               if (state) {
-                // Open a chat panel for the new agent. ChatPanel will detect
-                // it's a proto-agent and show build logs, then automatically
-                // switch to the chat view when creation completes.
                 focusOrCreateChatPanelForAgent(agentId, newAgentId, newAgentName, state);
               }
             },
             onCancel() {
               showNewChatModal = false;
+            },
+          })
+        : null,
+
+      showDestroyDialog && destroyTargetAgentId && destroyTargetAgentName
+        ? m(DestroyConfirmDialog, {
+            agentName: destroyTargetAgentName,
+            chatChildren: getChatAgentsForParent(destroyTargetAgentId),
+            onConfirm() {
+              showDestroyDialog = false;
+              const targetId = destroyTargetAgentId!;
+              const panelId = destroyTargetPanelId!;
+              const dvAgentId = destroyTargetDockviewAgentId!;
+              destroyTargetAgentId = null;
+              destroyTargetAgentName = null;
+              destroyTargetPanelId = null;
+              destroyTargetDockviewAgentId = null;
+              executeDestroy(targetId, panelId, dvAgentId);
+            },
+            onCancel() {
+              showDestroyDialog = false;
+              destroyTargetAgentId = null;
+              destroyTargetAgentName = null;
+              destroyTargetPanelId = null;
+              destroyTargetDockviewAgentId = null;
+            },
+          })
+        : null,
+
+      showShareModal && shareServerName
+        ? m(ShareModal, {
+            serverName: shareServerName,
+            onClose() {
+              showShareModal = false;
+              shareServerName = null;
             },
           })
         : null,

@@ -4,6 +4,7 @@ from pathlib import Path
 from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
+from imbue.minds.desktop_client.runner import _DEFAULT_MNGR_HOST_DIR
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -23,7 +24,7 @@ def test_agent_discovery_handler_writes_local_url_file(tmp_path: Path) -> None:
     agent_id = AgentId()
 
     # Call the handler with no SSH info (local agent)
-    handler(agent_id, None)
+    handler(agent_id, None, "local")
 
     url_file = tmp_path / "agents" / str(agent_id) / "minds_api_url"
     assert url_file.exists(), "minds_api_url file was not written"
@@ -66,10 +67,10 @@ def test_build_cloudflare_client_returns_client_when_configured() -> None:
 
 
 def test_agent_discovery_handler_default_mngr_host_dir() -> None:
-    """Verify the default mngr_host_dir is ~/.mngr."""
+    """Verify the default mngr_host_dir matches the module-level constant."""
     tunnel_manager = SSHTunnelManager()
     handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=9000)
-    assert handler.mngr_host_dir == Path.home() / ".mngr"
+    assert handler.mngr_host_dir == _DEFAULT_MNGR_HOST_DIR
     tunnel_manager.cleanup()
 
 
@@ -88,7 +89,7 @@ def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> No
         mngr_host_dir=tmp_path,
     )
     agent_id = AgentId()
-    handler(agent_id, None)
+    handler(agent_id, None, "local")
     tunnel_manager.cleanup()
 
 
@@ -142,12 +143,12 @@ def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
         mngr_host_dir=tmp_path,
     )
     agent_id = AgentId()
-    handler(agent_id, ssh_info)
+    handler(agent_id, ssh_info, "docker")
 
     assert len(fake_manager._reverse_tunnel_calls) == 1
     _, local_port, agent_state_dir = fake_manager._reverse_tunnel_calls[0]
     assert local_port == 8420
-    assert str(agent_id) in agent_state_dir
+    assert agent_state_dir == f"/mngr/agents/{agent_id}"
 
     assert len(fake_manager._write_remote_calls) == 1
     _, _, url = fake_manager._write_remote_calls[0]
@@ -171,6 +172,6 @@ def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Pat
     )
     agent_id = AgentId()
     # Should not raise even though setup_reverse_tunnel raises SSHTunnelError
-    handler(agent_id, ssh_info)
+    handler(agent_id, ssh_info, "docker")
     assert len(fake_manager._write_remote_calls) == 0
     fake_manager.cleanup()

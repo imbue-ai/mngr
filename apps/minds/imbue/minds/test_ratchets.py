@@ -139,9 +139,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # All violations are CSS hex color codes (e.g. `color: #64748b;`) inside
-    # template strings in templates.py -- the regex misfires on these.
-    rc.check_trailing_comments(_DIR, snapshot(28))
+    rc.check_trailing_comments(_DIR, snapshot(0))
 
 
 def test_prevent_init_docstrings() -> None:

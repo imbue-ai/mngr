@@ -44,7 +44,7 @@ def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
     return mngr_ctx, cg
 
 
-def _read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
+def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
     """Read CLAUDE_CONFIG_DIR from the agent's env file.
 
     Each mngr agent has an env file at <agent_state_dir>/env that contains
@@ -98,7 +98,7 @@ def discover_agents(
         agent_state_dir = default_host_dir / "agents" / agent_id
 
         # Get CLAUDE_CONFIG_DIR from the agent's env file
-        claude_config_dir = _read_claude_config_dir_from_env_file(agent_state_dir)
+        claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
         agents.append(
             AgentInfo(

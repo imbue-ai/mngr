@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
@@ -38,6 +39,13 @@ _ONE_TIME_CODE_LENGTH: Final[int] = 32
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 
 
+
+_PROVIDER_HOST_DIR: Final[dict[str, str]] = {
+    "docker": "/mngr",
+    "modal": "/mngr",
+}
+
+
 class AgentDiscoveryHandler(FrozenModel):
     """Handles agent discovery events by setting up reverse tunnels and writing URL files."""
 
@@ -47,15 +55,25 @@ class AgentDiscoveryHandler(FrozenModel):
         default_factory=lambda: _DEFAULT_MNGR_HOST_DIR,
         description="Base mngr host directory for local agents (defaults to ~/.mngr)",
     )
+    data_dir: Path = Field(
+        default_factory=lambda: _DEFAULT_MNGR_HOST_DIR.parent / ".minds",
+        description="Minds data directory for looking up stored tunnel tokens",
+    )
 
-    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None) -> None:
+    def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         if ssh_info is not None:
-            self._handle_remote_agent(agent_id, ssh_info)
+            self._handle_remote_agent(agent_id, ssh_info, provider_name)
         else:
             self._handle_local_agent(agent_id)
 
-    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
-        agent_state_dir = f"~/.mngr/agents/{agent_id}"
+    @staticmethod
+    def _remote_host_dir(provider_name: str) -> str:
+        """Return the mngr host directory for a provider, defaulting to ~/.mngr."""
+        return _PROVIDER_HOST_DIR.get(provider_name, "~/.mngr")
+
+    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, provider_name: str) -> None:
+        host_dir = self._remote_host_dir(provider_name)
+        agent_state_dir = f"{host_dir}/agents/{agent_id}"
         try:
             remote_port = self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
@@ -71,6 +89,19 @@ class AgentDiscoveryHandler(FrozenModel):
             logger.debug("Wrote API URL {} for remote agent {}", api_url, agent_id)
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning("Failed to set up reverse tunnel for agent {}: {}", agent_id, e)
+
+        # Inject stored tunnel token if one exists for this agent
+        self._inject_stored_tunnel_token(agent_id)
+
+    def _inject_stored_tunnel_token(self, agent_id: AgentId) -> None:
+        """If a tunnel token is stored for this agent, inject it via mngr exec."""
+        token = load_tunnel_token(self.data_dir, agent_id)
+        if token is None:
+            return
+        # Import here to avoid circular dependency and keep the import light
+        from imbue.minds.desktop_client.api_v1 import _inject_tunnel_token_into_agent
+
+        _inject_tunnel_token_into_agent(agent_id, token)
 
     def _handle_local_agent(self, agent_id: AgentId) -> None:
         local_state_dir = self.mngr_host_dir / "agents" / str(agent_id)
@@ -103,7 +134,7 @@ def start_desktop_client(
     tunnel_manager = SSHTunnelManager()
 
     cloudflare_client = _build_cloudflare_client()
-    agent_creator = AgentCreator(paths=paths, cloudflare_client=cloudflare_client)
+    agent_creator = AgentCreator(paths=paths)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
@@ -126,7 +157,9 @@ def start_desktop_client(
 
     # Register callback to set up reverse tunnels and write API URL files
     # when agents are discovered
-    discovery_handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=port)
+    discovery_handler = AgentDiscoveryHandler(
+        tunnel_manager=tunnel_manager, server_port=port, data_dir=data_directory,
+    )
     stream_manager.add_on_agent_discovered_callback(discovery_handler)
     stream_manager.start()
 
@@ -143,6 +176,7 @@ def start_desktop_client(
         telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
+        stream_manager=stream_manager,
     )
 
     if not is_no_browser:
@@ -150,11 +184,16 @@ def start_desktop_client(
         thread.daemon = True
         thread.start()
 
-    try:
-        uvicorn.run(app, host=host, port=port)
-    finally:
-        stream_manager.stop()
-        tunnel_manager.cleanup()
+    # Subprocess cleanup (stream_manager.stop(), tunnel_manager.cleanup())
+    # happens in the ASGI lifespan shutdown hook inside create_desktop_client,
+    # NOT in a finally block here. Uvicorn re-raises the captured SIGTERM
+    # after shutdown (via signal.raise_signal), so a finally block around
+    # uvicorn.run() would never execute on signal-triggered shutdown.
+    #
+    # timeout_graceful_shutdown=1 ensures uvicorn cancels in-flight tasks
+    # quickly, giving the lifespan shutdown hook time to run within
+    # electron's 5-second SIGKILL window.
+    uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:

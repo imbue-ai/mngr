@@ -34,3 +34,14 @@ export function getHostname(): string {
   cachedHostname = metaElement?.getAttribute("content") ?? "localhost";
   return cachedHostname;
 }
+
+let cachedPrimaryAgentId: string | null = null;
+
+export function getPrimaryAgentId(): string {
+  if (cachedPrimaryAgentId !== null) {
+    return cachedPrimaryAgentId;
+  }
+  const metaElement = document.querySelector('meta[name="minds-workspace-server-agent-id"]');
+  cachedPrimaryAgentId = metaElement?.getAttribute("content") ?? "";
+  return cachedPrimaryAgentId;
+}

@@ -195,11 +195,28 @@ function createWindow() {
     mainWindow = null;
   });
 
+  // Prevent backward navigation to file:// pages (shell.html) once the
+  // backend is running. Without this, hitting Back enough times lands on
+  // the static shell page which has no way to recover.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://') && backendBaseUrl) {
+      event.preventDefault();
+    }
+  });
+
   // Inject the custom title bar into every backend page.
   // Skip file:// pages (loading/error screens).
   mainWindow.webContents.on('dom-ready', () => {
     const url = mainWindow.webContents.getURL();
-    if (url.startsWith('file://')) return;
+    if (url.startsWith('file://')) {
+      // If the backend is already running and we somehow ended up on
+      // shell.html (e.g. via history navigation that bypassed will-navigate),
+      // redirect to the backend landing page.
+      if (backendBaseUrl) {
+        mainWindow.loadURL(backendBaseUrl + '/');
+      }
+      return;
+    }
 
     const css = TITLEBAR_CSS + (isMac ? TITLEBAR_CSS_MAC : '');
     mainWindow.webContents.insertCSS(css);
@@ -380,18 +397,24 @@ ipcMain.on('window-close', () => {
 let isShuttingDown = false;
 
 app.on('window-all-closed', async () => {
+  console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
   if (!isShuttingDown) {
     isShuttingDown = true;
+    console.log('[lifecycle] Starting shutdown from window-all-closed...');
     await shutdown();
+    console.log('[lifecycle] Shutdown complete, calling app.quit()');
     app.quit();
   }
 });
 
 app.on('before-quit', async (event) => {
+  console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   if (getBackendProcess() && !isShuttingDown) {
     isShuttingDown = true;
     event.preventDefault();
+    console.log('[lifecycle] Starting shutdown from before-quit...');
     await shutdown();
+    console.log('[lifecycle] Shutdown complete, calling app.quit()');
     app.quit();
   }
 });

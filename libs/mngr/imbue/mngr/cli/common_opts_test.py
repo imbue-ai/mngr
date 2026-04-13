@@ -29,8 +29,11 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
+
+hookimpl = pluggy.HookimplMarker("mngr")
 
 
 def _make_click_context(
@@ -542,6 +545,148 @@ def test_apply_create_template_skips_unknown_params(mngr_test_prefix: str) -> No
 
 
 # =============================================================================
+# Tests for apply_create_template list/tuple merging
+# =============================================================================
+
+
+def test_apply_create_template_concatenates_list_params_with_config_defaults(mngr_test_prefix: str) -> None:
+    """Template list values should concatenate with existing config defaults, not overwrite."""
+    # Simulate the state after apply_config_defaults has set env from [commands.create]
+    ctx = _make_click_context(
+        params={
+            "template": ("main",),
+            "env": ("IS_SANDBOX=1", "IS_AUTONOMOUS=1"),
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("main"): CreateTemplate(options={"env": ["REVIEWER_AUTOFIX_ENABLE=0"]}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["env"] == ("IS_SANDBOX=1", "IS_AUTONOMOUS=1", "REVIEWER_AUTOFIX_ENABLE=0")
+
+
+def test_apply_create_template_concatenates_list_params_across_multiple_templates(mngr_test_prefix: str) -> None:
+    """Multiple templates should concatenate their list values."""
+    ctx = _make_click_context(
+        params={
+            "template": ("first", "second"),
+            "env": (),
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("first"): CreateTemplate(options={"env": ["FOO=1"]}),
+            CreateTemplateName("second"): CreateTemplate(options={"env": ["BAR=2"]}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["env"] == ("FOO=1", "BAR=2")
+
+
+def test_apply_create_template_empty_list_resets(mngr_test_prefix: str) -> None:
+    """An explicit empty list in a template should reset earlier values."""
+    # Simulate config defaults already applied
+    ctx = _make_click_context(
+        params={
+            "template": ("reset-template",),
+            "env": ("FROM_CONFIG=1",),
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("reset-template"): CreateTemplate(options={"env": []}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["env"] == ()
+
+
+def test_apply_create_template_empty_list_reset_then_later_template_adds(mngr_test_prefix: str) -> None:
+    """After a reset, later templates can still add values."""
+    ctx = _make_click_context(
+        params={
+            "template": ("reset", "add-back"),
+            "env": ("FROM_CONFIG=1",),
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("reset"): CreateTemplate(options={"env": []}),
+            CreateTemplateName("add-back"): CreateTemplate(options={"env": ["FRESH=1"]}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["env"] == ("FRESH=1",)
+
+
+def test_apply_create_template_list_concat_with_cli_values(mngr_test_prefix: str) -> None:
+    """Template list values should concatenate with CLI-specified list values."""
+    ctx = _make_click_context(
+        params={
+            "template": ("mytemplate",),
+            "env": ("CLI_VAR=1",),
+        },
+        source_by_param_name={
+            "env": ParameterSource.COMMANDLINE,
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("mytemplate"): CreateTemplate(options={"env": ["TEMPLATE_VAR=2"]}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["env"] == ("CLI_VAR=1", "TEMPLATE_VAR=2")
+
+
+def test_apply_create_template_empty_list_does_not_reset_cli_values(mngr_test_prefix: str) -> None:
+    """An explicit empty list should not clear CLI-specified list values."""
+    ctx = _make_click_context(
+        params={
+            "template": ("reset-template",),
+            "env": ("CLI_VAR=1",),
+        },
+        source_by_param_name={
+            "env": ParameterSource.COMMANDLINE,
+        },
+    )
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("reset-template"): CreateTemplate(options={"env": []}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    # CLI-specified values should be preserved even when template resets
+    assert result["env"] == ("CLI_VAR=1",)
+
+
+# =============================================================================
 # Tests for _split_known_and_plugin_params
 # =============================================================================
 
@@ -872,3 +1017,75 @@ def test_setting_flag_sets_command_defaults_in_config(
     )
     assert result.exit_code == 0
     assert captured_config[0].commands["create"].defaults["connect"] is False
+
+
+def test_disable_plugin_in_command_defaults_blocks_override_hook(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """A plugin disabled via [commands.create] disable_plugin should not have
+    its override_command_options hook fire.
+
+    Regression test: the ttyd plugin was injecting a duplicate 'terminal'
+    extra_window even though disable_plugin=["ttyd"] was set in the project
+    settings under [commands.create]. The root cause was that disable_plugin
+    from command defaults only updated CLI params but never called
+    block_disabled_plugins on the plugin manager, so the plugin's hooks
+    still fired.
+    """
+
+    class FakeTerminalPlugin:
+        @hookimpl
+        def override_command_options(
+            self,
+            command_name: str,
+            command_class: type,
+            params: dict[str, Any],
+        ) -> None:
+            if command_name == "create":
+                existing = params.get("extra_window", ())
+                params["extra_window"] = (*existing, 'terminal="fake-ttyd-command"')
+
+    # Set up a project settings file that disables our plugin via command defaults
+    project_dir = tmp_path / ".mngr"
+    project_dir.mkdir(exist_ok=True)
+    settings_path = project_dir / "settings.toml"
+    settings_path.write_text(
+        '[commands.create]\n'
+        'disable_plugin = ["fake_terminal"]\n'
+    )
+
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    pm.register(FakeTerminalPlugin(), name="fake_terminal")
+
+    captured_params: list[dict[str, Any]] = []
+
+    @click.command()
+    @click.option("--extra-window", multiple=True, default=())
+    @add_common_options
+    @click.pass_context
+    def test_create(ctx: click.Context, **kwargs: Any) -> None:
+        _mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="create",
+            command_class=CommonCliOptions,
+        )
+        captured_params.append(ctx.params.copy())
+
+    result = cli_runner.invoke(
+        test_create,
+        [],
+        obj=pm,
+        catch_exceptions=False,
+        env={"MNGR_PROJECT_DIR": str(tmp_path)},
+    )
+    assert result.exit_code == 0
+    assert len(captured_params) == 1
+
+    extra_window = captured_params[0].get("extra_window", ())
+    terminal_entries = [e for e in extra_window if "fake-ttyd" in str(e)]
+    assert terminal_entries == [], (
+        f"Disabled plugin's override_command_options hook still fired, "
+        f"injecting: {terminal_entries}. extra_window={extra_window}"
+    )

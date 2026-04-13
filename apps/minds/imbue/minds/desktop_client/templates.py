@@ -97,7 +97,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       </thead>
       <tbody>
         {% for agent_id in agent_ids %}
-        <tr onclick="window.location='/agents/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
+        <tr onclick="window.location='/forwarding/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
@@ -573,7 +573,7 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     <li>
       <span class="server-name">{{ server_name }}</span>
       <div class="server-links">
-        <a href="/agents/{{ agent_id }}/{{ server_name }}/">Local</a>
+        <a href="/forwarding/{{ agent_id }}/{{ server_name }}/">Local</a>
         {% if cf_services and server_name in cf_services %}
         <a href="https://{{ cf_services[server_name] }}" class="global-link" target="_blank">Global</a>
         <button class="toggle-btn enabled" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', false)">Disable global</button>
@@ -593,7 +593,7 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
   <script>
   async function toggleGlobal(agentId, serverName, enable) {
     try {
-      const resp = await fetch('/agents/' + agentId + '/servers/' + serverName + '/global', {
+      const resp = await fetch('/forwarding/' + agentId + '/servers/' + serverName + '/global', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({enabled: enable})

@@ -23,8 +23,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
-from imbue.minds_workspace_server.agent_discovery import _read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -36,10 +37,16 @@ from imbue.minds_workspace_server.models import AgentListResponse
 from imbue.minds_workspace_server.models import CreateAgentResponse
 from imbue.minds_workspace_server.models import CreateChatRequest
 from imbue.minds_workspace_server.models import CreateWorktreeRequest
+from imbue.minds_workspace_server.models import DestroyAgentResponse
 from imbue.minds_workspace_server.models import ErrorResponse
 from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
+from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
+from imbue.minds_workspace_server.sharing_proxy import disable_sharing
+from imbue.minds_workspace_server.sharing_proxy import enable_sharing
+from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
+from imbue.minds_workspace_server.sharing_proxy import update_sharing_auth
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
@@ -168,6 +175,7 @@ def _index(request: Request) -> Response:
         html_content = index_path.read_text()
         html_content = _inject_base_path_meta_tag(html_content, root_path)
         html_content = _inject_hostname_meta_tag(html_content)
+        html_content = _inject_agent_id_meta_tag(html_content)
         if config.javascript_plugin_basenames:
             html_content = _inject_plugin_script_tags(html_content, config.javascript_plugin_basenames, root_path)
         return HTMLResponse(html_content)
@@ -216,7 +224,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
 
     host_dir = _get_host_dir()
     agent_state_dir = host_dir / "agents" / agent_id
-    claude_config_dir = _read_claude_config_dir_from_env_file(agent_state_dir)
+    claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
     return AgentInfo(
         id=agent_state.id,
@@ -372,13 +380,22 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
     )
 
 
+def _layout_filename(request: Request) -> str:
+    """Return the layout filename based on the access mode query parameter."""
+    mode = request.query_params.get("mode", "")
+    if mode and mode in ("cloudflare", "local", "dev"):
+        return f"layout-{mode}.json"
+    return "layout.json"
+
+
 def _get_layout(agent_id: str, request: Request) -> Response:
     """Get the saved workspace layout for an agent."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
 
-    layout_file = agent_info.agent_state_dir / "workspace_layout" / "layout.json"
+    filename = _layout_filename(request)
+    layout_file = agent_info.agent_state_dir / "workspace_layout" / filename
     if not layout_file.exists():
         return JSONResponse(content=None, status_code=404)
 
@@ -403,12 +420,49 @@ async def _save_layout(agent_id: str, request: Request) -> Response:
         error = ErrorResponse(detail="Invalid JSON in request body")
         return JSONResponse(content=error.model_dump(), status_code=400)
 
+    filename = _layout_filename(request)
     layout_dir = agent_info.agent_state_dir / "workspace_layout"
     layout_dir.mkdir(parents=True, exist_ok=True)
-    layout_file = layout_dir / "layout.json"
+    layout_file = layout_dir / filename
     layout_file.write_bytes(body)
 
     return JSONResponse(content={"status": "ok"})
+
+
+async def _get_screen_capture(agent_id: str, request: Request) -> Response:
+    """Capture the tmux pane content for an agent.
+
+    Returns the visible screen content (and optionally scrollback) as plain
+    text. Useful for seeing what's on an agent's terminal when it has no
+    Claude session data (e.g., the agent crashed on startup).
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    prefix = os.environ.get("MNGR_PREFIX", "mngr-")
+    session_name = f"{prefix}{agent_info.name}"
+    include_scrollback = request.query_params.get("scrollback", "false").lower() == "true"
+    scrollback_flag = ["-S", "-"] if include_scrollback else []
+    command = ["tmux", "capture-pane", "-t", session_name, *scrollback_flag, "-p"]
+
+    def _run_capture() -> tuple[bool, str]:
+        result = run_local_command_modern_version(
+            command=command,
+            cwd=None,
+            is_checked=False,
+            timeout=5.0,
+        )
+        succeeded = result.returncode == 0
+        return succeeded, result.stdout if succeeded else result.stderr
+
+    success, output = await run_in_threadpool(_run_capture)
+    if not success:
+        return JSONResponse(
+            content={"screen": None, "error": f"tmux session not found: {session_name}"},
+            status_code=200,
+        )
+    return JSONResponse(content={"screen": output})
 
 
 def _serve_static_file(basename: str, request: Request) -> Response:
@@ -546,6 +600,104 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
         pass
 
 
+async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
+    """Destroy an agent by running mngr destroy --force."""
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_state = agent_manager.get_agent_by_id(agent_id)
+    if agent_state is None:
+        error = ErrorResponse(detail=f"Agent '{agent_id}' not found")
+        return JSONResponse(content=error.model_dump(), status_code=404)
+
+    agent_name = agent_state.name
+
+    def _run_destroy() -> tuple[bool, str]:
+        result = run_local_command_modern_version(
+            command=["mngr", "destroy", agent_name, "--force"],
+            cwd=None,
+            is_checked=False,
+            timeout=30.0,
+        )
+        succeeded = result.returncode == 0
+        output = result.stdout.strip() if succeeded else result.stderr.strip()
+        return succeeded, output
+
+    success, output = await run_in_threadpool(_run_destroy)
+    if not success:
+        error = ErrorResponse(detail=f"Failed to destroy agent '{agent_name}': {output}")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    # Remove the agent from the workspace server's tracked state immediately
+    # so the frontend reflects the destruction without waiting for mngr observe.
+    agent_manager.remove_agent(agent_id)
+
+    return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
+
+
+async def _get_sharing_status_endpoint(server_name: str) -> JSONResponse:
+    """Get the Cloudflare forwarding status for a server."""
+    try:
+        status = await run_in_threadpool(get_sharing_status, server_name)
+        return JSONResponse(content=status.model_dump())
+    except SharingProxyError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+async def _enable_sharing_endpoint(server_name: str, request: Request) -> JSONResponse:
+    """Enable Cloudflare forwarding for a server, optionally with auth rules."""
+    auth_rules = None
+    try:
+        body = await request.json()
+        auth_rules = body.get("auth_rules")
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    try:
+        status = await run_in_threadpool(enable_sharing, server_name, auth_rules)
+        return JSONResponse(content=status.model_dump())
+    except SharingProxyError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+async def _update_sharing_auth_endpoint(server_name: str, request: Request) -> JSONResponse:
+    """Update the auth policy for an already-enabled shared server."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    auth_rules = body.get("auth_rules")
+    if auth_rules is None:
+        error = ErrorResponse(detail="auth_rules field is required")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    try:
+        status = await run_in_threadpool(update_sharing_auth, server_name, auth_rules)
+        return JSONResponse(content=status.model_dump())
+    except SharingProxyError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+async def _disable_sharing_endpoint(server_name: str) -> JSONResponse:
+    """Disable Cloudflare forwarding for a server."""
+    try:
+        status = await run_in_threadpool(disable_sharing, server_name)
+        return JSONResponse(content=status.model_dump())
+    except SharingProxyError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+def _inject_agent_id_meta_tag(html_content: str) -> str:
+    """Inject the primary agent ID as a meta tag for the frontend."""
+    agent_id = os.environ.get("MNGR_AGENT_ID", "")
+    meta_tag = f'<meta name="minds-workspace-server-agent-id" content="{agent_id}">'
+    return html_content.replace("</head>", f"{meta_tag}\n</head>")
+
+
 def create_application(
     config: Config | None = None,
     provider_names: tuple[str, ...] | None = None,
@@ -572,6 +724,12 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/layout", _get_layout, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
+    application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
+    application.add_api_route("/api/sharing/{server_name}", _get_sharing_status_endpoint, methods=["GET"])
+    application.add_api_route("/api/sharing/{server_name}", _enable_sharing_endpoint, methods=["PUT"])
+    application.add_api_route("/api/sharing/{server_name}", _disable_sharing_endpoint, methods=["DELETE"])
+    application.add_api_route("/api/sharing/{server_name}/auth", _update_sharing_auth_endpoint, methods=["PUT"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )
