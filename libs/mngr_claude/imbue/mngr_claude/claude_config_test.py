@@ -7,6 +7,7 @@ import pytest
 
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import _ACCEPT_DIALOGS_FIX_COMMAND
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
@@ -759,8 +760,6 @@ def test_get_user_claude_config_path_falls_back_to_claude_config_dir(
 # Tests for warn_undismissed_claude_dialogs
 # =============================================================================
 
-_FIX_COMMAND = "mngr config set local_system_mutations.accept_permission_dialogs YES"
-
 
 def test_warn_undismissed_claude_dialogs_returns_empty_when_all_dismissed(tmp_path: Path) -> None:
     """warn_undismissed_claude_dialogs returns [] when trust, effort, and onboarding are all set."""
@@ -799,7 +798,7 @@ def test_warn_undismissed_claude_dialogs_warns_when_source_not_trusted(tmp_path:
 
     assert len(warnings) == 1
     assert str(source_path) in warnings[0]
-    assert _FIX_COMMAND in warnings[0]
+    assert _ACCEPT_DIALOGS_FIX_COMMAND in warnings[0]
 
 
 def test_warn_undismissed_claude_dialogs_warns_when_effort_callout_not_dismissed(tmp_path: Path) -> None:
@@ -820,7 +819,7 @@ def test_warn_undismissed_claude_dialogs_warns_when_effort_callout_not_dismissed
     warnings = warn_undismissed_claude_dialogs(config_file, source_path)
 
     assert len(warnings) == 1
-    assert _FIX_COMMAND in warnings[0]
+    assert _ACCEPT_DIALOGS_FIX_COMMAND in warnings[0]
 
 
 def test_warn_undismissed_claude_dialogs_warns_when_onboarding_not_completed(tmp_path: Path) -> None:
@@ -841,7 +840,7 @@ def test_warn_undismissed_claude_dialogs_warns_when_onboarding_not_completed(tmp
     warnings = warn_undismissed_claude_dialogs(config_file, source_path)
 
     assert len(warnings) == 1
-    assert _FIX_COMMAND in warnings[0]
+    assert _ACCEPT_DIALOGS_FIX_COMMAND in warnings[0]
 
 
 def test_warn_undismissed_claude_dialogs_returns_multiple_warnings(tmp_path: Path) -> None:
@@ -857,4 +856,4 @@ def test_warn_undismissed_claude_dialogs_returns_multiple_warnings(tmp_path: Pat
 
     assert len(warnings) == 3
     for warning in warnings:
-        assert _FIX_COMMAND in warning
+        assert _ACCEPT_DIALOGS_FIX_COMMAND in warning
