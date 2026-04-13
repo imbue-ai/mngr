@@ -1095,14 +1095,16 @@ def test_get_orphaned_work_dirs_handles_size_command_failure(
 # =========================================================================
 
 
-def test_is_git_worktree_returns_true_for_worktree(local_host: Host, tmp_path: Path) -> None:
-    """_is_git_worktree returns True when a .git file (not directory) is present."""
-    work_dir = tmp_path / "worktree"
-    work_dir.mkdir()
-    git_file = work_dir / ".git"
-    git_file.write_text("gitdir: /some/repo/.git/worktrees/abc")
+def test_is_git_worktree_returns_true_for_worktree(local_host: Host, temp_git_repo: Path, tmp_path: Path) -> None:
+    """_is_git_worktree returns True for a real git worktree."""
+    wt_path = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "worktree", "add", str(wt_path)],
+        check=True,
+        capture_output=True,
+    )
 
-    assert _is_git_worktree(local_host, work_dir) is True
+    assert _is_git_worktree(local_host, wt_path) is True
 
 
 def test_is_git_worktree_returns_false_for_plain_directory(local_host: Host, tmp_path: Path) -> None:
@@ -1113,14 +1115,9 @@ def test_is_git_worktree_returns_false_for_plain_directory(local_host: Host, tmp
     assert _is_git_worktree(local_host, work_dir) is False
 
 
-def test_is_git_worktree_returns_false_for_git_directory(local_host: Host, tmp_path: Path) -> None:
-    """_is_git_worktree returns False when .git is a directory (main repo, not worktree)."""
-    work_dir = tmp_path / "main_repo"
-    work_dir.mkdir()
-    git_dir = work_dir / ".git"
-    git_dir.mkdir()
-
-    assert _is_git_worktree(local_host, work_dir) is False
+def test_is_git_worktree_returns_false_for_git_directory(local_host: Host, temp_git_repo: Path) -> None:
+    """_is_git_worktree returns False for a real git repo (main repo, not worktree)."""
+    assert _is_git_worktree(local_host, temp_git_repo) is False
 
 
 # =========================================================================
