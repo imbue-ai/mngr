@@ -245,8 +245,7 @@ def test_help_nonexistent_topic(
 ) -> None:
     """'mngr help nonexistent' exits with an error message."""
     # The error message is written via logger.error(), which goes to loguru's handlers
-    # (not CliRunner's captured stdout). Capture it with a StringIO sink, matching the
-    # pattern used in exec_test.py::test_emit_human_output_failed_agents_logs_errors.
+    # and not to CliRunner's captured stdout, so capture it with a StringIO sink.
     log_output = StringIO()
     sink_id = logger.add(log_output, level="ERROR", format="{message}")
     try:
