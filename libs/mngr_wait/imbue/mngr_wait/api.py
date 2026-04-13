@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
@@ -352,7 +353,7 @@ def _detect_state_changes(
 
 def _check_latest_lifecycle_event(
     host: OnlineHostInterface,
-    events_file_str: str,
+    events_file: Path,
     event_type: str,
 ) -> bool:
     """Check if the most recent event in the lifecycle file matches event_type.
@@ -360,7 +361,7 @@ def _check_latest_lifecycle_event(
     Reads only the last line of the events file to determine the latest event.
     Returns False if the file doesn't exist, is empty, or the last event doesn't match.
     """
-    result = host.execute_idempotent_command(f"tail -1 {shlex.quote(events_file_str)} 2>/dev/null || true")
+    result = host.execute_idempotent_command(f"tail -1 {shlex.quote(str(events_file))} 2>/dev/null || true")
     last_line = result.stdout.strip()
     if not last_line:
         return False
@@ -393,14 +394,13 @@ def wait_for_event(
         raise UserInputError("Cannot wait for events on an offline host")
 
     events_file = get_lifecycle_events_path(host_interface.host_dir, resolved.agent_id)
-    events_file_str = str(events_file)
 
     is_waiting = True
     while is_waiting:
         elapsed = time.monotonic() - start_time
 
         try:
-            if _check_latest_lifecycle_event(host_interface, events_file_str, event_type):
+            if _check_latest_lifecycle_event(host_interface, events_file, event_type):
                 return WaitResult(
                     target=resolved.target,
                     is_matched=True,

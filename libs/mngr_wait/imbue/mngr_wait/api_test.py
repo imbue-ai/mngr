@@ -528,11 +528,11 @@ def test_wait_for_state_detects_destroyed_after_connection_errors() -> None:
 # === _check_latest_lifecycle_event ===
 
 
-def _write_events_file(directory: Path, lines: list[str]) -> str:
-    """Write event lines to a temporary events.jsonl file and return the path string."""
+def _write_events_file(directory: Path, lines: list[str]) -> Path:
+    """Write event lines to a temporary events.jsonl file and return the path."""
     events_file = directory / "events.jsonl"
     events_file.write_text("\n".join(lines) + "\n" if lines else "")
-    return str(events_file)
+    return events_file
 
 
 def test_check_latest_lifecycle_event_matches_event_type(
@@ -569,7 +569,7 @@ def test_check_latest_lifecycle_event_returns_false_for_missing_file(
     local_provider: LocalProviderInstance,
 ) -> None:
     host = local_provider.get_host(local_provider.host_id)
-    events_file = str(temp_host_dir / "nonexistent.jsonl")
+    events_file = temp_host_dir / "nonexistent.jsonl"
     assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is False
 
 
