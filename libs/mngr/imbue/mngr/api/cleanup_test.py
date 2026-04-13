@@ -42,7 +42,6 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import make_test_agent_details
 
@@ -59,7 +58,6 @@ def _make_ctx_with_plugin(temp_mngr_ctx: MngrContext, plugin: object) -> MngrCon
     """Create a MngrContext that has the given plugin registered in its plugin manager."""
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
-    load_local_backend_only(pm)
     pm.register(plugin)
     return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().pm, pm))
 
@@ -77,9 +75,9 @@ class _OfflineHostProvider(LocalProviderInstance):
     type checker (ty) skip the incompatibility check.
     """
 
-    def get_host(self, host):
+    def get_host(self, host: HostId | HostName):
+        host_id = host if isinstance(host, HostId) else HostId.generate()
         now = datetime.now(timezone.utc)
-        host_id = HostId.generate()
         certified_data = CertifiedHostData(
             created_at=now,
             updated_at=now,
