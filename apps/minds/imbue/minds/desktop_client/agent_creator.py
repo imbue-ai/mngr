@@ -34,7 +34,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
-
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -331,7 +330,6 @@ def run_mngr_create(
     return api_key
 
 
-
 class AgentCreator(MutableModel):
     """Creates mngr agents in the background from git repositories or local paths.
 
@@ -493,4 +491,3 @@ class AgentCreator(MutableModel):
                 self._errors[aid] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
-

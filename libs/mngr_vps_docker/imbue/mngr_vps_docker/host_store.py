@@ -162,11 +162,7 @@ class VpsDockerHostStore:
         """List all host records stored on the state volume in a single SSH command."""
         state_dir = f"{STATE_VOLUME_MOUNT_PATH}/host_state"
         script = (
-            f"for f in '{state_dir}'/*.json; do "
-            f"[ -f \"$f\" ] || continue; "
-            f"echo '{_FILE_SEP}'\"$f\"; "
-            f"cat \"$f\"; "
-            f"done"
+            f'for f in \'{state_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
         )
         try:
             output = self._exec(script)
@@ -193,11 +189,7 @@ class VpsDockerHostStore:
         """Read persisted agent data for a host in a single SSH command."""
         agent_dir = self._agent_data_dir(host_id)
         script = (
-            f"for f in '{agent_dir}'/*.json; do "
-            f"[ -f \"$f\" ] || continue; "
-            f"echo '{_FILE_SEP}'\"$f\"; "
-            f"cat \"$f\"; "
-            f"done"
+            f'for f in \'{agent_dir}\'/*.json; do [ -f "$f" ] || continue; echo \'{_FILE_SEP}\'"$f"; cat "$f"; done'
         )
         try:
             output = self._exec(script)
@@ -215,7 +207,9 @@ class VpsDockerHostStore:
         except ContainerSetupError as e:
             logger.warning("Failed to remove agent data {}: {}", path, e)
 
-    def list_all_host_records_with_agents(self) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+    def list_all_host_records_with_agents(
+        self,
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Read all host records and their agent data in a single SSH command.
 
         Returns (host_records, agent_data_by_host_id).
@@ -224,9 +218,9 @@ class VpsDockerHostStore:
         # Read all .json files at the top level (host records) and in subdirs (agent data)
         script = (
             f"for f in '{state_dir}'/*.json '{state_dir}'/*/*.json; do "
-            f"[ -f \"$f\" ] || continue; "
+            f'[ -f "$f" ] || continue; '
             f"echo '{_FILE_SEP}'\"$f\"; "
-            f"cat \"$f\"; "
+            f'cat "$f"; '
             f"done"
         )
         try:

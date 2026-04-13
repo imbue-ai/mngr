@@ -90,9 +90,7 @@ def test_broadcast_proto_agent_completed() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
 
-    broadcaster.broadcast_proto_agent_completed(
-        agent_id="a1", success=True, error=None
-    )
+    broadcaster.broadcast_proto_agent_completed(agent_id="a1", success=True, error=None)
 
     msg = json.loads(_get_message(q))
     assert msg["type"] == "proto_agent_completed"

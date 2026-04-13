@@ -26,9 +26,9 @@ from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -38,7 +38,6 @@ from imbue.mngr.primitives import AgentId
 _ONE_TIME_CODE_LENGTH: Final[int] = 32
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
-
 
 
 _PROVIDER_HOST_DIR: Final[dict[str, str]] = {
@@ -156,7 +155,9 @@ def start_desktop_client(
     # Register callback to set up reverse tunnels and write API URL files
     # when agents are discovered
     discovery_handler = AgentDiscoveryHandler(
-        tunnel_manager=tunnel_manager, server_port=port, data_dir=data_directory,
+        tunnel_manager=tunnel_manager,
+        server_port=port,
+        data_dir=data_directory,
     )
     stream_manager.add_on_agent_discovered_callback(discovery_handler)
     stream_manager.start()
