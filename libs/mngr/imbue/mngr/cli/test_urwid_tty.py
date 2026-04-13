@@ -61,12 +61,25 @@ def _run_in_tmux_and_capture(
         captured = result.stdout
         return _SENTINEL in captured
 
-    wait_for(
-        _sentinel_appeared,
-        timeout=timeout,
-        poll_interval=0.5,
-        error_message=f"Sentinel {_SENTINEL!r} did not appear in tmux session {session_name!r} within {timeout}s",
-    )
+    try:
+        wait_for(
+            _sentinel_appeared,
+            timeout=timeout,
+            poll_interval=0.5,
+            error_message=f"Sentinel {_SENTINEL!r} did not appear in tmux session {session_name!r} within {timeout}s",
+        )
+    except TimeoutError:
+        # Capture final pane state for debugging
+        final = subprocess.run(
+            ["tmux", "capture-pane", "-t", session_name, "-p"],
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
+        raise TimeoutError(
+            f"Sentinel {_SENTINEL!r} did not appear in tmux session {session_name!r} within {timeout}s.\n"
+            f"Final pane content:\n{final.stdout}"
+        )
 
     subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
     return captured
