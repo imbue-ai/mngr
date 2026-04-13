@@ -29,6 +29,7 @@ from supertokens_python import InputAppInfo
 from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
 from supertokens_python.recipe import session as st_session_recipe
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 from supertokens_python.recipe.session.syncio import get_session_without_request_response
 
 logger = logging.getLogger(__name__)
@@ -966,7 +967,7 @@ def _authenticate_supertokens(token: str) -> AdminAuth:
             access_token=token,
             anti_csrf_check=False,
         )
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, SuperTokensSessionError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     if session is None:
