@@ -141,77 +141,67 @@ async function disableSharing(serverName: string): Promise<void> {
   m.redraw();
 }
 
-function renderEmailList(emails: string[], serverName: string, isEnabled: boolean): m.Vnode[] {
-  return [
-    m("div.share-modal-section", [
-      m("p.share-modal-label", "Allowed emails:"),
-      emails.length === 0
-        ? m("p.share-modal-empty", "No email restrictions configured. Anyone with the link can access.")
-        : m("ul.share-modal-email-list",
-            emails.map((email) =>
-              m("li.share-modal-email-item", { key: email }, [
-                m("span", email),
-                m("button.share-modal-email-remove", {
-                  title: "Remove",
-                  onclick: () => {
-                    const updated = emails.filter((e) => e !== email);
-                    if (isEnabled) {
-                      updateAuth(serverName, updated);
-                    } else if (modalStatus) {
-                      modalStatus.auth_rules = buildAuthRules(updated);
-                    }
-                  },
-                }, "x"),
-              ]),
-            ),
+function addEmail(emails: string[], serverName: string, isEnabled: boolean): void {
+  const email = modalNewEmail.trim();
+  if (!email || emails.includes(email)) return;
+  const updated = [...emails, email];
+  modalNewEmail = "";
+  if (isEnabled) {
+    updateAuth(serverName, updated);
+  } else if (modalStatus) {
+    modalStatus.auth_rules = buildAuthRules(updated);
+  }
+}
+
+function removeEmail(emails: string[], email: string, serverName: string, isEnabled: boolean): void {
+  const updated = emails.filter((e) => e !== email);
+  if (isEnabled) {
+    updateAuth(serverName, updated);
+  } else if (modalStatus) {
+    modalStatus.auth_rules = buildAuthRules(updated);
+  }
+}
+
+function renderEmailList(emails: string[], serverName: string, isEnabled: boolean): m.Vnode {
+  return m("div.share-modal-emails", [
+    emails.length === 0
+      ? m("p.share-modal-empty", "No email restrictions. Anyone with the link can access.")
+      : m("ul.share-modal-email-list",
+          emails.map((email) =>
+            m("li.share-modal-email-item", { key: email }, [
+              m("span", email),
+              m("button.share-modal-email-remove", {
+                title: "Remove",
+                onclick: () => removeEmail(emails, email, serverName, isEnabled),
+              }, "x"),
+            ]),
           ),
-      m("div.share-modal-add-email", [
-        m("input.share-modal-email-input", {
-          type: "email",
-          placeholder: "user@example.com",
-          value: modalNewEmail,
-          oninput: (e: Event) => { modalNewEmail = (e.target as HTMLInputElement).value; },
-          onkeydown: (e: KeyboardEvent) => {
-            if (e.key === "Enter" && modalNewEmail.trim()) {
-              e.preventDefault();
-              const email = modalNewEmail.trim();
-              if (!emails.includes(email)) {
-                const updated = [...emails, email];
-                modalNewEmail = "";
-                if (isEnabled) {
-                  updateAuth(serverName, updated);
-                } else if (modalStatus) {
-                  modalStatus.auth_rules = buildAuthRules(updated);
-                }
-              }
-            }
-          },
-        }),
-        m("button.share-modal-btn.share-modal-btn-secondary", {
-          disabled: !modalNewEmail.trim(),
-          onclick: () => {
-            const email = modalNewEmail.trim();
-            if (email && !emails.includes(email)) {
-              const updated = [...emails, email];
-              modalNewEmail = "";
-              if (isEnabled) {
-                updateAuth(serverName, updated);
-              } else if (modalStatus) {
-                modalStatus.auth_rules = buildAuthRules(updated);
-              }
-            }
-          },
-        }, "Add"),
-      ]),
+        ),
+    m("div.share-modal-add-email", [
+      m("input.share-modal-email-input", {
+        type: "email",
+        placeholder: "user@example.com",
+        value: modalNewEmail,
+        oninput: (e: Event) => { modalNewEmail = (e.target as HTMLInputElement).value; },
+        onkeydown: (e: KeyboardEvent) => {
+          if (e.key === "Enter" && modalNewEmail.trim()) {
+            e.preventDefault();
+            addEmail(emails, serverName, isEnabled);
+          }
+        },
+      }),
+      m("button.share-modal-btn.share-modal-btn-secondary", {
+        disabled: !modalNewEmail.trim(),
+        onclick: () => addEmail(emails, serverName, isEnabled),
+      }, "Add"),
     ]),
-  ];
+  ]);
 }
 
 export const ShareModal: m.Component<ShareModalAttrs> = {
   view(vnode) {
     const { serverName, onClose } = vnode.attrs;
 
-    // Fetch once when the modal opens for a new server
     if (modalFetchedFor !== serverName) {
       resetModalState();
       modalFetchedFor = serverName;
@@ -219,10 +209,17 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
     }
 
     const emails = modalStatus ? extractEmails(modalStatus) : [];
+    const isEnabled = modalStatus?.enabled ?? false;
+    const title = isEnabled ? `Edit ${serverName} sharing` : `Share ${serverName} with...`;
 
-    return m("div.share-modal-overlay", { onclick: (e: Event) => { if (e.target === e.currentTarget) { resetModalState(); onClose(); } } }, [
+    const close = () => { resetModalState(); onClose(); };
+
+    return m("div.share-modal-overlay", { onclick: (e: Event) => { if (e.target === e.currentTarget) close(); } }, [
       m("div.share-modal", [
-        m("h3.share-modal-title", `Share: ${serverName}`),
+        m("div.share-modal-header", [
+          m("h3.share-modal-title", title),
+          m("button.share-modal-close-x", { onclick: close, title: "Close" }, "x"),
+        ]),
 
         modalLoading
           ? m("p.share-modal-loading", "Loading...")
@@ -233,17 +230,16 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                   onclick: () => fetchStatus(serverName),
                 }, "Retry"),
               ])
-            : modalStatus?.enabled
+            : isEnabled
               ? m("div", [
-                  m("p.share-modal-label", "This application is shared globally:"),
                   m("div.share-modal-url-row", [
                     m("input.share-modal-url-input", {
                       type: "text",
                       readonly: true,
-                      value: modalStatus.url ?? "(URL not available)",
+                      value: modalStatus?.url ?? "(URL not available)",
                       onclick: (e: Event) => (e.target as HTMLInputElement).select(),
                     }),
-                    m("button.share-modal-btn.share-modal-btn-primary", {
+                    m("button.share-modal-btn.share-modal-btn-secondary", {
                       onclick: () => {
                         if (modalStatus?.url) {
                           navigator.clipboard.writeText(modalStatus.url);
@@ -253,26 +249,24 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                       },
                     }, modalCopied ? "Copied" : "Copy"),
                   ]),
-                  ...renderEmailList(emails, serverName, true),
-                  m("button.share-modal-btn.share-modal-btn-destructive", {
-                    disabled: modalActionInProgress,
-                    onclick: () => disableSharing(serverName),
-                  }, modalActionInProgress ? "Working..." : "Disable sharing"),
+                  renderEmailList(emails, serverName, true),
+                  m("div.share-modal-footer", [
+                    m("button.share-modal-btn.share-modal-btn-destructive", {
+                      disabled: modalActionInProgress,
+                      onclick: () => disableSharing(serverName),
+                    }, modalActionInProgress ? "Working..." : "Disable sharing"),
+                  ]),
                 ])
               : m("div", [
-                  m("p.share-modal-label", "This application is not currently shared."),
-                  ...renderEmailList(emails, serverName, false),
-                  m("button.share-modal-btn.share-modal-btn-primary", {
-                    disabled: modalActionInProgress,
-                    onclick: () => enableSharing(serverName, emails),
-                  }, modalActionInProgress ? "Enabling..." : "Enable sharing"),
+                  renderEmailList(emails, serverName, false),
+                  m("div.share-modal-footer", [
+                    m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Cancel"),
+                    m("button.share-modal-btn.share-modal-btn-create", {
+                      disabled: modalActionInProgress,
+                      onclick: () => enableSharing(serverName, emails),
+                    }, modalActionInProgress ? "Enabling..." : "Enable sharing"),
+                  ]),
                 ]),
-
-        m("div.share-modal-actions", [
-          m("button.share-modal-btn.share-modal-btn-secondary", {
-            onclick: () => { resetModalState(); onClose(); },
-          }, "Close"),
-        ]),
       ]),
     ]);
   },
