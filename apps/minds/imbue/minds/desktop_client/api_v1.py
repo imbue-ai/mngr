@@ -24,11 +24,11 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
-from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
+from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
 from imbue.minds.primitives import ServerName
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -46,7 +46,7 @@ def _authenticate_api_key(request: Request) -> AgentId:
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
 
-    token = auth_header[len("Bearer "):]
+    token = auth_header[len("Bearer ") :]
     if not token:
         raise HTTPException(status_code=401, detail="Empty Bearer token")
 
@@ -243,10 +243,12 @@ async def _handle_telegram_setup(
         pass
 
     telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
-    return _json_response({
-        "agent_id": str(parsed_id),
-        "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS),
-    })
+    return _json_response(
+        {
+            "agent_id": str(parsed_id),
+            "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS),
+        }
+    )
 
 
 def _handle_telegram_status(
@@ -319,9 +321,7 @@ async def _handle_notification(
     try:
         urgency = NotificationUrgency(urgency_str.upper())
     except (ValueError, AttributeError):
-        return _json_error(
-            f"Invalid urgency: {urgency_str}. Must be one of: low, normal, critical", 400
-        )
+        return _json_error(f"Invalid urgency: {urgency_str}. Must be one of: low, normal, critical", 400)
 
     notification_request = NotificationRequest(
         message=message,

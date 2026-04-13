@@ -135,18 +135,18 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
                 except json.JSONDecodeError as e:
                     logger.warning("Failed to parse agent data.json in listing output: {}", e)
         elif aline.startswith("USER_MTIME="):
-            agent_raw["user_activity_mtime"] = parse_optional_int(aline[len("USER_MTIME="):])
+            agent_raw["user_activity_mtime"] = parse_optional_int(aline[len("USER_MTIME=") :])
         elif aline.startswith("AGENT_MTIME="):
-            agent_raw["agent_activity_mtime"] = parse_optional_int(aline[len("AGENT_MTIME="):])
+            agent_raw["agent_activity_mtime"] = parse_optional_int(aline[len("AGENT_MTIME=") :])
         elif aline.startswith("START_MTIME="):
-            agent_raw["start_activity_mtime"] = parse_optional_int(aline[len("START_MTIME="):])
+            agent_raw["start_activity_mtime"] = parse_optional_int(aline[len("START_MTIME=") :])
         elif aline.startswith("TMUX_INFO="):
-            val = aline[len("TMUX_INFO="):].strip()
+            val = aline[len("TMUX_INFO=") :].strip()
             agent_raw["tmux_info"] = val if val else None
         elif aline.startswith("ACTIVE="):
-            agent_raw["is_active"] = aline[len("ACTIVE="):].strip() == "true"
+            agent_raw["is_active"] = aline[len("ACTIVE=") :].strip() == "true"
         elif aline.startswith("URL="):
-            val = aline[len("URL="):].strip()
+            val = aline[len("URL=") :].strip()
             agent_raw["url"] = val if val else None
         else:
             pass
@@ -166,13 +166,13 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
         line = lines[idx]
 
         if line.startswith("UPTIME=") and "uptime_seconds" not in result:
-            result["uptime_seconds"] = parse_optional_float(line[len("UPTIME="):])
+            result["uptime_seconds"] = parse_optional_float(line[len("UPTIME=") :])
         elif line.startswith("BTIME=") and "btime" not in result:
-            result["btime"] = parse_optional_int(line[len("BTIME="):])
+            result["btime"] = parse_optional_int(line[len("BTIME=") :])
         elif line.startswith("LOCK_MTIME=") and "lock_mtime" not in result:
-            result["lock_mtime"] = parse_optional_int(line[len("LOCK_MTIME="):])
+            result["lock_mtime"] = parse_optional_int(line[len("LOCK_MTIME=") :])
         elif line.startswith("SSH_ACTIVITY_MTIME=") and "ssh_activity_mtime" not in result:
-            result["ssh_activity_mtime"] = parse_optional_int(line[len("SSH_ACTIVITY_MTIME="):])
+            result["ssh_activity_mtime"] = parse_optional_int(line[len("SSH_ACTIVITY_MTIME=") :])
         elif line.strip() == SEP_DATA_JSON_START:
             idx += 1
             json_str, idx = _extract_delimited_block(lines, idx, SEP_DATA_JSON_END)
