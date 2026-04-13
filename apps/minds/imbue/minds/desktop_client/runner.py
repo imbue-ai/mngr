@@ -134,7 +134,7 @@ def start_desktop_client(
     tunnel_manager = SSHTunnelManager()
 
     cloudflare_client = _build_cloudflare_client()
-    agent_creator = AgentCreator(paths=paths, cloudflare_client=cloudflare_client)
+    agent_creator = AgentCreator(paths=paths)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)

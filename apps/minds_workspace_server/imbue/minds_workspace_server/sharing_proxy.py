@@ -21,7 +21,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 logger = _loguru_logger
 
 _MINDS_API_URL_FILENAME: Final[str] = "minds_api_url"
-_REQUEST_TIMEOUT_SECONDS: Final[float] = 15.0
+_REQUEST_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
 class SharingProxyError(RuntimeError):

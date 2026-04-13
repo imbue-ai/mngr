@@ -35,7 +35,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -332,35 +332,6 @@ def run_mngr_create(
     return api_key
 
 
-def _inject_tunnel_token(
-    agent_id: AgentId,
-    token: str,
-    log_queue: queue.Queue[str],
-) -> None:
-    """Inject the tunnel token into the agent's runtime/secrets file via mngr exec."""
-    log_queue.put("[minds] Injecting tunnel token into agent...")
-    safe_token = shlex.quote(token)
-    cg = ConcurrencyGroup(name="mngr-exec-token")
-    with cg:
-        command = [
-            MNGR_BINARY,
-            "exec",
-            str(agent_id),
-            f"mkdir -p runtime && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} >> runtime/secrets",
-        ]
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-        )
-    if result.returncode != 0:
-        log_queue.put(
-            "[minds] WARNING: Failed to inject tunnel token: {}".format(
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip()
-            )
-        )
-    else:
-        log_queue.put("[minds] Tunnel token injected successfully.")
-
 
 class AgentCreator(MutableModel):
     """Creates mngr agents in the background from git repositories or local paths.
@@ -372,11 +343,6 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
-    cloudflare_client: CloudflareForwardingClient | None = Field(
-        default=None,
-        frozen=True,
-        description="Client for Cloudflare tunnel API, or None if not configured",
-    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -514,8 +480,6 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                self._setup_cloudflare_tunnel(agent_id, log_queue)
-
                 log_queue.put("[minds] Agent created successfully.")
 
                 with self._lock:
@@ -531,24 +495,3 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
-    def _setup_cloudflare_tunnel(
-        self,
-        agent_id: AgentId,
-        log_queue: queue.Queue[str],
-    ) -> None:
-        """Create a Cloudflare tunnel and inject its token into the agent.
-
-        Uses the cloudflare_client if configured. Does nothing otherwise.
-        """
-        if self.cloudflare_client is None:
-            log_queue.put("[minds] Cloudflare forwarding not configured, skipping tunnel creation.")
-            return
-
-        log_queue.put("[minds] Creating Cloudflare tunnel...")
-        token, message = self.cloudflare_client.create_tunnel(agent_id)
-        log_queue.put(f"[minds] {message}")
-
-        if token is not None:
-            _inject_tunnel_token(agent_id, token, log_queue)
-        else:
-            log_queue.put("[minds] Skipping tunnel token injection.")
