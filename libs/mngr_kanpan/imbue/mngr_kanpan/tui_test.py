@@ -31,6 +31,7 @@ from imbue.mngr_kanpan.data_types import PrInfo
 from imbue.mngr_kanpan.data_types import PrState
 from imbue.mngr_kanpan.data_types import RefreshHook
 from imbue.mngr_kanpan.testing import make_pr_info
+from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
 from imbue.mngr_kanpan.tui import DEFAULT_REFRESH_INTERVAL_SECONDS
 from imbue.mngr_kanpan.tui import _BOARD_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BatchWorkItem
@@ -68,6 +69,7 @@ from imbue.mngr_kanpan.tui import _on_spinner_tick
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _request_refresh
+from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _restore_footer
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _schedule_next_refresh
@@ -1967,3 +1969,86 @@ def test_finish_refresh_prunes_orphaned_marks() -> None:
 
     assert AgentName("agent-a") in state.marks
     assert AgentName("agent-b") not in state.marks
+
+
+# =============================================================================
+# Tests for _build_board_widgets section_order parameter
+# =============================================================================
+
+
+def _extract_section_headings(walker: Any) -> list[str]:
+    """Extract plain-text section heading strings from a walker."""
+    headings: list[str] = []
+    for widget in walker:
+        if isinstance(widget, Text):
+            text = widget.get_text()[0]
+            if " (" in text and (
+                "Done" in text
+                or "In progress" in text
+                or "In review" in text
+                or "Muted" in text
+                or "Cancelled" in text
+            ):
+                headings.append(text)
+    return headings
+
+
+def test_build_board_widgets_default_section_order() -> None:
+    entries = (
+        _make_entry(name="cooking"),
+        _make_entry(name="merged", pr=_make_pr(state=PrState.MERGED)),
+    )
+    walker, _ = _build_board_widgets(_make_snapshot(entries=entries), _BOARD_COLUMN_DEFS)
+    headings = _extract_section_headings(walker)
+    assert len(headings) == 2
+    assert "Done" in headings[0]
+    assert "In progress" in headings[1]
+
+
+def test_build_board_widgets_custom_section_order_reverses() -> None:
+    entries = (
+        _make_entry(name="cooking"),
+        _make_entry(name="merged", pr=_make_pr(state=PrState.MERGED)),
+    )
+    reversed_order = (BoardSection.STILL_COOKING, BoardSection.PR_MERGED)
+    walker, _ = _build_board_widgets(
+        _make_snapshot(entries=entries),
+        _BOARD_COLUMN_DEFS,
+        section_order=reversed_order,
+    )
+    headings = _extract_section_headings(walker)
+    assert len(headings) == 2
+    assert "In progress" in headings[0]
+    assert "Done" in headings[1]
+
+
+def test_build_board_widgets_section_order_omits_unlisted() -> None:
+    entries = (
+        _make_entry(name="cooking"),
+        _make_entry(name="merged", pr=_make_pr(state=PrState.MERGED)),
+    )
+    only_merged = (BoardSection.PR_MERGED,)
+    walker, index_to_entry = _build_board_widgets(
+        _make_snapshot(entries=entries),
+        _BOARD_COLUMN_DEFS,
+        section_order=only_merged,
+    )
+    headings = _extract_section_headings(walker)
+    assert len(headings) == 1
+    assert "Done" in headings[0]
+    assert len(index_to_entry) == 1
+
+
+# =============================================================================
+# Tests for _resolve_section_order
+# =============================================================================
+
+
+def test_resolve_section_order_none_returns_default() -> None:
+    assert _resolve_section_order(None) == BOARD_SECTION_ORDER
+
+
+def test_resolve_section_order_custom_list() -> None:
+    custom = [BoardSection.STILL_COOKING, BoardSection.MUTED]
+    result = _resolve_section_order(custom)
+    assert result == (BoardSection.STILL_COOKING, BoardSection.MUTED)
