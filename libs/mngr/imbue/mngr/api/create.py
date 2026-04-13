@@ -166,9 +166,7 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Start the agent and wait for readiness, emitting lifecycle events.
-        # All agent types go through wait_for_ready_signal: the base implementation
-        # just calls start_action() and returns for agents without readiness checks.
+        # Start the agent, wait for readiness, and emit lifecycle events.
         initial_message = agent.get_initial_message()
         logger.info("Starting agent {} ...", agent.name)
         start_id = f"start-{uuid4().hex}"
