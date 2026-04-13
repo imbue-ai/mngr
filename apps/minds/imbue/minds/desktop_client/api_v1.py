@@ -105,6 +105,10 @@ class _CloudflareEnableBody(FrozenModel):
         default=None,
         description="Service URL to register. If omitted, resolved from the backend resolver.",
     )
+    auth_rules: list[dict[str, object]] | None = Field(
+        default=None,
+        description="Auth policy rules to apply. If omitted, uses tunnel default.",
+    )
 
 
 # -- Cloudflare forwarding routes --
@@ -125,13 +129,21 @@ def _handle_cloudflare_status(
 
     services = cf_client.list_services(parsed_id)
     if services is None:
-        # No tunnel exists yet or query failed -- treat as not enabled
-        return _json_response({"enabled": False, "url": None})
+        # No tunnel exists yet -- return default auth from tunnel (if any)
+        default_rules = cf_client.get_tunnel_auth(parsed_id)
+        return _json_response({"enabled": False, "url": None, "auth_rules": default_rules or []})
 
     hostname = services.get(server_name)
     if hostname:
-        return _json_response({"enabled": True, "url": f"https://{hostname}"})
-    return _json_response({"enabled": False, "url": None})
+        # Service is enabled -- get its specific auth policy
+        auth_rules = cf_client.get_service_auth(parsed_id, server_name)
+        if auth_rules is None:
+            auth_rules = cf_client.get_tunnel_auth(parsed_id) or []
+        return _json_response({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules})
+
+    # Tunnel exists but this service isn't enabled -- return tunnel default auth
+    default_rules = cf_client.get_tunnel_auth(parsed_id)
+    return _json_response({"enabled": False, "url": None, "auth_rules": default_rules or []})
 
 
 def _handle_cloudflare_enable(
@@ -170,10 +182,15 @@ def _handle_cloudflare_enable(
         _inject_tunnel_token_into_agent(parsed_id, token)
 
     is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
+    if not is_success:
+        return _json_error("Cloudflare API call failed", 502)
 
-    if is_success:
-        return _json_response({"ok": True})
-    return _json_error("Cloudflare API call failed", 502)
+    # Apply auth rules if provided
+    auth_rules = body.auth_rules if body is not None else None
+    if auth_rules is not None:
+        cf_client.set_service_auth(parsed_id, str(parsed_server), auth_rules)
+
+    return _json_response({"ok": True})
 
 
 def _handle_cloudflare_disable(

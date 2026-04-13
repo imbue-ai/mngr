@@ -46,6 +46,7 @@ from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import disable_sharing
 from imbue.minds_workspace_server.sharing_proxy import enable_sharing
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
+from imbue.minds_workspace_server.sharing_proxy import update_sharing_auth
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
@@ -642,10 +643,38 @@ async def _get_sharing_status_endpoint(server_name: str) -> JSONResponse:
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
-async def _enable_sharing_endpoint(server_name: str) -> JSONResponse:
-    """Enable Cloudflare forwarding for a server."""
+async def _enable_sharing_endpoint(server_name: str, request: Request) -> JSONResponse:
+    """Enable Cloudflare forwarding for a server, optionally with auth rules."""
+    auth_rules = None
     try:
-        status = await run_in_threadpool(enable_sharing, server_name)
+        body = await request.json()
+        auth_rules = body.get("auth_rules")
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    try:
+        status = await run_in_threadpool(enable_sharing, server_name, auth_rules)
+        return JSONResponse(content=status.model_dump())
+    except SharingProxyError as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+async def _update_sharing_auth_endpoint(server_name: str, request: Request) -> JSONResponse:
+    """Update the auth policy for an already-enabled shared server."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    auth_rules = body.get("auth_rules")
+    if auth_rules is None:
+        error = ErrorResponse(detail="auth_rules field is required")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    try:
+        status = await run_in_threadpool(update_sharing_auth, server_name, auth_rules)
         return JSONResponse(content=status.model_dump())
     except SharingProxyError as e:
         error = ErrorResponse(detail=str(e))
@@ -700,6 +729,7 @@ def create_application(
     application.add_api_route("/api/sharing/{server_name}", _get_sharing_status_endpoint, methods=["GET"])
     application.add_api_route("/api/sharing/{server_name}", _enable_sharing_endpoint, methods=["PUT"])
     application.add_api_route("/api/sharing/{server_name}", _disable_sharing_endpoint, methods=["DELETE"])
+    application.add_api_route("/api/sharing/{server_name}/auth", _update_sharing_auth_endpoint, methods=["PUT"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )

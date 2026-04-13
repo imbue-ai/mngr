@@ -35,6 +35,10 @@ class SharingStatus(FrozenModel):
 
     enabled: bool = Field(description="Whether Cloudflare forwarding is active for this server")
     url: str | None = Field(default=None, description="The global URL if forwarding is enabled")
+    auth_rules: list[dict[str, object]] = Field(
+        default_factory=list,
+        description="Cloudflare Access auth policy rules (who has access)",
+    )
 
 
 def _read_minds_api_url() -> str:
@@ -97,6 +101,7 @@ def get_sharing_status(server_name: str) -> SharingStatus:
             return SharingStatus(
                 enabled=data.get("enabled", False),
                 url=data.get("url"),
+                auth_rules=data.get("auth_rules", []),
             )
 
         error_msg = _extract_error(response)
@@ -106,7 +111,7 @@ def get_sharing_status(server_name: str) -> SharingStatus:
         raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
 
 
-def enable_sharing(server_name: str) -> SharingStatus:
+def enable_sharing(server_name: str, auth_rules: list[dict[str, object]] | None = None) -> SharingStatus:
     """Enable Cloudflare forwarding for a server via the desktop client API.
 
     After enabling, queries the status to get the resulting URL.
@@ -114,13 +119,39 @@ def enable_sharing(server_name: str) -> SharingStatus:
     url = _cloudflare_url(server_name)
     headers = _get_desktop_client_auth_headers()
 
+    body: dict[str, object] = {}
+    if auth_rules is not None:
+        body["auth_rules"] = auth_rules
+
     try:
-        response = httpx.put(url, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+        response = httpx.put(url, headers=headers, json=body if body else None, timeout=_REQUEST_TIMEOUT_SECONDS)
         if response.status_code == 200:
             return get_sharing_status(server_name)
 
         error_msg = _extract_error(response)
         raise SharingProxyError(f"Failed to enable sharing: {error_msg}")
+
+    except httpx.HTTPError as e:
+        raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
+
+
+def update_sharing_auth(server_name: str, auth_rules: list[dict[str, object]]) -> SharingStatus:
+    """Update the auth policy for an already-enabled service."""
+    url = _cloudflare_url(server_name)
+    headers = _get_desktop_client_auth_headers()
+
+    try:
+        response = httpx.put(
+            url,
+            headers=headers,
+            json={"auth_rules": auth_rules},
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+        if response.status_code == 200:
+            return get_sharing_status(server_name)
+
+        error_msg = _extract_error(response)
+        raise SharingProxyError(f"Failed to update sharing auth: {error_msg}")
 
     except httpx.HTTPError as e:
         raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e

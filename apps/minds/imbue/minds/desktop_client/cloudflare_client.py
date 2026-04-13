@@ -154,6 +154,59 @@ class CloudflareForwardingClient(FrozenModel):
             logger.warning("Failed to add service {} to {}: {}", service_name, tunnel_name, e)
             return False
 
+    def get_tunnel_auth(self, agent_id: AgentId) -> list[dict[str, object]] | None:
+        """Get the default auth policy rules for the agent's tunnel.
+
+        Returns the rules list, or None on failure.
+        """
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.get(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}/auth",
+                headers={"Authorization": self._auth_header()},
+                timeout=10.0,
+            )
+            if response.status_code != 200:
+                return None
+            return response.json().get("rules", [])
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Failed to get tunnel auth for {}: {}", tunnel_name, e)
+            return None
+
+    def get_service_auth(self, agent_id: AgentId, service_name: str) -> list[dict[str, object]] | None:
+        """Get the auth policy rules for a specific service.
+
+        Returns the rules list, or None on failure.
+        """
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.get(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}/services/{service_name}/auth",
+                headers={"Authorization": self._auth_header()},
+                timeout=10.0,
+            )
+            if response.status_code != 200:
+                return None
+            return response.json().get("rules", [])
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Failed to get service auth for {}/{}: {}", tunnel_name, service_name, e)
+            return None
+
+    def set_service_auth(self, agent_id: AgentId, service_name: str, rules: list[dict[str, object]]) -> bool:
+        """Set the auth policy rules for a specific service. Returns True on success."""
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.put(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}/services/{service_name}/auth",
+                headers={"Authorization": self._auth_header()},
+                json={"rules": rules},
+                timeout=15.0,
+            )
+            return response.status_code == 200
+        except httpx.HTTPError as e:
+            logger.warning("Failed to set service auth for {}/{}: {}", tunnel_name, service_name, e)
+            return False
+
     def remove_service(self, agent_id: AgentId, service_name: str) -> bool:
         """Remove a service from the agent's tunnel. Returns True on success."""
         tunnel_name = self.make_tunnel_name(agent_id)
