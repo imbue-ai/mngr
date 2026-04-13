@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import pytest
@@ -109,34 +108,48 @@ def test_get_signing_key_reads_existing_key(tmp_path: Path) -> None:
     assert key.get_secret_value() == "my-custom-key-82734"
 
 
-def test_get_signing_key_raises_on_read_error(tmp_path: Path) -> None:
+def test_get_signing_key_raises_on_read_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """If an existing signing key file is not readable, SigningKeyError is raised."""
     auth_dir = tmp_path / "auth"
     auth_dir.mkdir(parents=True)
     key_file = auth_dir / "signing_key"
     key_file.write_text("some-key")
-    os.chmod(key_file, 0o000)
 
-    try:
-        store = FileAuthStore(data_directory=auth_dir)
-        with pytest.raises(SigningKeyError):
-            store.get_signing_key()
-    finally:
-        os.chmod(key_file, 0o644)
+    # Monkeypatch read_text to simulate a read failure. We can't use chmod
+    # because Modal sandboxes run as root, which bypasses permission checks.
+    original_read_text = Path.read_text
+
+    def _raise_on_key_file(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "signing_key":
+            raise OSError("simulated read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_on_key_file)
+
+    store = FileAuthStore(data_directory=auth_dir)
+    with pytest.raises(SigningKeyError):
+        store.get_signing_key()
 
 
-def test_get_signing_key_raises_on_write_error(tmp_path: Path) -> None:
+def test_get_signing_key_raises_on_write_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """If the auth directory cannot be written to, SigningKeyError is raised on key generation."""
     auth_dir = tmp_path / "auth"
     auth_dir.mkdir(parents=True)
-    os.chmod(auth_dir, 0o555)
 
-    try:
-        store = FileAuthStore(data_directory=auth_dir)
-        with pytest.raises(SigningKeyError):
-            store.get_signing_key()
-    finally:
-        os.chmod(auth_dir, 0o755)
+    # Monkeypatch write_text to simulate a write failure. We can't use chmod
+    # because Modal sandboxes run as root, which bypasses permission checks.
+    original_write_text = Path.write_text
+
+    def _raise_on_key_file(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "signing_key":
+            raise OSError("simulated write failure")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _raise_on_key_file)
+
+    store = FileAuthStore(data_directory=auth_dir)
+    with pytest.raises(SigningKeyError):
+        store.get_signing_key()
 
 
 def test_validate_code_returns_false_on_json_decode_error(tmp_path: Path) -> None:
