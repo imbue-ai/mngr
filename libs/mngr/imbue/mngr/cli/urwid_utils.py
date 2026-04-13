@@ -39,9 +39,10 @@ def resolve_real_tty_path() -> str:
     macOS kqueue does not support EVFILT_READ on ``/dev/tty`` (the virtual
     controlling-terminal device), returning EINVAL.  It *does* work on the
     actual pty device (e.g. ``/dev/ttys003``).  This function resolves the
-    real device path by inspecting stdout/stderr, falling back to
-    ``/dev/tty`` when no real path can be determined (which still works on
-    Linux where epoll is used instead of kqueue).
+    real device path by inspecting stdout/stderr, then by probing the
+    controlling terminal via ``/dev/tty``, falling back to ``/dev/tty``
+    as a last resort (which still works on Linux where epoll is used
+    instead of kqueue, provided a controlling terminal exists).
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -50,6 +51,19 @@ def resolve_real_tty_path() -> str:
                 return os.ttyname(fd)
         except (OSError, ValueError):
             continue
+
+    # stdout/stderr aren't TTYs (e.g. piped by a test harness), but there
+    # may still be a controlling terminal. Open /dev/tty to get a fd, then
+    # resolve the real device path from it.
+    try:
+        fd = os.open("/dev/tty", os.O_RDONLY)
+        try:
+            return os.ttyname(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
     return "/dev/tty"
 
 
