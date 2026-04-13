@@ -1,8 +1,6 @@
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import CiField
@@ -149,55 +147,15 @@ def test_compute_nonzero_exit_produces_error() -> None:
     assert any("Custom" in e and "agent-1" in e for e in errors)
 
 
-def test_compute_process_returncode_none_skipped() -> None:
-    """Process with returncode None (still running) should be skipped.
-
-    This tests an edge case in the result-processing loop. A real process always
-    finishes with a non-None returncode, so this test uses a mock proc to reach
-    the code path that handles a still-running process.
-    """
+def test_compute_timeout_produces_error() -> None:
+    """A command that exceeds the timeout produces an error."""
     ds = ShellCommandDataSource(
         field_key="custom",
-        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="sleep 1"),
+        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="sleep 60"),
+        timeout_seconds=0.1,
     )
     agent = make_agent_details(name="agent-1")
-
-    proc = MagicMock()
-    proc.returncode = None
-
-    child_cg = MagicMock()
-    child_cg.__enter__ = MagicMock(return_value=child_cg)
-    child_cg.__exit__ = MagicMock(return_value=False)
-    child_cg.run_process_in_background.return_value = proc
-
-    cg = MagicMock()
-    cg.make_concurrency_group.return_value = child_cg
-
-    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert agent.name not in fields
-    assert errors == []
-
-
-def test_compute_concurrency_exception_group_produces_error() -> None:
-    ds = ShellCommandDataSource(
-        field_key="custom",
-        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="exit 1"),
-    )
-    agent = make_agent_details(name="agent-1")
-
-    proc = MagicMock()
-    proc.returncode = 0
-    proc.read_stdout.return_value = ""
-
-    child_cg = MagicMock()
-    child_cg.__enter__ = MagicMock(return_value=child_cg)
-    child_cg.__exit__ = MagicMock(side_effect=ConcurrencyExceptionGroup("timeout", [RuntimeError("timed out")]))
-    child_cg.run_process_in_background.return_value = proc
-
-    cg = MagicMock()
-    cg.make_concurrency_group.return_value = child_cg
-
-    ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_real_mngr_ctx(cg)
+        fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert any("Custom" in e for e in errors)

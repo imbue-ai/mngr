@@ -196,7 +196,7 @@ def test_prevent_click_echo() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(4))
+    rc.check_unittest_mock_imports(_DIR, snapshot(3))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
@@ -230,7 +230,7 @@ def test_prevent_direct_subprocess() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(3))
+    rc.check_if_elif_without_else(_DIR, snapshot(2))
 
 
 def test_prevent_inline_functions() -> None:
