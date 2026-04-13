@@ -578,34 +578,17 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
     register_provider_instance(provider_name, temp_mngr_ctx, stop_provider)
 
     try:
-        host_details = HostDetails(
-            id=stop_provider.host_id,
-            name="localhost",
+        first_agent = make_test_agent_details(
+            name="stop-error-agent-one",
+            host_id=stop_provider.host_id,
             provider_name=provider_name,
-        )
-        first_agent = AgentDetails(
-            id=AgentId.generate(),
-            name=AgentName("stop-error-agent-one"),
-            type="generic",
-            command=CommandString("sleep 99"),
-            work_dir=Path("/tmp/work"),
-            initial_branch=None,
-            create_time=datetime.now(timezone.utc),
-            start_on_boot=False,
             state=AgentLifecycleState.STOPPED,
-            host=host_details,
         )
-        second_agent = AgentDetails(
-            id=AgentId.generate(),
-            name=AgentName("stop-error-agent-two"),
-            type="generic",
-            command=CommandString("sleep 99"),
-            work_dir=Path("/tmp/work"),
-            initial_branch=None,
-            create_time=datetime.now(timezone.utc),
-            start_on_boot=False,
+        second_agent = make_test_agent_details(
+            name="stop-error-agent-two",
+            host_id=stop_provider.host_id,
+            provider_name=provider_name,
             state=AgentLifecycleState.STOPPED,
-            host=host_details,
         )
 
         result = execute_cleanup(
