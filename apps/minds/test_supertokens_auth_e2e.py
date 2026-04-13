@@ -68,7 +68,7 @@ def _poll_for_email(
         for msg in resp.json():
             if subject_contains.lower() in msg.get("subject", "").lower():
                 return msg
-        time.sleep(interval)
+        threading.Event().wait(interval)
     raise TimeoutError(
         f"No email with subject containing {subject_contains!r} "
         f"arrived at {username}@restmail.net within {timeout}s"
