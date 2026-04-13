@@ -248,9 +248,9 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/agents/{agent_id}/", follow_redirects=False)
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/agents/{agent_id}/web/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
@@ -264,7 +264,7 @@ def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
         http_client=None,
     )
 
-    response = client.get(f"/agents/{agent_id}/", follow_redirects=False)
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 403
 
 
@@ -285,12 +285,12 @@ def test_agent_servers_page_lists_available_servers(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/agents/{agent_id}/servers/")
+    response = client.get(f"/forwarding/{agent_id}/servers/")
     assert response.status_code == 200
     assert "web" in response.text
     assert "api" in response.text
-    assert f"/agents/{agent_id}/web/" in response.text
-    assert f"/agents/{agent_id}/api/" in response.text
+    assert f"/forwarding/{agent_id}/web/" in response.text
+    assert f"/forwarding/{agent_id}/api/" in response.text
 
 
 def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) -> None:
@@ -303,7 +303,7 @@ def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) ->
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/agents/{agent_id}/servers/")
+    response = client.get(f"/forwarding/{agent_id}/servers/")
     assert response.status_code == 200
     assert "No servers are currently running" in response.text
 
@@ -319,7 +319,7 @@ def test_agent_servers_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
         http_client=None,
     )
 
-    response = client.get(f"/agents/{agent_id}/servers/")
+    response = client.get(f"/forwarding/{agent_id}/servers/")
     assert response.status_code == 403
 
 
@@ -329,7 +329,7 @@ def test_agent_servers_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
 def test_agent_proxy_rejects_unauthenticated_requests(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
 
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/")
     assert response.status_code == 403
 
 
@@ -338,7 +338,7 @@ def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> Non
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Electron/32.0.0",
@@ -354,7 +354,7 @@ def test_browser_navigation_serves_info_bar_wrapper(tmp_path: Path) -> None:
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Firefox/130.0",
@@ -373,7 +373,7 @@ def test_browser_navigation_info_bar_preserves_query_params(tmp_path: Path) -> N
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/some/path?foo=bar",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/some/path?foo=bar",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Firefox/130.0",
@@ -392,7 +392,7 @@ def test_browser_navigation_with_embed_bypasses_info_bar(tmp_path: Path) -> None
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/?_embed=1",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/?_embed=1",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Firefox/130.0",
@@ -409,7 +409,7 @@ def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/__sw.js")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/__sw.js")
     assert response.status_code == 200
     assert "application/javascript" in response.headers["content-type"]
     assert "skipWaiting" in response.text
@@ -421,7 +421,7 @@ def test_agent_proxy_forwards_get_request_to_backend(tmp_path: Path) -> None:
 
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -433,7 +433,7 @@ def test_agent_proxy_forwards_post_request_to_backend(tmp_path: Path) -> None:
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     response = client.post(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/echo",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/echo",
         content=b"test-body-content",
     )
     assert response.status_code == 200
@@ -446,7 +446,7 @@ def test_agent_proxy_injects_websocket_shim_into_html_responses(tmp_path: Path) 
 
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/")
     assert response.status_code == 200
     assert "OrigWebSocket" in response.text
     assert "Hello from backend" in response.text
@@ -476,7 +476,7 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
         headers={"Accept": "text/html"},
     )
     assert response.status_code == 200
@@ -484,8 +484,8 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
     assert "location.reload()" in response.text
     # Convention links (terminal and agent) are always shown, even before those
     # servers have registered with the backend resolver.
-    assert f"/agents/{agent_id}/terminal/" in response.text
-    assert f"/agents/{agent_id}/agent/" in response.text
+    assert f"/forwarding/{agent_id}/terminal/" in response.text
+    assert f"/forwarding/{agent_id}/agent/" in response.text
     assert 'target="_top"' in response.text
 
 
@@ -495,7 +495,7 @@ def test_agent_proxy_returns_502_for_unknown_backend_non_html(tmp_path: Path) ->
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     response = client.get(
-        f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
         headers={"Accept": "application/json"},
     )
     assert response.status_code == 502
@@ -521,7 +521,7 @@ def test_websocket_proxy_rejects_unauthenticated_connection(tmp_path: Path) -> N
     client, _, agent_id = _setup_test_server(tmp_path)
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
+        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
             pass
 
     assert exc_info.value.code == 4003
@@ -531,7 +531,7 @@ def test_websocket_proxy_rejects_unknown_backend(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server_without_backend(tmp_path)
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
+        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
             pass
 
     assert exc_info.value.code == 4004
@@ -577,11 +577,11 @@ def test_proxy_routes_to_correct_server_for_multi_server_agent(tmp_path: Path) -
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
 
-    web_response = client.get(f"/agents/{agent_id}/web/")
+    web_response = client.get(f"/forwarding/{agent_id}/web/")
     assert web_response.status_code == 200
     assert web_response.json() == {"server": "web"}
 
-    api_response = client.get(f"/agents/{agent_id}/api/")
+    api_response = client.get(f"/forwarding/{agent_id}/api/")
     assert api_response.status_code == 200
     assert api_response.json() == {"server": "api"}
 
@@ -611,9 +611,9 @@ def test_agent_auth_covers_all_servers(tmp_path: Path) -> None:
     )
 
     # Not authenticated yet - both servers reject
-    response_web = client.get(f"/agents/{agent_id}/web/")
+    response_web = client.get(f"/forwarding/{agent_id}/web/")
     assert response_web.status_code == 403
-    response_api = client.get(f"/agents/{agent_id}/api/")
+    response_api = client.get(f"/forwarding/{agent_id}/api/")
     assert response_api.status_code == 403
 
     # Authenticate once (global session)
@@ -623,10 +623,10 @@ def test_agent_auth_covers_all_servers(tmp_path: Path) -> None:
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
 
     # Both servers are now accessible
-    response_web = client.get(f"/agents/{agent_id}/web/api/status")
+    response_web = client.get(f"/forwarding/{agent_id}/web/api/status")
     assert response_web.status_code == 200
 
-    response_api = client.get(f"/agents/{agent_id}/api/api/status")
+    response_api = client.get(f"/forwarding/{agent_id}/api/api/status")
     assert response_api.status_code == 200
 
 
@@ -661,12 +661,12 @@ def test_mngr_cli_resolver_proxies_to_backend_discovered_via_mngr_cli(tmp_path: 
     _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
-    response = client.get(f"/agents/{agent_id}/web/api/status")
+    response = client.get(f"/forwarding/{agent_id}/web/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
     response = client.post(
-        f"/agents/{agent_id}/web/api/echo",
+        f"/forwarding/{agent_id}/web/api/echo",
         content=b"integration-test",
     )
     assert response.status_code == 200
@@ -715,11 +715,11 @@ def test_mngr_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
 
     # Verify each server routes correctly
-    web_response = client.get(f"/agents/{agent_id}/web/health")
+    web_response = client.get(f"/forwarding/{agent_id}/web/health")
     assert web_response.status_code == 200
     assert web_response.json() == {"source": "web"}
 
-    api_response = client.get(f"/agents/{agent_id}/api/health")
+    api_response = client.get(f"/forwarding/{agent_id}/api/health")
     assert api_response.status_code == 200
     assert api_response.json() == {"source": "api"}
 
@@ -739,7 +739,7 @@ def test_mngr_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_pat
     _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
-    response = client.get(f"/agents/{agent_id}/web/", headers={"Accept": "text/html"})
+    response = client.get(f"/forwarding/{agent_id}/web/", headers={"Accept": "text/html"})
     assert response.status_code == 200
     assert "Loading..." in response.text
     assert "location.reload()" in response.text
@@ -786,7 +786,7 @@ def test_mngr_cli_resolver_agent_servers_page_via_mngr_cli(tmp_path: Path) -> No
 
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/agents/{agent_id}/servers/")
+    response = client.get(f"/forwarding/{agent_id}/servers/")
     assert response.status_code == 200
     assert "web" in response.text
     assert "api" in response.text
@@ -854,7 +854,7 @@ def test_http_proxy_returns_502_when_ssh_tunnel_fails(tmp_path: Path) -> None:
     client, _, agent_id = _setup_failing_tunnel_server(tmp_path)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
-    response = client.get(f"/agents/{agent_id}/web/api/status")
+    response = client.get(f"/forwarding/{agent_id}/web/api/status")
     assert response.status_code == 502
     assert "SSH tunnel" in response.text
 
@@ -864,7 +864,7 @@ def test_websocket_proxy_closes_with_1011_when_ssh_tunnel_fails(tmp_path: Path) 
     client, _, agent_id = _setup_failing_tunnel_server(tmp_path)
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(f"/agents/{agent_id}/web/ws"):
+        with client.websocket_connect(f"/forwarding/{agent_id}/web/ws"):
             pass
 
     assert exc_info.value.code == 1011
@@ -876,7 +876,7 @@ def test_http_proxy_without_tunnel_manager_works_for_local_backend(tmp_path: Pat
     _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -919,12 +919,12 @@ def test_proxy_combines_stored_and_request_query_strings(tmp_path: Path) -> None
     client.cookies.set(f"sw_installed_{agent_id}_chat", "1")
 
     # Request with no additional query -- only stored query should arrive
-    response = client.get(f"/agents/{agent_id}/chat/")
+    response = client.get(f"/forwarding/{agent_id}/chat/")
     assert response.status_code == 200
     assert response.json()["query"] == "arg=chat"
 
     # Request with additional query -- both should be combined
-    response = client.get(f"/agents/{agent_id}/chat/", params={"arg": "CONV123"})
+    response = client.get(f"/forwarding/{agent_id}/chat/", params={"arg": "CONV123"})
     assert response.status_code == 200
     query = response.json()["query"]
     assert "arg=chat" in query
@@ -938,7 +938,7 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     # Existing test: plain backend URL with request query
-    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status", params={"foo": "bar"})
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status", params={"foo": "bar"})
     assert response.status_code == 200
 
 

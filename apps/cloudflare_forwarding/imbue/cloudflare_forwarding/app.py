@@ -78,6 +78,16 @@ class InvalidTunnelComponentError(ValueError):
         )
 
 
+class TunnelComponentTooLongError(ValueError):
+    """Raised when a tunnel component exceeds the maximum length."""
+
+    def __init__(self, component_name: str, value: str, max_length: int) -> None:
+        self.component_name = component_name
+        self.value = value
+        self.max_length = max_length
+        super().__init__(f"{component_name} '{value}' exceeds maximum length of {max_length}")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -393,14 +403,14 @@ def _validate_username(username: str) -> None:
     if TUNNEL_NAME_SEP in username:
         raise InvalidTunnelComponentError("Username", username, TUNNEL_NAME_SEP)
     if len(username) > _MAX_USERNAME_LENGTH:
-        raise ValueError(f"Username '{username}' exceeds maximum length of {_MAX_USERNAME_LENGTH}")
+        raise TunnelComponentTooLongError("Username", username, _MAX_USERNAME_LENGTH)
 
 
 def _validate_service_name(service_name: str) -> None:
     if TUNNEL_NAME_SEP in service_name:
         raise InvalidTunnelComponentError("Service name", service_name, TUNNEL_NAME_SEP)
     if len(service_name) > _MAX_SERVICE_NAME_LENGTH:
-        raise ValueError(f"Service name '{service_name}' exceeds maximum length of {_MAX_SERVICE_NAME_LENGTH}")
+        raise TunnelComponentTooLongError("Service name", service_name, _MAX_SERVICE_NAME_LENGTH)
 
 
 def make_tunnel_name(username: str, agent_id: str) -> str:

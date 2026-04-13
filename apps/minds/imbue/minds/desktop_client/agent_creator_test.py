@@ -16,11 +16,6 @@ from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
-from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
-from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -310,39 +305,6 @@ def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
     assert info is not None
     assert info.status == AgentCreationStatus.FAILED
 
-
-def test_setup_cloudflare_tunnel_skips_when_no_client(tmp_path: Path) -> None:
-    """Verify _setup_cloudflare_tunnel does nothing when cloudflare_client is None."""
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-    )
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    creator._setup_cloudflare_tunnel(AgentId(), log_queue)
-    messages = []
-    while not log_queue.empty():
-        messages.append(log_queue.get_nowait())
-    assert any("not configured" in m for m in messages)
-
-
-def test_setup_cloudflare_tunnel_with_client_logs_creation(tmp_path: Path) -> None:
-    """Verify _setup_cloudflare_tunnel calls the client and logs progress."""
-    client = CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
-        username=CloudflareUsername("testuser"),
-        secret=CloudflareSecret("testsecret"),
-        owner_email=OwnerEmail("test@example.com"),
-    )
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        cloudflare_client=client,
-    )
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    creator._setup_cloudflare_tunnel(AgentId(), log_queue)
-    messages = []
-    while not log_queue.empty():
-        messages.append(log_queue.get_nowait())
-    assert any("Creating Cloudflare tunnel" in m for m in messages)
-    assert any("WARNING" in m or "failed" in m.lower() for m in messages)
 
 
 @pytest.mark.timeout(30)

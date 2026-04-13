@@ -53,7 +53,7 @@ def test_generate_browser_info_bar_html_preserves_path() -> None:
         host_id="remote-host-1",
         path="some/deep/path",
     )
-    expected_src = f"/agents/{_TEST_AGENT}/{_TEST_SERVER}/some/deep/path?_embed=1"
+    expected_src = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/some/deep/path?_embed=1"
     assert expected_src in html
 
 
@@ -66,14 +66,14 @@ def test_generate_browser_info_bar_html_preserves_query_string() -> None:
         path="some/path",
         query_string="foo=bar&baz=1",
     )
-    expected_src = f"/agents/{_TEST_AGENT}/{_TEST_SERVER}/some/path?foo=bar&amp;baz=1&amp;_embed=1"
+    expected_src = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/some/path?foo=bar&amp;baz=1&amp;_embed=1"
     assert expected_src in html
 
 
 def test_generate_bootstrap_html_contains_service_worker_registration() -> None:
     html = generate_bootstrap_html(_TEST_AGENT, _TEST_SERVER)
     assert "serviceWorker.register" in html
-    assert f"/agents/{_TEST_AGENT}/{_TEST_SERVER}/" in html
+    assert f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/" in html
     assert "__sw.js" in html
 
 
@@ -84,7 +84,7 @@ def test_generate_bootstrap_html_sets_sw_cookie() -> None:
 
 def test_generate_service_worker_js_contains_prefix() -> None:
     js = generate_service_worker_js(_TEST_AGENT, _TEST_SERVER)
-    assert f"const PREFIX = '/agents/{_TEST_AGENT}/{_TEST_SERVER}'" in js
+    assert f"const PREFIX = '/forwarding/{_TEST_AGENT}/{_TEST_SERVER}'" in js
     assert "skipWaiting" in js
     assert "clients.claim" in js
 
@@ -96,7 +96,7 @@ def test_generate_service_worker_js_rewrites_fetch_urls() -> None:
 
 def test_generate_websocket_shim_js_contains_prefix() -> None:
     js = generate_websocket_shim_js(_TEST_AGENT, _TEST_SERVER)
-    assert f"var PREFIX = '/agents/{_TEST_AGENT}/{_TEST_SERVER}'" in js
+    assert f"var PREFIX = '/forwarding/{_TEST_AGENT}/{_TEST_SERVER}'" in js
     assert "OrigWebSocket" in js
 
 
@@ -106,7 +106,7 @@ def test_rewrite_cookie_path_with_root_path() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot("sid=abc; Path=/agents/agent-00000000000000000000000000000001/web/")
+    assert result == snapshot("sid=abc; Path=/forwarding/agent-00000000000000000000000000000001/web/")
 
 
 def test_rewrite_cookie_path_with_subpath() -> None:
@@ -115,7 +115,7 @@ def test_rewrite_cookie_path_with_subpath() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot("sid=abc; Path=/agents/agent-00000000000000000000000000000001/web/api")
+    assert result == snapshot("sid=abc; Path=/forwarding/agent-00000000000000000000000000000001/web/api")
 
 
 def test_rewrite_cookie_path_without_path_attribute() -> None:
@@ -124,16 +124,16 @@ def test_rewrite_cookie_path_without_path_attribute() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot("sid=abc; Path=/agents/agent-00000000000000000000000000000001/web/")
+    assert result == snapshot("sid=abc; Path=/forwarding/agent-00000000000000000000000000000001/web/")
 
 
 def test_rewrite_cookie_path_does_not_double_prefix() -> None:
     result = rewrite_cookie_path(
-        set_cookie_header=f"sid=abc; Path=/agents/{_TEST_AGENT}/{_TEST_SERVER}/api",
+        set_cookie_header=f"sid=abc; Path=/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/api",
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot("sid=abc; Path=/agents/agent-00000000000000000000000000000001/web/api")
+    assert result == snapshot("sid=abc; Path=/forwarding/agent-00000000000000000000000000000001/web/api")
 
 
 # -- Absolute path rewriting --
@@ -146,7 +146,7 @@ def test_rewrite_absolute_paths_rewrites_href() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot('<a href="/agents/agent-00000000000000000000000000000001/web/hello.txt">link</a>')
+    assert result == snapshot('<a href="/forwarding/agent-00000000000000000000000000000001/web/hello.txt">link</a>')
 
 
 def test_rewrite_absolute_paths_rewrites_src() -> None:
@@ -156,7 +156,7 @@ def test_rewrite_absolute_paths_rewrites_src() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot('<img src="/agents/agent-00000000000000000000000000000001/web/images/logo.png">')
+    assert result == snapshot('<img src="/forwarding/agent-00000000000000000000000000000001/web/images/logo.png">')
 
 
 def test_rewrite_absolute_paths_rewrites_action() -> None:
@@ -166,7 +166,7 @@ def test_rewrite_absolute_paths_rewrites_action() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot('<form action="/agents/agent-00000000000000000000000000000001/web/submit">')
+    assert result == snapshot('<form action="/forwarding/agent-00000000000000000000000000000001/web/submit">')
 
 
 def test_rewrite_absolute_paths_preserves_relative_urls() -> None:
@@ -200,13 +200,13 @@ def test_rewrite_absolute_paths_preserves_full_urls() -> None:
 
 
 def test_rewrite_absolute_paths_does_not_double_prefix() -> None:
-    html = f'<a href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/hello.txt">link</a>'
+    html = f'<a href="/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/hello.txt">link</a>'
     result = rewrite_absolute_paths_in_html(
         html_content=html,
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot('<a href="/agents/agent-00000000000000000000000000000001/web/hello.txt">link</a>')
+    assert result == snapshot('<a href="/forwarding/agent-00000000000000000000000000000001/web/hello.txt">link</a>')
 
 
 def test_rewrite_absolute_paths_handles_single_quotes() -> None:
@@ -216,7 +216,7 @@ def test_rewrite_absolute_paths_handles_single_quotes() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result == snapshot("<a href='/agents/agent-00000000000000000000000000000001/web/hello.txt'>link</a>")
+    assert result == snapshot("<a href='/forwarding/agent-00000000000000000000000000000001/web/hello.txt'>link</a>")
 
 
 # -- Full proxied HTML rewriting --
@@ -229,7 +229,7 @@ def test_rewrite_proxied_html_injects_base_tag_and_shim() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert f'<base href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/">' in result
+    assert f'<base href="/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/">' in result
     assert "OrigWebSocket" in result
     assert "<title>Test</title>" in result
 
@@ -241,7 +241,7 @@ def test_rewrite_proxied_html_rewrites_absolute_paths() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert f'href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/page"' in result
+    assert f'href="/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/page"' in result
 
 
 def test_rewrite_proxied_html_with_head_attributes() -> None:
@@ -251,7 +251,7 @@ def test_rewrite_proxied_html_with_head_attributes() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert f'<head lang="en"><base href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/">' in result
+    assert f'<head lang="en"><base href="/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/">' in result
 
 
 def test_rewrite_proxied_html_without_head_tag() -> None:
@@ -261,7 +261,7 @@ def test_rewrite_proxied_html_without_head_tag() -> None:
         agent_id=_TEST_AGENT,
         server_name=_TEST_SERVER,
     )
-    assert result.startswith(f'<base href="/agents/{_TEST_AGENT}/{_TEST_SERVER}/">')
+    assert result.startswith(f'<base href="/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/">')
     assert "<html><body>Hello</body></html>" in result
 
 
@@ -269,13 +269,13 @@ def test_generate_backend_loading_html_no_agent_id_has_no_links() -> None:
     html = generate_backend_loading_html()
     assert "Loading..." in html
     assert "location.reload()" in html
-    assert "/agents/" not in html
+    assert "/forwarding/" not in html
 
 
 def test_generate_backend_loading_html_with_agent_id_includes_convention_links() -> None:
     html = generate_backend_loading_html(agent_id=_TEST_AGENT)
-    assert f"/agents/{_TEST_AGENT}/terminal/" in html
-    assert f"/agents/{_TEST_AGENT}/agent/" in html
+    assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
+    assert f"/forwarding/{_TEST_AGENT}/agent/" in html
 
 
 def test_generate_backend_loading_html_excludes_current_server_from_links() -> None:
@@ -283,8 +283,8 @@ def test_generate_backend_loading_html_excludes_current_server_from_links() -> N
         agent_id=_TEST_AGENT,
         current_server=ServerName("terminal"),
     )
-    assert f"/agents/{_TEST_AGENT}/terminal/" not in html
-    assert f"/agents/{_TEST_AGENT}/agent/" in html
+    assert f"/forwarding/{_TEST_AGENT}/terminal/" not in html
+    assert f"/forwarding/{_TEST_AGENT}/agent/" in html
 
 
 def test_generate_backend_loading_html_includes_other_servers() -> None:
@@ -292,7 +292,7 @@ def test_generate_backend_loading_html_includes_other_servers() -> None:
         agent_id=_TEST_AGENT,
         other_servers=(ServerName("web"),),
     )
-    assert f"/agents/{_TEST_AGENT}/web/" in html
+    assert f"/forwarding/{_TEST_AGENT}/web/" in html
 
 
 def test_generate_backend_loading_html_links_use_target_top() -> None:

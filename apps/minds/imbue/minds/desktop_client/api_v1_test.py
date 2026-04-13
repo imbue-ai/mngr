@@ -716,6 +716,12 @@ def test_telegram_setup_with_non_dict_json_body(tmp_path: Path) -> None:
 class _AlwaysSucceedCloudflareClient(CloudflareForwardingClient):
     """CloudflareForwardingClient subclass that always returns True without making HTTP calls."""
 
+    def create_tunnel(self, agent_id: AgentId) -> tuple[str | None, str]:
+        return "fake-token", "Tunnel created"
+
+    def list_services(self, agent_id: AgentId) -> dict[str, str] | None:
+        return {}
+
     def add_service(self, agent_id: AgentId, service_name: str, service_url: str) -> bool:
         return True
 

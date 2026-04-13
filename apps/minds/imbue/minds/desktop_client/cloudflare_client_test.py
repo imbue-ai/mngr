@@ -19,7 +19,8 @@ def test_make_tunnel_name() -> None:
     client = _make_client()
     agent_id = AgentId()
     tunnel_name = client.make_tunnel_name(agent_id)
-    assert tunnel_name == f"testuser--{agent_id}"
+    truncated_id = client._truncate_agent_id(agent_id)
+    assert tunnel_name == f"testuser--{truncated_id}"
 
 
 def test_auth_header_is_basic() -> None:

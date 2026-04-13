@@ -14,6 +14,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -98,10 +99,7 @@ class AgentDiscoveryHandler(FrozenModel):
         token = load_tunnel_token(self.data_dir, agent_id)
         if token is None:
             return
-        # Import here to avoid circular dependency and keep the import light
-        from imbue.minds.desktop_client.api_v1 import _inject_tunnel_token_into_agent
-
-        _inject_tunnel_token_into_agent(agent_id, token)
+        inject_tunnel_token_into_agent(agent_id, token)
 
     def _handle_local_agent(self, agent_id: AgentId) -> None:
         local_state_dir = self.mngr_host_dir / "agents" / str(agent_id)

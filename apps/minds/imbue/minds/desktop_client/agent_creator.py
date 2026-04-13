@@ -11,7 +11,6 @@ via get_log_queue().
 
 import os
 import queue
-import shlex
 import shutil
 import tempfile
 import threading

@@ -19,8 +19,8 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/agents/{_AGENT_A}/" in html
-    assert f"/agents/{_AGENT_B}/" in html
+    assert f"/forwarding/{_AGENT_A}/" in html
+    assert f"/forwarding/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -35,7 +35,7 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "Discovering agents" in html
     assert "reload" in html
     assert "No workspaces yet" not in html
-    assert "/agents/" not in html
+    assert "/forwarding/" not in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
@@ -69,8 +69,8 @@ def test_agent_id_accepts_valid_format() -> None:
 def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
     server_names = (ServerName("api"), ServerName("web"))
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert f"/agents/{_AGENT_A}/api/" in html
-    assert f"/agents/{_AGENT_A}/web/" in html
+    assert f"/forwarding/{_AGENT_A}/api/" in html
+    assert f"/forwarding/{_AGENT_A}/web/" in html
     assert "api" in html
     assert "web" in html
     assert str(_AGENT_A) in html

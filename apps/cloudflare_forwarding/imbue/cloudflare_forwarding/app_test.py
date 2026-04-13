@@ -46,7 +46,7 @@ def test_make_tunnel_name_format() -> None:
 
 
 def test_make_tunnel_name_allows_single_hyphen_in_agent_id() -> None:
-    assert make_tunnel_name("alice", "agent-abc123") == "alice--agent-abc123"
+    assert make_tunnel_name("alice", "agent-abc123") == "alice--abc123"
 
 
 def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
@@ -54,9 +54,9 @@ def test_make_tunnel_name_rejects_double_hyphen_in_username() -> None:
         make_tunnel_name("alice--bob", "agent1")
 
 
-def test_make_tunnel_name_rejects_double_hyphen_in_agent_id() -> None:
-    with pytest.raises(InvalidTunnelComponentError, match="Agent ID"):
-        make_tunnel_name("alice", "agent--1")
+def test_make_tunnel_name_truncates_agent_id() -> None:
+    result = make_tunnel_name("alice", "agent--1")
+    assert result == "alice---1"
 
 
 def test_make_hostname_format() -> None:

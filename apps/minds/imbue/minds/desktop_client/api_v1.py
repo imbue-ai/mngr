@@ -61,7 +61,7 @@ def _authenticate_api_key(request: Request) -> AgentId:
 CallerAgentIdDep = Annotated[AgentId, Depends(_authenticate_api_key)]
 
 
-def _inject_tunnel_token_into_agent(agent_id: AgentId, token: str) -> None:
+def inject_tunnel_token_into_agent(agent_id: AgentId, token: str) -> None:
     """Write the tunnel token to the agent's runtime/secrets via mngr exec.
 
     This causes the cloudflare-tunnel service inside the agent to detect
@@ -184,7 +184,7 @@ def _handle_cloudflare_enable(
         if token is None:
             return _json_error(f"Failed to create Cloudflare tunnel: {message}", 502)
         save_tunnel_token(paths.data_dir, parsed_id, token)
-        _inject_tunnel_token_into_agent(parsed_id, token)
+        inject_tunnel_token_into_agent(parsed_id, token)
 
     is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
     if not is_success:
