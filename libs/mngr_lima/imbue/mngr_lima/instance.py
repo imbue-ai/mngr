@@ -45,9 +45,9 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
-from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_lima.config import LimaProviderConfig

@@ -245,7 +245,6 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
     return wrapper
 
 
-
 class SandboxConfig(HostConfig):
     """Configuration parsed from build arguments."""
 

@@ -25,8 +25,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
-from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
@@ -42,13 +42,13 @@ from imbue.minds_workspace_server.models import ErrorResponse
 from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
+from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import disable_sharing
 from imbue.minds_workspace_server.sharing_proxy import enable_sharing
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 from imbue.minds_workspace_server.sharing_proxy import update_sharing_auth
-from imbue.minds_workspace_server.plugins import get_plugin_manager
-from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 logger = _loguru_logger
@@ -511,9 +511,7 @@ async def _create_chat_agent(request: Request) -> JSONResponse:
 
     try:
         create_request = CreateChatRequest(**body)
-        agent_id = agent_manager.create_chat_agent(
-            create_request.name, create_request.parent_agent_id
-        )
+        agent_id = agent_manager.create_chat_agent(create_request.name, create_request.parent_agent_id)
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
@@ -549,9 +547,7 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
         )
 
         for proto in agent_manager.get_proto_agents():
-            await websocket.send_text(
-                json.dumps({"type": "proto_agent_created", **proto})
-            )
+            await websocket.send_text(json.dumps({"type": "proto_agent_created", **proto}))
 
         shutdown = False
         while not shutdown:
@@ -577,11 +573,7 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
 
     log_queue = agent_manager.get_log_queue(agent_id)
     if log_queue is None:
-        await websocket.send_text(
-            json.dumps(
-                {"done": True, "success": False, "error": "Proto-agent not found"}
-            )
-        )
+        await websocket.send_text(json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}))
         await websocket.close()
         return
 
