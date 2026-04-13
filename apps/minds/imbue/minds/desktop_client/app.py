@@ -1176,7 +1176,7 @@ def create_desktop_client(
     app.state.notification_dispatcher = notification_dispatcher
     app.state.supertokens_session_store = supertokens_session_store
     app.state.supertokens_server_port = server_port
-    app.state.supertokens_output_format = output_format
+    app.state.supertokens_output_format = output_format or OutputFormat.JSONL
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
