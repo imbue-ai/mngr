@@ -243,7 +243,7 @@ def _handle_check_email_page(request: Request) -> HTMLResponse:
     return HTMLResponse(render_check_email_page(email=email))
 
 
-def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
+async def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
     """Initiate OAuth by opening the system browser."""
     server_port = _get_server_port(request)
     provider = get_provider(tenant_id=_TENANT_ID, third_party_id=provider_id)
@@ -251,7 +251,7 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
         return _json_response({"error": f"Unknown provider: {provider_id}"}, 404)
 
     callback_url = f"http://127.0.0.1:{server_port}/auth/callback/{provider_id}"
-    auth_redirect = provider.get_authorisation_redirect_url(
+    auth_redirect = await provider.get_authorisation_redirect_url(
         redirect_uri_on_provider_dashboard=callback_url,
         user_context={},
     )
@@ -260,7 +260,7 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
     return _json_response({"status": "OK", "message": f"Opened {provider_id} sign-in in your browser"})
 
 
-def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
+async def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
     """Handle OAuth callback from the provider (opened in system browser)."""
     session_store = _get_session_store(request)
     output_format = _get_output_format(request)
@@ -273,7 +273,7 @@ def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
         return HTMLResponse(f"<html><body><h1>Unknown provider: {provider_id}</h1></body></html>", status_code=404)
 
     try:
-        oauth_tokens = provider.exchange_auth_code_for_oauth_tokens(
+        oauth_tokens = await provider.exchange_auth_code_for_oauth_tokens(
             redirect_uri_info=RedirectUriInfo(
                 redirect_uri_on_provider_dashboard=callback_url,
                 redirect_uri_query_params=query_params,
@@ -281,7 +281,7 @@ def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
             ),
             user_context={},
         )
-        user_info = provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
+        user_info = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
     except (ValueError, KeyError, OSError) as e:
         logger.error("OAuth callback failed for {}: {}", provider_id, e)
         return HTMLResponse(
