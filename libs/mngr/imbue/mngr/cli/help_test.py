@@ -248,11 +248,11 @@ def test_help_nonexistent_topic(
     # (not CliRunner's captured stdout). Capture it with a StringIO sink, matching the
     # pattern used in exec_test.py::test_emit_human_output_failed_agents_logs_errors.
     log_output = StringIO()
-    handler_id = logger.add(log_output, level="ERROR", format="{message}")
+    sink_id = logger.add(log_output, level="ERROR", format="{message}")
     try:
         result = cli_runner.invoke(cli, ["help", "nonexistent-xyz"], obj=plugin_manager, catch_exceptions=False)
     finally:
-        logger.remove(handler_id)
+        logger.remove(sink_id)
     assert result.exit_code != 0
     assert "No help found" in log_output.getvalue()
 
