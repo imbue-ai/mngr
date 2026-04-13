@@ -188,12 +188,14 @@ def test_render_tutorial_block_command_lines_get_prompt_class() -> None:
 
 
 def test_render_tutorial_block_blank_lines_are_not_wrapped() -> None:
-    """Empty lines are not wrapped in any span."""
+    """Empty lines appear between command spans without any wrapping."""
     result = render_tutorial_block("cmd\n\ncmd2")
-    # The blank line should appear between the two prompt spans, un-wrapped.
-    lines = result.split("\n")
-    # Find the middle line (after the first cmd)
-    assert any(line == "" for line in lines)
+    # Strip the outer <pre> wrapper to inspect the inner lines.
+    inner = result.removeprefix('<pre class="transcript">').removesuffix("</pre>")
+    lines = inner.split("\n")
+    assert lines[0] == '<span class="prompt">cmd</span>'
+    assert lines[1] == ""
+    assert lines[2] == '<span class="prompt">cmd2</span>'
 
 
 def test_render_tutorial_block_output_is_wrapped_in_pre_tag() -> None:
@@ -287,10 +289,11 @@ def test_render_transcript_new_block_starts_after_exit_code_then_command() -> No
     assert result.count('<div class="cmd-block">') == 2
 
 
-def test_render_transcript_plain_output_line_goes_through_ansi_to_html() -> None:
-    """Undecorated output lines are processed through ansi_to_html."""
-    result = render_transcript("$ cmd\nsome output\n? 0")
-    assert "some output" in result
+def test_render_transcript_output_lines_are_processed_through_ansi_to_html() -> None:
+    """Output lines have their ANSI codes converted to HTML spans."""
+    result = render_transcript("$ cmd\n\x1b[31mred error\x1b[0m\n? 0")
+    assert "color:#c00" in result
+    assert "red error" in result
 
 
 def test_render_transcript_stderr_rest_goes_through_ansi_to_html() -> None:
@@ -417,19 +420,12 @@ def test_render_test_detail_cast_stem_is_linkified_in_transcript(tmp_path: Path)
     assert 'href="#cast-rec-1"' in result
 
 
-def test_render_test_detail_cast_anchor_id_uses_detail_id_prefix(tmp_path: Path) -> None:
-    """The cast anchor ID is prefixed with detail_id_prefix when supplied."""
+def test_render_test_detail_detail_id_prefix_applied_to_anchor_and_player(tmp_path: Path) -> None:
+    """detail_id_prefix is prepended to both the cast anchor and player div IDs."""
     (tmp_path / "rec.cast").write_bytes(b'{"version": 2}\n')
     result = render_test_detail(tmp_path, detail_id_prefix="test42-")
     assert 'id="test42-cast-rec"' in result
     assert 'id="test42-player-0"' in result
-
-
-def test_render_test_detail_player_div_id_uses_detail_id_prefix(tmp_path: Path) -> None:
-    """The player div ID is prefixed with detail_id_prefix when supplied."""
-    (tmp_path / "rec.cast").write_bytes(b'{"version": 2}\n')
-    result = render_test_detail(tmp_path, detail_id_prefix="pfx-")
-    assert 'id="pfx-player-0"' in result
 
 
 def test_render_test_detail_html_escaping_in_cast_stem(tmp_path: Path) -> None:
