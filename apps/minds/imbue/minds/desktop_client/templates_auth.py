@@ -390,7 +390,7 @@ _RESET_PASSWORD_TEMPLATE: Final[str] = """<!DOCTYPE html>
       var res = await fetch('/auth/api/reset-password', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ token: '{{ token }}', newPassword: pw })
+        body: JSON.stringify({ token: {{ token | tojson }}, newPassword: pw })
       });
       var data = await res.json();
       if (data.status === 'OK') {
