@@ -255,10 +255,17 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                   ]),
                   renderEmailList(emails, serverName, true),
                   m("div.share-modal-footer", [
-                    m("button.share-modal-btn.share-modal-btn-destructive", {
+                    m("div.share-modal-footer-left", [
+                      m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Cancel"),
+                      m("button.share-modal-btn.share-modal-btn-destructive", {
+                        disabled: modalActionInProgress,
+                        onclick: () => disableSharing(serverName),
+                      }, "Disable sharing"),
+                    ]),
+                    m("button.share-modal-btn.share-modal-btn-create", {
                       disabled: modalActionInProgress,
-                      onclick: () => disableSharing(serverName),
-                    }, modalActionInProgress ? "Working..." : "Disable sharing"),
+                      onclick: () => updateAuth(serverName, emails),
+                    }, modalActionInProgress ? "Updating..." : "Update"),
                   ]),
                 ])
               : m("div", [

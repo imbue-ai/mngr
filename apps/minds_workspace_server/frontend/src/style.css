@@ -1676,6 +1676,11 @@ body {
   margin-top: 16px;
 }
 
+.share-modal-footer-left {
+  display: flex;
+  gap: 8px;
+}
+
 .share-modal-btn-create {
   padding: 6px 16px;
   background: #1e293b;
