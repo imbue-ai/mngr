@@ -25,7 +25,7 @@ try:
 except OSError as e:
     print(f"tty_open=FAILED: {e}")
     print("URWID_TTY_TEST_DONE")
-    raise SystemExit(0)
+    raise SystemExit(0) from None
 
 rd, wr = socket.socketpair()
 rd.setblocking(False)
