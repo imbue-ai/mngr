@@ -91,11 +91,12 @@ PREVENT_GLOBAL_KEYWORD = RegexRatchetRule(
 PREVENT_BARE_PRINT = RegexRatchetRule(
     rule_name="bare print statements",
     rule_description=(
-        "Do not use bare print statements. Consider what kind of output you are producing: "
+        "Do not use bare print statements or direct sys.stdout/sys.stderr writes. "
+        "Consider what kind of output you are producing: "
         "for user-facing command output (results, tables, status messages), use write_human_line(); "
         "for diagnostic/debug messages, use logger.info(), logger.debug(), logger.warning(), etc."
     ),
-    pattern_string=r"^\s*print\s*\(",
+    pattern_string=r"^\s*print\s*\(|^\s*sys\.std(?:out|err)\.write\s*\(",
     is_multiline=True,
 )
 
@@ -223,7 +224,7 @@ PREVENT_NUM_PREFIX = RegexRatchetRule(
 PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
     rule_description="Comments should be on their own line, not trailing after code. Trailing comments make code harder to read",
-    pattern_string=r"[^\s#].*[ \t]#(?!\s*ty:\s*ignore\[)",
+    pattern_string=r"[^\s#].*[ \t]#(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
 )
 
 PREVENT_INIT_DOCSTRINGS = RegexRatchetRule(
@@ -455,7 +456,7 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
         "Use the accessor functions from claude_config.py instead of hardcoding "
         "Path.home() / '.claude' or Path.home() / '.claude.json'. "
         "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
-        "For the config file: get_claude_config_path() / get_user_claude_config_path(). "
+        "For the user config file: find_user_claude_config(). "
         "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
         "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
     ),

@@ -20,7 +20,7 @@ def test_clone_creates_agent_from_source(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that clone creates a new agent by delegating to create --from-agent."""
+    """Test that clone creates a new agent by delegating to create --from."""
     source_name = f"test-clone-source-{uuid4().hex}"
     clone_name = f"test-clone-target-{uuid4().hex}"
     create_test_agent(source_name)

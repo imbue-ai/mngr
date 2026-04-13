@@ -302,6 +302,8 @@ class _KanpanState(MutableModel):
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
     column_defs: list["_ColumnDef"] = []
+    # Board section display order (from config or default BOARD_SECTION_ORDER)
+    section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER
     # Palette attr names for custom column colors
     col_attr_names: tuple[str, ...] = ()
     # Data sources collected from plugins
@@ -1161,6 +1163,16 @@ def _assemble_column_defs(
 
 
 @pure
+def _resolve_section_order(
+    config_order: list[BoardSection] | None,
+) -> tuple[BoardSection, ...]:
+    """Resolve the configured section order, falling back to the default."""
+    if config_order is None:
+        return BOARD_SECTION_ORDER
+    return tuple(config_order)
+
+
+@pure
 def _build_field_color_palette(
     snapshot: BoardSnapshot | None,
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
@@ -1268,6 +1280,7 @@ def _build_board_widgets(
     marks: dict[AgentName, str] | None = None,
     mark_attr_names: tuple[str, ...] = (),
     col_attr_names: tuple[str, ...] = (),
+    section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER,
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by section."""
     index_to_entry: dict[int, AgentBoardEntry] = {}
@@ -1287,7 +1300,7 @@ def _build_board_widgets(
 
     has_content = False
 
-    for section in BOARD_SECTION_ORDER:
+    for section in section_order:
         entries = by_section.get(section)
         if not entries:
             continue
@@ -1344,6 +1357,7 @@ def _refresh_display(state: _KanpanState) -> None:
         state.marks or None,
         state.mark_attr_names,
         state.col_attr_names,
+        state.section_order,
     )
     state.list_walker = walker
     state.frame.body = ListBox(walker)
@@ -1453,6 +1467,8 @@ def run_kanpan(
     source_col_defs = _build_data_source_column_defs(data_sources)
     column_defs = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, source_col_defs, plugin_config.column_order)
 
+    section_order = _resolve_section_order(plugin_config.section_order)
+
     state = _KanpanState(
         mngr_ctx=mngr_ctx,
         frame=frame,
@@ -1468,6 +1484,7 @@ def run_kanpan(
         cached_fields=initial_cached_fields,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
+        section_order=section_order,
     )
 
     input_handler = _KanpanInputHandler(state=state)

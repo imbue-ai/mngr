@@ -20,7 +20,7 @@ mngr snapshot create my-agent --name "before-refactor"
 Snapshots are restored automatically when starting a stopped agent. You can also:
 
 ```bash
-mngr create --from-agent my-agent --snapshot <id>   # New agent from snapshot [future]
+mngr create --from my-agent --snapshot <id>   # New agent from snapshot [future]
 ```
 
 ## Consistency

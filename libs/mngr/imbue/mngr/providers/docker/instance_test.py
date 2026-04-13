@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime
 from datetime import timezone
@@ -19,12 +20,14 @@ from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
 from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
 from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
+from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
+from imbue.mngr.providers.docker.testing import write_fake_docker_context
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -166,6 +169,56 @@ def test_get_ssh_host_remote_docker_ssh() -> None:
 
 def test_get_ssh_host_remote_docker_tcp() -> None:
     assert _get_ssh_host_from_docker_config("tcp://192.168.1.100:2376") == "192.168.1.100"
+
+
+# =========================================================================
+# Docker Context Host Resolution
+# =========================================================================
+
+
+def test_get_docker_context_host_returns_host_for_non_default_context(fake_docker_config: Path) -> None:
+    """Non-default context returns the context's Host URL."""
+    write_fake_docker_context(fake_docker_config, "desktop-linux", "unix:///Users/x/.docker/run/docker.sock")
+    assert _get_docker_context_host() == "unix:///Users/x/.docker/run/docker.sock"
+
+
+def test_get_docker_context_host_returns_none_for_default_context(fake_docker_config: Path) -> None:
+    """Default context returns None so docker.from_env() is used."""
+    write_fake_docker_context(fake_docker_config, "default", "")
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_config_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing Docker config returns None."""
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "nonexistent"))
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_config_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed Docker config returns None."""
+    config_dir = tmp_path / "docker-config-bad"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text("not json")
+    monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    assert _get_docker_context_host() is None
+
+
+def test_get_docker_context_host_returns_none_when_context_meta_corrupted(
+    fake_docker_config: Path,
+) -> None:
+    """Corrupted context meta.json returns None (the Docker SDK raises bare Exception)."""
+    # Write config pointing to a non-default context
+    (fake_docker_config / "config.json").write_text('{"currentContext": "bad-ctx"}')
+    # Create a corrupted meta.json for that context
+    ctx_id = hashlib.sha256(b"bad-ctx").hexdigest()
+    meta_dir = fake_docker_config / "contexts" / "meta" / ctx_id
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "meta.json").write_text("not json")
+    assert _get_docker_context_host() is None
 
 
 # =========================================================================

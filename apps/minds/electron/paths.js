@@ -61,6 +61,11 @@ function getPyprojectDir() {
   return path.join(getResourcesDir(), 'pyproject');
 }
 
+function getMonorepoRoot() {
+  // apps/minds/electron/ -> apps/minds/ -> apps/ -> repo root
+  return path.resolve(__dirname, '..', '..', '..');
+}
+
 module.exports = {
   isDev,
   getResourcesDir,
@@ -74,4 +79,5 @@ module.exports = {
   getLogDir,
   getVenvDir,
   getPyprojectDir,
+  getMonorepoRoot,
 };

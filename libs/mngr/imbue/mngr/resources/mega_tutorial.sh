@@ -73,7 +73,7 @@ mngr create my-task --provider modal --edit-message
 ## SPECIFYING DATA FOR THE AGENT
 
 # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
-mngr create my-task --source-path /path/to/some/other/project
+mngr create my-task --from /path/to/some/other/project
 
 # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
 mngr create my-task --project my-project
@@ -81,7 +81,7 @@ mngr create my-task --project my-project
 # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mngr create my-task --source-path /tmp/my_random_folder --command python -- script.py
+mngr create my-task --from /tmp/my_random_folder --command python -- script.py
 
 # however, if you do use git, mngr makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -112,13 +112,9 @@ mngr create my-task --branch main
 # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
 mngr create my-task --clone
 
-# you can make a shallow clone for faster setup:
-mngr create my-task --depth 1
-# (--shallow-since clones since a specific date instead)
-
 # you can clone from an existing agent's work directory:
 mngr create my-task --from other-agent
-# (--source, --source-agent, and --source-host are alternative forms for more specific control)
+# (--source is an alias for --from; the format supports agent@host.provider:path)
 
 # you can use rsync to transfer extra data as well, beyond just the git data:
 mngr create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
@@ -173,11 +169,11 @@ mngr create my-task --provider docker -s "--gpus all"
 # these args are passed to "docker run", whereas the build args are passed to "docker build".
 
 # you can specify the target path where the agent's work directory will be mounted:
-mngr create my-task --provider modal --target-path /workspace
+mngr create my-task@.modal:/workspace
 
 # you can upload files and run custom commands during host provisioning:
 mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
-# (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
+# (--sudo-command runs as root)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mngr create my-task --provider modal --no-start-on-boot
@@ -228,8 +224,10 @@ mngr create my-task --no-ensure-clean
 mngr create sisyphus --reuse --provider modal
 # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
 
-# you can control connection retries and timeouts:
-mngr create my-task --provider modal --retry 5 --retry-delay 10s
+# you can control connection retries and timeouts via settings.toml:
+# [retry]
+# connect_retry_times = 5
+# connect_retry_delay = "10s"
 # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
 
 # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -1208,8 +1206,8 @@ mngr create my-task --provider modal --extra-provision-command "pip install nump
 # run a command as root during provisioning (if your default user is not root, assumes passwordless sudo for that user)
 mngr create my-task --provider modal --extra-provision-command "sudo apt-get update && apt-get install -y vim"
 
-# append content to a file on the host
-mngr create my-task --provider modal --append-to-file /root/.bashrc="export PATH=/opt/bin:\$PATH"
+# append content to a file on the host using a provision command
+mngr create my-task --provider modal --extra-provision-command "echo 'export PATH=/opt/bin:\$PATH' >> /root/.bashrc"
 
 # combine multiple setup steps
 mngr create my-task --provider modal \

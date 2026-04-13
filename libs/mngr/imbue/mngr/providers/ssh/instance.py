@@ -10,6 +10,7 @@ from pydantic import Field
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
+from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostNotFoundError
@@ -86,6 +87,10 @@ class SSHProviderInstance(BaseProviderInstance):
         }
         if host_config.key_file is not None:
             host_data["ssh_key"] = str(host_config.key_file)
+        if host_config.known_hosts_file is not None:
+            get_host_keys.cache.clear()
+            host_data["ssh_known_hosts_file"] = str(host_config.known_hosts_file)
+            host_data["ssh_strict_host_key_checking"] = "yes"
 
         names_data = ([(host_config.address, host_data)], {})
         inventory = Inventory(names_data)

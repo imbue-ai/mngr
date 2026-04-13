@@ -221,7 +221,9 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
 
     gitconfig = Path.home() / ".gitconfig"
     if not gitconfig.exists():
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+        gitconfig.write_text(
+            "[user]\n\tname = Test User\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n"
+        )
 
     yield
 
@@ -1202,6 +1204,20 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+def build_test_known_hosts_file(host_key_path: Path, port: int, output_path: Path) -> Path:
+    """Build a known_hosts file for a local sshd instance.
+
+    Reads the public key from host_key_path.with_suffix(".pub") and writes a
+    known_hosts entry in the format expected by SSH for a localhost host on
+    the given port.
+
+    Returns the output_path for convenience.
+    """
+    host_pub_key = host_key_path.with_suffix(".pub").read_text().strip()
+    output_path.write_text(f"[127.0.0.1]:{port} {host_pub_key}\n")
+    return output_path
 
 
 # =============================================================================

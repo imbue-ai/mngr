@@ -91,12 +91,17 @@ def _load_ttyd_resource(filename: str) -> str:
 
 
 def _build_ttyd_install_command() -> str:
-    """Build a shell command that downloads the ttyd binary for the current architecture."""
+    """Build a shell command that downloads the ttyd binary for the current architecture.
+
+    Uses sudo when not running as root (e.g. Lima VMs) since the install
+    target /usr/local/bin/ requires elevated permissions.
+    """
     return (
         "ARCH=$(uname -m) && "
+        '_SUDO=""; [ "$(id -u)" != "0" ] && _SUDO=sudo && '
         f'curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}/ttyd.${{ARCH}}" '
-        "-o /usr/local/bin/ttyd && "
-        "chmod +x /usr/local/bin/ttyd"
+        '-o /tmp/ttyd.$$ && $_SUDO mv /tmp/ttyd.$$ /usr/local/bin/ttyd && '
+        "$_SUDO chmod +x /usr/local/bin/ttyd"
     )
 
 

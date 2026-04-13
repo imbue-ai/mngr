@@ -225,7 +225,7 @@ def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> No
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to create and list snapshots."""
     host = None
@@ -253,7 +253,7 @@ def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_list_snapshots_returns_initial_snapshot(initial_snapshot_provider: ModalProviderInstance) -> None:
     """list_snapshots should return the initial snapshot when is_snapshotted_after_create=True."""
     host = None

@@ -293,12 +293,7 @@ Supports custom format templates via --format. Available fields: agent, stdout, 
         ("connect", "Connect to an agent interactively"),
         ("message", "Send a message to an agent"),
         ("list", "List available agents"),
-    ),
-    additional_sections=(
-        (
-            "Related Documentation",
-            """- [Multi-target Options](../generic/multi_target.md) - Behavior when targeting multiple agents""",
-        ),
+        ("multi_target", "Behavior when targeting multiple agents"),
     ),
 ).register()
 

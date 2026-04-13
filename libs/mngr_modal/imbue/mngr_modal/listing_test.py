@@ -8,13 +8,13 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr_modal.instance import ModalProviderInstance
-from imbue.mngr_modal.instance import _build_listing_collection_script
-from imbue.mngr_modal.instance import _parse_listing_collection_output
 
 
 def test_build_listing_collection_script_contains_key_sections() -> None:
-    script = _build_listing_collection_script("/mngr", "mngr-")
+    script = build_listing_collection_script("/mngr", "mngr-")
     assert "UPTIME=" in script
     assert "BTIME=" in script
     assert "LOCK_MTIME=" in script
@@ -26,19 +26,19 @@ def test_build_listing_collection_script_contains_key_sections() -> None:
 
 def test_parse_listing_output_extracts_uptime() -> None:
     output = "UPTIME=123.45\nBTIME=\nLOCK_MTIME=\nSSH_ACTIVITY_MTIME=\n"
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     assert result["uptime_seconds"] == 123.45
 
 
 def test_parse_listing_output_extracts_btime() -> None:
     output = "UPTIME=\nBTIME=1700000000\nLOCK_MTIME=\nSSH_ACTIVITY_MTIME=\n"
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     assert result["btime"] == 1700000000
 
 
 def test_parse_listing_output_handles_empty_values() -> None:
     output = "UPTIME=\nBTIME=\nLOCK_MTIME=\nSSH_ACTIVITY_MTIME=\n"
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     assert result.get("uptime_seconds") is None
     assert result.get("btime") is None
     assert result.get("lock_mtime") is None
@@ -57,7 +57,7 @@ def test_parse_listing_output_extracts_certified_data() -> None:
         "---MNGR_PS_START---\n"
         "---MNGR_PS_END---\n"
     )
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     assert result["certified_data"]["host_id"] == "host-abc"
 
 
@@ -84,7 +84,7 @@ def test_parse_listing_output_extracts_agent_data() -> None:
         "URL=https://example.com\n"
         "---MNGR_AGENT_END---\n"
     )
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     agents = result["agents"]
     assert len(agents) == 1
     agent = agents[0]
@@ -106,14 +106,14 @@ def test_parse_listing_output_handles_malformed_agent_json() -> None:
         "---MNGR_AGENT_DATA_END---\n"
         "---MNGR_AGENT_END---\n"
     )
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     # Agent with malformed JSON should be skipped (no "data" key)
     assert len(result["agents"]) == 0
 
 
 def test_parse_listing_output_extracts_ps_output() -> None:
     output = "UPTIME=100\n---MNGR_PS_START---\n  1   0 init\n100   1 sshd\n---MNGR_PS_END---\n"
-    result = _parse_listing_collection_output(output)
+    result = parse_listing_collection_output(output)
     assert "init" in result["ps_output"]
     assert "sshd" in result["ps_output"]
 

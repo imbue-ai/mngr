@@ -59,20 +59,17 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
  * and human-readable log messages to stderr. We parse stdout for the
  * login_url event and log everything to the log file.
  *
+ * In dev mode, uses `uv run --package minds` from the monorepo root so
+ * the workspace venv (with all plugins) is used directly.
+ *
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress) {
+function startBackend(onProgress, onNotification) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
     findAvailablePort().then((port) => {
-      const uvPath = paths.getUvPath();
-      const uvBinDir = paths.getUvBinDir();
-      const gitBinDir = paths.getGitBinDir();
-      const uvCacheDir = paths.getUvCacheDir();
-      const uvPythonDir = paths.getUvPythonDir();
-      const pyprojectDir = paths.getPyprojectDir();
       const logDir = paths.getLogDir();
 
       // Ensure log directory exists
@@ -83,28 +80,56 @@ function startBackend(onProgress) {
 
       onProgress('Starting Minds...');
 
-      const args = [
-        'run', '--project', pyprojectDir,
-        'mind', '--format', 'jsonl',
-        '--log-file', path.join(logDir, 'minds-events.jsonl'),
-        'forward',
-        '--host', '127.0.0.1',
-        '--port', String(port),
-        '--no-browser',
-      ];
+      let uvBin, args, cwd, env;
 
-      const env = {
-        ...process.env,
-        PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
-        UV_CACHE_DIR: uvCacheDir,
-        UV_PYTHON_INSTALL_DIR: uvPythonDir,
-      };
-      // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
-      delete env.VIRTUAL_ENV;
+      if (paths.isDev()) {
+        // Dev mode: use system uv with the monorepo workspace venv
+        uvBin = 'uv';
+        args = [
+          'run', '--package', 'minds',
+          'minds', '-vv', '--format', 'jsonl',
+          '--log-file', path.join(logDir, 'minds-events.jsonl'),
+          'forward',
+          '--host', '127.0.0.1',
+          '--port', String(port),
+          '--no-browser',
+        ];
+        cwd = paths.getMonorepoRoot();
+        env = { ...process.env, MINDS_ELECTRON: '1' };
+      } else {
+        // Packaged mode: use bundled uv with standalone pyproject
+        const uvPath = paths.getUvPath();
+        const uvBinDir = paths.getUvBinDir();
+        const gitBinDir = paths.getGitBinDir();
+        const uvCacheDir = paths.getUvCacheDir();
+        const uvPythonDir = paths.getUvPythonDir();
+        const pyprojectDir = paths.getPyprojectDir();
 
-      const child = spawn(uvPath, args, {
+        uvBin = uvPath;
+        args = [
+          'run', '--project', pyprojectDir,
+          'minds', '--format', 'jsonl',
+          '--log-file', path.join(logDir, 'minds-events.jsonl'),
+          'forward',
+          '--host', '127.0.0.1',
+          '--port', String(port),
+          '--no-browser',
+        ];
+        cwd = pyprojectDir;
+        env = {
+          ...process.env,
+          PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
+          UV_CACHE_DIR: uvCacheDir,
+          UV_PYTHON_INSTALL_DIR: uvPythonDir,
+          MINDS_ELECTRON: '1',
+        };
+        // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
+        delete env.VIRTUAL_ENV;
+      }
+
+      const child = spawn(uvBin, args, {
         env,
-        cwd: pyprojectDir,
+        cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -136,6 +161,8 @@ function startBackend(onProgress) {
                   reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
                 });
               }
+            } else if (event.event === 'notification' && event.message && onNotification) {
+              onNotification(event);
             }
           } catch {
             // Not valid JSON -- just log it
@@ -143,9 +170,13 @@ function startBackend(onProgress) {
         }
       });
 
-      // Stderr is human-readable logging -- capture to log file
+      // Stderr is human-readable logging -- capture to log file and console
       child.stderr.on('data', (data) => {
-        logStream.write(data.toString());
+        const text = data.toString();
+        logStream.write(text);
+        if (paths.isDev()) {
+          process.stderr.write(text);
+        }
       });
 
       child.on('error', (err) => {
@@ -176,23 +207,30 @@ function startBackend(onProgress) {
 function shutdown() {
   return new Promise((resolve) => {
     if (!backendProcess) {
+      console.log('[shutdown] No backend process to shut down');
       resolve();
       return;
     }
 
     const child = backendProcess;
     let isExited = false;
+    const startTime = Date.now();
 
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[shutdown] Backend exited after ${elapsed}ms (code=${code}, signal=${signal})`);
       isExited = true;
       backendProcess = null;
       resolve();
     });
 
+    console.log(`[shutdown] Sending SIGTERM to backend (PID ${child.pid})`);
     child.kill('SIGTERM');
 
     setTimeout(() => {
       if (!isExited) {
+        const elapsed = Date.now() - startTime;
+        console.log(`[shutdown] Backend still alive after ${elapsed}ms, sending SIGKILL`);
         try {
           child.kill('SIGKILL');
         } catch {
@@ -202,6 +240,8 @@ function shutdown() {
       // Resolve after SIGKILL attempt regardless
       setTimeout(() => {
         if (!isExited) {
+          const elapsed = Date.now() - startTime;
+          console.log(`[shutdown] Backend did not exit after SIGKILL (${elapsed}ms), giving up`);
           backendProcess = null;
           resolve();
         }

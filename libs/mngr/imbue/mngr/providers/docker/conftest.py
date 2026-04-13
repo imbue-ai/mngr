@@ -51,6 +51,18 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
 
 
 @pytest.fixture
+def fake_docker_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point DOCKER_CONFIG at a temp directory and return its path.
+
+    Tests call ``write_fake_docker_context(path, name, url)`` to populate it.
+    """
+    config_dir = tmp_path / "docker-config"
+    config_dir.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    return config_dir
+
+
+@pytest.fixture
 def temp_source_dir(tmp_path: Path) -> Path:
     """Create a temporary source directory for tests."""
     source_dir = tmp_path / "source"
