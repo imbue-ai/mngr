@@ -3,6 +3,8 @@ import threading
 from pathlib import Path
 from queue import Queue
 
+import pytest
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.observe import get_agent_states_events_path
@@ -176,6 +178,7 @@ def test_watch_exits_when_observe_process_dies_no_stderr(temp_mngr_ctx: MngrCont
     assert len(notifier.calls) == 0
 
 
+@pytest.mark.timeout(30)
 def test_watch_processes_events_then_stops(temp_mngr_ctx: MngrContext) -> None:
     """Watcher reads new events when file grows and stops when stop_event is set."""
     events_path = get_agent_states_events_path(get_default_events_base_dir(temp_mngr_ctx.config))
