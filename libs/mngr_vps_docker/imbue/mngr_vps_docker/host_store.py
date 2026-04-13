@@ -70,7 +70,14 @@ def ensure_state_container(
         docker_ssh.start_container(container_name)
         return container_name
     except ContainerSetupError as e:
-        logger.debug("State container {} does not exist yet, creating: {}", container_name, e)
+        logger.debug("State container {} cannot be started, will recreate: {}", container_name, e)
+
+    # Remove any stale container that might hold the name (e.g., in "created" or
+    # "dead" state). The named volume preserves all state independently.
+    try:
+        docker_ssh.remove_container(container_name, force=True)
+    except ContainerSetupError:
+        pass
 
     # Create the volume and container
     logger.debug("Creating VPS state container: {}", container_name)
