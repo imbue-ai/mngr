@@ -237,7 +237,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run Docker acceptance tests
-        run: uv run pytest -n 0 --timeout 300 --no-cov -v --tb=short -m '(docker or docker_sdk) and not release'
+        run: uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release'
 
   # Release tests - runs only on release branch pushes
   test-release:
