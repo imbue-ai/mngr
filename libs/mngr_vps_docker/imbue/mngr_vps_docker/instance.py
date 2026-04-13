@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -534,16 +535,25 @@ class VpsDockerProvider(BaseProviderInstance):
             return host
 
         except Exception:
-            logger.error("Host creation failed, attempting cleanup...")
-            try:
-                if vps_instance_id is not None:
-                    self.vps_client.destroy_instance(vps_instance_id)
-            except Exception as cleanup_err:
-                logger.warning("Failed to clean up VPS instance: {}", cleanup_err)
-            try:
-                self.vps_client.delete_ssh_key(vps_ssh_key_id)
-            except Exception as cleanup_err:
-                logger.warning("Failed to clean up SSH key: {}", cleanup_err)
+            keep_failed = os.environ.get("MNGR_KEEP_FAILED_HOSTS", "0") == "1"
+            if keep_failed:
+                logger.error(
+                    "Host creation failed. MNGR_KEEP_FAILED_HOSTS=1 is set, "
+                    "skipping cleanup so you can debug. VPS instance: {}, IP: {}",
+                    vps_instance_id,
+                    vps_ip if "vps_ip" in dir() else "unknown",
+                )
+            else:
+                logger.error("Host creation failed, attempting cleanup...")
+                try:
+                    if vps_instance_id is not None:
+                        self.vps_client.destroy_instance(vps_instance_id)
+                except Exception as cleanup_err:
+                    logger.warning("Failed to clean up VPS instance: {}", cleanup_err)
+                try:
+                    self.vps_client.delete_ssh_key(vps_ssh_key_id)
+                except Exception as cleanup_err:
+                    logger.warning("Failed to clean up SSH key: {}", cleanup_err)
             raise
 
     def _provision_vps(
