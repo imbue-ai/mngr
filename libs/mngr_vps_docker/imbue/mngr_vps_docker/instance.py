@@ -711,14 +711,11 @@ class VpsDockerProvider(BaseProviderInstance):
 
         idle_timeout = self.config.default_idle_timeout
         activity_sources = self.config.default_activity_sources
-        disable_session_shutdown = False
         if lifecycle is not None:
             if lifecycle.idle_timeout_seconds is not None:
                 idle_timeout = lifecycle.idle_timeout_seconds
             if lifecycle.activity_sources is not None:
                 activity_sources = lifecycle.activity_sources
-            if lifecycle.disable_session_shutdown is not None:
-                disable_session_shutdown = lifecycle.disable_session_shutdown
 
         now = datetime.now(timezone.utc)
         host_data = CertifiedHostData(
@@ -726,7 +723,6 @@ class VpsDockerProvider(BaseProviderInstance):
             host_name=str(name),
             idle_timeout_seconds=idle_timeout,
             activity_sources=activity_sources,
-            disable_session_shutdown=disable_session_shutdown,
             image=base_image,
             user_tags=dict(tags) if tags else {},
             created_at=now,

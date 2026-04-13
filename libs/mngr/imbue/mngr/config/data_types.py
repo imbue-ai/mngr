@@ -861,7 +861,6 @@ class CreateCliOptions(CommonCliOptions):
     idle_timeout: str | None
     idle_mode: str | None
     activity_sources: str | None
-    disable_session_shutdown: bool | None
     worktree_base_folder: str | None
     start_on_boot: bool | None
     start_host: bool

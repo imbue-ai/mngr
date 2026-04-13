@@ -116,15 +116,6 @@ get_tmux_session_prefix() {
     jq -r '.tmux_session_prefix // empty' "$DATA_JSON_PATH" 2>/dev/null
 }
 
-# Read disable_session_shutdown from data.json (optional field, defaults to false)
-get_disable_session_shutdown() {
-    if [ ! -f "$DATA_JSON_PATH" ]; then
-        echo "false"
-        return
-    fi
-    jq -r '.disable_session_shutdown // false' "$DATA_JSON_PATH" 2>/dev/null
-}
-
 # Check if there are any running tmux sessions with the configured prefix.
 # Returns 0 (true) if at least one session exists, 1 (false) if none exist.
 # Also returns 0 (true / skip shutdown) if:
@@ -344,10 +335,7 @@ main() {
         # Check if all agent tmux sessions have exited.
         # If the prefix is configured and no sessions with that prefix exist,
         # the host should be stopped (not just paused) since all agents are gone.
-        # Skip this check if disable_session_shutdown is true (for persistent hosts).
-        if [ "$(get_disable_session_shutdown)" = "true" ]; then
-            echo "Session shutdown disabled, skipping tmux session check"
-        elif ! has_running_agent_sessions; then
+        if ! has_running_agent_sessions; then
             log "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
             if [ -x "$SHUTDOWN_SCRIPT" ]; then
                 log "Calling shutdown script with STOPPED (no agents running): $SHUTDOWN_SCRIPT"

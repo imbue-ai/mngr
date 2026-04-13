@@ -10,7 +10,6 @@ import pytest
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
@@ -253,67 +252,6 @@ def test_certified_host_data_backward_compatible_without_prefix() -> None:
     """CertifiedHostData should deserialize from JSON without tmux_session_prefix."""
     data = CertifiedHostData.model_validate({"host_id": "host-123", "host_name": "test-host"})
     assert data.tmux_session_prefix is None
-
-
-# =============================================================================
-# disable_session_shutdown tests
-# =============================================================================
-
-
-def test_certified_host_data_disable_session_shutdown_defaults_to_false() -> None:
-    """disable_session_shutdown should default to False for backward compatibility."""
-    now = datetime.now(timezone.utc)
-    data = CertifiedHostData(host_id="host-123", host_name="test-host", created_at=now, updated_at=now)
-    assert data.disable_session_shutdown is False
-
-
-def test_certified_host_data_disable_session_shutdown_set_true() -> None:
-    """disable_session_shutdown should be settable to True."""
-    now = datetime.now(timezone.utc)
-    data = CertifiedHostData(
-        host_id="host-123",
-        host_name="test-host",
-        disable_session_shutdown=True,
-        created_at=now,
-        updated_at=now,
-    )
-    assert data.disable_session_shutdown is True
-
-
-def test_certified_host_data_disable_session_shutdown_serializes_to_json() -> None:
-    """disable_session_shutdown should round-trip through JSON serialization."""
-    now = datetime.now(timezone.utc)
-    data = CertifiedHostData(
-        host_id="host-123",
-        host_name="test-host",
-        disable_session_shutdown=True,
-        created_at=now,
-        updated_at=now,
-    )
-    json_str = json.dumps(data.model_dump(by_alias=True, mode="json"))
-    parsed = json.loads(json_str)
-    assert parsed["disable_session_shutdown"] is True
-
-    restored = CertifiedHostData.model_validate(parsed)
-    assert restored.disable_session_shutdown is True
-
-
-def test_certified_host_data_backward_compatible_without_disable_session_shutdown() -> None:
-    """CertifiedHostData should deserialize from JSON without disable_session_shutdown."""
-    data = CertifiedHostData.model_validate({"host_id": "host-123", "host_name": "test-host"})
-    assert data.disable_session_shutdown is False
-
-
-def test_host_lifecycle_options_disable_session_shutdown_defaults_to_none() -> None:
-    """HostLifecycleOptions.disable_session_shutdown should default to None."""
-    opts = HostLifecycleOptions()
-    assert opts.disable_session_shutdown is None
-
-
-def test_host_lifecycle_options_disable_session_shutdown_set() -> None:
-    """HostLifecycleOptions.disable_session_shutdown should be settable."""
-    opts = HostLifecycleOptions(disable_session_shutdown=True)
-    assert opts.disable_session_shutdown is True
 
 
 # =============================================================================

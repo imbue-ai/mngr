@@ -334,36 +334,6 @@ def test_get_tmux_session_prefix_returns_prefix_value(tmp_path: Path) -> None:
     assert result.stdout.strip() == "mngr-"
 
 
-def test_get_disable_session_shutdown_returns_false_when_no_data_json(tmp_path: Path) -> None:
-    """get_disable_session_shutdown should return 'false' when data.json doesn't exist."""
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_disable_session_shutdown")
-    assert result.returncode == 0
-    assert result.stdout.strip() == "false"
-
-
-def test_get_disable_session_shutdown_returns_false_when_field_missing(tmp_path: Path) -> None:
-    """get_disable_session_shutdown should return 'false' when field is not in data.json."""
-    data_json = tmp_path / "data.json"
-    data_json.write_text(json.dumps({"host_id": "test"}))
-
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_disable_session_shutdown")
-    assert result.returncode == 0
-    assert result.stdout.strip() == "false"
-
-
-def test_get_disable_session_shutdown_returns_true_when_set(tmp_path: Path) -> None:
-    """get_disable_session_shutdown should return 'true' when set to true in data.json."""
-    data_json = tmp_path / "data.json"
-    data_json.write_text(json.dumps({"disable_session_shutdown": True}))
-
-    script_path = _get_activity_watcher_script_path()
-    result = _run_bash_function(script_path, str(tmp_path), "get_disable_session_shutdown")
-    assert result.returncode == 0
-    assert result.stdout.strip() == "true"
-
-
 def test_has_running_agent_sessions_returns_true_when_no_prefix(tmp_path: Path) -> None:
     """has_running_agent_sessions should return 0 (true) when no prefix is configured."""
     data_json = tmp_path / "data.json"
