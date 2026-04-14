@@ -1177,7 +1177,7 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
     result = ListResult()
     result.agents.append(agent)
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         _maybe_write_full_discovery_snapshot(
             mngr_ctx=temp_mngr_ctx,
             result=result,
