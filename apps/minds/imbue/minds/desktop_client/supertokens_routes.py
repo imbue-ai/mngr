@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from loguru import logger
 from supertokens_python.asyncio import list_users_by_account_info
+from supertokens_python.exceptions import SuperTokensError
 from supertokens_python.recipe.emailpassword.asyncio import consume_password_reset_token
 from supertokens_python.recipe.emailpassword.asyncio import send_reset_password_email
 from supertokens_python.recipe.emailpassword.asyncio import sign_in
@@ -28,11 +29,12 @@ from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPass
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
 from supertokens_python.recipe.emailverification.asyncio import is_email_verified
 from supertokens_python.recipe.emailverification.asyncio import send_email_verification_email
-from supertokens_python.exceptions import SuperTokensError
 from supertokens_python.recipe.emailverification.asyncio import verify_email_using_token
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
 from supertokens_python.recipe.emailverification.syncio import is_email_verified as is_email_verified_sync
-from supertokens_python.recipe.emailverification.syncio import send_email_verification_email as send_email_verification_email_sync
+from supertokens_python.recipe.emailverification.syncio import (
+    send_email_verification_email as send_email_verification_email_sync,
+)
 from supertokens_python.recipe.session.asyncio import create_new_session_without_request_response
 from supertokens_python.recipe.thirdparty.asyncio import get_provider
 from supertokens_python.recipe.thirdparty.asyncio import manually_create_or_update_user
@@ -105,11 +107,13 @@ def _handle_auth_page(request: Request, message: str | None = None) -> HTMLRespo
     """Render the sign-up or sign-in page."""
     session_store = _get_session_store(request)
     default_to_signup = not session_store.has_signed_in_before()
-    return HTMLResponse(render_auth_page(
-        default_to_signup=default_to_signup,
-        message=message,
-        server_port=_get_server_port(request),
-    ))
+    return HTMLResponse(
+        render_auth_page(
+            default_to_signup=default_to_signup,
+            message=message,
+            server_port=_get_server_port(request),
+        )
+    )
 
 
 async def _handle_signup_api(request: Request) -> Response:
@@ -129,7 +133,9 @@ async def _handle_signup_api(request: Request) -> Response:
     )
 
     if isinstance(result, EmailAlreadyExistsError):
-        return _json_response({"status": "EMAIL_ALREADY_EXISTS", "message": "An account with this email already exists"})
+        return _json_response(
+            {"status": "EMAIL_ALREADY_EXISTS", "message": "An account with this email already exists"}
+        )
 
     if isinstance(result, EPSignUpOkResult):
         user = result.user
@@ -178,11 +184,13 @@ async def _handle_signin_api(request: Request) -> Response:
                 recipe_user_id=recipe_user_id,
                 email=email,
             )
-        return _json_response({
-            "status": "OK",
-            "userId": user.id,
-            "needsEmailVerification": needs_verification,
-        })
+        return _json_response(
+            {
+                "status": "OK",
+                "userId": user.id,
+                "needsEmailVerification": needs_verification,
+            }
+        )
 
     return _json_response({"status": "ERROR", "message": "Sign-in failed"}, 500)
 
@@ -200,13 +208,15 @@ def _handle_status_api(request: Request) -> Response:
     user_info = session_store.get_user_info()
     if user_info is None:
         return _json_response({"signedIn": False})
-    return _json_response({
-        "signedIn": True,
-        "userId": str(user_info.user_id),
-        "email": user_info.email,
-        "displayName": user_info.display_name,
-        "userIdPrefix": str(user_info.user_id_prefix),
-    })
+    return _json_response(
+        {
+            "signedIn": True,
+            "userId": str(user_info.user_id),
+            "email": user_info.email,
+            "displayName": user_info.display_name,
+            "userIdPrefix": str(user_info.user_id_prefix),
+        }
+    )
 
 
 def _handle_email_verified_api(request: Request) -> Response:
@@ -218,7 +228,9 @@ def _handle_email_verified_api(request: Request) -> Response:
     user = get_user(str(user_info.user_id))
     if user is None:
         return _json_response({"verified": False, "signedIn": False})
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
+    recipe_user_id = (
+        user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
+    )
     verified = is_email_verified_sync(recipe_user_id=recipe_user_id, email=user_info.email)
     return _json_response({"verified": verified, "signedIn": True})
 
@@ -232,7 +244,9 @@ def _handle_resend_verification_api(request: Request) -> Response:
     user = get_user(str(user_info.user_id))
     if user is None:
         return _json_response({"status": "ERROR", "message": "User not found"}, 404)
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
+    recipe_user_id = (
+        user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
+    )
     send_email_verification_email_sync(
         tenant_id=_TENANT_ID,
         user_id=str(user_info.user_id),
@@ -440,13 +454,15 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
                 provider = lm.third_party.id
                 break
 
-    return HTMLResponse(render_settings_page(
-        email=user_info.email,
-        display_name=user_info.display_name,
-        user_id=str(user_info.user_id),
-        provider=provider,
-        user_id_prefix=str(user_info.user_id_prefix),
-    ))
+    return HTMLResponse(
+        render_settings_page(
+            email=user_info.email,
+            display_name=user_info.display_name,
+            user_id=str(user_info.user_id),
+            provider=provider,
+            user_id_prefix=str(user_info.user_id_prefix),
+        )
+    )
 
 
 # -- Router factory --

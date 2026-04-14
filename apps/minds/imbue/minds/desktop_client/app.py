@@ -49,6 +49,8 @@ from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
+from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page

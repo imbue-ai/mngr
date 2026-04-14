@@ -27,14 +27,14 @@ from imbue.mngr.utils.logging import ERROR_COLOR
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
 from imbue.mngr.utils.logging import RESET_COLOR
-from imbue.mngr.utils.logging import WARNING_COLOR
 from imbue.mngr.utils.logging import TRACE_COLOR
+from imbue.mngr.utils.logging import WARNING_COLOR
 from imbue.mngr.utils.logging import _ParamikoToLoguruHandler
 from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
-from imbue.mngr.utils.logging import _should_use_color
 from imbue.mngr.utils.logging import _patched_transport_log
 from imbue.mngr.utils.logging import _resolve_log_dir
+from imbue.mngr.utils.logging import _should_use_color
 from imbue.mngr.utils.logging import _threading_excepthook
 from imbue.mngr.utils.logging import remove_console_handlers
 from imbue.mngr.utils.logging import setup_logging

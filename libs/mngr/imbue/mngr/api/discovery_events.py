@@ -588,7 +588,9 @@ def _discovery_stream_tail_events_file(
                 file_size = events_path.stat().st_size
                 # Handle file truncation (reset to start)
                 if file_size < current_offset:
-                    logger.debug("Discovery events file truncated (size {} < offset {}), resetting", file_size, current_offset)
+                    logger.debug(
+                        "Discovery events file truncated (size {} < offset {}), resetting", file_size, current_offset
+                    )
                     current_offset = 0
                 if file_size > current_offset:
                     bytes_new = file_size - current_offset
@@ -597,7 +599,9 @@ def _discovery_stream_tail_events_file(
                         new_content = f.read()
                         current_offset = f.tell()
                     new_lines = new_content.splitlines()
-                    logger.debug("Discovery tail: read {} new bytes, {} lines from events file", bytes_new, len(new_lines))
+                    logger.debug(
+                        "Discovery tail: read {} new bytes, {} lines from events file", bytes_new, len(new_lines)
+                    )
                     for file_line in new_lines:
                         if stop_event.is_set():
                             break

@@ -90,7 +90,12 @@ def ensure_state_container(
         logger.info("ensure_state_container: {} does not exist yet, will create: {}", container_name, e)
 
     # Create the volume and container
-    logger.info("ensure_state_container: creating volume {} and container {} on VPS {}", volume_name, container_name, docker_ssh.vps_ip)
+    logger.info(
+        "ensure_state_container: creating volume {} and container {} on VPS {}",
+        volume_name,
+        container_name,
+        docker_ssh.vps_ip,
+    )
     docker_ssh.create_volume(volume_name)
     docker_ssh.run_container(
         image=STATE_CONTAINER_IMAGE,

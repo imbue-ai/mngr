@@ -122,6 +122,8 @@ omit = [
   "*/providers/docker/instance.py",
   "*/providers/docker/volume.py",
   "*/providers/docker/testing.py",
+  # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
+  "*/minds/*",
 ]
 
 [tool.inline-snapshot]
