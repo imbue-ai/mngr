@@ -7,17 +7,13 @@ pytest_plugins.
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr_modal.register_guards import register_modal_guard
 from imbue.resource_guards.resource_guards import register_resource_guard
 
 suppress_warnings()
 
-register_marker("tmux: marks tests that create real tmux sessions or mngr agents")
-register_marker("rsync: marks tests that invoke rsync for file transfer")
-register_marker("unison: marks tests that start a real unison file-sync process")
-register_marker("modal: marks tests that connect to the Modal cloud service")
+# The corresponding pytest marks are auto-registered by conftest_hooks.
 register_resource_guard("tmux")
 register_resource_guard("rsync")
 register_resource_guard("unison")
