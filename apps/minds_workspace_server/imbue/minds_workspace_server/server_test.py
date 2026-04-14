@@ -286,7 +286,7 @@ def test_random_name_endpoint(client: TestClient) -> None:
     assert len(data["name"]) > 0
 
 
-def test_create_chat_agent_without_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """Creating a chat agent without a primary agent work dir returns 400."""
     monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
     monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
