@@ -483,6 +483,14 @@ class MngrStreamManager(MutableModel):
             agent_ids.append(agent.agent_id)
             agent_host_map[str(agent.agent_id)] = str(agent.host_id)
 
+        workspace_names = [str(a.agent_name) for a in event.agents if self._is_workspace_agent(a)]
+        logger.debug(
+            "Processing DISCOVERY_FULL: {} agents total, {} workspace agents: {}",
+            len(event.agents),
+            len(workspace_names),
+            workspace_names,
+        )
+
         with self._lock:
             self._agent_host_map = agent_host_map
 
@@ -523,6 +531,11 @@ class MngrStreamManager(MutableModel):
         """Incrementally add or update a single agent in the resolver."""
         agent = event.agent
         aid_str = str(agent.agent_id)
+        is_workspace = self._is_workspace_agent(agent)
+        logger.debug(
+            "AGENT_DISCOVERED: {} (workspace={}, labels={})",
+            agent.agent_name, is_workspace, list(agent.labels.keys()),
+        )
 
         with self._lock:
             self._agent_host_map[aid_str] = str(agent.host_id)
