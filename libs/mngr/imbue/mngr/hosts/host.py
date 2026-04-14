@@ -245,11 +245,23 @@ class Host(BaseHost, OnlineHostInterface):
             logger.trace("Disconnected pyinfra host {}", self.id)
         self._explicitly_disconnected = True
 
+    def model_copy_update(self, *updates: Any) -> "Host":
+        """Create a copy of this Host with updated fields.
+
+        The copy shares the same pyinfra connector (and thus the same SSH
+        client). Mark ourselves so __del__ does not close the shared client
+        when this original is garbage collected.
+        """
+        result = super().model_copy_update(*updates)
+        self._explicitly_disconnected = True
+        return result
+
     def __del__(self) -> None:
         """Best-effort cleanup of the paramiko SSH client on garbage collection.
 
-        Only acts if disconnect() was never called explicitly (i.e., the Host
-        was dropped without proper cleanup).
+        Only acts if disconnect() was never called explicitly and this Host
+        was never copied via model_copy_update (the copy shares the connector,
+        so closing the client here would kill the copy's connection).
         """
         if getattr(self, "_explicitly_disconnected", False):
             return
