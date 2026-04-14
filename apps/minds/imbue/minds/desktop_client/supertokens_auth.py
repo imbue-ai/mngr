@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 
 from loguru import logger
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -182,8 +185,6 @@ class SuperTokensSessionStore(MutableModel):
         if session.refresh_token is None:
             return None
         try:
-            from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
-
             new_session = refresh_session_without_request_response(
                 refresh_token=str(session.refresh_token),
             )
@@ -199,7 +200,7 @@ class SuperTokensSessionStore(MutableModel):
             )
             logger.info("Refreshed expired SuperTokens access token")
             return new_access_token
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError, OSError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
             logger.warning("Failed to refresh SuperTokens session: {}", exc)
             return None
 
