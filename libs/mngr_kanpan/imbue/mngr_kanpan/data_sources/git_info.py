@@ -8,6 +8,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
@@ -33,7 +34,7 @@ class CommitsAheadField(FieldValue):
         return CellDisplay(text=f"[{self.count} unpushed]")
 
 
-class GitInfoDataSource:
+class GitInfoDataSource(FrozenModel):
     """Computes commits_ahead field from git rev-list --count."""
 
     @property

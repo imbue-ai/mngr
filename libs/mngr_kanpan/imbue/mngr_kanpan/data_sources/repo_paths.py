@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -55,7 +56,7 @@ def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     return _parse_github_repo_path(remote_url)
 
 
-class RepoPathsDataSource:
+class RepoPathsDataSource(FrozenModel):
     """Computes repo_path field from agent remote labels.
 
     This is infrastructure data for other data sources (e.g. GitHub).
