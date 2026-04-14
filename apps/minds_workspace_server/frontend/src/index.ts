@@ -17,8 +17,23 @@ declare global {
 
 window.$llm = llmApi;
 
+function getEffectiveRoutePrefix(): string {
+  // When served through the desktop client proxy, the <base> tag contains
+  // the forwarding prefix (e.g., /forwarding/{agentId}/web/). Use this as
+  // the Mithril route prefix so pushState preserves the correct URL in the
+  // browser history stack (enabling back/forward navigation).
+  const baseEl = document.querySelector("base[href]");
+  if (baseEl) {
+    const href = baseEl.getAttribute("href") ?? "";
+    if (href.includes("/forwarding/")) {
+      return href.replace(/\/+$/, "");
+    }
+  }
+  return getBasePath();
+}
+
 async function bootstrap(): Promise<void> {
-  m.route.prefix = getBasePath();
+  m.route.prefix = getEffectiveRoutePrefix();
   initAgentManager();
   const rootElement = document.getElementById("app");
   if (rootElement) {
