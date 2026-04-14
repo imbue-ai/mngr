@@ -830,10 +830,17 @@ if (isElectron) {
   document.getElementById('sidebar-panel').style.display = 'none';
 }
 
-// -- Title tracking --
+// -- Title tracking + auth refresh on navigation --
+function refreshAuthStatus() {
+  fetch('/auth/api/status').then(function(r) { return r.json(); }).then(updateAuthUI).catch(function() {});
+}
+
 if (isElectron) {
   window.minds.onContentTitleChange(function(title) {
     document.getElementById('page-title').textContent = title || 'Minds';
+  });
+  window.minds.onContentURLChange(function() {
+    refreshAuthStatus();
   });
 } else {
   setInterval(function() {
@@ -842,6 +849,8 @@ if (isElectron) {
       if (t) document.getElementById('page-title').textContent = t;
     } catch(e) {}
   }, 500);
+  // Re-check auth on iframe navigation
+  document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
 }
 
 // -- Auth status --
@@ -858,7 +867,7 @@ function updateAuthUI(data) {
     btn.title = 'Sign in to your account';
   }
 }
-fetch('/auth/api/status').then(function(r) { return r.json(); }).then(updateAuthUI).catch(function() {});
+refreshAuthStatus();
 
 document.getElementById('user-btn').onclick = function() {
   if (signedIn) navigateContent('/auth/settings');
