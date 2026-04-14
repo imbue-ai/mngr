@@ -27,26 +27,6 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 # =============================================================================
 
 
-def test_generate_ssh_keypair_returns_strings() -> None:
-    """generate_ssh_keypair should return a tuple of two strings."""
-    private_pem, public_openssh = generate_ssh_keypair()
-    assert isinstance(private_pem, str)
-    assert isinstance(public_openssh, str)
-
-
-def test_generate_ssh_keypair_private_key_is_pem_rsa() -> None:
-    """The private key should be a PEM-encoded RSA key."""
-    private_pem, _ = generate_ssh_keypair()
-    assert private_pem.startswith("-----BEGIN RSA PRIVATE KEY-----")
-    assert "-----END RSA PRIVATE KEY-----" in private_pem
-
-
-def test_generate_ssh_keypair_public_key_is_openssh_rsa() -> None:
-    """The public key should be in OpenSSH format for RSA."""
-    _, public_openssh = generate_ssh_keypair()
-    assert public_openssh.startswith("ssh-rsa ")
-
-
 def test_generate_ssh_keypair_rsa_4096_bits() -> None:
     """The RSA key should be 4096 bits."""
     private_pem, _ = generate_ssh_keypair()
@@ -67,20 +47,19 @@ def test_generate_ssh_keypair_each_call_produces_unique_keys() -> None:
 # =============================================================================
 
 
-def test_save_ssh_keypair_creates_files(tmp_path: Path) -> None:
-    """save_ssh_keypair should create both private and public key files."""
+def test_save_ssh_keypair_writes_valid_keys_with_correct_permissions(tmp_path: Path) -> None:
+    """save_ssh_keypair should write PEM private key (0o600) and OpenSSH public key (0o644)."""
     key_dir = tmp_path / "keys"
     private_path, public_path = save_ssh_keypair(key_dir)
-    assert private_path.exists()
-    assert public_path.exists()
 
-
-def test_save_ssh_keypair_returns_correct_paths(tmp_path: Path) -> None:
-    """save_ssh_keypair should return paths matching the expected filenames."""
-    key_dir = tmp_path / "keys"
-    private_path, public_path = save_ssh_keypair(key_dir)
     assert private_path == key_dir / "ssh_key"
     assert public_path == key_dir / "ssh_key.pub"
+
+    assert private_path.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
+    assert public_path.read_text().startswith("ssh-rsa ")
+
+    assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(public_path.stat().st_mode) == 0o644
 
 
 def test_save_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
@@ -89,40 +68,8 @@ def test_save_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
     private_path, public_path = save_ssh_keypair(key_dir, key_name="id_rsa")
     assert private_path == key_dir / "id_rsa"
     assert public_path == key_dir / "id_rsa.pub"
-    assert private_path.exists()
-    assert public_path.exists()
-
-
-def test_save_ssh_keypair_private_key_permissions(tmp_path: Path) -> None:
-    """save_ssh_keypair should set private key permissions to 0o600."""
-    key_dir = tmp_path / "keys"
-    private_path, _ = save_ssh_keypair(key_dir)
-    file_mode = stat.S_IMODE(private_path.stat().st_mode)
-    assert file_mode == 0o600
-
-
-def test_save_ssh_keypair_public_key_permissions(tmp_path: Path) -> None:
-    """save_ssh_keypair should set public key permissions to 0o644."""
-    key_dir = tmp_path / "keys"
-    _, public_path = save_ssh_keypair(key_dir)
-    file_mode = stat.S_IMODE(public_path.stat().st_mode)
-    assert file_mode == 0o644
-
-
-def test_save_ssh_keypair_private_key_content_is_valid_pem(tmp_path: Path) -> None:
-    """save_ssh_keypair should write valid PEM content to the private key file."""
-    key_dir = tmp_path / "keys"
-    private_path, _ = save_ssh_keypair(key_dir)
-    content = private_path.read_text()
-    assert content.startswith("-----BEGIN RSA PRIVATE KEY-----")
-
-
-def test_save_ssh_keypair_public_key_content_is_openssh(tmp_path: Path) -> None:
-    """save_ssh_keypair should write valid OpenSSH content to the public key file."""
-    key_dir = tmp_path / "keys"
-    _, public_path = save_ssh_keypair(key_dir)
-    content = public_path.read_text()
-    assert content.startswith("ssh-rsa ")
+    assert private_path.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
+    assert public_path.read_text().startswith("ssh-rsa ")
 
 
 def test_save_ssh_keypair_creates_parent_directories(tmp_path: Path) -> None:
@@ -196,26 +143,6 @@ def test_load_or_create_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
 # =============================================================================
 # generate_ed25519_host_keypair
 # =============================================================================
-
-
-def test_generate_ed25519_host_keypair_returns_strings() -> None:
-    """generate_ed25519_host_keypair should return a tuple of two strings."""
-    private_pem, public_openssh = generate_ed25519_host_keypair()
-    assert isinstance(private_pem, str)
-    assert isinstance(public_openssh, str)
-
-
-def test_generate_ed25519_host_keypair_private_key_is_openssh_format() -> None:
-    """The private key should be in OpenSSH PEM format."""
-    private_pem, _ = generate_ed25519_host_keypair()
-    assert private_pem.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
-    assert "-----END OPENSSH PRIVATE KEY-----" in private_pem
-
-
-def test_generate_ed25519_host_keypair_public_key_is_ed25519() -> None:
-    """The public key should be in OpenSSH format for Ed25519."""
-    _, public_openssh = generate_ed25519_host_keypair()
-    assert public_openssh.startswith("ssh-ed25519 ")
 
 
 def test_generate_ed25519_host_keypair_produces_valid_ed25519_key() -> None:
@@ -371,19 +298,12 @@ def test_clear_host_from_known_hosts_removes_multiple_entries_for_host(tmp_path:
 # =============================================================================
 
 
-def test_add_host_to_known_hosts_creates_file_if_missing(tmp_path: Path) -> None:
-    """add_host_to_known_hosts should create the file if it doesn't exist."""
+def test_add_host_to_known_hosts_creates_file_with_correct_content(tmp_path: Path) -> None:
+    """add_host_to_known_hosts should create parent dirs and file with bare hostname for port 22."""
     known_hosts = tmp_path / "ssh" / "known_hosts"
     add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey")
-    assert known_hosts.exists()
-
-
-def test_add_host_to_known_hosts_standard_port_uses_bare_hostname(tmp_path: Path) -> None:
-    """add_host_to_known_hosts should use bare hostname format for port 22."""
-    known_hosts = tmp_path / "known_hosts"
-    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey")
     content = known_hosts.read_text()
-    assert content.startswith("example.com ssh-ed25519 AAAAC3Nza hostkey\n")
+    assert content == "example.com ssh-ed25519 AAAAC3Nza hostkey\n"
 
 
 def test_add_host_to_known_hosts_nonstandard_port_uses_bracket_format(tmp_path: Path) -> None:
@@ -434,13 +354,6 @@ def test_add_host_to_known_hosts_preserves_different_key_types(tmp_path: Path) -
     assert "ssh-ed25519" in content
 
 
-def test_add_host_to_known_hosts_creates_parent_directories(tmp_path: Path) -> None:
-    """add_host_to_known_hosts should create parent directories if needed."""
-    known_hosts = tmp_path / "deep" / "nested" / "known_hosts"
-    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAA hostkey")
-    assert known_hosts.exists()
-
-
 # =============================================================================
 # wait_for_sshd
 # =============================================================================
@@ -462,38 +375,28 @@ def test_wait_for_sshd_raises_on_non_listening_port() -> None:
 # =============================================================================
 
 
-def test_create_pyinfra_host_returns_pyinfra_host(tmp_path: Path) -> None:
-    """create_pyinfra_host should return a PyinfraHost object."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-
-    host = create_pyinfra_host(
-        hostname="127.0.0.1",
-        port=22,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
-    )
-
-    assert isinstance(host, PyinfraHost)
-
-
-def test_create_pyinfra_host_has_correct_hostname(tmp_path: Path) -> None:
-    """create_pyinfra_host should configure the host with the given hostname."""
+def test_create_pyinfra_host_configures_all_ssh_data(tmp_path: Path) -> None:
+    """create_pyinfra_host should set hostname, port, key path, known_hosts, and default user."""
     private_key_path, _ = save_ssh_keypair(tmp_path)
     known_hosts_path = tmp_path / "known_hosts"
 
     host = create_pyinfra_host(
         hostname="myhost.example.com",
-        port=22,
+        port=2222,
         private_key_path=private_key_path,
         known_hosts_path=known_hosts_path,
     )
 
+    assert isinstance(host, PyinfraHost)
     assert host.name == "myhost.example.com"
+    assert host.data.get("ssh_port") == 2222
+    assert host.data.get("ssh_user") == "root"
+    assert host.data.get("ssh_key") == str(private_key_path)
+    assert host.data.get("ssh_known_hosts_file") == str(known_hosts_path)
 
 
 def test_create_pyinfra_host_uses_custom_ssh_user(tmp_path: Path) -> None:
-    """create_pyinfra_host should pass through the ssh_user to the host data."""
+    """create_pyinfra_host should pass through a custom ssh_user."""
     private_key_path, _ = save_ssh_keypair(tmp_path)
     known_hosts_path = tmp_path / "known_hosts"
 
@@ -506,63 +409,3 @@ def test_create_pyinfra_host_uses_custom_ssh_user(tmp_path: Path) -> None:
     )
 
     assert host.data.get("ssh_user") == "ubuntu"
-
-
-def test_create_pyinfra_host_default_user_is_root(tmp_path: Path) -> None:
-    """create_pyinfra_host should default to 'root' as the ssh_user."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-
-    host = create_pyinfra_host(
-        hostname="127.0.0.1",
-        port=2222,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
-    )
-
-    assert host.data.get("ssh_user") == "root"
-
-
-def test_create_pyinfra_host_correct_port(tmp_path: Path) -> None:
-    """create_pyinfra_host should set the ssh_port correctly."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-
-    host = create_pyinfra_host(
-        hostname="127.0.0.1",
-        port=2222,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
-    )
-
-    assert host.data.get("ssh_port") == 2222
-
-
-def test_create_pyinfra_host_known_hosts_path_is_set(tmp_path: Path) -> None:
-    """create_pyinfra_host should set the ssh_known_hosts_file on the host."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-
-    host = create_pyinfra_host(
-        hostname="127.0.0.1",
-        port=22,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
-    )
-
-    assert host.data.get("ssh_known_hosts_file") == str(known_hosts_path)
-
-
-def test_create_pyinfra_host_private_key_path_is_set(tmp_path: Path) -> None:
-    """create_pyinfra_host should set the ssh_key path on the host."""
-    private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-
-    host = create_pyinfra_host(
-        hostname="127.0.0.1",
-        port=22,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
-    )
-
-    assert host.data.get("ssh_key") == str(private_key_path)
