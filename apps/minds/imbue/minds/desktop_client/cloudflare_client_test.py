@@ -52,3 +52,62 @@ def test_remove_service_returns_false_on_connection_error() -> None:
     client = _make_client()
     result = client.remove_service(AgentId(), "web")
     assert result is False
+
+
+def test_auth_header_uses_bearer_when_supertokens_token_set() -> None:
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        supertokens_token="my-jwt-token",
+        supertokens_user_id_prefix="a1b2c3d4e5f67890",
+    )
+    header = client._auth_header()
+    assert header == "Bearer my-jwt-token"
+
+
+def test_auth_header_prefers_supertokens_over_basic() -> None:
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        username=CloudflareUsername("testuser"),
+        secret=CloudflareSecret("testsecret"),
+        supertokens_token="my-jwt-token",
+        supertokens_user_id_prefix="a1b2c3d4e5f67890",
+    )
+    header = client._auth_header()
+    assert header.startswith("Bearer ")
+
+
+def test_make_tunnel_name_uses_supertokens_user_id_prefix() -> None:
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        supertokens_token="token",
+        supertokens_user_id_prefix="a1b2c3d4e5f67890",
+    )
+    agent_id = AgentId()
+    tunnel_name = client.make_tunnel_name(agent_id)
+    assert tunnel_name.startswith("a1b2c3d4e5f67890--")
+
+
+def test_effective_owner_email_prefers_supertokens() -> None:
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        owner_email=OwnerEmail("basic@example.com"),
+        supertokens_email="st@example.com",
+    )
+    assert client.effective_owner_email() == "st@example.com"
+
+
+def test_effective_owner_email_falls_back_to_owner_email() -> None:
+    client = _make_client()
+    assert client.effective_owner_email() == "test@example.com"
+
+
+def test_client_works_with_only_supertokens_fields() -> None:
+    client = CloudflareForwardingClient(
+        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        supertokens_token="jwt-token",
+        supertokens_user_id_prefix="a1b2c3d4e5f67890",
+        supertokens_email="user@example.com",
+    )
+    assert client._auth_header() == "Bearer jwt-token"
+    assert client._effective_username() == "a1b2c3d4e5f67890"
+    assert client.effective_owner_email() == "user@example.com"

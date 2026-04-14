@@ -120,6 +120,8 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert "--reuse" in cmd
     assert "--update" in cmd
     assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LOCAL mode: address includes host name with docker provider suffix
     assert cmd[2] == "test-agent@test-agent-host.docker"
 
@@ -136,6 +138,8 @@ def test_build_mngr_create_command_lima_mode() -> None:
     assert "--reuse" in cmd
     assert "--update" in cmd
     assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LIMA mode: address includes host name with lima provider suffix
     assert cmd[2] == "test-agent@test-agent-host.lima"
 
@@ -152,6 +156,8 @@ def test_build_mngr_create_command_cloud_mode() -> None:
     assert "--reuse" in cmd
     assert "--update" in cmd
     assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # CLOUD mode: address includes host name with vultr provider suffix
     assert cmd[2] == "test-agent@test-agent-host.vultr"
 

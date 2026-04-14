@@ -62,6 +62,25 @@ const TITLEBAR_CSS = `
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   text-align: center; padding: 0 8px;
 }
+#minds-titlebar .minds-user-area { position: relative; -webkit-app-region: no-drag; flex-shrink: 0; }
+#minds-titlebar .minds-user-btn {
+  width: auto; height: auto; display: inline;
+  color: #94a3b8; cursor: pointer; padding: 4px 10px; border-radius: 4px;
+  font-size: 12px; font-family: inherit; white-space: nowrap;
+}
+#minds-titlebar .minds-user-btn:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
+#minds-titlebar .minds-user-dropdown {
+  display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
+  background: #1e293b; border: 1px solid #475569; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); min-width: 140px; z-index: 10; padding: 4px 0;
+}
+#minds-titlebar .minds-user-dropdown.open { display: block; }
+#minds-titlebar .minds-dropdown-item {
+  display: block; width: 100%; padding: 8px 16px; font-size: 13px;
+  text-align: left; background: none; border: none; cursor: pointer;
+  color: #cbd5e1; font-family: inherit;
+}
+#minds-titlebar .minds-dropdown-item:hover { background: rgba(255,255,255,0.08); color: #f1f5f9; }
 #minds-titlebar .minds-wc { display: flex; }
 #minds-titlebar .minds-wc button { border-radius: 0; width: 36px; height: ${TITLEBAR_HEIGHT}px; }
 #minds-titlebar .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
@@ -88,6 +107,13 @@ const TITLEBAR_HTML = `
   </button>
 </div>
 <span class="minds-title" id="minds-title">Minds</span>
+<div class="minds-user-area" id="minds-user-area">
+  <button id="minds-user-btn" class="minds-user-btn" title="Account">Login</button>
+  <div class="minds-user-dropdown" id="minds-user-dropdown">
+    <button class="minds-dropdown-item" id="minds-settings-btn">Settings</button>
+    <button class="minds-dropdown-item" id="minds-signout-btn">Sign out</button>
+  </div>
+</div>
 <button id="minds-external" title="Open in browser">
   <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
 </button>
@@ -130,6 +156,45 @@ const TITLEBAR_JS = `(function() {
   document.getElementById('minds-min').onclick = function() { if (window.minds) window.minds.minimize(); };
   document.getElementById('minds-max').onclick = function() { if (window.minds) window.minds.maximize(); };
   document.getElementById('minds-close').onclick = function() { if (window.minds) window.minds.close(); };
+
+  // User account area
+  var userBtn = document.getElementById('minds-user-btn');
+  var dropdown = document.getElementById('minds-user-dropdown');
+  var signedIn = false;
+
+  userBtn.onclick = function(e) {
+    e.stopPropagation();
+    if (!signedIn) {
+      window.location.href = '/auth/login';
+      return;
+    }
+    dropdown.classList.toggle('open');
+  };
+  document.addEventListener('click', function() { dropdown.classList.remove('open'); });
+  document.getElementById('minds-settings-btn').onclick = function() {
+    dropdown.classList.remove('open');
+    window.location.href = '/auth/settings';
+  };
+  document.getElementById('minds-signout-btn').onclick = function() {
+    dropdown.classList.remove('open');
+    fetch('/auth/api/signout', { method: 'POST' }).then(function() { window.location.href = '/'; });
+  };
+
+  // Fetch auth status using an absolute URL so the service worker cannot intercept it
+  var statusUrl = window.location.origin + '/auth/api/status';
+  fetch(statusUrl).then(function(r) { return r.json(); }).then(function(data) {
+    var btn = document.getElementById('minds-user-btn');
+    if (!btn) return;
+    if (data.signedIn) {
+      signedIn = true;
+      btn.textContent = data.displayName || data.email || 'Account';
+      btn.title = data.email || 'Account';
+    } else {
+      signedIn = false;
+      btn.textContent = 'Login';
+      btn.title = 'Sign in to your account';
+    }
+  }).catch(function() {});
 })();`;
 
 // -- Single instance lock --
@@ -277,6 +342,20 @@ async function startBackendWithRetry() {
         body: event.message,
       });
       notification.show();
+    }, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (event.event === 'auth_success') {
+        // Refresh the page to update the title bar
+        mainWindow.webContents.reload();
+      } else if (event.event === 'auth_required') {
+        // Foreground the window and navigate to the auth page
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        const authUrl = `http://127.0.0.1:${port}/auth/login?message=` +
+          encodeURIComponent('You need to sign in to Imbue in order to share');
+        mainWindow.loadURL(authUrl);
+      }
     });
 
     backendBaseUrl = `http://127.0.0.1:${port}`;

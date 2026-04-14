@@ -1,6 +1,21 @@
 import shutil
+from pathlib import Path
 
 import pytest
+
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+
+
+@pytest.fixture
+def gc_mock_provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> MockProviderInstance:
+    """Create a MockProviderInstance for gc_machines tests."""
+    return MockProviderInstance(
+        name=ProviderInstanceName("test-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
 
 
 @pytest.fixture
