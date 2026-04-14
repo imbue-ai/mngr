@@ -615,8 +615,10 @@ class AgentProvisioningOptions(FrozenModel):
 
 
 # Mapping from raw-string config/CLI field names to AgentProvisioningOptions
-# target fields and their parsers.  Used by both the CLI (create.py) and the
-# agent-type merge path (host.py) so the two stay in sync.
+# target fields and their parsers.  Covers the three fields that map to
+# AgentProvisioningOptions; env/env_file are handled separately because they
+# map to AgentEnvironmentOptions instead.  Used by both the CLI (create.py) and
+# the agent-type merge path (host.py) so the two stay in sync.
 PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
     ("extra_provision_command", "extra_provision_commands", str),
     ("upload_file", "upload_files", UploadFileSpec.from_string),
