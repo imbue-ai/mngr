@@ -42,7 +42,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import UploadFileSpec
@@ -2215,32 +2214,6 @@ def test_host_provision_agent_with_extra_provision_commands(
 
     assert marker_file.exists()
     assert "provisioned" in marker_file.read_text()
-
-
-def test_host_provision_agent_with_append_to_file(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """provision_agent should append text to files."""
-    host = local_host
-    target_file = temp_work_dir / "bashrc"
-    target_file.write_text("existing content\n")
-
-    options = CreateAgentOptions(
-        name=AgentName("append-provision-agent"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended line\n"),),
-        ),
-    )
-
-    agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
-
-    assert target_file.read_text() == "existing content\nappended line\n"
 
 
 def test_host_provision_agent_with_create_directories(

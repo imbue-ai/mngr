@@ -597,21 +597,6 @@ class UploadFileSpec(FrozenModel):
         return cls(local_path=Path(local.strip()), remote_path=Path(remote.strip()))
 
 
-class FileModificationSpec(FrozenModel):
-    """Specification for modifying a file: REMOTE:TEXT."""
-
-    remote_path: Path = Field(description="Remote path to the file")
-    text: str = Field(description="Text to append/prepend")
-
-    @classmethod
-    def from_string(cls, s: str) -> "FileModificationSpec":
-        """Parse a REMOTE:TEXT string into a FileModificationSpec."""
-        if ":" not in s:
-            raise ParseSpecError(f"File modification must be in REMOTE:TEXT format, got: {s}")
-        remote, text = s.split(":", 1)
-        return cls(remote_path=Path(remote.strip()), text=text)
-
-
 class AgentProvisioningOptions(FrozenModel):
     """Simple provisioning options for the agent."""
 
@@ -622,14 +607,6 @@ class AgentProvisioningOptions(FrozenModel):
     upload_files: tuple[UploadFileSpec, ...] = Field(
         default=(),
         description="Files to upload (LOCAL:REMOTE pairs)",
-    )
-    append_to_files: tuple[FileModificationSpec, ...] = Field(
-        default=(),
-        description="Text to append to files (REMOTE:TEXT pairs)",
-    )
-    prepend_to_files: tuple[FileModificationSpec, ...] = Field(
-        default=(),
-        description="Text to prepend to files (REMOTE:TEXT pairs)",
     )
     create_directories: tuple[Path, ...] = Field(
         default=(),

@@ -2256,8 +2256,6 @@ class Host(BaseHost, OnlineHostInterface):
         Call agent.provision() (agent-type-specific provisioning)
         Create directories (so paths exist for uploads)
         Upload files (files exist before modifications)
-        Append text to files
-        Prepend text to files
         Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
@@ -2306,8 +2304,6 @@ class Host(BaseHost, OnlineHostInterface):
                 agent_name=str(agent.name),
                 dirs=len(provisioning.create_directories),
                 uploads=len(provisioning.upload_files),
-                appends=len(provisioning.append_to_files),
-                prepends=len(provisioning.prepend_to_files),
                 extra_cmds=len(provisioning.extra_provision_commands),
             ):
                 # Create directories
@@ -2321,16 +2317,6 @@ class Host(BaseHost, OnlineHostInterface):
                     local_content = upload_spec.local_path.read_bytes()
                     self.write_file(upload_spec.remote_path, local_content)
                     logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
-
-                # Append text to files
-                for append_spec in provisioning.append_to_files:
-                    self._append_to_file(append_spec.remote_path, append_spec.text)
-                    logger.trace("Appended to file: {}", append_spec.remote_path)
-
-                # Prepend text to files
-                for prepend_spec in provisioning.prepend_to_files:
-                    self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
-                    logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2403,22 +2389,6 @@ class Host(BaseHost, OnlineHostInterface):
             local_content = transfer.local_path.read_bytes()
             self.write_file(remote_path, local_content)
             logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
-
-    def _append_to_file(self, path: Path, text: str) -> None:
-        """Append text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, existing_content + text)
-
-    def _prepend_to_file(self, path: Path, text: str) -> None:
-        """Prepend text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, text + existing_content)
 
     def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
         """Rename an agent and return the updated agent object.

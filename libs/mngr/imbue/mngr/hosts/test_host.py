@@ -41,7 +41,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.primitives import ActivitySource
@@ -1370,98 +1369,6 @@ def test_provision_agent_upload_files(host_with_temp_dir: tuple[Host, Path], tmp
     assert remote_path.read_text() == "uploaded content"
 
 
-def test_provision_agent_append_to_existing_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent appends text to existing files."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "append.txt"
-    target_file.parent.mkdir(parents=True)
-    target_file.write_text("existing content\n")
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-append"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended text"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.read_text() == "existing content\nappended text"
-
-
-def test_provision_agent_append_to_new_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent creates file when appending to non-existent file."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "new_append.txt"
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-append-new"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            create_directories=(target_file.parent,),
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="new content"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.exists()
-    assert target_file.read_text() == "new content"
-
-
-def test_provision_agent_prepend_to_existing_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent prepends text to existing files."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "prepend.txt"
-    target_file.parent.mkdir(parents=True)
-    target_file.write_text("existing content")
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-prepend"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended: "),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.read_text() == "prepended: existing content"
-
-
-def test_provision_agent_prepend_to_new_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent creates file when prepending to non-existent file."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "new_prepend.txt"
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-prepend-new"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            create_directories=(target_file.parent,),
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="new content"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.exists()
-    assert target_file.read_text() == "new content"
-
-
 def test_provision_agent_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
     """Test that provision_agent runs extra provision commands."""
     host, temp_dir = host_with_temp_dir
@@ -1576,7 +1483,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
 
     provision_dir = temp_dir / "provision_combined"
     remote_upload = provision_dir / "uploaded.txt"
-    append_file = provision_dir / "appended.txt"
     marker_file = provision_dir / "marker.txt"
 
     options = CreateAgentOptions(
@@ -1586,7 +1492,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
         provisioning=AgentProvisioningOptions(
             create_directories=(provision_dir,),
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=remote_upload),),
-            append_to_files=(FileModificationSpec(remote_path=append_file, text="appended content"),),
             extra_provision_commands=(f"echo 'marker' > {marker_file}",),
         ),
     )
@@ -1596,7 +1501,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
     # Verify all operations completed
     assert provision_dir.exists()
     assert remote_upload.read_text() == "uploaded"
-    assert append_file.read_text() == "appended content"
     assert marker_file.read_text().strip() == "marker"
 
 
@@ -1635,9 +1539,7 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
     The order should be:
     1. Create directories
     2. Upload files
-    3. Append to files
-    4. Prepend to files
-    5. Extra provision commands
+    3. Extra provision commands
     """
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
@@ -1659,23 +1561,16 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
             create_directories=(provision_dir,),
             # 2. Upload files - puts base content in place
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=target_file),),
-            # 3. Append - adds to end of uploaded content
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended\n"),),
-            # 4. Prepend - adds to beginning
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended\n"),),
-            # 5. Extra provision commands - run last, can verify final state
+            # 3. Extra provision commands - run last, can verify final state
             extra_provision_commands=(f"cat {target_file} > {log_file}",),
         ),
     )
 
     host.provision_agent(agent, options, host.mngr_ctx)
 
-    # Verify the final order in the file
-    content = target_file.read_text()
-    assert content == "prepended\nuploaded\nappended\n"
-
-    # Log file should have captured the same content
-    assert log_file.read_text() == content
+    # Verify upload happened and extra command could read the file
+    assert target_file.read_text() == "uploaded\n"
+    assert log_file.read_text() == "uploaded\n"
 
 
 # =============================================================================
