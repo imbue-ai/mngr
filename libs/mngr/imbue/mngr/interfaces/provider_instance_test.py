@@ -13,7 +13,7 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.provider_instance import _discover_agents_and_disconnect
+from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -217,8 +217,8 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
 # =============================================================================
 
 
-def test_discover_agents_and_disconnect_helper(host_id: HostId, provider: MockProviderInstance) -> None:
-    """_discover_agents_and_disconnect calls discover_agents then disconnect."""
+def test_discover_agents_on_host_disconnects(host_id: HostId, provider: MockProviderInstance) -> None:
+    """_discover_agents_on_host calls discover_agents then disconnect."""
     mock_host = MagicMock(spec=HostInterface)
     mock_host.id = host_id
     mock_host.get_name.return_value = HostName("test-host")
@@ -226,7 +226,7 @@ def test_discover_agents_and_disconnect_helper(host_id: HostId, provider: MockPr
 
     provider.mock_hosts = [mock_host]
 
-    result = _discover_agents_and_disconnect(provider, host_id)
+    result = _discover_agents_on_host(provider, host_id)
 
     assert result == []
     mock_host.disconnect.assert_called_once()

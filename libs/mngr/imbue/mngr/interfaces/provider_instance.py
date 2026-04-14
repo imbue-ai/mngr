@@ -1,7 +1,9 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -224,16 +226,26 @@ def _build_agent_details_from_offline_ref(
     )
 
 
-def _discover_agents_and_disconnect(
+@contextmanager
+def connected_host(
+    provider: "ProviderInstanceInterface",
+    host_id: HostId,
+) -> Iterator[HostInterface]:
+    """Connect to a host and disconnect when done, releasing the connection."""
+    host = provider.get_host(host_id)
+    try:
+        yield host
+    finally:
+        host.disconnect()
+
+
+def _discover_agents_on_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
 ) -> list[DiscoveredAgent]:
-    """Discover agents on a host, then disconnect to release the connection."""
-    host = provider.get_host(host_id)
-    try:
+    """Discover agents on a host, disconnecting afterward."""
+    with connected_host(provider, host_id) as host:
         return host.discover_agents()
-    finally:
-        host.disconnect()
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -410,7 +422,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
-                    _discover_agents_and_disconnect,
+                    _discover_agents_on_host,
                     self,
                     host_ref.host_id,
                 )

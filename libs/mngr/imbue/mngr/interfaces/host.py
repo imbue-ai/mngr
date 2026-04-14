@@ -5,7 +5,6 @@ from abc import abstractmethod
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from types import TracebackType
 from typing import Any
 from typing import Final
 from typing import Iterator
@@ -171,17 +170,6 @@ class HostInterface(MutableModel, ABC):
         Online host implementations should override this to close SSH or other
         network connections. The default is a no-op for offline hosts.
         """
-
-    def __enter__(self) -> HostInterface:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        self.disconnect()
 
 
 class OnlineHostInterface(HostInterface, ABC):
