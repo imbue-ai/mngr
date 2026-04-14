@@ -289,12 +289,33 @@ class MngrCliBackendResolver(BackendResolverInterface):
         Callbacks are invoked synchronously from the thread that made the change
         (typically a MngrStreamManager background thread). Keep callbacks fast
         and non-blocking -- they should just signal an event, not do real work.
+
+        Call remove_on_change_callback() with the same callable to unregister it.
         """
-        self._on_change_callbacks.append(callback)
+        with self._lock:
+            self._on_change_callbacks.append(callback)
+
+    def remove_on_change_callback(self, callback: Callable[[], None]) -> None:
+        """Unregister a previously registered change callback.
+
+        Safe to call even if the callback is not currently registered (no-op).
+        """
+        with self._lock:
+            try:
+                self._on_change_callbacks.remove(callback)
+            except ValueError:
+                pass
 
     def _fire_on_change(self) -> None:
-        """Invoke all registered change callbacks."""
-        for callback in self._on_change_callbacks:
+        """Invoke all registered change callbacks.
+
+        Takes a snapshot of the callbacks list under the lock, then calls each
+        callback outside the lock to avoid holding the lock during potentially
+        blocking operations.
+        """
+        with self._lock:
+            callbacks = list(self._on_change_callbacks)
+        for callback in callbacks:
             try:
                 callback()
             except (OSError, RuntimeError) as e:
@@ -554,7 +575,9 @@ class MngrStreamManager(MutableModel):
         is_workspace = self._is_workspace_agent(agent)
         logger.debug(
             "AGENT_DISCOVERED: {} (workspace={}, labels={})",
-            agent.agent_name, is_workspace, list(agent.labels.keys()),
+            agent.agent_name,
+            is_workspace,
+            list(agent.labels.keys()),
         )
 
         with self._lock:

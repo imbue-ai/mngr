@@ -804,9 +804,11 @@ function toggleSidebar() {
 
 function selectWorkspace(agentId) {
   navigateContent('/forwarding/' + agentId + '/');
-  // Close sidebar
+  // Close sidebar. In Electron, navigate-content already removes the sidebar
+  // WebContentsView on the main process side, so only reset the local state flag
+  // without sending another toggle-sidebar IPC (which would re-create it).
   if (isElectron) {
-    if (sidebarOpen) { window.minds.toggleSidebar(); sidebarOpen = false; }
+    sidebarOpen = false;
   } else {
     sidebarOpen = false;
     document.getElementById('sidebar-panel').classList.remove('sidebar-visible');
@@ -959,20 +961,23 @@ function renderWorkspaces(workspaces) {
   }).join('');
 }
 
-var evtSource = new EventSource('/_chrome/events');
-evtSource.onmessage = function(event) {
-  try {
-    var data = JSON.parse(event.data);
-    if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
-  } catch(e) {}
-};
-evtSource.onerror = function() {
-  evtSource.close();
-  setTimeout(function() {
-    evtSource = new EventSource('/_chrome/events');
-    evtSource.onmessage = arguments.callee;
-  }, 5000);
-};
+var evtSource = null;
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/_chrome/events');
+  evtSource.onmessage = function(event) {
+    try {
+      var data = JSON.parse(event.data);
+      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+    } catch(e) {}
+  };
+  evtSource.onerror = function() {
+    evtSource.close();
+    evtSource = null;
+    setTimeout(connectSSE, 5000);
+  };
+}
+connectSSE();
 </script>
 </body>
 </html>"""
