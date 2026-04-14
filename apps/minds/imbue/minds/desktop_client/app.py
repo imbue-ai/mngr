@@ -1163,31 +1163,38 @@ async def _handle_chrome_events(
         change_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
+        def _on_change() -> None:
+            loop.call_soon_threadsafe(change_event.set)
+
         if isinstance(backend_resolver, MngrCliBackendResolver):
-            backend_resolver.add_on_change_callback(lambda: loop.call_soon_threadsafe(change_event.set))
+            backend_resolver.add_on_change_callback(_on_change)
 
-        # Send initial workspace list
-        last_workspace_data = _build_workspace_list(backend_resolver)
-        yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+        try:
+            # Send initial workspace list
+            last_workspace_data = _build_workspace_list(backend_resolver)
+            yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
 
-        # Wait for changes and push updates until client disconnects
-        connected = not await request.is_disconnected()
-        while connected:
-            # Wait for a change signal or timeout (timeout for disconnect checks)
-            change_event.clear()
-            try:
-                await asyncio.wait_for(change_event.wait(), timeout=30.0)
-            except TimeoutError:
-                pass
-
+            # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
-            if not connected:
-                break
+            while connected:
+                # Wait for a change signal or timeout (timeout for disconnect checks)
+                change_event.clear()
+                try:
+                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                except TimeoutError:
+                    pass
 
-            current_data = _build_workspace_list(backend_resolver)
-            if current_data != last_workspace_data:
-                last_workspace_data = current_data
-                yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+                connected = not await request.is_disconnected()
+                if not connected:
+                    break
+
+                current_data = _build_workspace_list(backend_resolver)
+                if current_data != last_workspace_data:
+                    last_workspace_data = current_data
+                    yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+        finally:
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.remove_on_change_callback(_on_change)
 
     return StreamingResponse(
         _event_generator(),

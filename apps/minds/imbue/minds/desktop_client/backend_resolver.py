@@ -289,8 +289,20 @@ class MngrCliBackendResolver(BackendResolverInterface):
         Callbacks are invoked synchronously from the thread that made the change
         (typically a MngrStreamManager background thread). Keep callbacks fast
         and non-blocking -- they should just signal an event, not do real work.
+
+        Call remove_on_change_callback() with the same callable to unregister it.
         """
         self._on_change_callbacks.append(callback)
+
+    def remove_on_change_callback(self, callback: Callable[[], None]) -> None:
+        """Unregister a previously registered change callback.
+
+        Safe to call even if the callback is not currently registered (no-op).
+        """
+        try:
+            self._on_change_callbacks.remove(callback)
+        except ValueError:
+            pass
 
     def _fire_on_change(self) -> None:
         """Invoke all registered change callbacks."""
