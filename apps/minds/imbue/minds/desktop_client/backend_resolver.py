@@ -292,21 +292,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
         Call remove_on_change_callback() with the same callable to unregister it.
         """
-        self._on_change_callbacks.append(callback)
+        with self._lock:
+            self._on_change_callbacks.append(callback)
 
     def remove_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Unregister a previously registered change callback.
 
         Safe to call even if the callback is not currently registered (no-op).
         """
-        try:
-            self._on_change_callbacks.remove(callback)
-        except ValueError:
-            pass
+        with self._lock:
+            try:
+                self._on_change_callbacks.remove(callback)
+            except ValueError:
+                pass
 
     def _fire_on_change(self) -> None:
-        """Invoke all registered change callbacks."""
-        for callback in self._on_change_callbacks:
+        """Invoke all registered change callbacks.
+
+        Takes a snapshot of the callbacks list under the lock, then calls each
+        callback outside the lock to avoid holding the lock during potentially
+        blocking operations.
+        """
+        with self._lock:
+            callbacks = list(self._on_change_callbacks)
+        for callback in callbacks:
             try:
                 callback()
             except (OSError, RuntimeError) as e:
