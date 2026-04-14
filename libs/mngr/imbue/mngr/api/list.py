@@ -269,7 +269,7 @@ def _list_agents_batch_inner(
     result: ListResult,
     results_lock: Lock,
 ) -> None:
-    """Inner implementation of batch listing, separated for cleanup."""
+    """Process all discovered hosts and agents and populate result."""
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
