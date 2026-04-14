@@ -30,6 +30,12 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+For headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude), create automatically uses the
+headless flow: it creates a temporary directory, streams the agent's output
+to stdout, and destroys the agent when done. No --connect/--no-connect flag
+applies in this mode.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.
@@ -64,8 +70,8 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-n`, `--name` | text | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
-| `--type` | text | Which type of agent to run [default: claude] | None |
-| `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
+| `--type` | text | Which type of agent to run [default: claude, or generic when -c is used] | None |
+| `--command`, `-c` | text | Shell command for the agent to run (default --type: generic) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
@@ -364,4 +370,10 @@ $ mngr create my-agent -w server="npm run dev"
 
 ```bash
 $ mngr create my-agent --reuse
+```
+
+**Run a shell command (headless)**
+
+```bash
+$ mngr create --type headless_command -c "echo hello world"
 ```

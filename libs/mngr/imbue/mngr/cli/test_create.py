@@ -528,15 +528,15 @@ def test_extra_window_without_name_uses_default_window_name(
         )
 
 
-def test_command_and_type_are_mutually_exclusive(
+def test_command_rejected_for_non_command_accepting_type(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --command and --type (other than generic) are mutually exclusive."""
-    agent_name = f"test-mutex-{int(time.time())}"
+    """Test that -c/--command is rejected for agent types that don't accept it."""
+    agent_name = f"test-cmd-reject-{int(time.time())}"
 
-    # "claude" agent type should conflict with --command
+    # "claude" agent type does not implement CommandAcceptingAgentMixin
     result = cli_runner.invoke(
         create,
         [
@@ -556,7 +556,7 @@ def test_command_and_type_are_mutually_exclusive(
     )
 
     assert result.exit_code != 0
-    assert "--command and --type are mutually exclusive" in result.output
+    assert "does not accept -c/--command" in result.output
 
 
 @pytest.mark.tmux

@@ -28,6 +28,7 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
+from imbue.mngr.api.create import resolve_target_host as api_resolve_target_host
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -42,11 +43,15 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
+from imbue.mngr.cli.headless_runner import headless_agent_output
+from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -55,6 +60,8 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CommandAcceptingAgentMixin
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -149,6 +156,101 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
 
 
 @pure
+def _resolve_agent_type_name(
+    type_flag: str | None,
+    positional_agent_type: str | None,
+    command: str | None,
+) -> str | None:
+    """Resolve the agent type name from CLI options.
+
+    Shared logic for both the early headless detection path and the full
+    _parse_agent_opts path. Returns the resolved type name, or None when
+    neither --type nor positional agent type is set and no --command flag
+    implies "generic".
+
+    Precedence: --type flag > positional argument > --command implying "generic".
+    """
+    resolved = type_flag
+    if positional_agent_type and resolved is None:
+        resolved = positional_agent_type
+    if resolved is not None:
+        return resolved
+    if command:
+        return "generic"
+    return None
+
+
+@pure
+def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
+    """Extract the agent type name from CLI options for early headless detection.
+
+    Returns the resolved type name, or None when defaulting to "claude".
+    """
+    return _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
+
+
+def _resolve_online_host(
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+) -> OnlineHostInterface:
+    """Resolve CLI options and address into an online host.
+
+    Consolidates the three-step host resolution chain used by both the normal
+    create path and the headless path: _parse_target_host -> _resolve_target_host
+    -> api_resolve_target_host (for NewHostOptions).
+    """
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    lifecycle = _parse_host_lifecycle_options(opts)
+    target_host = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=agent_and_host_loader,
+        lifecycle=lifecycle,
+    )
+    resolved = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
+    if isinstance(resolved, NewHostOptions):
+        return api_resolve_target_host(resolved, mngr_ctx)
+    return resolved
+
+
+def _create_headless(
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    agent_type_name: str,
+) -> None:
+    """Run a headless agent via create, streaming output and auto-destroying.
+
+    This is the headless alternative to the normal create flow. Instead of
+    creating a persistent interactive agent, it creates a temporary agent,
+    streams its output, and destroys it when done. Driven by the agent type
+    implementing StreamingHeadlessAgentMixin.
+    """
+    host = _resolve_online_host(opts, address, mngr_ctx)
+
+    command_override = CommandString(opts.command) if opts.command else None
+    agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
+    label_options = AgentLabelOptions(labels={"internal": "create-headless"})
+
+    with headless_agent_output(
+        host=host,
+        mngr_ctx=mngr_ctx,
+        agent_type=AgentTypeName(agent_type_name),
+        agent_args=opts.agent_args,
+        command=command_override,
+        label_options=label_options,
+        name=agent_name,
+    ) as agent:
+        chunks = agent.stream_output()
+        stream_or_accumulate_response(
+            chunks=chunks,
+            output_format=output_opts.output_format,
+        )
+
+
+@pure
 def _is_new_host_implied(address: AgentAddress) -> bool:
     """True when the address implies creating a new host (NAME@.PROVIDER form)."""
     return address.provider_name is not None and address.host_name is None
@@ -239,10 +341,11 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", help="Which type of agent to run [default: claude]")
+@optgroup.option("--type", help="Which type of agent to run [default: claude, or generic when -c is used]")
 @optgroup.option(
     "--command",
-    help="Run a literal command using the generic agent type (mutually exclusive with --type)",
+    "-c",
+    help="Shell command for the agent to run (default --type: generic)",
 )
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
@@ -499,6 +602,24 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Validate --update requires --reuse
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
+
+        # Detect headless agent types and use the headless flow instead of the
+        # normal interactive create path. The agent type (via StreamingHeadlessAgentMixin)
+        # drives this -- no new CLI flags needed.
+        resolved_agent_type = _resolve_early_agent_type(opts)
+        if resolved_agent_type is not None:
+            agent_class = get_agent_class(resolved_agent_type)
+            if issubclass(agent_class, StreamingHeadlessAgentMixin):
+                # Validate that -c/--command is only used with agent types that accept it.
+                # This mirrors the same check in _parse_agent_opts for the non-headless path.
+                if opts.command and is_agent_class_registered(resolved_agent_type):
+                    if not issubclass(agent_class, CommandAcceptingAgentMixin):
+                        raise UserInputError(
+                            f"Agent type '{resolved_agent_type}' does not accept -c/--command. "
+                            f"Only command-accepting agent types (like 'generic' or 'headless_command') support -c."
+                        )
+                _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
+                return
 
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
@@ -1307,34 +1428,28 @@ def _parse_agent_opts(
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
-    # Determine agent type: --type and positional are equivalent; specifying both
-    # with different values is an error. _CreateCommand.parse_args handles --
-    # correctly so positional_agent_type is always a real positional.
-    #
-    # Special case: --command implies using the "generic" agent type, which simply
-    # runs the provided command. If --type is also specified to something other
-    # than "generic", that's an error (they are mutually exclusive).
-    resolved_agent_type = opts.type
+    # Determine agent type using the shared resolution logic.
+    # --type defaults to "generic" when -c is present (via _resolve_agent_type_name).
     resolved_agent_args = opts.agent_args
 
-    if opts.positional_agent_type and resolved_agent_type and resolved_agent_type != opts.positional_agent_type:
+    if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
         raise UserInputError(
             f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
-            f"but --type says '{resolved_agent_type}'. Use one or the other."
+            f"but --type says '{opts.type}'. Use one or the other."
         )
-    if opts.positional_agent_type and resolved_agent_type is None:
-        resolved_agent_type = opts.positional_agent_type
 
-    # Handle --command: it implies using the "generic" agent type
-    if opts.command:
-        if resolved_agent_type is not None and resolved_agent_type != "generic":
+    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
+
+    # Validate that -c/--command is only used with agent types that accept it.
+    # Unregistered types (which fall back to the default BaseAgent) are always
+    # command-accepting since running arbitrary commands is their primary purpose.
+    if opts.command and resolved_agent_type is not None and is_agent_class_registered(resolved_agent_type):
+        agent_class = get_agent_class(resolved_agent_type)
+        if not issubclass(agent_class, CommandAcceptingAgentMixin):
             raise UserInputError(
-                f"--command and --type are mutually exclusive. "
-                f"Use --command to run a literal command (implicitly uses 'generic' agent type), "
-                f"or use --type to specify an agent type like '{resolved_agent_type}'."
+                f"Agent type '{resolved_agent_type}' does not accept -c/--command. "
+                f"Only command-accepting agent types (like 'generic' or 'headless_command') support -c."
             )
-        # Automatically use the "generic" agent type when --command is provided
-        resolved_agent_type = "generic"
 
     is_clone = source_agent_state_dir is not None
 
@@ -1619,6 +1734,12 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+For headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude), create automatically uses the
+headless flow: it creates a temporary directory, streams the agent's output
+to stdout, and destroys the agent when done. No --connect/--no-connect flag
+applies in this mode.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.""",
@@ -1638,6 +1759,7 @@ by pushing all local branches and tags via git. Use --transfer to override the d
         ("Create without connecting", "mngr create my-agent --no-connect"),
         ("Add extra tmux windows", 'mngr create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mngr create my-agent --reuse"),
+        ("Run a shell command (headless)", 'mngr create --type headless_command -c "echo hello world"'),
     ),
     see_also=(
         ("connect", "Connect to an existing agent"),

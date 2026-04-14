@@ -42,7 +42,7 @@ mngr schedule add [OPTIONS] [POSITIONAL_NAME]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--name` | text | Name for this scheduled trigger. If not specified, a random name is generated. | None |
-| `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
+| `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec` &#x7C; `run`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
 
@@ -143,6 +143,12 @@ mngr schedule remove [OPTIONS] NAMES...
 ```
 **Options:**
 
+## Execution
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Provider on which the triggers are deployed (e.g. 'local', 'modal'). | None |
+
 ## Safety
 
 | Name | Type | Description | Default |
@@ -173,6 +179,12 @@ mngr schedule run [OPTIONS] NAME
 ```
 **Options:**
 
+## Execution
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Provider on which the trigger is deployed (e.g. 'local', 'modal'). | None |
+
 ## Common
 
 | Name | Type | Description | Default |
@@ -202,7 +214,7 @@ mngr schedule update [OPTIONS] [POSITIONAL_NAME]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--name` | text | Name for this scheduled trigger. If not specified, a random name is generated. | None |
-| `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
+| `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec` &#x7C; `run`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
 

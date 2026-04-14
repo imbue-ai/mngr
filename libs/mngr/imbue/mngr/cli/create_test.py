@@ -1,6 +1,7 @@
 """Tests for create module helper functions."""
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -18,6 +19,7 @@ from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
+from imbue.mngr.cli.create import _create_headless
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -27,16 +29,21 @@ from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
+from imbue.mngr.cli.create import _resolve_agent_type_name
+from imbue.mngr.cli.create import _resolve_early_agent_type
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
 from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
+from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -696,6 +703,223 @@ def test_split_cli_args_preserves_separate_flag_and_value() -> None:
 def test_split_cli_args_empty() -> None:
     """Empty input should produce empty output."""
     assert _split_cli_args(()) == []
+
+
+# =============================================================================
+# Tests for _resolve_agent_type_name (shared resolution logic)
+# =============================================================================
+
+
+def test_resolve_agent_type_name_type_flag_wins() -> None:
+    """--type flag takes precedence over positional and command."""
+    assert _resolve_agent_type_name("headless_command", "claude", "echo") == "headless_command"
+
+
+def test_resolve_agent_type_name_positional_fallback() -> None:
+    """Positional arg used when --type is None."""
+    assert _resolve_agent_type_name(None, "headless_claude", None) == "headless_claude"
+
+
+def test_resolve_agent_type_name_command_implies_generic() -> None:
+    """--command without explicit type resolves to 'generic'."""
+    assert _resolve_agent_type_name(None, None, "echo hello") == "generic"
+
+
+def test_resolve_agent_type_name_all_none() -> None:
+    """All None returns None (default to claude)."""
+    assert _resolve_agent_type_name(None, None, None) is None
+
+
+# =============================================================================
+# Tests for _resolve_early_agent_type
+# =============================================================================
+
+
+def test_resolve_early_agent_type_from_type_flag(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag should be returned as the agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_from_positional(default_create_cli_opts: CreateCliOptions) -> None:
+    """Positional agent type should be returned when --type is not set."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_claude"
+
+
+def test_resolve_early_agent_type_flag_takes_precedence(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag takes precedence over positional agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_returns_none_when_unset(default_create_cli_opts: CreateCliOptions) -> None:
+    """Returns None when neither --type nor positional agent type is set."""
+    result = _resolve_early_agent_type(default_create_cli_opts)
+
+    assert result is None
+
+
+def test_resolve_early_agent_type_command_implies_generic(default_create_cli_opts: CreateCliOptions) -> None:
+    """--command flag without --type implies 'generic' agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "generic"
+
+
+def test_resolve_early_agent_type_explicit_type_overrides_command(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--type flag takes precedence over --command implying 'generic'."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+# =============================================================================
+# Tests for _create_headless
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_headless_streams_output(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """_create_headless should stream output from a headless_command agent."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().command, "echo headless-test-output"),
+    )
+    output_opts = OutputOptions()
+
+    _create_headless(
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=output_opts,
+        opts=opts,
+        address=AgentAddress(),
+        agent_type_name="headless_command",
+    )
+
+    captured = capsys.readouterr()
+    assert "headless-test-output" in captured.out
+
+
+# =============================================================================
+# Tests for -c/--command validation in the early headless detection path
+# =============================================================================
+
+
+def test_create_rejects_command_for_headless_non_command_accepting_type(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The early headless path must reject -c for types that are not CommandAcceptingAgentMixin.
+
+    When a StreamingHeadlessAgentMixin type that does NOT implement
+    CommandAcceptingAgentMixin receives -c/--command, create must raise
+    a UserInputError before reaching _create_headless.
+    """
+
+    # Create a mock headless type that is NOT CommandAcceptingAgentMixin.
+    # We register it so is_agent_class_registered() returns True.
+    class _MockHeadlessNoCommand(StreamingHeadlessAgentMixin):
+        def output(self) -> str:
+            return ""
+
+        def stream_output(self) -> Iterator[str]:
+            return iter([])
+
+    register_agent_class("mock_headless_no_cmd", _MockHeadlessNoCommand)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        create,
+        ["--type", "mock_headless_no_cmd", "--command", "echo should-not-run"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "does not accept -c/--command" in result.output
+
+
+# =============================================================================
+# Tests for --command validation in _parse_agent_opts
+# =============================================================================
+
+
+def test_parse_agent_opts_command_with_registered_non_command_type_raises(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Using -c with a registered type that doesn't accept commands should raise."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    # "claude" is a registered type that does not implement CommandAcceptingAgentMixin
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "claude"),
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    with pytest.raises(UserInputError, match="does not accept -c/--command"):
+        _parse_agent_opts(
+            opts=opts,
+            address=AgentAddress(),
+            initial_message=None,
+            source_location=source_location,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+def test_parse_agent_opts_command_with_generic_type_allowed(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Using -c with unregistered 'generic' type should be allowed (default fallback)."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
+    )
+
+    result, _ = _parse_agent_opts(
+        opts=opts,
+        address=AgentAddress(),
+        initial_message=None,
+        source_location=source_location,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    assert result.command == CommandString("echo hello")
 
 
 # =============================================================================

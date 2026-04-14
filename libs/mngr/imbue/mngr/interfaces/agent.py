@@ -440,6 +440,20 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
 
+class CommandAcceptingAgentMixin:
+    """Marker mixin for agent types that accept a user-provided command via -c/--command.
+
+    Agent types that are designed to run an arbitrary user-supplied command
+    (like headless_command) should include this mixin. When -c is used with
+    an agent type that does not have this mixin, create will reject the
+    combination with a clear error.
+
+    Note: unregistered agent types (which fall back to the default BaseAgent)
+    are always considered command-accepting, since running arbitrary commands
+    is their primary purpose.
+    """
+
+
 class NoPermissionsAgentMixin:
     """Marker mixin for agents that are granted no permissions.
 
