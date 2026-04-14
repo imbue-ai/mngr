@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from io import StringIO
 from pathlib import Path
 from typing import Final
 from typing import IO
@@ -734,6 +735,22 @@ def make_test_agent_details(
 
 def get_short_random_string() -> str:
     return uuid4().hex[:8]
+
+
+@contextmanager
+def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
+    """Capture loguru output at the given level into a StringIO buffer.
+
+    Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
+    tests that need to verify logged messages should use this context manager
+    instead of checking result.output.
+    """
+    log_output = StringIO()
+    sink_id = logger.add(log_output, level=level, format="{message}")
+    try:
+        yield log_output
+    finally:
+        logger.remove(sink_id)
 
 
 def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
