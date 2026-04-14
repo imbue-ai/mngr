@@ -293,6 +293,11 @@ class GitHubDataSourceConfig(FrozenModel):
     create_pr_url: bool = Field(default=True, description="Generate URL to create PR if none exists")
     conflicts: bool = Field(default=True, description="Check merge conflict status via gh pr view")
     unresolved: bool = Field(default=True, description="Check unresolved PR comments via GraphQL")
+    unresolved_ignore_user: str | None = Field(
+        default=None,
+        description="GitHub username whose review threads to ignore when checking for unresolved comments. "
+        "Useful for excluding your own threads (which you can resolve yourself).",
+    )
 
 
 _DEFAULT_CONFIG = GitHubDataSourceConfig()
@@ -574,7 +579,7 @@ def _fetch_pr_metadata(
                 unresolved_proc.wait()
                 if unresolved_proc.returncode == 0:
                     stdout = unresolved_proc.read_stdout()
-                    has_unresolved = _parse_unresolved(stdout)
+                    has_unresolved = _parse_unresolved(stdout, ignore_user=config.unresolved_ignore_user)
                     agent_extra[FIELD_UNRESOLVED] = UnresolvedField(has_unresolved=has_unresolved)
             except Exception as e:
                 logger.debug("Failed to check unresolved for PR #{} in {}: {}", pr_number, repo, e)
@@ -600,17 +605,32 @@ def _build_unresolved_query(repo: str, pr_number: int) -> str:
     return (
         '{ repository(owner: "%s", name: "%s") '
         "{ pullRequest(number: %d) "
-        "{ reviewThreads(first: 100) { nodes { isResolved } } } } }"
+        "{ reviewThreads(first: 100) { nodes { isResolved "
+        "comments(first: 1) { nodes { author { login } } } } } } } }"
     ) % (owner, name, pr_number)
 
 
-def _parse_unresolved(stdout: str) -> bool:
-    """Parse GraphQL response to determine if there are unresolved review threads."""
+def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
+    """Parse GraphQL response to determine if there are unresolved review threads.
+
+    If ignore_user is set, threads where the first comment's author matches
+    that username are skipped (useful for ignoring your own review threads).
+    """
     try:
         data = json.loads(stdout)
         threads = (
             data.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
         )
-        return any(not thread.get("isResolved", True) for thread in threads)
+        for thread in threads:
+            if thread.get("isResolved", True):
+                continue
+            if ignore_user is not None:
+                comments = thread.get("comments", {}).get("nodes", [])
+                if comments:
+                    author = comments[0].get("author", {}).get("login")
+                    if author == ignore_user:
+                        continue
+            return True
+        return False
     except (json.JSONDecodeError, TypeError, AttributeError):
         return False
