@@ -155,8 +155,9 @@ def test_render_chrome_page_contains_titlebar() -> None:
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
+    """On macOS, the .minds-wc section is hidden (native traffic lights used instead)."""
     html = render_chrome_page(is_mac=True)
-    assert "display: none" in html  # .minds-wc is hidden on mac
+    assert "display: none" in html
 
 
 def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:

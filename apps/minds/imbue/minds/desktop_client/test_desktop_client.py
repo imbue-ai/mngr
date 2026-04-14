@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -1454,8 +1455,6 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     We test the underlying _build_workspace_list helper since the SSE endpoint
     is an infinite stream that the TestClient cannot consume without blocking.
     """
-    from imbue.minds.desktop_client.app import _build_workspace_list
-
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={str(agent_id): {str(DEFAULT_SERVER_NAME): "http://test-backend"}},

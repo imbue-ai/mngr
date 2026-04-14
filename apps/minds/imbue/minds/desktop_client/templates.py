@@ -706,7 +706,7 @@ body {
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
 .minds-wc button { border-radius: 0; width: 36px; height: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px; }
 .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
-.minds-wc #close-btn:hover { background: #dc2626; color: white; }
+.minds-wc button:last-child:hover { background: rgb(220, 38, 38); color: white; border-radius: 0; }
 
 /* Sidebar (browser mode) */
 #sidebar-panel {

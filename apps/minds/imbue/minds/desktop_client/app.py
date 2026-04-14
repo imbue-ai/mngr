@@ -1159,12 +1159,13 @@ async def _handle_chrome_events(
         last_workspace_data = _build_workspace_list(backend_resolver)
         yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
 
-        # Poll for changes (the backend resolver tracks workspaces persistently)
-        while True:
+        # Poll for changes until client disconnects
+        connected = not await request.is_disconnected()
+        while connected:
             await asyncio.sleep(2.0)
 
-            # Check if client disconnected
-            if await request.is_disconnected():
+            connected = not await request.is_disconnected()
+            if not connected:
                 break
 
             current_data = _build_workspace_list(backend_resolver)
