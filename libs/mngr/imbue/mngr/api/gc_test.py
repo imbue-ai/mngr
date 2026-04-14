@@ -965,7 +965,7 @@ class _DiscoveryErrorProvider(MockProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> list:
-        raise MngrError("simulated discovery failure")
+        raise MngrError("simulated discovery failure from test")
 
 
 def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1360,14 +1360,14 @@ class _OfflineErroringHost(Host):
     """Host subclass whose get_certified_data raises HostOfflineError."""
 
     def get_certified_data(self) -> CertifiedHostData:
-        raise HostOfflineError("host is offline")
+        raise HostOfflineError("simulated offline error from test")
 
 
 class _AuthErroringHost(Host):
     """Host subclass whose get_certified_data raises HostAuthenticationError."""
 
     def get_certified_data(self) -> CertifiedHostData:
-        raise HostAuthenticationError("authentication failed")
+        raise HostAuthenticationError("simulated auth error from test")
 
 
 def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -> Host:
@@ -1449,7 +1449,7 @@ class _GetHostErrorProvider(MockProviderInstance):
     """Provider that raises MngrError from get_host."""
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
-        raise MngrError("simulated get_host failure")
+        raise MngrError("simulated get_host failure from test")
 
 
 def test_gc_machines_handles_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1481,7 +1481,7 @@ def test_gc_machines_handles_mngr_error_with_continue(temp_host_dir: Path, temp_
     )
 
     assert len(result.errors) == 1
-    assert "simulated get_host failure" in result.errors[0]
+    assert "simulated get_host failure from test" in result.errors[0]
 
 
 def test_gc_machines_handles_mngr_error_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1504,7 +1504,7 @@ def test_gc_machines_handles_mngr_error_with_abort(temp_host_dir: Path, temp_mng
     )
 
     result = GcResult()
-    with pytest.raises(MngrError, match="simulated get_host failure"):
+    with pytest.raises(MngrError, match="simulated get_host failure from test"):
         gc_machines(
             mngr_ctx=temp_mngr_ctx,
             hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
@@ -1549,7 +1549,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path
     )
 
     assert len(result.errors) == 1
-    assert "simulated get_host failure" in result.errors[0]
+    assert "simulated get_host failure from test" in result.errors[0]
     assert len(result.snapshots_destroyed) == 0
 
 
@@ -1575,7 +1575,7 @@ def test_gc_snapshots_handles_inner_mngr_error_with_abort(temp_host_dir: Path, t
     )
 
     result = GcResult()
-    with pytest.raises(MngrError, match="simulated get_host failure"):
+    with pytest.raises(MngrError, match="simulated get_host failure from test"):
         gc_snapshots(
             hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
             dry_run=False,
@@ -1690,7 +1690,7 @@ class _DeleteVolumeErrorProvider(MockProviderInstance):
     """Provider whose delete_volume raises MngrError."""
 
     def delete_volume(self, volume_id: VolumeId) -> None:
-        raise MngrError(f"failed to delete volume {volume_id}")
+        raise MngrError(f"simulated delete_volume failure from test: {volume_id}")
 
 
 def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1760,7 +1760,7 @@ class _ListVolumesMngrErrorProvider(MockProviderInstance):
     """Provider whose list_volumes raises a generic MngrError."""
 
     def list_volumes(self) -> list[VolumeInfo]:
-        raise MngrError("unexpected list_volumes failure")
+        raise MngrError("simulated list_volumes failure from test")
 
 
 def test_gc_volumes_skips_provider_when_unavailable(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1804,7 +1804,7 @@ def test_gc_volumes_handles_list_volumes_mngr_error_with_continue(
     )
 
     assert len(result.errors) == 1
-    assert "unexpected list_volumes failure" in result.errors[0]
+    assert "simulated list_volumes failure from test" in result.errors[0]
 
 
 def test_gc_volumes_handles_list_volumes_mngr_error_with_abort(
@@ -1819,7 +1819,7 @@ def test_gc_volumes_handles_list_volumes_mngr_error_with_abort(
     )
 
     result = GcResult()
-    with pytest.raises(MngrError, match="unexpected list_volumes failure"):
+    with pytest.raises(MngrError, match="simulated list_volumes failure from test"):
         gc_volumes(
             hosts_by_provider=[(provider, [])],
             dry_run=False,

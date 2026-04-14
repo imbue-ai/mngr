@@ -994,7 +994,7 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        raise MngrError("simulated discovery failure")
+        raise MngrError("simulated discovery failure from test")
 
 
 class _RaisingDetailProviderInstance(MockProviderInstance):
@@ -1011,7 +1011,7 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
         field_generators: Mapping[str, Any] | None = None,
         on_error: Any = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        raise MngrError("simulated detail retrieval failure")
+        raise MngrError("simulated detail retrieval failure from test")
 
 
 class _MismatchedProviderInstance(MockProviderInstance):
@@ -1345,7 +1345,7 @@ def test_discover_and_emit_details_for_provider_continue_mode_records_error(
     assert len(result.errors) == 1
     assert isinstance(result.errors[0], ProviderErrorInfo)
     assert result.errors[0].provider_name == ProviderInstanceName("raising-provider")
-    assert "simulated discovery failure" in result.errors[0].message
+    assert "simulated discovery failure from test" in result.errors[0].message
     assert len(captured_errors) == 1
     assert captured_errors[0] is result.errors[0]
 
@@ -1363,7 +1363,7 @@ def test_discover_and_emit_details_for_provider_abort_mode_propagates_error(
     lock = Lock()
     params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-    with pytest.raises(MngrError, match="simulated discovery failure"):
+    with pytest.raises(MngrError, match="simulated discovery failure from test"):
         _discover_and_emit_details_for_provider(
             provider=provider,
             params=params,
@@ -1446,7 +1446,7 @@ def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error
         agent_name=AgentName("erroring-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    exception = MngrError("agent lookup failed")
+    exception = MngrError("simulated agent lookup failure from test")
     result = ListResult()
     lock = Lock()
     params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
@@ -1462,7 +1462,7 @@ def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error
     assert len(result.errors) == 1
     assert isinstance(result.errors[0], AgentErrorInfo)
     assert result.errors[0].agent_id == agent_ref.agent_id
-    assert result.errors[0].message == "agent lookup failed"
+    assert result.errors[0].message == "simulated agent lookup failure from test"
 
 
 def test_handle_listing_error_continue_with_discovered_host_creates_host_error() -> None:
@@ -1472,7 +1472,7 @@ def test_handle_listing_error_continue_with_discovered_host_creates_host_error()
         host_name=HostName("erroring-host"),
         provider_name=ProviderInstanceName("local"),
     )
-    exception = MngrError("host unreachable")
+    exception = MngrError("simulated host unreachable from test")
     result = ListResult()
     lock = Lock()
     params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
@@ -1488,7 +1488,7 @@ def test_handle_listing_error_continue_with_discovered_host_creates_host_error()
     assert len(result.errors) == 1
     assert isinstance(result.errors[0], HostErrorInfo)
     assert result.errors[0].host_id == host_ref.host_id
-    assert result.errors[0].message == "host unreachable"
+    assert result.errors[0].message == "simulated host unreachable from test"
 
 
 def test_handle_listing_error_continue_calls_on_error_callback() -> None:
@@ -1500,7 +1500,7 @@ def test_handle_listing_error_continue_calls_on_error_callback() -> None:
         agent_name=AgentName("callback-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    exception = MngrError("callback test")
+    exception = MngrError("simulated callback error from test")
     result = ListResult()
     lock = Lock()
     captured: list[ErrorInfo] = []
@@ -1528,12 +1528,12 @@ def test_handle_listing_error_abort_mode_raises() -> None:
         host_name=HostName("aborting-host"),
         provider_name=ProviderInstanceName("local"),
     )
-    exception = MngrError("abort test")
+    exception = MngrError("simulated abort error from test")
     result = ListResult()
     lock = Lock()
     params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-    with pytest.raises(MngrError, match="abort test"):
+    with pytest.raises(MngrError, match="simulated abort error from test"):
         _handle_listing_error(
             source=host_ref,
             exception=exception,
@@ -1790,7 +1790,7 @@ def test_process_host_with_error_handling_continue_mode_records_host_error(
     assert len(result.errors) == 1
     assert isinstance(result.errors[0], HostErrorInfo)
     assert result.errors[0].host_id == host_id
-    assert "simulated detail retrieval failure" in result.errors[0].message
+    assert "simulated detail retrieval failure from test" in result.errors[0].message
     assert len(captured_errors) == 1
     assert captured_errors[0] is result.errors[0]
 
@@ -1821,7 +1821,7 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
     lock = Lock()
     params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
 
-    with pytest.raises(MngrError, match="simulated detail retrieval failure"):
+    with pytest.raises(MngrError, match="simulated detail retrieval failure from test"):
         _process_host_with_error_handling(
             host_ref=host_ref,
             agent_refs=[agent_ref],

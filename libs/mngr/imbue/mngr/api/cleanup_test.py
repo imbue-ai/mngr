@@ -486,7 +486,7 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
         )
 
         # The destroy error must be recorded.
-        assert len(result.errors) >= 1
+        assert len(result.errors) == 1
         assert any("Cannot destroy the local host" in e for e in result.errors)
         # No agents should have been reported as destroyed.
         assert result.destroyed_agents == []
@@ -520,7 +520,7 @@ def test_execute_cleanup_destroy_unknown_provider_with_abort_stops_processing(
     )
 
     # At least the first error is recorded (provider access fails).
-    assert len(result.errors) >= 1
+    assert len(result.errors) == 1
     assert any("Error accessing host" in e for e in result.errors)
     # Nothing was destroyed.
     assert result.destroyed_agents == []
@@ -601,7 +601,7 @@ def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
     )
 
     # At least the first error is recorded (provider access fails).
-    assert len(result.errors) >= 1
+    assert len(result.errors) == 1
     assert any("Error accessing host" in e for e in result.errors)
     # Nothing was stopped.
     assert result.stopped_agents == []
