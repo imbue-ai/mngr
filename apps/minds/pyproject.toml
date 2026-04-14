@@ -53,8 +53,6 @@ packages = ["imbue"]
 # before any hooks run: addopts, coverage.run, inline-snapshot, timeout_func_only.
 [tool.pytest.ini_options]
 timeout_func_only = true
-# Use xunit1 format to enable record_xml_attribute fixture for consistent classnames
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",

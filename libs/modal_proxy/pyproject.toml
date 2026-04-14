@@ -27,7 +27,6 @@ resource-guards = { workspace = true }
 
 [tool.pytest.ini_options]
 timeout_func_only = true
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
