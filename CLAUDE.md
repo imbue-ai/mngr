@@ -28,6 +28,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
+- Never pipe the output of a non-instant command through `grep`, `jq`, `awk`, `head`, `tail`, or similar without preserving the full output. If you later need something that was discarded, you have to rerun the entire command. Instead, write the output to a file first and then filter the file, or use `tee` to capture and filter simultaneously (e.g. `some_command | tee /tmp/some_command_output.txt | grep pattern`).
 
 # Always remember these guidelines:
 

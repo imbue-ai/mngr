@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import secrets as secrets_module
+from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
@@ -25,6 +26,14 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 from pydantic import Field
+from supertokens_python import InputAppInfo
+from supertokens_python import SupertokensConfig
+from supertokens_python import init as supertokens_init
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
+from supertokens_python.recipe import session as st_session_recipe
+from supertokens_python.recipe.emailverification import EmailVerificationClaim
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import get_session_without_request_response
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +85,16 @@ class InvalidTunnelComponentError(ValueError):
         super().__init__(
             f"{component_name} '{value}' must not contain '{forbidden}' (used as the tunnel name separator)"
         )
+
+
+class TunnelComponentTooLongError(ValueError):
+    """Raised when a tunnel component exceeds the maximum length."""
+
+    def __init__(self, component_name: str, value: str, max_length: int) -> None:
+        self.component_name = component_name
+        self.value = value
+        self.max_length = max_length
+        super().__init__(f"{component_name} '{value}' exceeds maximum length of {max_length}")
 
 
 # ---------------------------------------------------------------------------
@@ -244,15 +263,24 @@ def cf_delete_dns_record(client: httpx.Client, zone_id: str, record_id: str) -> 
 # --- Access operations ---
 
 
-def cf_create_access_app(client: httpx.Client, account_id: str, hostname: str, app_name: str) -> dict[str, Any]:
+def cf_create_access_app(
+    client: httpx.Client,
+    account_id: str,
+    hostname: str,
+    app_name: str,
+    allowed_idps: list[str] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "name": app_name,
+        "domain": hostname,
+        "type": "self_hosted",
+        "session_duration": "24h",
+    }
+    if allowed_idps is not None:
+        body["allowed_idps"] = allowed_idps
     response = client.post(
         f"/accounts/{account_id}/access/apps",
-        json={
-            "name": app_name,
-            "domain": hostname,
-            "type": "self_hosted",
-            "session_duration": "24h",
-        },
+        json=body,
     )
     return cf_check(response)["result"]
 
@@ -365,27 +393,57 @@ def cf_kv_ensure_namespace(client: httpx.Client, account_id: str, title: str) ->
 # ---------------------------------------------------------------------------
 
 
-def make_tunnel_name(username: str, agent_id: str) -> str:
+_MAX_USERNAME_LENGTH = 22
+_MAX_SERVICE_NAME_LENGTH = 21
+_AGENT_ID_PREFIX_LENGTH = 16
+
+
+def truncate_agent_id(agent_id: str) -> str:
+    """Truncate an agent ID to a short prefix for use in hostnames.
+
+    Strips the "agent-" prefix (if present) and takes the first 16 hex chars.
+    16 chars of hex provides sufficient uniqueness per user.
+    """
+    raw = agent_id.removeprefix("agent-")
+    return raw[:_AGENT_ID_PREFIX_LENGTH]
+
+
+def _validate_username(username: str) -> None:
     if TUNNEL_NAME_SEP in username:
         raise InvalidTunnelComponentError("Username", username, TUNNEL_NAME_SEP)
-    if TUNNEL_NAME_SEP in agent_id:
-        raise InvalidTunnelComponentError("Agent ID", agent_id, TUNNEL_NAME_SEP)
-    return f"{username}{TUNNEL_NAME_SEP}{agent_id}"
+    if len(username) > _MAX_USERNAME_LENGTH:
+        raise TunnelComponentTooLongError("Username", username, _MAX_USERNAME_LENGTH)
+
+
+def _validate_service_name(service_name: str) -> None:
+    if TUNNEL_NAME_SEP in service_name:
+        raise InvalidTunnelComponentError("Service name", service_name, TUNNEL_NAME_SEP)
+    if len(service_name) > _MAX_SERVICE_NAME_LENGTH:
+        raise TunnelComponentTooLongError("Service name", service_name, _MAX_SERVICE_NAME_LENGTH)
+
+
+def make_tunnel_name(username: str, agent_id: str) -> str:
+    _validate_username(username)
+    short_id = truncate_agent_id(agent_id)
+    return f"{username}{TUNNEL_NAME_SEP}{short_id}"
 
 
 def make_hostname(service_name: str, agent_id: str, username: str, domain: str) -> str:
-    return f"{service_name}--{agent_id}--{username}.{domain}"
+    _validate_service_name(service_name)
+    short_id = truncate_agent_id(agent_id)
+    return f"{service_name}--{short_id}--{username}.{domain}"
 
 
-def extract_agent_id(tunnel_name: str, username: str) -> str:
+def extract_agent_id_prefix(tunnel_name: str, username: str) -> str:
+    """Extract the truncated agent ID prefix from a tunnel name."""
     prefix = f"{username}{TUNNEL_NAME_SEP}"
     if not tunnel_name.startswith(prefix):
         raise TunnelOwnershipError(tunnel_name, username)
     return tunnel_name[len(prefix) :]
 
 
-def extract_service_name(hostname: str, agent_id: str, username: str, domain: str) -> str | None:
-    expected_suffix = f"--{agent_id}--{username}.{domain}"
+def extract_service_name(hostname: str, agent_id_prefix: str, username: str, domain: str) -> str | None:
+    expected_suffix = f"--{agent_id_prefix}--{username}.{domain}"
     if not hostname.endswith(expected_suffix):
         return None
     return hostname[: -len(expected_suffix)]
@@ -462,7 +520,9 @@ class CloudflareOps(Protocol):
     def create_cname(self, name: str, target: str) -> dict[str, Any]: ...
     def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
     def delete_dns_record(self, record_id: str) -> None: ...
-    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]: ...
+    def create_access_app(
+        self, hostname: str, app_name: str, allowed_idps: list[str] | None = None
+    ) -> dict[str, Any]: ...
     def delete_access_app(self, app_id: str) -> None: ...
     def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None: ...
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]: ...
@@ -528,8 +588,8 @@ class HttpCloudflareOps:
     def delete_dns_record(self, record_id: str) -> None:
         cf_delete_dns_record(self.client, self.zone_id, record_id)
 
-    def create_access_app(self, hostname: str, app_name: str) -> dict[str, Any]:
-        return cf_create_access_app(self.client, self.account_id, hostname, app_name)
+    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
+        return cf_create_access_app(self.client, self.account_id, hostname, app_name, allowed_idps=allowed_idps)
 
     def delete_access_app(self, app_id: str) -> None:
         cf_delete_access_app(self.client, self.account_id, app_id)
@@ -579,9 +639,10 @@ class HttpCloudflareOps:
 class ForwardingCtx:
     """Holds the Cloudflare ops abstraction and domain config. Created once per container."""
 
-    def __init__(self, ops: CloudflareOps, domain: str) -> None:
+    def __init__(self, ops: CloudflareOps, domain: str, allowed_idps: list[str] | None = None) -> None:
         self.ops = ops
         self.domain = domain
+        self.allowed_idps = allowed_idps
 
     def verify_ownership(self, tunnel_name: str, username: str) -> None:
         if not tunnel_name.startswith(f"{username}{TUNNEL_NAME_SEP}"):
@@ -607,6 +668,10 @@ class ForwardingCtx:
             tid = existing["id"]
             token = self.ops.get_tunnel_token(tid)
             services = self._list_services(tid, name, username)
+            # Update the default auth policy if provided (may have been missing
+            # from the original creation or may need updating)
+            if default_auth_policy is not None:
+                self.ops.kv_put(name, default_auth_policy.model_dump_json())
             return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
         result = self.ops.create_tunnel(name)
@@ -650,12 +715,18 @@ class ForwardingCtx:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
-        rules.append({"hostname": hostname, "service": service_url})
+        rules.append(
+            {
+                "hostname": hostname,
+                "service": service_url,
+                "originRequest": {"noTLSVerify": True},
+            }
+        )
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
         self._apply_default_access_policy(tunnel_name, hostname)
@@ -666,7 +737,7 @@ class ForwardingCtx:
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
@@ -690,7 +761,7 @@ class ForwardingCtx:
 
     def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
         """Get the auth policy for a specific service from its Access Application."""
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
@@ -700,11 +771,11 @@ class ForwardingCtx:
 
     def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
         """Set the auth policy for a specific service on its Access Application."""
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
         access_app = self.ops.get_access_app_by_domain(hostname)
         if access_app is None:
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}")
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}", allowed_idps=self.allowed_idps)
 
         existing_policies = self.ops.list_access_policies(access_app["id"])
         for ep in existing_policies:
@@ -720,7 +791,7 @@ class ForwardingCtx:
         return self._list_services(tunnel["id"], tunnel_name, username)
 
     def _list_services(self, tunnel_id: str, tunnel_name: str, username: str) -> list[ServiceInfo]:
-        agent_id = extract_agent_id(tunnel_name, username)
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
         config = self.ops.get_tunnel_config(tunnel_id)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         services: list[ServiceInfo] = []
@@ -752,7 +823,7 @@ class ForwardingCtx:
             if raw is None:
                 return
             policy = AuthPolicy.model_validate_json(raw)
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}")
+            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
             for cf_policy in policy_to_cf_rules(policy):
                 self.ops.create_access_policy(access_app["id"], cf_policy)
         except (CloudflareApiError, httpx.HTTPError) as exc:
@@ -824,11 +895,35 @@ class ForwardingCtx:
 
 
 def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
-    """Authenticate a request. Returns AdminAuth or AgentAuth."""
+    """Authenticate a request. Returns AdminAuth or AgentAuth.
+
+    Supports three auth methods:
+    1. Basic Auth (admin credentials from USER_CREDENTIALS)
+    2. Bearer token (base64-encoded tunnel token for agent auth)
+    3. Bearer token (SuperTokens JWT for user auth -- treated as admin)
+    """
     auth_header = request.headers.get("authorization", "")
 
     if auth_header.lower().startswith("bearer "):
-        return _authenticate_agent(auth_header[7:], ops)
+        token = auth_header[7:]
+        # Try tunnel token first
+        agent_exc: HTTPException | None = None
+        try:
+            return _authenticate_agent(token, ops)
+        except HTTPException as exc:
+            agent_exc = exc
+        # Only try SuperTokens JWT if it is configured; otherwise preserve the
+        # original agent auth error so callers receive a meaningful message.
+        if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+            assert agent_exc is not None
+            raise agent_exc
+        # If SuperTokens also fails, re-raise the original agent auth error so
+        # callers receive the most specific and useful error message.
+        try:
+            return _authenticate_supertokens(token)
+        except HTTPException:
+            assert agent_exc is not None
+            raise agent_exc from None
 
     if auth_header.lower().startswith("basic "):
         return _authenticate_admin(auth_header)
@@ -874,6 +969,42 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
     return AgentAuth(tunnel_id=tunnel_id, tunnel_name=tunnel["name"])
 
 
+_USER_ID_PREFIX_LENGTH = 16
+
+
+def _authenticate_supertokens(
+    token: str,
+    session_getter: Callable[..., Any] = get_session_without_request_response,
+) -> AdminAuth:
+    """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        raise HTTPException(status_code=401, detail="SuperTokens not configured")
+
+    try:
+        session = session_getter(
+            access_token=token,
+            anti_csrf_check=False,
+        )
+    except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
+
+    # Reject tokens where the email is not verified
+    payload = session.get_access_token_payload()
+    is_verified = EmailVerificationClaim.get_value_from_payload(payload)
+    if not is_verified:
+        raise HTTPException(status_code=401, detail="Email not verified")
+
+    user_id = session.get_user_id()
+    # Derive 16-char hex prefix from UUID
+    user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+    return AdminAuth(username=user_id_prefix)
+
+
 def require_admin(auth: AuthResult) -> AdminAuth:
     """Require admin auth. Raises 403 if agent auth."""
     if isinstance(auth, AgentAuth):
@@ -903,7 +1034,9 @@ def get_ctx() -> ForwardingCtx:
         account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
         zone_id=os.environ["CLOUDFLARE_ZONE_ID"],
     )
-    return ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"])
+    raw_idps = os.environ.get("CLOUDFLARE_ALLOWED_IDPS", "")
+    allowed_idps = [s.strip() for s in raw_idps.split(",") if s.strip()] or None
+    return ForwardingCtx(ops=ops, domain=os.environ["CLOUDFLARE_DOMAIN"], allowed_idps=allowed_idps)
 
 
 def raise_as_http(exc: Exception) -> NoReturn:
@@ -918,6 +1051,8 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, ServiceNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, InvalidTunnelComponentError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, TunnelComponentTooLongError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.exception("Unexpected error in endpoint handler")
     raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1066,11 +1201,42 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
 # Modal deployment
 # ---------------------------------------------------------------------------
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx")
+image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx", "supertokens-python")
 app = modal.App(name="cloudflare-forwarding", image=image)
 
 
-@app.function(secrets=[modal.Secret.from_name("cloudflare-forwarding-secrets")])
+def _init_supertokens() -> None:
+    """Initialize SuperTokens SDK for JWT validation if configured."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        return
+
+    api_key = os.environ.get("SUPERTOKENS_API_KEY")
+
+    supertokens_init(
+        supertokens_config=SupertokensConfig(
+            connection_uri=connection_uri,
+            api_key=api_key,
+        ),
+        app_info=InputAppInfo(
+            app_name="CloudflareForwarding",
+            api_domain="https://cloudflare-forwarding.modal.run",
+            website_domain="https://cloudflare-forwarding.modal.run",
+            api_base_path="/auth",
+            website_base_path="/auth",
+        ),
+        framework="fastapi",
+        recipe_list=[st_session_recipe.init()],
+        mode="asgi",
+    )
+    logger.info("SuperTokens SDK initialized for JWT validation")
+
+
+@app.function(secrets=[
+    modal.Secret.from_name("cloudflare-forwarding-secrets"),
+    modal.Secret.from_name("supertokens-secrets"),
+])
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
+    _init_supertokens()
     return web_app

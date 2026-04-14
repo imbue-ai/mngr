@@ -28,9 +28,11 @@ from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
 from imbue.mngr.utils.logging import RESET_COLOR
 from imbue.mngr.utils.logging import WARNING_COLOR
+from imbue.mngr.utils.logging import TRACE_COLOR
 from imbue.mngr.utils.logging import _ParamikoToLoguruHandler
 from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
+from imbue.mngr.utils.logging import _should_use_color
 from imbue.mngr.utils.logging import _patched_transport_log
 from imbue.mngr.utils.logging import _resolve_log_dir
 from imbue.mngr.utils.logging import _threading_excepthook
@@ -248,69 +250,198 @@ def test_log_call_handles_kwargs() -> None:
 
 
 # =============================================================================
-# Tests for _format_user_message
+# Tests for _should_use_color
 # =============================================================================
 
 
-def test_format_user_message_adds_warning_prefix_for_warnings() -> None:
-    """_format_user_message should add colored WARNING prefix for warning level."""
-    # Mock a loguru record with WARNING level
-    record = {"level": type("Level", (), {"name": "WARNING"})()}
+class _FakeTtyStream(io.StringIO):
+    """A StringIO that reports itself as a TTY for testing color logic."""
 
-    result = _format_user_message(record)
+    def isatty(self) -> bool:
+        return True
 
-    assert "WARNING:" in result
-    assert "{message}" in result
-    assert WARNING_COLOR in result
-    assert RESET_COLOR in result
+
+def test_should_use_color_returns_false_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_should_use_color should return False when NO_COLOR is set."""
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _should_use_color(_FakeTtyStream()) is False
+
+
+def test_should_use_color_returns_false_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_should_use_color should return False when the stream is not a TTY."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert _should_use_color(io.StringIO()) is False
+
+
+def test_should_use_color_returns_true_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_should_use_color should return True when the stream is a TTY and NO_COLOR is not set."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert _should_use_color(_FakeTtyStream()) is True
+
+
+# =============================================================================
+# Tests for _format_user_message
+#
+# _format_user_message calls _should_use_color() which checks sys.stderr.
+# In test environments, stderr is not a TTY, so by default no colors are used.
+# To test the colored path, we temporarily replace sys.stderr with a
+# _FakeTtyStream via try/finally to ensure cleanup.
+# =============================================================================
+
+
+def _make_record(level_name: str) -> dict[str, Any]:
+    return {"level": type("Level", (), {"name": level_name})()}
+
+
+def _with_tty_stderr(fn: Callable[[], None], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run fn with sys.stderr replaced by a fake TTY stream, restoring afterwards."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    saved = sys.stderr
+    sys.stderr = cast(Any, _FakeTtyStream())
+    try:
+        fn()
+    finally:
+        sys.stderr = saved
+
+
+def _with_pipe_stderr(fn: Callable[[], None], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run fn with sys.stderr replaced by a non-TTY StringIO, restoring afterwards."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    saved = sys.stderr
+    sys.stderr = cast(Any, io.StringIO())
+    try:
+        fn()
+    finally:
+        sys.stderr = saved
+
+
+def test_format_user_message_adds_colored_warning_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should add colored WARNING prefix when stderr is a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("WARNING"))
+        assert "WARNING:" in result
+        assert "{message}" in result
+        assert WARNING_COLOR in result
+        assert RESET_COLOR in result
+
+    _with_tty_stderr(check, monkeypatch)
+
+
+def test_format_user_message_adds_plain_warning_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should add plain WARNING prefix when stderr is not a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("WARNING"))
+        assert result == "WARNING: {message}\n"
+        assert WARNING_COLOR not in result
+
+    _with_pipe_stderr(check, monkeypatch)
 
 
 def test_format_user_message_returns_plain_message_for_info() -> None:
-    """_format_user_message should return plain message for INFO level."""
-    record = {"level": type("Level", (), {"name": "INFO"})()}
-
-    result = _format_user_message(record)
+    """_format_user_message should return plain message for INFO level regardless of TTY."""
+    result = _format_user_message(_make_record("INFO"))
 
     assert result == "{message}\n"
     assert "WARNING" not in result
     assert WARNING_COLOR not in result
 
 
-def test_format_user_message_returns_blue_message_for_debug() -> None:
-    """_format_user_message should return blue-colored message for DEBUG level."""
-    record = {"level": type("Level", (), {"name": "DEBUG"})()}
+def test_format_user_message_returns_colored_debug_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should return colored message for DEBUG when stderr is a TTY."""
 
-    result = _format_user_message(record)
+    def check() -> None:
+        result = _format_user_message(_make_record("DEBUG"))
+        assert "{message}" in result
+        assert DEBUG_COLOR in result
+        assert RESET_COLOR in result
 
-    assert "{message}" in result
-    assert DEBUG_COLOR in result
-    assert RESET_COLOR in result
-    assert "WARNING" not in result
-
-
-def test_format_user_message_returns_gray_message_for_build() -> None:
-    """_format_user_message should return gray-colored message for BUILD level."""
-    record = {"level": type("Level", (), {"name": "BUILD"})()}
-
-    result = _format_user_message(record)
-
-    assert "{message}" in result
-    assert BUILD_COLOR in result
-    assert RESET_COLOR in result
-    assert "WARNING" not in result
+    _with_tty_stderr(check, monkeypatch)
 
 
-def test_format_user_message_adds_error_prefix_for_errors() -> None:
-    """_format_user_message should add colored ERROR prefix for error level."""
-    record = {"level": type("Level", (), {"name": "ERROR"})()}
+def test_format_user_message_returns_plain_debug_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should return plain message for DEBUG when stderr is not a TTY."""
 
-    result = _format_user_message(record)
+    def check() -> None:
+        result = _format_user_message(_make_record("DEBUG"))
+        assert result == "{message}\n"
+        assert DEBUG_COLOR not in result
 
-    assert "ERROR:" in result
-    assert "{message}" in result
-    assert ERROR_COLOR in result
-    assert RESET_COLOR in result
-    assert "WARNING" not in result
+    _with_pipe_stderr(check, monkeypatch)
+
+
+def test_format_user_message_returns_colored_build_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should return colored message for BUILD when stderr is a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("BUILD"))
+        assert "{message}" in result
+        assert BUILD_COLOR in result
+        assert RESET_COLOR in result
+
+    _with_tty_stderr(check, monkeypatch)
+
+
+def test_format_user_message_returns_plain_build_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should return plain message for BUILD when stderr is not a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("BUILD"))
+        assert result == "{message}\n"
+        assert BUILD_COLOR not in result
+
+    _with_pipe_stderr(check, monkeypatch)
+
+
+def test_format_user_message_adds_colored_error_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should add colored ERROR prefix when stderr is a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("ERROR"))
+        assert "ERROR:" in result
+        assert "{message}" in result
+        assert ERROR_COLOR in result
+        assert RESET_COLOR in result
+
+    _with_tty_stderr(check, monkeypatch)
+
+
+def test_format_user_message_adds_plain_error_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should add plain ERROR prefix when stderr is not a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("ERROR"))
+        assert result == "ERROR: {message}\n"
+        assert ERROR_COLOR not in result
+
+    _with_pipe_stderr(check, monkeypatch)
+
+
+def test_format_user_message_returns_colored_trace_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should return colored message for TRACE when stderr is a TTY."""
+
+    def check() -> None:
+        result = _format_user_message(_make_record("TRACE"))
+        assert "{message}" in result
+        assert TRACE_COLOR in result
+        assert RESET_COLOR in result
+
+    _with_tty_stderr(check, monkeypatch)
+
+
+def test_format_user_message_no_color_env_disables_colors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_format_user_message should not include ANSI codes when NO_COLOR is set, even on TTY."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    saved = sys.stderr
+    sys.stderr = cast(Any, _FakeTtyStream())
+    try:
+        result = _format_user_message(_make_record("WARNING"))
+        assert "WARNING:" in result
+        assert WARNING_COLOR not in result
+        assert RESET_COLOR not in result
+    finally:
+        sys.stderr = saved
 
 
 # =============================================================================

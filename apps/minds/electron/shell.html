@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Minds</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    .logo {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 32px;
+    }
+    .logo svg { width: 100%; height: 100%; }
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #f8fafc;
+    }
+    .status {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      min-height: 20px;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error state */
+    #error-view {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 32px;
+    }
+    #error-view h1 { margin-bottom: 12px; }
+    .message {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      max-width: 400px;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+      -webkit-app-region: no-drag;
+    }
+    .actions button {
+      padding: 8px 20px;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-secondary:hover { background: #475569; }
+    .toggle-details {
+      background: none;
+      border: none;
+      color: #64748b;
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-bottom: 12px;
+      -webkit-app-region: no-drag;
+    }
+    .toggle-details:hover { color: #94a3b8; }
+    .details {
+      display: none;
+      width: 100%;
+      max-width: 600px;
+      max-height: 200px;
+      overflow: auto;
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 12px;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-all;
+      -webkit-app-region: no-drag;
+      user-select: text;
+    }
+    .details.visible { display: block; }
+  </style>
+</head>
+<body>
+  <div id="loading-view">
+    <div class="logo">
+      <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="50" r="45" fill="none" stroke="#3b82f6" stroke-width="3"/>
+        <path d="M30 55 C30 35, 50 25, 50 25 C50 25, 70 35, 70 55 C70 70, 55 75, 50 75 C45 75, 30 70, 30 55Z"
+              fill="none" stroke="#3b82f6" stroke-width="2.5"/>
+        <path d="M40 50 C40 42, 50 35, 50 35 C50 35, 60 42, 60 50 C60 58, 55 62, 50 62 C45 62, 40 58, 40 50Z"
+              fill="#3b82f6" opacity="0.3"/>
+        <circle cx="50" cy="48" r="4" fill="#3b82f6"/>
+      </svg>
+    </div>
+    <h1>Minds</h1>
+    <p class="status" id="status-text">Starting...</p>
+    <div class="spinner"></div>
+  </div>
+
+  <div id="error-view">
+    <h1>Something went wrong</h1>
+    <p class="message" id="error-message">Minds stopped unexpectedly.</p>
+    <div class="actions">
+      <button class="btn-primary" id="retry-btn">Retry</button>
+      <button class="btn-secondary" id="log-btn">View full log</button>
+    </div>
+    <button class="toggle-details" id="toggle-details-btn">Show details</button>
+    <pre class="details" id="error-details"></pre>
+  </div>
+
+  <script>
+    var loadingView = document.getElementById('loading-view');
+    var errorView = document.getElementById('error-view');
+
+    document.getElementById('retry-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.retry();
+    });
+    document.getElementById('log-btn').addEventListener('click', function() {
+      if (window.minds) window.minds.openLogFile();
+    });
+    document.getElementById('toggle-details-btn').addEventListener('click', function() {
+      var el = document.getElementById('error-details');
+      el.classList.toggle('visible');
+      this.textContent = el.classList.contains('visible') ? 'Hide details' : 'Show details';
+    });
+
+    if (window.minds) {
+      window.minds.onStatusUpdate(function(message) {
+        document.getElementById('status-text').textContent = message;
+      });
+      window.minds.onErrorDetails(function(data) {
+        loadingView.style.display = 'none';
+        errorView.style.display = 'flex';
+        if (data.message) document.getElementById('error-message').textContent = data.message;
+        if (data.details) document.getElementById('error-details').textContent = data.details;
+      });
+    }
+  </script>
+</body>
+</html>

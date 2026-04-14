@@ -27,6 +27,7 @@ from paramiko import SFTPClient
 from paramiko import SSHException
 from paramiko import Transport
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
@@ -46,6 +47,8 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -61,6 +64,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
+from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -73,6 +78,7 @@ from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -89,6 +95,50 @@ from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.polling import wait_for
+
+
+@pure
+def _merge_agent_type_provisioning(
+    agent_config: AgentTypeConfig,
+    options: CreateAgentOptions,
+) -> CreateAgentOptions:
+    """Merge provisioning fields from an agent type config into CreateAgentOptions.
+
+    Parses raw string specs from AgentTypeConfig into typed specs and prepends them
+    before the CLI-provided entries so that agent type provisioning runs first and
+    CLI entries can override (e.g., env vars with the same key).
+
+    Returns the original options unchanged if the agent config has no provisioning fields.
+    """
+    prov_updates: list[tuple[str, Any]] = []
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
+        raw_values: tuple[str, ...] = getattr(agent_config, config_field)
+        if raw_values:
+            existing: tuple[Any, ...] = getattr(options.provisioning, target_field)
+            prov_updates.append((target_field, tuple(parser(s) for s in raw_values) + existing))
+
+    env_vars = tuple(EnvVar.from_string(s) for s in agent_config.env) if agent_config.env else ()
+    env_files = tuple(Path(s) for s in agent_config.env_file) if agent_config.env_file else ()
+
+    if not prov_updates and not env_vars and not env_files:
+        return options
+
+    updates: list[tuple[str, Any]] = []
+    if prov_updates:
+        updates.append(
+            (
+                "provisioning",
+                options.provisioning.model_copy_update(*prov_updates),
+            )
+        )
+    env_updates: list[tuple[str, Any]] = []
+    if env_vars:
+        env_updates.append(("env_vars", env_vars + options.environment.env_vars))
+    if env_files:
+        env_updates.append(("env_files", env_files + options.environment.env_files))
+    if env_updates:
+        updates.append(("environment", options.environment.model_copy_update(*env_updates)))
+    return options.model_copy_update(*updates)
 
 
 def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
@@ -177,6 +227,10 @@ class Host(BaseHost, OnlineHostInterface):
     )
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="The mngr context")
 
+    # Set to True by disconnect() and model_copy_update() to prevent __del__
+    # from closing the paramiko client (which may be shared with a copy).
+    _explicitly_disconnected: bool = PrivateAttr(default=False)
+
     @property
     def is_local(self) -> bool:
         """Check if this host uses the local connector."""
@@ -207,16 +261,66 @@ class Host(BaseHost, OnlineHostInterface):
             else:
                 raise HostConnectionError(f"Failed to connect to host: {e}") from e
 
+    def _close_paramiko_client(self) -> None:
+        """Close the paramiko SSH client if one exists.
+
+        pyinfra's disconnect() only clears its SFTP cache and sets
+        connected=False. It does NOT close the underlying paramiko SSHClient.
+        When connect() is called again, pyinfra creates a new SSHClient
+        without closing the old one, leaking the TCP socket (and a
+        server-side sshd-session process). This method explicitly closes
+        the client to prevent that leak.
+
+        Safe to call on local connectors (no paramiko client) and on
+        already-closed clients.
+        """
+        try:
+            client = self.connector.host.connector.client  # ty: ignore[unresolved-attribute]
+        except AttributeError:
+            return
+        if client is not None:
+            try:
+                client.close()
+            except (OSError, SSHException):
+                pass
+
     def disconnect(self) -> None:
         """Disconnect the pyinfra host if connected.
 
-        This should be called before destroying or stopping a host to cleanly
-        close the SSH connection. Failure to disconnect can lead to stale
-        socket state causing "Socket is closed" errors in subsequent operations.
+        Closes the paramiko SSH client first (which pyinfra's disconnect
+        neglects to do), then calls pyinfra's disconnect to clear its
+        internal state.
         """
+        self._close_paramiko_client()
         if self.connector.host.connected:
             self.connector.host.disconnect()
             logger.trace("Disconnected pyinfra host {}", self.id)
+        self._explicitly_disconnected = True
+
+    def model_copy_update(self, *updates: Any) -> "Host":
+        """Create a copy of this Host with updated fields.
+
+        The copy shares the same pyinfra connector (and thus the same SSH
+        client). Mark ourselves so __del__ does not close the shared client
+        when this original is garbage collected.
+        """
+        result = super().model_copy_update(*updates)
+        self._explicitly_disconnected = True
+        return result
+
+    def __del__(self) -> None:
+        """Best-effort cleanup of the paramiko SSH client on garbage collection.
+
+        Only acts if disconnect() was never called explicitly and this Host
+        was never copied via model_copy_update (the copy shares the connector,
+        so closing the client here would kill the copy's connection).
+        """
+        if self._explicitly_disconnected:
+            return
+        try:
+            self._close_paramiko_client()
+        except (OSError, SSHException, AttributeError, TypeError):
+            logger.debug("Failed to close paramiko client during Host.__del__ for {}", self.id)
 
     @contextmanager
     def _notify_on_connection_error(self) -> Iterator[None]:
@@ -1516,8 +1620,9 @@ class Host(BaseHost, OnlineHostInterface):
                 if source_ssh_info is None:
                     raise MngrError("Cannot determine SSH connection info for remote source host")
                 user, hostname, port, key_path = source_ssh_info
+                source_known_hosts = get_ssh_known_hosts_file(source_host)
                 with log_span("Fetching from remote source to local target"):
-                    git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+                    git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
                     env = {"GIT_SSH_COMMAND": git_ssh_cmd}
                     remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
                     try:
@@ -1540,7 +1645,8 @@ class Host(BaseHost, OnlineHostInterface):
         env: dict[str, str] = {}
         if target_ssh_info is not None:
             user, hostname, port, key_path = target_ssh_info
-            git_ssh_cmd = f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+            target_known_hosts = get_ssh_known_hosts_file(self)
+            git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
             env["GIT_SSH_COMMAND"] = git_ssh_cmd
 
         # Don't bother pushing LFS objects - they can be transferred later as needed,
@@ -1845,7 +1951,8 @@ class Host(BaseHost, OnlineHostInterface):
             target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
             user, hostname, port, key_path = target_ssh_info
-            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
+            target_known_hosts = get_ssh_known_hosts_file(self)
+            rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, target_known_hosts)])
             rsync_args.extend([source_path_str, f"{user}@{hostname}:{target_path_str}"])
             rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
         elif not source_host.is_local and self.is_local:
@@ -1853,7 +1960,8 @@ class Host(BaseHost, OnlineHostInterface):
             source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
             user, hostname, port, key_path = source_ssh_info
-            rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
+            source_known_hosts = get_ssh_known_hosts_file(source_host)
+            rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, source_known_hosts)])
             rsync_args.extend([f"{user}@{hostname}:{source_path_str}", target_path_str])
             rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
         else:
@@ -1880,9 +1988,8 @@ class Host(BaseHost, OnlineHostInterface):
                 ):
                     # Step 1: pull from source remote to local temp
                     pull_args = list(rsync_args)
-                    pull_args.extend(
-                        ["-e", f"ssh -i {shlex.quote(str(src_key_path))} -p {src_port} -o StrictHostKeyChecking=no"]
-                    )
+                    src_known_hosts = get_ssh_known_hosts_file(source_host)
+                    pull_args.extend(["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)])
                     pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
@@ -1897,9 +2004,8 @@ class Host(BaseHost, OnlineHostInterface):
                         push_args.extend(["--exclude", ".git"])
                     if extra_args:
                         push_args.extend(shlex.split(extra_args))
-                    push_args.extend(
-                        ["-e", f"ssh -i {shlex.quote(str(tgt_key_path))} -p {tgt_port} -o StrictHostKeyChecking=no"]
-                    )
+                    tgt_known_hosts = get_ssh_known_hosts_file(self)
+                    push_args.extend(["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)])
                     push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
@@ -2029,7 +2135,15 @@ class Host(BaseHost, OnlineHostInterface):
 
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             # _mkdirs uses mkdir -p, which is idempotent for existing directories
-            self._mkdirs([state_dir, state_dir / "events", state_dir / "activity", state_dir / "commands"])
+            events_dir = state_dir / "events"
+            servers_events_dir = events_dir / "servers"
+            self._mkdirs([state_dir, events_dir, servers_events_dir, state_dir / "activity", state_dir / "commands"])
+
+            # Pre-create empty events.jsonl so that `mngr events --follow` finds
+            # the source immediately on startup, rather than waiting for a 10-second
+            # rescan after the agent's services start writing events.
+            servers_events_file = servers_events_dir / "events.jsonl"
+            self.execute_idempotent_command(f"touch '{servers_events_file}'")
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:
@@ -2209,11 +2323,16 @@ class Host(BaseHost, OnlineHostInterface):
         Call agent.provision() (agent-type-specific provisioning)
         Create directories (so paths exist for uploads)
         Upload files (files exist before modifications)
-        Append text to files
-        Prepend text to files
         Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
+        # Merge agent type provisioning fields into options before any other logic.
+        # Use resolve_agent_type to get the parent-merged config so that
+        # provisioning fields defined on a parent type are inherited by children.
+        if options.agent_type is not None:
+            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+            options = _merge_agent_type_provisioning(resolved.agent_config, options)
+
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
             with log_span("Calling on_before_provisioning for agent {}", agent.name):
@@ -2252,8 +2371,6 @@ class Host(BaseHost, OnlineHostInterface):
                 agent_name=str(agent.name),
                 dirs=len(provisioning.create_directories),
                 uploads=len(provisioning.upload_files),
-                appends=len(provisioning.append_to_files),
-                prepends=len(provisioning.prepend_to_files),
                 extra_cmds=len(provisioning.extra_provision_commands),
             ):
                 # Create directories
@@ -2267,16 +2384,6 @@ class Host(BaseHost, OnlineHostInterface):
                     local_content = upload_spec.local_path.read_bytes()
                     self.write_file(upload_spec.remote_path, local_content)
                     logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
-
-                # Append text to files
-                for append_spec in provisioning.append_to_files:
-                    self._append_to_file(append_spec.remote_path, append_spec.text)
-                    logger.trace("Appended to file: {}", append_spec.remote_path)
-
-                # Prepend text to files
-                for prepend_spec in provisioning.prepend_to_files:
-                    self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
-                    logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2349,22 +2456,6 @@ class Host(BaseHost, OnlineHostInterface):
             local_content = transfer.local_path.read_bytes()
             self.write_file(remote_path, local_content)
             logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
-
-    def _append_to_file(self, path: Path, text: str) -> None:
-        """Append text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, existing_content + text)
-
-    def _prepend_to_file(self, path: Path, text: str) -> None:
-        """Prepend text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, text + existing_content)
 
     def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
         """Rename an agent and return the updated agent object.

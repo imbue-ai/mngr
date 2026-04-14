@@ -20,6 +20,7 @@ import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -256,6 +257,9 @@ def temp_mngr_ctx(
     cg = ConcurrencyGroup(name="test")
     with cg:
         yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+    # Clear the provider instance cache so cached instances don't outlive
+    # the ConcurrencyGroup that was just torn down.
+    reset_provider_instances()
 
 
 @pytest.fixture
@@ -454,6 +458,7 @@ def plugin_manager(
     # Clear the registries to ensure clean state
     reset_backend_registry()
     reset_agent_registry()
+    reset_provider_instances()
 
     # Discover all entry-point plugins and block everything except enabled_plugins
     all_eps = {ep.name for ep in importlib.metadata.entry_points(group="mngr")}
@@ -479,6 +484,7 @@ def plugin_manager(
     imbue.mngr.main.reset_plugin_manager()
     reset_backend_registry()
     reset_agent_registry()
+    reset_provider_instances()
 
 
 # =============================================================================

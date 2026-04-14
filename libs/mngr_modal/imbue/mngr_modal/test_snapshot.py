@@ -63,7 +63,7 @@ def _destroy_modal_agent(
         ["uv", "run", "mngr", "destroy", agent_name, "--force"],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=240,
         env=env,
     )
 

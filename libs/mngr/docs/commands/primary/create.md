@@ -198,6 +198,19 @@ Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: lima
+  Supported build arguments for the lima provider:
+    --file PATH           Path to a Lima YAML config file for full VM customization.
+                          When not specified, a default config is generated with the
+                          mngr pre-built image.
+  Start args are passed directly to 'limactl start'. Common options:
+    --cpus=N              Number of CPU cores (default: 4)
+    --memory=NGiB         Memory size (default: 4GiB)
+    --disk=NGiB           Disk size (default: 100GiB)
+    --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
+    --mount-writable      Make default mounts writable
+  Run 'limactl start --help' for the full list.
+
 Provider: local
   No build arguments are supported for the local provider.
   No start arguments are supported for the local provider.
@@ -243,10 +256,11 @@ Provider: ssh
   No start arguments are supported for the SSH provider.
 
 Provider: vultr
-  VPS-specific args (--vps- prefix, consumed by provider):
+  VPS-specific args (consumed by provider, not passed to docker):
     --vps-region=REGION  Vultr region (default: ewr)
     --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
     --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
+    --git-depth=N        Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
   Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
