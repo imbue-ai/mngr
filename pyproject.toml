@@ -171,6 +171,14 @@ omit = [
     "scripts/*",
 ]
 
+[tool.coverage.paths]
+# Map sandbox paths back to local paths so coverage data collected on
+# offload Modal sandboxes (rooted at /code/mngr/) can be combined locally.
+source = [
+    ".",
+    "/code/mngr/",
+]
+
 [tool.importlinter]
 root_package = "imbue"
 

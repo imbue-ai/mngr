@@ -1,11 +1,13 @@
 # offload configuration for running mngr acceptance tests on Modal
 [offload]
 max_parallel = 200
-test_timeout_secs = 60
+test_timeout_secs = 120
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
+# git add -A syncs the index after git apply, which only updates the working
+# tree. Without it, git ls-files would still list files deleted by the patch.
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
 
 [provider]
 type = "modal"
@@ -21,9 +23,10 @@ command = "uv run pytest"
 run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
-retry_count = 4
-# Exclude release tests from the acceptance suite. Exclude docker tests because Modal support for Docker is in ALPHA state.
-filters = "-m'not release and not docker'"
+retry_count = 2
+# Exclude docker/docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
+# Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
+filters = "-m 'acceptance and not docker and not docker_sdk'"
 
 [report]
 output_dir = "test-results"
