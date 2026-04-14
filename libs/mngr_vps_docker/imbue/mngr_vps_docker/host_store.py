@@ -13,6 +13,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.docker_over_ssh import ContainerSetupError
 from imbue.mngr_vps_docker.docker_over_ssh import DockerOverSsh
+from imbue.mngr_vps_docker.errors import VpsConnectionError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # State container configuration
@@ -61,19 +62,35 @@ def ensure_state_container(
     container_name = f"{prefix}docker-state-{user_id}"
     volume_name = f"{prefix}docker-state-{user_id}"
 
+    logger.info(
+        "ensure_state_container: checking for {} on VPS {} (ssh_key={})",
+        container_name,
+        docker_ssh.vps_ip,
+        docker_ssh.ssh_key_path,
+    )
+
+    # List all containers on the VPS for diagnostics
+    try:
+        all_containers = docker_ssh.run_ssh("docker ps -a --format '{{.Names}} {{.Status}} {{.ID}}'")
+        logger.info("ensure_state_container: existing containers on VPS:\n{}", all_containers.strip() or "(none)")
+    except (VpsConnectionError, ContainerSetupError) as e:
+        logger.warning("ensure_state_container: failed to list containers: {}", e)
+
     # Check if already running
     if docker_ssh.container_is_running(container_name):
+        logger.info("ensure_state_container: {} is already running", container_name)
         return container_name
 
     # Try to start if it exists but is stopped
     try:
         docker_ssh.start_container(container_name)
+        logger.info("ensure_state_container: started existing stopped container {}", container_name)
         return container_name
     except ContainerSetupError as e:
-        logger.debug("State container {} does not exist yet, creating: {}", container_name, e)
+        logger.info("ensure_state_container: {} does not exist yet, will create: {}", container_name, e)
 
     # Create the volume and container
-    logger.debug("Creating VPS state container: {}", container_name)
+    logger.info("ensure_state_container: creating volume {} and container {} on VPS {}", volume_name, container_name, docker_ssh.vps_ip)
     docker_ssh.create_volume(volume_name)
     docker_ssh.run_container(
         image=STATE_CONTAINER_IMAGE,
@@ -87,6 +104,7 @@ def ensure_state_container(
         extra_args=["--restart", "unless-stopped"],
         entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
     )
+    logger.info("ensure_state_container: successfully created {}", container_name)
     return container_name
 
 
