@@ -14,11 +14,24 @@ contextBridge.exposeInMainWorld('minds', {
 
   // Navigation
   goHome: () => ipcRenderer.send('go-home'),
+  navigateContent: (url) => ipcRenderer.send('navigate-content', url),
+  contentGoBack: () => ipcRenderer.send('content-go-back'),
+  contentGoForward: () => ipcRenderer.send('content-go-forward'),
+
+  // Content events (forwarded from main process)
+  onContentTitleChange: (callback) => {
+    ipcRenderer.on('content-title-changed', (_event, title) => callback(title));
+  },
+  onContentURLChange: (callback) => {
+    ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
+  },
+
+  // Sidebar
+  toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
 
   // Actions
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
-  openExternal: (url) => ipcRenderer.send('open-external', url),
 
   // Window controls
   minimize: () => ipcRenderer.send('window-minimize'),
