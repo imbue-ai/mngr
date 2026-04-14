@@ -280,10 +280,16 @@ def register_sdk_guard(
     before register_conftest_hooks() to push SDK-specific guard
     implementations into the infrastructure. Deduplicates by name so
     multiple conftest files can safely call the registration function.
+
+    The guard name is added to _guarded_resources immediately (so it is
+    visible at pytest_configure time for auto mark registration), while
+    the install/cleanup functions are deferred to create_sdk_resource_guards().
     """
     registered_names = {entry[0] for entry in _registered_sdk_guards}
     if name not in registered_names:
         _registered_sdk_guards.append((name, install, cleanup))
+        if name not in _guarded_resources:
+            _guarded_resources.append(name)
 
 
 class MethodKind(StrEnum):
@@ -366,15 +372,13 @@ def create_sdk_method_guard(
 
 
 def create_sdk_resource_guards() -> None:
-    """Install all registered SDK guards and add their names to _guarded_resources.
+    """Install all registered SDK guards.
 
-    Iterates through guards registered via register_sdk_guard(), calls each
-    install function, and extends _guarded_resources so the per-test hooks
-    set up env vars for them.
+    Iterates through guards registered via register_sdk_guard() and calls
+    each install function. Guard names are already in _guarded_resources
+    (added by register_sdk_guard at registration time).
     """
-    for name, install, _cleanup in _registered_sdk_guards:
-        if name not in _guarded_resources:
-            _guarded_resources.append(name)
+    for _name, install, _cleanup in _registered_sdk_guards:
         install()
 
 
