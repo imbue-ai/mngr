@@ -399,7 +399,7 @@ ipcMain.on('retry', async () => {
         nodeIntegration: false,
       },
     });
-    mainWindow.contentView.addChildView(chromeView);
+    // chromeView is never removed during the error path, so only add contentView
     mainWindow.contentView.addChildView(contentView);
     updateViewBounds();
   }
