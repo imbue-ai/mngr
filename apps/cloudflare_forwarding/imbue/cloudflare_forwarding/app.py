@@ -1219,7 +1219,7 @@ def _init_supertokens() -> None:
             api_key=api_key,
         ),
         app_info=InputAppInfo(
-            app_name="CloudflareForwarding",
+            app_name="Minds",
             api_domain="https://cloudflare-forwarding.modal.run",
             website_domain="https://cloudflare-forwarding.modal.run",
             api_base_path="/auth",
