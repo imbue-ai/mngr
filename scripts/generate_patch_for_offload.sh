@@ -20,4 +20,4 @@ if ! git rev-parse "$CHECKPOINT_HASH" >/dev/null 2>&1; then
 fi
 
 # Diff against the working tree so uncommitted changes are included
-git diff "$CHECKPOINT_HASH"
+git diff --binary "$CHECKPOINT_HASH"
