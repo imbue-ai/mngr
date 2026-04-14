@@ -306,6 +306,9 @@ def test_register_sdk_guard_adds_entry(isolated_guard_state: None) -> None:
 
     assert len(resource_guards._registered_sdk_guards) == 1
     assert resource_guards._registered_sdk_guards[0][0] == "test_sdk"
+    # Guard name is added to _guarded_resources immediately at registration time,
+    # not deferred to create_sdk_resource_guards().
+    assert "test_sdk" in resource_guards._guarded_resources
 
 
 def test_register_sdk_guard_deduplicates(isolated_guard_state: None) -> None:
@@ -315,14 +318,13 @@ def test_register_sdk_guard_deduplicates(isolated_guard_state: None) -> None:
     assert len(resource_guards._registered_sdk_guards) == 1
 
 
-def test_create_sdk_resource_guards_installs_and_populates(
+def test_create_sdk_resource_guards_calls_install(
     isolated_guard_state: None,
 ) -> None:
     install_called = []
     register_sdk_guard("test_sdk", lambda: install_called.append(1), lambda: None)
     create_sdk_resource_guards()
 
-    assert "test_sdk" in resource_guards._guarded_resources
     assert install_called == [1]
 
 
