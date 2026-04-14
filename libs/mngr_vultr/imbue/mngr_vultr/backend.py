@@ -199,8 +199,8 @@ class VultrProviderBackend(ProviderBackendInterface):
             api_key = config.get_api_key()
         except ValueError:
             # No API key configured -- create with empty key.
-            # The provider will be discoverable but operations will fail
-            # with a clear error message when the API is actually used.
+            # The provider will be discoverable but discovery operations will
+            # return empty results and log a warning when the API is called.
             api_key = ""
         vultr_client = VultrVpsClient(api_key=SecretStr(api_key))
 
