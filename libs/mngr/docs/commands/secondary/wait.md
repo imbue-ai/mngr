@@ -86,18 +86,6 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 $ mngr wait my-agent DONE
 ```
 
-**Wait for agent to be ready**
-
-```bash
-$ mngr wait my-agent --event AGENT_READY
-```
-
-**Wait for ready with timeout**
-
-```bash
-$ mngr wait my-agent --event AGENT_READY --timeout 2m
-```
-
 **Wait for any terminal state**
 
 ```bash
@@ -132,4 +120,10 @@ $ echo agent-abc123 | mngr wait
 
 ```bash
 $ mngr wait my-agent --state WAITING --state DONE
+```
+
+**Wait for agent to be ready**
+
+```bash
+$ mngr wait my-agent --event AGENT_READY
 ```
