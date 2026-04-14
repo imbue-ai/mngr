@@ -365,7 +365,7 @@ ipcMain.on('navigate-content', (_event, url) => {
     contentView.webContents.loadURL(url);
   }
   // Close sidebar after navigation
-  if (sidebarView) {
+  if (sidebarView && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.contentView.removeChildView(sidebarView);
     sidebarView.webContents.close();
     sidebarView = null;
