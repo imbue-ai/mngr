@@ -11,9 +11,7 @@ from imbue.mngr.providers.registry import build_provider_instance
 from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
 
-# Tracking list for atexit cleanup. Every provider instance created is
-# appended here so we can close them all when the process exits. This is
-# a safety net -- callers should close providers explicitly when possible.
+# Track all created provider instances for cleanup at exit.
 _created_instances: list[BaseProviderInstance] = []
 _atexit_registered: dict[str, bool] = {"registered": False}
 
