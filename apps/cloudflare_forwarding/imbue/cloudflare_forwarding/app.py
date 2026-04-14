@@ -1232,10 +1232,12 @@ def _init_supertokens() -> None:
     logger.info("SuperTokens SDK initialized for JWT validation")
 
 
-@app.function(secrets=[
-    modal.Secret.from_name("cloudflare-forwarding-secrets"),
-    modal.Secret.from_name("supertokens-secrets"),
-])
+@app.function(
+    secrets=[
+        modal.Secret.from_name("cloudflare-forwarding-secrets"),
+        modal.Secret.from_name("supertokens-secrets"),
+    ]
+)
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
     _init_supertokens()

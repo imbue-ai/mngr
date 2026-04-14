@@ -56,9 +56,12 @@ class CloudflareForwardingClient(FrozenModel):
     owner_email: OwnerEmail | None = Field(default=None, description="Email for default Google OAuth policy")
     supertokens_token: str | None = Field(default=None, description="SuperTokens JWT access token for Bearer auth")
     supertokens_user_id_prefix: str | None = Field(
-        default=None, description="First 16 hex chars of SuperTokens user ID for tunnel naming",
+        default=None,
+        description="First 16 hex chars of SuperTokens user ID for tunnel naming",
     )
-    supertokens_email: str | None = Field(default=None, description="Email from SuperTokens session for access policies")
+    supertokens_email: str | None = Field(
+        default=None, description="Email from SuperTokens session for access policies"
+    )
 
     def _auth_header(self) -> str:
         """Build the auth header value. Prefers SuperTokens Bearer token over Basic auth."""
