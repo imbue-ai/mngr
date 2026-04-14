@@ -69,8 +69,7 @@ def _poll_for_email(
                 return msg
         threading.Event().wait(interval)
     pytest.fail(
-        f"No email with subject containing {subject_contains!r} "
-        f"arrived at {username}@restmail.net within {timeout}s"
+        f"No email with subject containing {subject_contains!r} arrived at {username}@restmail.net within {timeout}s"
     )
 
 
