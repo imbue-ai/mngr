@@ -19,6 +19,7 @@ from imbue.resource_guards.resource_guards import create_sdk_resource_guards
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.resource_guards.resource_guards import generate_stub_wrapper_script
 from imbue.resource_guards.resource_guards import generate_wrapper_script
+from imbue.resource_guards.resource_guards import get_guarded_resource_names
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.resource_guards.resource_guards import register_sdk_guard
 from imbue.resource_guards.resource_guards import start_resource_guards
@@ -336,6 +337,18 @@ def test_cleanup_sdk_resource_guards_calls_cleanup(
     cleanup_sdk_resource_guards()
 
     assert cleanup_called == [1]
+
+
+def test_get_guarded_resource_names_returns_binary_and_sdk_guards(
+    isolated_guard_state: None,
+) -> None:
+    """get_guarded_resource_names() returns names from both registration paths."""
+    register_resource_guard("binary_guard")
+    register_sdk_guard("sdk_guard", lambda: None, lambda: None)
+
+    names = get_guarded_resource_names()
+    assert "binary_guard" in names
+    assert "sdk_guard" in names
 
 
 def test_custom_sdk_guard_end_to_end(
@@ -796,4 +809,59 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
             assert 1 + 1 == 2
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+# ---------------------------------------------------------------------------
+# Auto-registration of marks via conftest_hooks (pytester)
+# ---------------------------------------------------------------------------
+
+# Conftest that uses register_conftest_hooks for the auto-registration path.
+# Notably, there is NO manual config.addinivalue_line("markers", ...) call --
+# the mark is registered automatically by conftest_hooks._pytest_configure.
+_PYTESTER_AUTO_MARKER_CONFTEST = """\
+import os
+from imbue.resource_guards.resource_guards import (
+    register_resource_guard,
+    start_resource_guards,
+    stop_resource_guards,
+)
+from imbue.imbue_common.conftest_hooks import register_conftest_hooks
+
+# Clear inherited guard state so we create fresh wrappers for our resources.
+os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+
+register_resource_guard("cat")
+
+# register_conftest_hooks injects pytest_configure, which auto-registers markers
+# for all resources registered via register_resource_guard().
+register_conftest_hooks(globals())
+
+def pytest_sessionstart(session):
+    start_resource_guards(session)
+
+def pytest_sessionfinish(session, exitstatus):
+    stop_resource_guards()
+"""
+
+
+def test_register_resource_guard_auto_registers_pytest_mark(
+    pytester: pytest.Pytester,
+) -> None:
+    """register_resource_guard() auto-registers the pytest mark via conftest_hooks.
+
+    With --strict-markers, an unregistered mark causes a collection error.
+    This test verifies that calling register_resource_guard("cat") is sufficient
+    to register @pytest.mark.cat without a separate register_marker() call.
+    """
+    pytester.makeconftest(_PYTESTER_AUTO_MARKER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        @pytest.mark.cat
+        def test_cat_dev_null():
+            subprocess.run(["cat", "/dev/null"], check=True)
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider", "--strict-markers")
     result.assert_outcomes(passed=1)
