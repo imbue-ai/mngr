@@ -76,6 +76,7 @@ addopts = [
   "--cov=imbue.mngr_lima",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
+  "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
   "--cov=imbue.cloudflare_forwarding",
   "--cov-report=term-missing",
@@ -159,8 +160,10 @@ omit = [
     "libs/mngr_lima/imbue/mngr_lima/instance.py",
     "libs/mngr_lima/imbue/mngr_lima/limactl.py",
     "libs/mngr_lima/imbue/mngr_lima/testing.py",
-    # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
-    "apps/minds/*",
+    # Mind deploy modules run on Modal and require infrastructure to test
+    "apps/minds/imbue/minds/deploy/cron_runner.py",
+    "apps/minds/imbue/minds/deploy/remote_runner.py",
+    "apps/minds/imbue/minds/deploy/verification.py",
     # Schedule plugin cron runner and verification run on Modal and require infrastructure to test
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/cron_runner.py",
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",
