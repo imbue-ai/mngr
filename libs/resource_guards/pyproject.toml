@@ -36,7 +36,6 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py"]
 
 [tool.pytest.ini_options]
 timeout_func_only = true
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",

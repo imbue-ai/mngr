@@ -26,7 +26,6 @@ imbue-common = { workspace = true }
 # before any hooks run: addopts, coverage.run, inline-snapshot, timeout_func_only.
 [tool.pytest.ini_options]
 timeout_func_only = true
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
