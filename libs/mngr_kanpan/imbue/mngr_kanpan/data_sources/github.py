@@ -600,27 +600,34 @@ def _parse_conflicts(stdout: str) -> bool:
 
 
 def _build_unresolved_query(repo: str, pr_number: int) -> str:
-    """Build a GraphQL query to check for unresolved review threads."""
+    """Build a GraphQL query to check for unresolved review threads and PR comments."""
     owner, name = repo.split("/", 1)
     return (
         '{ repository(owner: "%s", name: "%s") '
-        "{ pullRequest(number: %d) "
-        "{ reviewThreads(first: 100) { nodes { isResolved "
-        "comments(last: 1) { nodes { author { login } } } } } } } }"
+        "{ pullRequest(number: %d) { "
+        "reviewThreads(first: 100) { nodes { isResolved "
+        "comments(last: 1) { nodes { author { login } } } } } "
+        "comments(last: 1) { nodes { author { login } } } "
+        "} } }"
     ) % (owner, name, pr_number)
 
 
 def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
-    """Parse GraphQL response to determine if there are unresolved review threads.
+    """Check for unresolved review threads or unanswered PR conversation comments.
 
-    If ignore_user is set, threads where the last comment's author matches
+    Checks two things:
+    1. Inline review threads that are not resolved
+    2. PR conversation comments where the last comment is by someone else
+
+    If ignore_user is set, threads/comments where the last author matches
     that username are skipped (you already replied, ball is in their court).
     """
     try:
         data = json.loads(stdout)
-        threads = (
-            data.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
-        )
+        pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
+
+        # Check inline review threads
+        threads = pr_data.get("reviewThreads", {}).get("nodes", [])
         for thread in threads:
             if thread.get("isResolved", True):
                 continue
@@ -631,6 +638,14 @@ def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
                     if author == ignore_user:
                         continue
             return True
+
+        # Check PR conversation: if the last comment is by someone else, flag it
+        pr_comments = pr_data.get("comments", {}).get("nodes", [])
+        if pr_comments and ignore_user is not None:
+            last_author = pr_comments[0].get("author", {}).get("login")
+            if last_author is not None and last_author != ignore_user:
+                return True
+
         return False
     except (json.JSONDecodeError, TypeError, AttributeError):
         return False
