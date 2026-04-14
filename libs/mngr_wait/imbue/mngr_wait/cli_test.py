@@ -7,6 +7,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.lifecycle_events import LifecycleEventType
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentId
@@ -246,16 +247,16 @@ def test_output_result_json_includes_state_changes(capsys: pytest.CaptureFixture
 
 
 def test_validate_event_type_accepts_agent_ready() -> None:
-    assert _validate_event_type("AGENT_READY") == "AGENT_READY"
+    assert _validate_event_type("AGENT_READY") is LifecycleEventType.AGENT_READY
 
 
 def test_validate_event_type_accepts_agent_starting() -> None:
-    assert _validate_event_type("AGENT_STARTING") == "AGENT_STARTING"
+    assert _validate_event_type("AGENT_STARTING") is LifecycleEventType.AGENT_STARTING
 
 
 def test_validate_event_type_is_case_insensitive() -> None:
-    assert _validate_event_type("agent_ready") == "AGENT_READY"
-    assert _validate_event_type("Agent_Starting") == "AGENT_STARTING"
+    assert _validate_event_type("agent_ready") is LifecycleEventType.AGENT_READY
+    assert _validate_event_type("Agent_Starting") is LifecycleEventType.AGENT_STARTING
 
 
 def test_validate_event_type_rejects_invalid_event() -> None:
@@ -289,7 +290,6 @@ def _create_local_agent_dir(host_dir: Path, agent_id: AgentId) -> None:
     (agent_dir / "data.json").write_text(json.dumps(data))
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_flag_returns_success_when_event_exists(
     cli_runner: CliRunner,
     temp_host_dir: Path,
@@ -300,13 +300,13 @@ def test_wait_cli_event_flag_returns_success_when_event_exists(
     """Test that `mngr wait <agent> --event AGENT_READY` returns 0 when the event exists."""
     agent_id = AgentId.generate()
     _create_local_agent_dir(temp_host_dir, agent_id)
+    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_STARTING")
     write_lifecycle_event(temp_host_dir, agent_id, "AGENT_READY")
 
     result = cli_runner.invoke(wait, [str(agent_id), "--event", "AGENT_READY", "--interval", "1s"], obj=plugin_manager)
     assert result.exit_code == 0
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_flag_times_out_when_event_missing(
     cli_runner: CliRunner,
     temp_host_dir: Path,
@@ -326,7 +326,6 @@ def test_wait_cli_event_flag_times_out_when_event_missing(
     assert result.exit_code == 2
 
 
-@pytest.mark.tmux
 def test_wait_cli_event_and_state_are_mutually_exclusive(
     cli_runner: CliRunner,
     temp_host_dir: Path,

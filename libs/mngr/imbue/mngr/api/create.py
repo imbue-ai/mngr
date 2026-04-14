@@ -166,22 +166,26 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Start the agent, wait for readiness, and emit lifecycle events.
+        # Start the agent and emit lifecycle events.
         initial_message = agent.get_initial_message()
         logger.info("Starting agent {} ...", agent.name)
         start_id = f"start-{uuid4().hex}"
         emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_STARTING, start_id)
-        timeout = agent_options.ready_timeout_seconds
-        agent.wait_for_ready_signal(
-            is_creating=True,
-            start_action=lambda: host.start_agents([agent.id]),
-            timeout=timeout,
-        )
-        emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
 
         if initial_message is not None:
+            # Wait for readiness before sending the initial message.
+            timeout = agent_options.ready_timeout_seconds
+            agent.wait_for_ready_signal(
+                is_creating=True,
+                start_action=lambda: host.start_agents([agent.id]),
+                timeout=timeout,
+            )
+            emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
             logger.info("Sending initial message...")
             agent.send_message(initial_message)
+        else:
+            host.start_agents([agent.id])
+            emit_agent_lifecycle_event(host, agent.id, LifecycleEventType.AGENT_READY, start_id)
 
         # Build and return the result
         result = CreateAgentResult(agent=agent, host=host)

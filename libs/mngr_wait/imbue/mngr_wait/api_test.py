@@ -18,7 +18,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_wait.api import ResolvedTarget
 from imbue.mngr_wait.api import _build_agent_resolved_target
 from imbue.mngr_wait.api import _build_host_resolved_target
-from imbue.mngr_wait.api import _check_latest_lifecycle_event
+from imbue.mngr_wait.api import _check_lifecycle_event_by_start_id
 from imbue.mngr_wait.api import _detect_state_changes
 from imbue.mngr_wait.api import _resolve_by_name
 from imbue.mngr_wait.api import wait_for_event
@@ -525,7 +525,7 @@ def test_wait_for_state_detects_destroyed_after_connection_errors() -> None:
     assert result.state_changes[0].new_value == "DESTROYED"
 
 
-# === _check_latest_lifecycle_event ===
+# === _check_lifecycle_event_by_start_id ===
 
 
 def _write_events_file(directory: Path, lines: list[str]) -> Path:
@@ -535,66 +535,77 @@ def _write_events_file(directory: Path, lines: list[str]) -> Path:
     return events_file
 
 
-def test_check_latest_lifecycle_event_matches_event_type(
+def test_check_lifecycle_event_matches_ready_after_starting(
     temp_host_dir: Path,
     local_provider: LocalProviderInstance,
 ) -> None:
-    host = local_provider.get_host(local_provider.host_id)
-    event_line = json.dumps({"type": "AGENT_READY", "start_id": "start-abc"})
-    events_file = _write_events_file(temp_host_dir, [event_line])
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is True
-
-
-def test_check_latest_lifecycle_event_does_not_match_different_type(
-    temp_host_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    host = local_provider.get_host(local_provider.host_id)
-    event_line = json.dumps({"type": "AGENT_STARTING", "start_id": "start-abc"})
-    events_file = _write_events_file(temp_host_dir, [event_line])
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is False
-
-
-def test_check_latest_lifecycle_event_returns_false_for_empty_file(
-    temp_host_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    host = local_provider.get_host(local_provider.host_id)
-    events_file = _write_events_file(temp_host_dir, [])
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is False
-
-
-def test_check_latest_lifecycle_event_returns_false_for_missing_file(
-    temp_host_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    host = local_provider.get_host(local_provider.host_id)
-    events_file = temp_host_dir / "nonexistent.jsonl"
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is False
-
-
-def test_check_latest_lifecycle_event_returns_false_for_invalid_json(
-    temp_host_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    host = local_provider.get_host(local_provider.host_id)
-    events_file = _write_events_file(temp_host_dir, ["not valid json at all"])
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is False
-
-
-def test_check_latest_lifecycle_event_reads_only_last_line(
-    temp_host_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    """When the file has AGENT_STARTING then AGENT_READY, the last line (READY) should match."""
     host = local_provider.get_host(local_provider.host_id)
     lines = [
         json.dumps({"type": "AGENT_STARTING", "start_id": "start-abc"}),
         json.dumps({"type": "AGENT_READY", "start_id": "start-abc"}),
     ]
     events_file = _write_events_file(temp_host_dir, lines)
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_READY") is True
-    assert _check_latest_lifecycle_event(host, events_file, "AGENT_STARTING") is False
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is True
+
+
+def test_check_lifecycle_event_no_match_when_only_starting(
+    temp_host_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = local_provider.get_host(local_provider.host_id)
+    lines = [
+        json.dumps({"type": "AGENT_STARTING", "start_id": "start-abc"}),
+    ]
+    events_file = _write_events_file(temp_host_dir, lines)
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is False
+
+
+def test_check_lifecycle_event_new_start_invalidates_old_ready(
+    temp_host_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A new AGENT_STARTING with a different start_id invalidates a previous AGENT_READY."""
+    host = local_provider.get_host(local_provider.host_id)
+    lines = [
+        json.dumps({"type": "AGENT_STARTING", "start_id": "start-old"}),
+        json.dumps({"type": "AGENT_READY", "start_id": "start-old"}),
+        json.dumps({"type": "AGENT_STARTING", "start_id": "start-new"}),
+    ]
+    events_file = _write_events_file(temp_host_dir, lines)
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is False
+
+
+def test_check_lifecycle_event_robust_to_trailing_events(
+    temp_host_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """AGENT_READY is still found even if other events are appended after it."""
+    host = local_provider.get_host(local_provider.host_id)
+    lines = [
+        json.dumps({"type": "AGENT_STARTING", "start_id": "start-abc"}),
+        json.dumps({"type": "AGENT_READY", "start_id": "start-abc"}),
+        json.dumps({"type": "SOME_OTHER_EVENT", "start_id": "start-abc"}),
+    ]
+    events_file = _write_events_file(temp_host_dir, lines)
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is True
+
+
+def test_check_lifecycle_event_returns_false_for_empty_file(
+    temp_host_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = local_provider.get_host(local_provider.host_id)
+    events_file = _write_events_file(temp_host_dir, [])
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is False
+
+
+def test_check_lifecycle_event_returns_false_for_missing_file(
+    temp_host_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = local_provider.get_host(local_provider.host_id)
+    events_file = temp_host_dir / "nonexistent.jsonl"
+    assert _check_lifecycle_event_by_start_id(host, events_file, "AGENT_READY") is False
 
 
 # === wait_for_event ===
@@ -621,6 +632,7 @@ def test_wait_for_event_returns_immediately_when_event_exists(
     local_provider: LocalProviderInstance,
 ) -> None:
     resolved, agent_id = _make_resolved_agent_target_with_local_provider(temp_host_dir, local_provider)
+    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_STARTING")
     write_lifecycle_event(temp_host_dir, agent_id, "AGENT_READY")
 
     result = wait_for_event(resolved, "AGENT_READY", timeout_seconds=5.0, interval_seconds=0.01)
@@ -655,14 +667,16 @@ def test_wait_for_event_rejects_host_target(
         wait_for_event(resolved, "AGENT_READY", timeout_seconds=5.0, interval_seconds=0.01)
 
 
-def test_wait_for_event_does_not_match_stale_ready_after_starting(
+def test_wait_for_event_does_not_match_stale_ready_after_restart(
     temp_host_dir: Path,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """If the last event is AGENT_STARTING, it should not match AGENT_READY."""
+    """A new AGENT_STARTING (restart) invalidates the previous cycle's AGENT_READY."""
     resolved, agent_id = _make_resolved_agent_target_with_local_provider(temp_host_dir, local_provider)
-    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_READY")
-    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_STARTING")
+    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_STARTING", start_id="start-old")
+    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_READY", start_id="start-old")
+    # New start cycle without a corresponding AGENT_READY yet
+    write_lifecycle_event(temp_host_dir, agent_id, "AGENT_STARTING", start_id="start-new")
 
     result = wait_for_event(resolved, "AGENT_READY", timeout_seconds=0.1, interval_seconds=0.02)
     assert result.is_matched is False
