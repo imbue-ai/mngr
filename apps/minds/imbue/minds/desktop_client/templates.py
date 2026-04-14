@@ -635,7 +635,8 @@ def render_agent_servers_page(
 
 _CHROME_TITLEBAR_HEIGHT: Final[int] = 38
 
-_CHROME_TEMPLATE: Final[str] = """<!DOCTYPE html>
+_CHROME_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -650,7 +651,9 @@ body {
 
 #minds-titlebar {
   position: fixed; top: 0; left: 0; right: 0;
-  height: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
+  height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
   background: #1e293b;
   display: flex; align-items: center;
   user-select: none;
@@ -692,14 +695,20 @@ body {
 
 .minds-wc { display: flex; }
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
-.minds-wc button { border-radius: 0; width: 36px; height: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px; }
+.minds-wc button { border-radius: 0; width: 36px; height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px; }
 .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
 .minds-wc button:last-child:hover { background: rgb(220, 38, 38); color: white; border-radius: 0; }
 
 /* Sidebar (browser mode) */
 #sidebar-panel {
-  position: fixed; left: 0; top: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
-  width: 260px; height: calc(100% - """ + str(_CHROME_TITLEBAR_HEIGHT) + """px);
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 260px; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
   background: #f3f2ef; z-index: 50;
   box-shadow: 4px 0 12px rgba(0,0,0,0.15);
   transform: translateX(-100%);
@@ -722,8 +731,12 @@ body {
 
 /* Content area (browser mode) */
 #content-frame {
-  position: fixed; left: 0; top: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
-  width: 100%; height: calc(100% - """ + str(_CHROME_TITLEBAR_HEIGHT) + """px);
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 100%; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
   border: none;
 }
 </style>
@@ -910,6 +923,7 @@ connectSSE();
 </script>
 </body>
 </html>"""
+)
 
 
 _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
