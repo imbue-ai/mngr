@@ -17,7 +17,7 @@ import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
-import { apiUrl, getPrimaryAgentId } from "../base-path";
+import { apiUrl, getBasePath, getPrimaryAgentId } from "../base-path";
 import {
   getAgentById,
   getAgents,
@@ -35,11 +35,9 @@ function getAccessMode(): AccessMode {
   if (hostname.match(/^[^-]+--(.*)/)) {
     return "cloudflare";
   }
-  if (window.location.pathname.match(/^.*\/agents\/[^/]+\//)) {
-    return "local";
-  }
-  // Also detect /forwarding/ paths used by the desktop client proxy
-  if (window.location.pathname.match(/^.*\/forwarding\//)) {
+  // Local mode: the base path contains /forwarding/ when served through
+  // the desktop client proxy (e.g. /forwarding/{agentId}/web).
+  if (getBasePath().includes("/forwarding/")) {
     return "local";
   }
   return "dev";
@@ -62,8 +60,8 @@ function getApplicationUrl(appName: string, rawUrl: string): string {
     return `${proto}//${appName}--${cfMatch[1]}${port}/`;
   }
 
-  // Local forwarding server
-  if (primaryId && (window.location.pathname.match(/^.*\/agents\/[^/]+\//) || window.location.pathname.match(/^.*\/forwarding\//))) {
+  // Local forwarding server: base path contains /forwarding/ when proxied
+  if (primaryId && getBasePath().includes("/forwarding/")) {
     return `/forwarding/${primaryId}/${appName}/`;
   }
 
@@ -84,7 +82,7 @@ function getTerminalUrl(): string {
 
   // Local forwarding server: always use the primary agent's terminal
   const primaryId = getPrimaryAgentId();
-  if (primaryId && (window.location.pathname.match(/^.*\/agents\/[^/]+\//) || window.location.pathname.match(/^.*\/forwarding\//))) {
+  if (primaryId && getBasePath().includes("/forwarding/")) {
     return `/forwarding/${primaryId}/terminal/`;
   }
 
