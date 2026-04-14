@@ -185,7 +185,9 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     </script>
     {% else %}
       {% if is_discovering %}
-    <p class="empty-state">Discovering agents...</p>
+    <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">
+      <p class="empty-state" style="padding: 0;">Discovering agents...</p>
+    </div>
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
     <div style="text-align: center; padding: 48px 0;">
@@ -627,3 +629,403 @@ def render_agent_servers_page(
     """
     template = _JINJA_ENV.from_string(_AGENT_SERVERS_TEMPLATE)
     return template.render(agent_id=agent_id, server_names=server_names, cf_services=cf_services or {})
+
+
+# -- Chrome (persistent shell) templates --
+
+_CHROME_TITLEBAR_HEIGHT: Final[int] = 38
+
+_CHROME_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Minds</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0f172a;
+}
+
+#minds-titlebar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  background: #1e293b;
+  display: flex; align-items: center;
+  user-select: none;
+  -webkit-app-region: drag;
+  z-index: 100;
+  border-bottom: 1px solid #334155;
+  padding: 0 4px;
+}
+{% if is_mac %}#minds-titlebar { padding-left: 72px; }{% endif %}
+
+#minds-titlebar button {
+  -webkit-app-region: no-drag;
+  background: none; border: none; color: #94a3b8; cursor: pointer;
+  width: 32px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; font-size: 14px; line-height: 1;
+}
+#minds-titlebar button:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+#minds-titlebar button:active { background: rgba(255,255,255,0.12); }
+#minds-titlebar svg {
+  width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+
+.minds-nav { display: flex; gap: 2px; }
+.minds-title {
+  flex: 1; color: #cbd5e1; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-align: center; padding: 0 8px;
+}
+
+.minds-user-area { position: relative; -webkit-app-region: no-drag; flex-shrink: 0; }
+.minds-user-btn {
+  width: auto !important; height: auto !important; display: inline-block !important;
+  color: #94a3b8; cursor: pointer; padding: 4px 10px; border-radius: 4px;
+  font-size: 12px; font-family: inherit; white-space: nowrap;
+}
+.minds-user-btn:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
+
+.minds-wc { display: flex; }
+{% if is_mac %}.minds-wc { display: none; }{% endif %}
+.minds-wc button { border-radius: 0; width: 36px; height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px; }
+.minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
+.minds-wc button:last-child:hover { background: rgb(220, 38, 38); color: white; border-radius: 0; }
+
+/* Sidebar (browser mode) */
+#sidebar-panel {
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 260px; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
+  background: #f3f2ef; z-index: 50;
+  box-shadow: 4px 0 12px rgba(0,0,0,0.15);
+  transform: translateX(-100%);
+  transition: transform 200ms ease-in-out;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+#sidebar-panel.sidebar-visible { transform: translateX(0); }
+
+.sidebar-item {
+  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  transition: background 100ms;
+}
+.sidebar-item:hover { background: #edecea; }
+
+.sidebar-empty {
+  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+}
+
+/* Content area (browser mode) */
+#content-frame {
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 100%; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
+  border: none;
+}
+</style>
+</head>
+<body>
+<div id="minds-titlebar">
+  <div class="minds-nav">
+    <button id="sidebar-toggle" title="Workspaces">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+    </button>
+    <button id="home-btn" title="Home">
+      <svg viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4"/></svg>
+    </button>
+    <button id="back-btn" title="Back">
+      <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <button id="forward-btn" title="Forward">
+      <svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+    </button>
+  </div>
+  <span class="minds-title" id="page-title">Minds</span>
+  <div class="minds-user-area">
+    <button id="user-btn" class="minds-user-btn" title="Account">Login</button>
+  </div>
+  <div class="minds-wc">
+    <button id="min-btn" title="Minimize">
+      <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+    </button>
+    <button id="max-btn" title="Maximize">
+      <svg viewBox="0 0 12 12" style="width:12px;height:12px"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
+    </button>
+    <button id="close-btn" title="Close">
+      <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- Sidebar panel (used in browser mode; hidden by default) -->
+<div id="sidebar-panel">
+  <div id="sidebar-workspaces">
+    <div class="sidebar-empty">No workspaces</div>
+  </div>
+</div>
+
+<!-- Content iframe (browser mode only, hidden in Electron) -->
+<iframe id="content-frame" src="/"></iframe>
+
+<script>
+var isElectron = !!window.minds;
+
+// -- Navigation adapter --
+function navigateContent(url) {
+  if (isElectron) window.minds.navigateContent(url);
+  else document.getElementById('content-frame').src = url;
+}
+function goBack() {
+  if (isElectron) window.minds.contentGoBack();
+  else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch(e) {} }
+}
+function goForward() {
+  if (isElectron) window.minds.contentGoForward();
+  else { try { document.getElementById('content-frame').contentWindow.history.forward(); } catch(e) {} }
+}
+
+// -- Sidebar toggle --
+var sidebarOpen = false;
+function toggleSidebar() {
+  if (isElectron) {
+    window.minds.toggleSidebar();
+    sidebarOpen = !sidebarOpen;
+  } else {
+    var panel = document.getElementById('sidebar-panel');
+    sidebarOpen = !sidebarOpen;
+    if (sidebarOpen) panel.classList.add('sidebar-visible');
+    else panel.classList.remove('sidebar-visible');
+  }
+}
+
+function selectWorkspace(agentId) {
+  navigateContent('/forwarding/' + agentId + '/');
+  // Close sidebar. In Electron, navigate-content already removes the sidebar
+  // WebContentsView on the main process side, so only reset the local state flag
+  // without sending another toggle-sidebar IPC (which would re-create it).
+  if (isElectron) {
+    sidebarOpen = false;
+  } else {
+    sidebarOpen = false;
+    document.getElementById('sidebar-panel').classList.remove('sidebar-visible');
+  }
+}
+
+// -- Button handlers --
+document.getElementById('sidebar-toggle').onclick = toggleSidebar;
+document.getElementById('home-btn').onclick = function() { navigateContent('/'); };
+document.getElementById('back-btn').onclick = goBack;
+document.getElementById('forward-btn').onclick = goForward;
+
+// Window controls (Electron only)
+if (isElectron) {
+  document.getElementById('min-btn').onclick = function() { window.minds.minimize(); };
+  document.getElementById('max-btn').onclick = function() { window.minds.maximize(); };
+  document.getElementById('close-btn').onclick = function() { window.minds.close(); };
+  // Hide iframe in Electron (content is in WebContentsView)
+  document.getElementById('content-frame').style.display = 'none';
+  // Hide browser sidebar panel in Electron (separate WebContentsView)
+  document.getElementById('sidebar-panel').style.display = 'none';
+}
+
+// -- Title tracking + auth refresh on navigation --
+function refreshAuthStatus() {
+  fetch('/auth/api/status').then(function(r) { return r.json(); }).then(updateAuthUI).catch(function() {});
+}
+
+if (isElectron) {
+  window.minds.onContentTitleChange(function(title) {
+    document.getElementById('page-title').textContent = title || 'Minds';
+  });
+  window.minds.onContentURLChange(function() {
+    refreshAuthStatus();
+  });
+} else {
+  setInterval(function() {
+    try {
+      var t = document.getElementById('content-frame').contentDocument.title;
+      if (t) document.getElementById('page-title').textContent = t;
+    } catch(e) {}
+  }, 500);
+  // Re-check auth on iframe navigation
+  document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
+}
+
+// -- Auth status --
+var signedIn = false;
+function updateAuthUI(data) {
+  var btn = document.getElementById('user-btn');
+  if (data.signedIn) {
+    signedIn = true;
+    btn.textContent = data.displayName || data.email || 'Account';
+    btn.title = data.email || 'Account';
+  } else {
+    signedIn = false;
+    btn.textContent = 'Login';
+    btn.title = 'Sign in to your account';
+  }
+}
+refreshAuthStatus();
+
+document.getElementById('user-btn').onclick = function() {
+  if (signedIn) navigateContent('/auth/settings');
+  else navigateContent('/auth/login');
+};
+
+// -- SSE for workspace list (browser mode sidebar) --
+function renderWorkspaces(workspaces) {
+  var container = document.getElementById('sidebar-workspaces');
+  if (!workspaces || workspaces.length === 0) {
+    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    return;
+  }
+  container.innerHTML = workspaces.map(function(w) {
+    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
+      (w.name || w.id) + '</div>';
+  }).join('');
+}
+
+var evtSource = null;
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/_chrome/events');
+  evtSource.onmessage = function(event) {
+    try {
+      var data = JSON.parse(event.data);
+      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+      if (data.type === 'auth_status') updateAuthUI(data);
+    } catch(e) {}
+  };
+  evtSource.onerror = function() {
+    evtSource.close();
+    evtSource = null;
+    setTimeout(connectSSE, 5000);
+  };
+}
+connectSSE();
+</script>
+</body>
+</html>"""
+)
+
+
+_SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Workspaces</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f3f2ef;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.sidebar-item {
+  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  transition: background 100ms;
+}
+.sidebar-item:hover { background: #edecea; }
+
+.sidebar-empty {
+  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+}
+</style>
+</head>
+<body>
+<div id="sidebar-workspaces">
+  <div class="sidebar-empty">No workspaces</div>
+</div>
+<script>
+var isElectron = !!window.minds;
+
+function selectWorkspace(agentId) {
+  if (isElectron) window.minds.navigateContent('/forwarding/' + agentId + '/');
+}
+
+function renderWorkspaces(workspaces) {
+  var container = document.getElementById('sidebar-workspaces');
+  if (!workspaces || workspaces.length === 0) {
+    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    return;
+  }
+  container.innerHTML = workspaces.map(function(w) {
+    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
+      (w.name || w.id) + '</div>';
+  }).join('');
+}
+
+var evtSource = null;
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/_chrome/events');
+  evtSource.onmessage = function(event) {
+    try {
+      var data = JSON.parse(event.data);
+      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+    } catch(e) {}
+  };
+  evtSource.onerror = function() {
+    evtSource.close();
+    evtSource = null;
+    setTimeout(connectSSE, 5000);
+  };
+}
+connectSSE();
+</script>
+</body>
+</html>"""
+
+
+@pure
+def render_chrome_page(
+    is_mac: bool = False,
+    is_authenticated: bool = False,
+    initial_workspaces: Sequence[dict[str, str]] | None = None,
+) -> str:
+    """Render the persistent chrome page (title bar + sidebar + content iframe).
+
+    is_mac controls whether macOS-specific styling is applied (traffic light padding,
+    hidden window controls).
+
+    In Electron mode, the iframe and browser sidebar are hidden via JS; the content
+    and sidebar are handled by separate WebContentsViews.
+    """
+    template = _JINJA_ENV.from_string(_CHROME_TEMPLATE)
+    return template.render(
+        is_mac=is_mac,
+        is_authenticated=is_authenticated,
+        initial_workspaces=initial_workspaces or [],
+    )
+
+
+@pure
+def render_sidebar_page() -> str:
+    """Render the standalone sidebar page for the Electron sidebar WebContentsView.
+
+    This page shows the workspace list and subscribes to SSE updates. In Electron,
+    clicking a workspace sends an IPC message via the preload bridge to navigate
+    the content WebContentsView.
+    """
+    template = _JINJA_ENV.from_string(_SIDEBAR_TEMPLATE)
+    return template.render()

@@ -1116,9 +1116,9 @@ def _check_settings_local_gitignored(
         )
         if not repo_only_result.success:
             raise PluginMngrError(
-                f".claude/settings.local.json is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
+                f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
                 "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
-                "Add '.claude/settings.local.json' to your repository's .gitignore and try again."
+                f"Add '{settings_relative}' to your repository's .gitignore and try again."
             )
 
 

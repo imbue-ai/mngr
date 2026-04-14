@@ -92,7 +92,6 @@ class LimaProviderInstance(BaseProviderInstance):
 
     config: LimaProviderConfig = Field(frozen=True, description="Lima provider configuration")
 
-    _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
     _lima_checked: bool = PrivateAttr(default=False)
 
     def _ensure_lima_available(self) -> None:
@@ -128,7 +127,8 @@ class LimaProviderInstance(BaseProviderInstance):
         return True
 
     def reset_caches(self) -> None:
-        self._host_by_id_cache.clear()
+        for host_id in list(self._host_by_id_cache):
+            self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
     # =========================================================================
@@ -537,7 +537,7 @@ sudo poweroff
                 with log_span("Adding {} known_hosts entries to VM", len(known_hosts)):
                     host.execute_stateful_command(f"sh -c '{add_known_hosts_cmd}'")
 
-        self._host_by_id_cache[host_id] = host
+        self._evict_cached_host(host_id, replacement=host)
         return host
 
     def _read_resources_from_config(self, lima_config: dict) -> HostResources:
@@ -568,9 +568,9 @@ sudo poweroff
         logger.info("Stopping Lima VM: {}", host_id)
 
         # Disconnect SSH before stopping
-        cached_host = self._host_by_id_cache.get(host_id)
-        if isinstance(cached_host, Host):
-            cached_host.disconnect()
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
@@ -583,7 +583,6 @@ sudo poweroff
         else:
             logger.debug("No host record found for {}", host_id)
 
-        # Update host record with stop reason
         if host_record is not None:
             updated_certified_data = host_record.certified_host_data.model_copy_update(
                 to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.STOPPED.value),
@@ -593,8 +592,6 @@ sudo poweroff
                     to_update(host_record.field_ref().certified_host_data, updated_certified_data),
                 )
             )
-
-        self._host_by_id_cache.pop(host_id, None)
 
     def start_host(
         self,
@@ -655,7 +652,7 @@ sudo poweroff
             start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
             host_obj.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
-        self._host_by_id_cache[host_id] = host_obj
+        self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
@@ -664,9 +661,9 @@ sudo poweroff
         logger.info("Destroying Lima VM: {}", host_id)
 
         # Disconnect SSH
-        cached_host = self._host_by_id_cache.get(host_id)
-        if isinstance(cached_host, Host):
-            cached_host.disconnect()
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
@@ -686,8 +683,6 @@ sudo poweroff
                 )
             )
 
-        self._host_by_id_cache.pop(host_id, None)
-
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a destroyed host."""
         host_id = host.id
@@ -706,11 +701,11 @@ sudo poweroff
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
 
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Handle connection errors by clearing the cache."""
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     # =========================================================================
     # Discovery Methods
@@ -746,7 +741,7 @@ sudo poweroff
         # Instance is running -- create online host
         ssh_config = self._get_ssh_config(instance_name)
         host_obj = self._create_host_object(host_id, ssh_config)
-        self._host_by_id_cache[host_id] = host_obj
+        self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
     def _get_host_by_name(self, name: HostName) -> HostInterface:

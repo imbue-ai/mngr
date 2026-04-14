@@ -178,6 +178,8 @@ def test_upload_directory_success(docker_ssh: DockerOverSsh, tmp_path: Path) -> 
         assert call_args[0] == "rsync"
         assert "-az" in call_args
         assert "--delete" in call_args
+        assert "--exclude=__pycache__" in call_args
+        assert "--exclude=htmlcov" in call_args
         assert str(local_dir) + "/" in call_args
         assert "root@192.168.1.100:/tmp/build-ctx/" in call_args
 

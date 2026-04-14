@@ -280,11 +280,11 @@ def _build_mngr_create_command(
         case LaunchMode.DEV:
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
-            mngr_command.extend(["--new-host", "--template", "docker"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "docker"])
         case LaunchMode.LIMA:
-            mngr_command.extend(["--new-host", "--template", "lima"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "lima"])
         case LaunchMode.CLOUD:
-            mngr_command.extend(["--new-host", "--template", "vultr"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
         case _ as unreachable:
             assert_never(unreachable)
 
