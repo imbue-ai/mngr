@@ -96,6 +96,7 @@ def git_work_dir(tmp_path: Path, setup_git_config: None) -> Path:
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_with_no_agents(temp_mngr_ctx: MngrContext) -> None:
     """Board snapshot with no real agents returns an empty snapshot."""
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
@@ -106,6 +107,7 @@ def test_fetch_board_snapshot_with_no_agents(temp_mngr_ctx: MngrContext) -> None
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_real_agent_gets_entry(
     local_host: Host,
     work_dir: Path,
@@ -120,6 +122,7 @@ def test_fetch_board_snapshot_real_agent_gets_entry(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_entry_has_correct_fields(
     local_host: Host,
     work_dir: Path,
@@ -140,6 +143,7 @@ def test_fetch_board_snapshot_entry_has_correct_fields(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_with_repo_paths_source(
     local_host: Host,
     work_dir: Path,
@@ -158,6 +162,7 @@ def test_fetch_board_snapshot_with_repo_paths_source(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_with_git_info_source(
     local_host: Host,
     git_work_dir: Path,
@@ -174,6 +179,7 @@ def test_fetch_board_snapshot_with_git_info_source(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_work_dir_set_for_local_agent(
     local_host: Host,
     work_dir: Path,
@@ -188,6 +194,7 @@ def test_fetch_board_snapshot_work_dir_set_for_local_agent(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_cached_fields_updated(
     local_host: Host,
     work_dir: Path,
@@ -206,6 +213,7 @@ def test_fetch_board_snapshot_cached_fields_updated(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_local_snapshot_skips_remote_sources(
     local_host: Host,
     git_work_dir: Path,
@@ -236,6 +244,7 @@ def test_fetch_local_snapshot_skips_remote_sources(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_load_muted_agents_returns_empty_when_no_agents_muted(
     local_host: Host,
     work_dir: Path,
@@ -248,6 +257,7 @@ def test_load_muted_agents_returns_empty_when_no_agents_muted(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_load_muted_agents_after_toggle(
     local_host: Host,
     work_dir: Path,
@@ -267,6 +277,7 @@ def test_load_muted_agents_after_toggle(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_toggle_agent_mute_twice_returns_to_unmuted(
     local_host: Host,
     work_dir: Path,
@@ -283,6 +294,7 @@ def test_toggle_agent_mute_twice_returns_to_unmuted(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 def test_fetch_board_snapshot_muted_agent_in_muted_section(
     local_host: Host,
     work_dir: Path,

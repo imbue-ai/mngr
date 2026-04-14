@@ -202,6 +202,9 @@ def test_build_unresolved_query() -> None:
     assert "repo" in query
     assert "42" in query
     assert "reviewThreads" in query
+    assert "comments" in query
+    assert "author" in query
+    assert "login" in query
 
 
 # === _parse_unresolved ===
@@ -309,6 +312,26 @@ def test_parse_unresolved_ignore_user_none_counts_all() -> None:
         }
     }
     assert _parse_unresolved(json.dumps(data), ignore_user=None) is True
+
+
+def test_parse_unresolved_ignore_user_empty_comments_counts_as_unresolved() -> None:
+    data = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [
+                            {
+                                "isResolved": False,
+                                "comments": {"nodes": []},
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is True
 
 
 # === _fetch_repo_prs ===
