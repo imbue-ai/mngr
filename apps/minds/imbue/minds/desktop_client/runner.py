@@ -40,7 +40,6 @@ _ONE_TIME_CODE_LENGTH: Final[int] = 32
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 
 
-
 _REMOTE_HOST_DIR: Final[str] = "/mngr"
 
 
