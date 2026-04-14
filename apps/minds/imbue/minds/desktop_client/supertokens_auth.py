@@ -203,6 +203,11 @@ class SuperTokensSessionStore(MutableModel):
         except (ValueError, TypeError, KeyError, OSError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
             logger.warning("Failed to refresh SuperTokens session: {}", exc)
             return None
+        except Exception as exc:
+            # The supertokens Querier raises bare Exception for network failures,
+            # HTTP errors from the core, and core availability issues.
+            logger.warning("Failed to refresh SuperTokens session (unexpected error): {}", exc)
+            return None
 
     def get_user_info(self) -> UserInfo | None:
         """Return user info from the stored session, or None if not signed in."""
