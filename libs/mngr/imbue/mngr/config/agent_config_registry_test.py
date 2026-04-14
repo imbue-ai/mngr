@@ -121,6 +121,38 @@ def test_apply_custom_overrides_preserves_unset_subclass_fields() -> None:
     assert result.extra_str == "original"
 
 
+def test_apply_custom_overrides_concatenates_provisioning_fields() -> None:
+    """Provisioning tuple fields should be concatenated onto parent, not replaced."""
+    parent = AgentTypeConfig(
+        extra_provision_command=("echo parent",),
+        env=("PARENT=1",),
+    )
+    custom = AgentTypeConfig(
+        extra_provision_command=("echo child",),
+        env=("CHILD=2",),
+    )
+
+    result = _apply_custom_overrides_to_parent_config(parent, custom)
+
+    assert result.extra_provision_command == ("echo parent", "echo child")
+    assert result.env == ("PARENT=1", "CHILD=2")
+
+
+def test_apply_custom_overrides_preserves_parent_provisioning_when_unset() -> None:
+    """Parent provisioning fields should be preserved when custom config doesn't set them."""
+    parent = AgentTypeConfig(
+        extra_provision_command=("echo parent",),
+        upload_file=("a.txt:/a.txt",),
+    )
+    custom = AgentTypeConfig(cli_args=("--flag",))
+
+    result = _apply_custom_overrides_to_parent_config(parent, custom)
+
+    assert result.extra_provision_command == ("echo parent",)
+    assert result.upload_file == ("a.txt:/a.txt",)
+    assert result.cli_args == ("--flag",)
+
+
 # =============================================================================
 # Registry function tests
 # =============================================================================

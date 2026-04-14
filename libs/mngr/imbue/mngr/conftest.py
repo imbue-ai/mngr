@@ -257,6 +257,9 @@ def temp_mngr_ctx(
     cg = ConcurrencyGroup(name="test")
     with cg:
         yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=cg)
+    # Clear the provider instance cache so cached instances don't outlive
+    # the ConcurrencyGroup that was just torn down.
+    reset_provider_instances()
 
 
 @pytest.fixture

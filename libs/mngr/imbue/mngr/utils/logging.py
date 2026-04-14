@@ -166,24 +166,61 @@ def _dynamic_stderr_sink(message: Any) -> None:
     sys.stderr.flush()
 
 
+def _should_use_color(stream: TextIO | None = None) -> bool:
+    """Check whether ANSI color codes should be used on the given stream.
+
+    Respects the NO_COLOR convention (https://no-color.org/) and falls back
+    to checking whether the stream is a TTY. When stream is None, defaults
+    to sys.stderr.
+    """
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    target = stream if stream is not None else sys.stderr
+    try:
+        return target.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _format_user_message(record: Any) -> str:
     """Format user-facing log messages, adding colored prefixes for warnings and errors.
+
+    Colors are only applied when stderr is a TTY and the NO_COLOR environment
+    variable is not set. When output is piped (e.g. captured by a subprocess),
+    plain text is emitted.
 
     The record parameter is a loguru Record TypedDict, but the type is only available
     in type stubs so we use Any here.
     """
     level_name = record["level"].name
+    use_color = _should_use_color()
     if level_name == "WARNING":
-        return f"{WARNING_COLOR}WARNING: {{message}}{RESET_COLOR}\n"
-    if level_name == "ERROR":
-        return f"{ERROR_COLOR}ERROR: {{message}}{RESET_COLOR}\n"
-    if level_name == "BUILD":
-        return f"{BUILD_COLOR}{{message}}{RESET_COLOR}\n"
-    if level_name == "DEBUG":
-        return f"{DEBUG_COLOR}{{message}}{RESET_COLOR}\n"
-    if level_name == "TRACE":
-        return f"{TRACE_COLOR}{{message}}{RESET_COLOR}\n"
-    return "{message}\n"
+        if use_color:
+            return f"{WARNING_COLOR}WARNING: {{message}}{RESET_COLOR}\n"
+        else:
+            return "WARNING: {message}\n"
+    elif level_name == "ERROR":
+        if use_color:
+            return f"{ERROR_COLOR}ERROR: {{message}}{RESET_COLOR}\n"
+        else:
+            return "ERROR: {message}\n"
+    elif level_name == "BUILD":
+        if use_color:
+            return f"{BUILD_COLOR}{{message}}{RESET_COLOR}\n"
+        else:
+            return "{message}\n"
+    elif level_name == "DEBUG":
+        if use_color:
+            return f"{DEBUG_COLOR}{{message}}{RESET_COLOR}\n"
+        else:
+            return "{message}\n"
+    elif level_name == "TRACE":
+        if use_color:
+            return f"{TRACE_COLOR}{{message}}{RESET_COLOR}\n"
+        else:
+            return "{message}\n"
+    else:
+        return "{message}\n"
 
 
 _PYINFRA_NOISE_RE: Final[re.Pattern[str]] = re.compile(

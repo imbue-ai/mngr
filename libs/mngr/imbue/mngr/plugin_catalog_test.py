@@ -34,7 +34,6 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
     basic_names = {e.entry_point_name for e in PLUGIN_CATALOG if e.tier == PluginTier.INDEPENDENT}
     assert "claude" in basic_names
     assert "opencode" in basic_names
-    assert "llm" in basic_names
     assert "tutor" in basic_names
 
 

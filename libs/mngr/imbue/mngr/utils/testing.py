@@ -29,6 +29,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
@@ -38,6 +39,7 @@ from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -51,6 +53,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.polling import wait_for
 
 # Prefix used for test environments
@@ -688,6 +691,29 @@ def make_mngr_ctx(
     )
 
 
+def make_ctx_with_plugins(
+    mngr_ctx: MngrContext,
+    plugins: Sequence[object],
+    *,
+    load_backends: bool = False,
+) -> MngrContext:
+    """Create a MngrContext with a fresh plugin manager and the given plugins registered.
+
+    Use this when a test needs to inject custom hookimpl plugins (e.g., to test
+    hook error paths or modify hook behavior) without affecting the shared
+    plugin_manager fixture.
+
+    If load_backends is True, also loads the local provider backend into the PM.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    if load_backends:
+        load_local_backend_only(pm)
+    for plugin in plugins:
+        pm.register(plugin)
+    return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
+
+
 def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
@@ -1204,6 +1230,20 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+def build_test_known_hosts_file(host_key_path: Path, port: int, output_path: Path) -> Path:
+    """Build a known_hosts file for a local sshd instance.
+
+    Reads the public key from host_key_path.with_suffix(".pub") and writes a
+    known_hosts entry in the format expected by SSH for a localhost host on
+    the given port.
+
+    Returns the output_path for convenience.
+    """
+    host_pub_key = host_key_path.with_suffix(".pub").read_text().strip()
+    output_path.write_text(f"[127.0.0.1]:{port} {host_pub_key}\n")
+    return output_path
 
 
 # =============================================================================

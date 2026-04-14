@@ -61,9 +61,8 @@ def make_modal_provider_real(
         app_name=app_name,
         host_dir=Path("/mngr"),
         default_sandbox_timeout=300,
-        # FIXME: we really should bump CPU up to 1.0 and memory up to at least 4gb for more stable tests
-        default_cpu=0.5,
-        default_memory=0.5,
+        default_cpu=1.0,
+        default_memory=2.0,
         is_persistent=is_persistent,
         is_snapshotted_after_create=is_snapshotted_after_create,
     )

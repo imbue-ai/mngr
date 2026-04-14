@@ -73,6 +73,7 @@ from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
@@ -233,6 +234,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=False,
         description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
         "before startup. When False, the interactive flow prompts.",
+    )
+    auto_allow_permissions: bool = Field(
+        default=False,
+        description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
+        "This means Claude Code will never pause for permission approval.",
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
@@ -1105,9 +1111,9 @@ def _check_settings_local_gitignored(
         )
         if not repo_only_result.success:
             raise PluginMngrError(
-                f".claude/settings.local.json is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
+                f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
                 "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
-                "Add '.claude/settings.local.json' to your repository's .gitignore and try again."
+                f"Add '{settings_relative}' to your repository's .gitignore and try again."
             )
 
 
@@ -1521,7 +1527,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
           Notification:auth_success hook that propagates keychain credentials
           to all per-agent entries after login.
 
-        Skips if all hooks already exist.
+        When auto_allow_permissions is True, also adds a hook that auto-allows
+        all permission dialogs so Claude never pauses for approval.
+
+        Skips if hooks already exist.
         """
         # Future improvement: use `claude --settings <path>` to load hooks from
         # outside the worktree (e.g. the agent state dir), eliminating the need
@@ -1543,7 +1552,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         except FileNotFoundError:
             pass
 
-        # Merge hooks, checking for duplicates
+        # Merge readiness hooks, checking for duplicates
+        is_changed = False
         merged = merge_hooks_config(existing_settings, hooks_config)
 
         # Conditionally add credential sync hooks (macOS only)
@@ -1554,7 +1564,20 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 merged = merged_with_creds
 
         if merged is None:
-            logger.debug("Agent hooks already configured in {}", settings_path)
+            logger.debug("Readiness hooks already configured in {}", settings_path)
+            merged = existing_settings
+        else:
+            is_changed = True
+
+        # Merge permission auto-allow hooks if configured
+        if self.agent_config.auto_allow_permissions:
+            permission_hooks = build_permission_auto_allow_hooks_config()
+            merged_with_permissions = merge_hooks_config(merged, permission_hooks)
+            if merged_with_permissions is not None:
+                merged = merged_with_permissions
+                is_changed = True
+
+        if not is_changed:
             return
 
         # Write the merged settings

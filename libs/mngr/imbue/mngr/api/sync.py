@@ -20,6 +20,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
+from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -374,10 +376,10 @@ def _build_rsync_command(
 
 
 @pure
-def _build_ssh_transport_args(ssh_info: SshConnectionInfo) -> str:
+def _build_ssh_transport_args(ssh_info: SshConnectionInfo, known_hosts_file: Path | None) -> str:
     """Build the SSH transport string for rsync -e or GIT_SSH_COMMAND."""
-    user, hostname, port, key_path = ssh_info
-    return f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"
+    _, _, port, key_path = ssh_info
+    return build_ssh_transport_command(key_path, port, known_hosts_file)
 
 
 @pure
@@ -392,13 +394,14 @@ def _build_remote_rsync_command(
     source_path: Path,
     destination_path: Path,
     ssh_info: SshConnectionInfo,
+    known_hosts_file: Path | None,
     mode: SyncMode,
     is_dry_run: bool,
     is_delete: bool,
 ) -> list[str]:
     """Build an rsync command that transfers files over SSH to/from a remote host."""
     user, hostname, port, key_path = ssh_info
-    ssh_transport = _build_ssh_transport_args(ssh_info)
+    ssh_transport = _build_ssh_transport_args(ssh_info, known_hosts_file)
 
     rsync_cmd = ["rsync", "-avz", "--stats", "--exclude=.git", "-e", ssh_transport]
 
@@ -507,10 +510,12 @@ def sync_files(
             ssh_info = host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
 
+            known_hosts_file = get_ssh_known_hosts_file(host)
             rsync_cmd = _build_remote_rsync_command(
                 source_path=source_path,
                 destination_path=destination_path,
                 ssh_info=ssh_info,
+                known_hosts_file=known_hosts_file,
                 mode=mode,
                 is_dry_run=is_dry_run,
                 is_delete=is_delete,
@@ -751,7 +756,8 @@ def _remote_git_push_mirror(
     Returns the number of commits transferred.
     """
     git_url = _build_ssh_git_url(ssh_info, destination_path)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info)
+    known_hosts_file = get_ssh_known_hosts_file(host)
+    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
     env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
 
     logger.debug("Performing mirror push to {}", git_url)
@@ -830,7 +836,8 @@ def _remote_git_push_branch(
     Returns the number of commits transferred.
     """
     git_url = _build_ssh_git_url(ssh_info, destination_path)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info)
+    known_hosts_file = get_ssh_known_hosts_file(host)
+    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
     env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
 
     logger.debug("Pushing branch {} to {} via SSH", source_branch, git_url)
@@ -973,6 +980,7 @@ def _fetch_and_merge(
     is_dry_run: bool,
     cg: ConcurrencyGroup,
     ssh_info: SshConnectionInfo | None,
+    known_hosts_file: Path | None,
 ) -> int:
     """Fetch from source repo and merge into target branch.
 
@@ -987,7 +995,7 @@ def _fetch_and_merge(
     if ssh_info is not None:
         # Remote host: fetch via SSH URL
         git_url = _build_ssh_git_url(ssh_info, source_path)
-        git_ssh_cmd = _build_ssh_transport_args(ssh_info)
+        git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
         fetch_env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd}
         logger.debug("Fetching from remote agent repository via SSH: {}", git_url)
         try:
@@ -1094,6 +1102,7 @@ def _sync_git_pull(
 
     # Get SSH info for remote hosts so _fetch_and_merge can use SSH URLs
     ssh_info = host.get_ssh_connection_info() if not host.is_local else None
+    known_hosts_file = get_ssh_known_hosts_file(host) if not host.is_local else None
 
     with _stash_guard(git_ctx, local_path, uncommitted_changes):
         commits_transferred = _fetch_and_merge(
@@ -1105,6 +1114,7 @@ def _sync_git_pull(
             is_dry_run=is_dry_run,
             cg=cg,
             ssh_info=ssh_info,
+            known_hosts_file=known_hosts_file,
         )
 
     return SyncGitResult(
