@@ -296,7 +296,7 @@ class GitHubDataSourceConfig(FrozenModel):
     unresolved_ignore_user: str | None = Field(
         default=None,
         description="GitHub username whose review threads to ignore when checking for unresolved comments. "
-        "Useful for excluding your own threads (which you can resolve yourself).",
+        "Threads where the last comment is by this user are skipped (you already replied).",
     )
 
 
@@ -606,15 +606,15 @@ def _build_unresolved_query(repo: str, pr_number: int) -> str:
         '{ repository(owner: "%s", name: "%s") '
         "{ pullRequest(number: %d) "
         "{ reviewThreads(first: 100) { nodes { isResolved "
-        "comments(first: 1) { nodes { author { login } } } } } } } }"
+        "comments(last: 1) { nodes { author { login } } } } } } } }"
     ) % (owner, name, pr_number)
 
 
 def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
     """Parse GraphQL response to determine if there are unresolved review threads.
 
-    If ignore_user is set, threads where the first comment's author matches
-    that username are skipped (useful for ignoring your own review threads).
+    If ignore_user is set, threads where the last comment's author matches
+    that username are skipped (you already replied, ball is in their court).
     """
     try:
         data = json.loads(stdout)
