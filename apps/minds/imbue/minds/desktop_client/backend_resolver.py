@@ -534,7 +534,9 @@ class MngrStreamManager(MutableModel):
         is_workspace = self._is_workspace_agent(agent)
         logger.debug(
             "AGENT_DISCOVERED: {} (workspace={}, labels={})",
-            agent.agent_name, is_workspace, list(agent.labels.keys()),
+            agent.agent_name,
+            is_workspace,
+            list(agent.labels.keys()),
         )
 
         with self._lock:
