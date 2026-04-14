@@ -66,8 +66,8 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
 
 
 @pure
-def merge_cli_args(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge CLI arguments, concatenating if both present."""
+def merge_tuples(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
+    """Merge string tuples, concatenating if both present."""
     if override:
         return base + override
     return base
@@ -146,6 +146,18 @@ class HookDefinition(FrozenModel):
 # === Config Types ===
 
 
+AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "cli_args",
+        "extra_provision_command",
+        "upload_file",
+        "create_directory",
+        "env",
+        "env_file",
+    }
+)
+
+
 class AgentTypeConfig(FrozenModel):
     """Defines a custom agent type that inherits from an existing type."""
 
@@ -170,6 +182,26 @@ class AgentTypeConfig(FrozenModel):
         default_factory=list,
         description="Explicit list of permissions (overrides parent type permissions)",
     )
+    extra_provision_command: tuple[str, ...] = Field(
+        default=(),
+        description="Shell commands to run during provisioning",
+    )
+    upload_file: tuple[str, ...] = Field(
+        default=(),
+        description="LOCAL:REMOTE file upload specs",
+    )
+    create_directory: tuple[str, ...] = Field(
+        default=(),
+        description="Directories to create on the remote",
+    )
+    env: tuple[str, ...] = Field(
+        default=(),
+        description="KEY=VALUE environment variables",
+    )
+    env_file: tuple[str, ...] = Field(
+        default=(),
+        description="Paths to env files",
+    )
 
     @field_validator("cli_args", mode="before")
     @classmethod
@@ -188,7 +220,7 @@ class AgentTypeConfig(FrozenModel):
         auto_dismiss_dialogs) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
-        Tuples (cli_args): concatenate
+        Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
         Lists (permissions): concatenate if explicitly set
         """
         # Allow override to be the same class or a base class of self (e.g., when
@@ -202,12 +234,13 @@ class AgentTypeConfig(FrozenModel):
         if not explicitly_set:
             return self
 
+        base_values = self.model_dump()
         override_values = override.model_dump()
         updates: list[tuple[str, Any]] = []
 
         for field_name in explicitly_set:
-            if field_name == "cli_args":
-                updates.append((field_name, merge_cli_args(self.cli_args, override.cli_args)))
+            if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
+                updates.append((field_name, merge_tuples(base_values[field_name], override_values[field_name])))
             elif field_name == "permissions":
                 updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
             else:

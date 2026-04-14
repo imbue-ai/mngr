@@ -10,6 +10,16 @@ import paramiko
 import uvicorn
 from loguru import logger
 from pydantic import Field
+from supertokens_python import InputAppInfo
+from supertokens_python import SupertokensConfig
+from supertokens_python import init as supertokens_init
+from supertokens_python.recipe import emailpassword
+from supertokens_python.recipe import emailverification
+from supertokens_python.recipe import session as session_recipe
+from supertokens_python.recipe import thirdparty
+from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
+from supertokens_python.recipe.thirdparty.provider import ProviderConfig
+from supertokens_python.recipe.thirdparty.provider import ProviderInput
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
@@ -26,9 +36,10 @@ from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
 from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -40,11 +51,7 @@ _ONE_TIME_CODE_LENGTH: Final[int] = 32
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 
 
-
-_PROVIDER_HOST_DIR: Final[dict[str, str]] = {
-    "docker": "/mngr",
-    "modal": "/mngr",
-}
+_REMOTE_HOST_DIR: Final[str] = "/mngr"
 
 
 class AgentDiscoveryHandler(FrozenModel):
@@ -63,17 +70,17 @@ class AgentDiscoveryHandler(FrozenModel):
 
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         if ssh_info is not None:
-            self._handle_remote_agent(agent_id, ssh_info, provider_name)
+            self._handle_remote_agent(agent_id, ssh_info)
         else:
             self._handle_local_agent(agent_id)
 
     @staticmethod
-    def _remote_host_dir(provider_name: str) -> str:
-        """Return the mngr host directory for a provider, defaulting to ~/.mngr."""
-        return _PROVIDER_HOST_DIR.get(provider_name, "~/.mngr")
+    def _remote_host_dir() -> str:
+        """Return the mngr host directory for a remote provider."""
+        return _REMOTE_HOST_DIR
 
-    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo, provider_name: str) -> None:
-        host_dir = self._remote_host_dir(provider_name)
+    def _handle_remote_agent(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
+        host_dir = self._remote_host_dir()
         agent_state_dir = f"{host_dir}/agents/{agent_id}"
         try:
             remote_port = self.tunnel_manager.setup_reverse_tunnel(
@@ -137,6 +144,13 @@ def start_desktop_client(
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
+    # Initialize SuperTokens if configured
+    supertokens_session_store = _init_supertokens(
+        data_directory=data_directory,
+        host=host,
+        port=port,
+    )
+
     # Generate a one-time login URL for the user
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
     auth_store.add_one_time_code(code=code)
@@ -156,7 +170,9 @@ def start_desktop_client(
     # Register callback to set up reverse tunnels and write API URL files
     # when agents are discovered
     discovery_handler = AgentDiscoveryHandler(
-        tunnel_manager=tunnel_manager, server_port=port, data_dir=data_directory,
+        tunnel_manager=tunnel_manager,
+        server_port=port,
+        data_dir=data_directory,
     )
     stream_manager.add_on_agent_discovered_callback(discovery_handler)
     stream_manager.start()
@@ -175,6 +191,9 @@ def start_desktop_client(
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         stream_manager=stream_manager,
+        supertokens_session_store=supertokens_session_store,
+        server_port=port,
+        output_format=output_format,
     )
 
     if not is_no_browser:
@@ -194,27 +213,111 @@ def start_desktop_client(
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
+def _init_supertokens(
+    data_directory: Path,
+    host: str,
+    port: int,
+) -> SuperTokensSessionStore | None:
+    """Initialize the SuperTokens SDK and return a session store, or None if not configured."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        logger.info("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
+        return None
+
+    api_key = os.environ.get("SUPERTOKENS_API_KEY")
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    github_client_id = os.environ.get("GITHUB_CLIENT_ID")
+    github_client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+
+    # Build OAuth provider list
+    providers: list[ProviderInput] = []
+    if google_client_id and google_client_secret:
+        providers.append(
+            ProviderInput(
+                config=ProviderConfig(
+                    third_party_id="google",
+                    clients=[
+                        ProviderClientConfig(
+                            client_id=google_client_id,
+                            client_secret=google_client_secret,
+                        )
+                    ],
+                ),
+            )
+        )
+    if github_client_id and github_client_secret:
+        providers.append(
+            ProviderInput(
+                config=ProviderConfig(
+                    third_party_id="github",
+                    clients=[
+                        ProviderClientConfig(
+                            client_id=github_client_id,
+                            client_secret=github_client_secret,
+                        )
+                    ],
+                ),
+            )
+        )
+
+    api_domain = f"http://{host}:{port}"
+
+    supertokens_init(
+        supertokens_config=SupertokensConfig(
+            connection_uri=connection_uri,
+            api_key=api_key,
+        ),
+        app_info=InputAppInfo(
+            app_name="Minds",
+            api_domain=api_domain,
+            website_domain=api_domain,
+            api_base_path="/auth",
+            website_base_path="/auth",
+        ),
+        framework="fastapi",
+        recipe_list=[
+            session_recipe.init(),
+            emailpassword.init(),
+            thirdparty.init(
+                sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=providers),
+            )
+            if providers
+            else thirdparty.init(),
+            emailverification.init(mode="REQUIRED"),
+        ],
+        mode="asgi",
+    )
+
+    session_store = SuperTokensSessionStore(
+        data_directory=data_directory / "supertokens",
+    )
+    logger.info("SuperTokens initialized (core: {})", connection_uri)
+    return session_store
+
+
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:
-    """Build a CloudflareForwardingClient from environment variables, or None if not configured."""
+    """Build a CloudflareForwardingClient from environment variables, or None if not configured.
+
+    Only CLOUDFLARE_FORWARDING_URL is required. Basic Auth fields (username, secret,
+    owner_email) are optional and only used as a fallback when SuperTokens is not configured.
+    """
     forwarding_url = os.environ.get("CLOUDFLARE_FORWARDING_URL")
+    if not forwarding_url:
+        logger.info(
+            "Cloudflare forwarding not configured (CLOUDFLARE_FORWARDING_URL not set), tunnel features disabled"
+        )
+        return None
+
     username = os.environ.get("CLOUDFLARE_FORWARDING_USERNAME")
     secret = os.environ.get("CLOUDFLARE_FORWARDING_SECRET")
     owner_email = os.environ.get("OWNER_EMAIL")
 
-    if not all([forwarding_url, username, secret, owner_email]):
-        logger.info("Cloudflare forwarding not configured (missing env vars), tunnel features disabled")
-        return None
-
-    assert forwarding_url is not None
-    assert username is not None
-    assert secret is not None
-    assert owner_email is not None
-
     return CloudflareForwardingClient(
         forwarding_url=CloudflareForwardingUrl(forwarding_url),
-        username=CloudflareUsername(username),
-        secret=CloudflareSecret(secret),
-        owner_email=OwnerEmail(owner_email),
+        username=CloudflareUsername(username) if username else None,
+        secret=CloudflareSecret(secret) if secret else None,
+        owner_email=OwnerEmail(owner_email) if owner_email else None,
     )
 
 

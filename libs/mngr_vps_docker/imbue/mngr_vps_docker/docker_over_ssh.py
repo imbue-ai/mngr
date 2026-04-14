@@ -101,9 +101,7 @@ class DockerOverSsh(MutableModel):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
-            raise VpsConnectionError(
-                f"SSH command timed out after {timeout_seconds}s: {remote_command}"
-            ) from None
+            raise VpsConnectionError(f"SSH command timed out after {timeout_seconds}s: {remote_command}") from None
         if returncode != 0:
             error_output = "\n".join(collected_output[-50:])
             raise ContainerSetupError(f"Remote command failed (exit {returncode}): {error_output}")
@@ -212,7 +210,7 @@ class DockerOverSsh(MutableModel):
             logger.debug("Docker not ready on VPS {}: {}", self.vps_ip, e)
             return False
 
-    def upload_directory(self, local_path: Path, remote_path: str, timeout_seconds: float = 120.0) -> None:
+    def upload_directory(self, local_path: Path, remote_path: str, timeout_seconds: float = 300.0) -> None:
         """Upload a local directory to the VPS via rsync over SSH."""
         ssh_cmd = (
             f"ssh -i {shlex.quote(str(self.ssh_key_path))} "
@@ -226,6 +224,15 @@ class DockerOverSsh(MutableModel):
             "rsync",
             "-az",
             "--delete",
+            "--exclude=__pycache__",
+            "--exclude=.venv",
+            "--exclude=node_modules",
+            "--exclude=.mypy_cache",
+            "--exclude=.ruff_cache",
+            "--exclude=.pytest_cache",
+            "--exclude=.test_output",
+            "--exclude=htmlcov",
+            "--exclude=.test_durations",
             "-e",
             ssh_cmd,
             local_str,

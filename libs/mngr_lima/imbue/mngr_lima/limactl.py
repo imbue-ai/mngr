@@ -52,10 +52,10 @@ class _SerialLogTailerCallback(MutableModel):
             # Match an absolute path containing "serial" and ending with ".log".
             # limactl escapes quotes in its log output, so we match the path
             # directly rather than relying on surrounding quote characters.
-            match = re.search(r'(/\S+serial\S*\.log)', stripped)
+            match = re.search(r"(/\S+serial\S*\.log)", stripped)
             if match:
                 log_pattern = match.group(1)
-                serial_log = re.sub(r'\*', '', log_pattern)
+                serial_log = re.sub(r"\*", "", log_pattern)
                 self.tailer_started = True
                 _start_serial_tailer(self.cg, serial_log)
 

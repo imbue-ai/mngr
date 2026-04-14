@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
+from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
@@ -53,11 +54,14 @@ from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServerName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
@@ -364,13 +368,10 @@ async def _handle_toggle_global(
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
-    if cf_client is None:
-        return Response(
-            status_code=501,
-            content='{"error": "Cloudflare forwarding not configured"}',
-            media_type="application/json",
-        )
+    cf_client, error_response = get_cf_client_with_auth(request)
+    if error_response is not None:
+        return error_response
+    assert cf_client is not None
 
     try:
         body = await request.json()
@@ -1128,6 +1129,9 @@ def create_desktop_client(
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     stream_manager: MngrStreamManager | None = None,
+    supertokens_session_store: SuperTokensSessionStore | None = None,
+    server_port: int = 0,
+    output_format: OutputFormat | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1170,10 +1174,22 @@ def create_desktop_client(
     app.state.cloudflare_client = cloudflare_client
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
+    app.state.supertokens_session_store = supertokens_session_store
+    app.state.supertokens_server_port = server_port
+    app.state.supertokens_output_format = output_format or OutputFormat.JSONL
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
+
+    # Mount the SuperTokens auth routes
+    if supertokens_session_store is not None:
+        supertokens_router = create_supertokens_router(
+            session_store=supertokens_session_store,
+            server_port=server_port,
+            output_format=output_format or OutputFormat.JSONL,
+        )
+        app.include_router(supertokens_router)
 
     # Mount the REST API v1 router
     if paths is not None:

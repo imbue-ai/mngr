@@ -245,7 +245,6 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
     return wrapper
 
 
-
 class SandboxConfig(HostConfig):
     """Configuration parsed from build arguments."""
 
@@ -393,7 +392,6 @@ class ModalProviderInstance(BaseProviderInstance):
     # Modal's eventually consistent tag API for recently created sandboxes.
     _sandbox_cache_by_id: dict[HostId, SandboxInterface] = PrivateAttr(default_factory=dict)
     _sandbox_cache_by_name: dict[HostName, SandboxInterface] = PrivateAttr(default_factory=dict)
-    _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
     # Cache for host records read from the volume to avoid repeated reads
     _host_record_cache_by_id: dict[HostId, HostRecord] = PrivateAttr(default_factory=dict)
     # a reference to the ssh process, just in case we ever need it (and to prevent it from being garbage collected)
@@ -627,7 +625,7 @@ class ModalProviderInstance(BaseProviderInstance):
         logger.trace("Deleted agent records from state volume dir: {}", host_dir)
 
         # Clear cache entries for this host
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         self._host_record_cache_by_id.pop(host_id, None)
 
     def _delete_host_record(self, host_id: HostId) -> None:
@@ -643,7 +641,7 @@ class ModalProviderInstance(BaseProviderInstance):
         logger.trace("Deleted host record from volume: {}", path)
 
         # Clear cache entries for this host
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         self._host_record_cache_by_id.pop(host_id, None)
 
     def _clear_snapshots_from_host_record(self, host_id: HostId) -> None:
@@ -1464,7 +1462,7 @@ log "=== Shutdown script completed ==="
         This should be called when a host transitions state (e.g., from online to offline
         or vice versa) to ensure the next lookup returns the correct host type.
         """
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     def reset_caches(self) -> None:
         """Reset all caches on this instance.
@@ -1474,7 +1472,8 @@ log "=== Shutdown script completed ==="
         """
         self._sandbox_cache_by_id.clear()
         self._sandbox_cache_by_name.clear()
-        self._host_by_id_cache.clear()
+        for host_id in list(self._host_by_id_cache):
+            self._evict_cached_host(host_id)
         self._host_record_cache_by_id.clear()
         self._full_sandbox_list_cache = None
 
@@ -1578,6 +1577,14 @@ log "=== Shutdown script completed ==="
                     "Skipped sandbox {}: host record missing SSH info (likely failed host)", sandbox.get_object_id()
                 )
                 return None
+
+            # Reuse the cached Host if SSH details have not changed
+            cached = self._host_by_id_cache.get(host_id)
+            if isinstance(cached, Host):
+                cached_name = cached.connector.name
+                cached_port = cached.connector.host.data.get("ssh_port")
+                if cached_name == host_record.ssh_host and cached_port == host_record.ssh_port:
+                    return cached
 
             # Add the sandbox's host key to known_hosts so SSH connections will work
             with trace_span("Adding to known hosts {}", host_id, _is_trace_span_enabled=False):
@@ -1840,28 +1847,20 @@ log "=== Shutdown script completed ==="
         host_id = host.id if isinstance(host, HostInterface) else host
         logger.info("Stopping (terminating) Modal sandbox: {}", host_id)
 
-        # Disconnect the SSH connection before terminating the sandbox.
-        # This prevents stale socket state that can cause "Socket is closed" errors.
-        # We check the cache first, then fall back to the passed host object.
-        cached_host = self._host_by_id_cache.get(host_id)
-        if cached_host is not None and isinstance(cached_host, Host):
-            cached_host.disconnect()
-        elif isinstance(host, Host):
-            host.disconnect()
-        else:
-            # No Host instance available (e.g., only have a host_id string or HostInterface stub)
-            pass
-
         sandbox = self._find_sandbox_by_host_id(host_id)
-        if sandbox:
-            # Create a snapshot before termination if requested
-            if create_snapshot:
-                try:
-                    with log_span("Creating snapshot before termination", host_id=str(host_id)):
-                        self.create_snapshot(host_id, SnapshotName("stop"))
-                except (MngrError, ModalProxyError) as e:
-                    logger.warning("Failed to create snapshot before termination: {}", e)
+        if sandbox and create_snapshot:
+            try:
+                with log_span("Creating snapshot before termination", host_id=str(host_id)):
+                    self.create_snapshot(host_id, SnapshotName("stop"))
+            except (MngrError, ModalProxyError) as e:
+                logger.warning("Failed to create snapshot before termination: {}", e)
 
+        # Disconnect SSH after snapshot but before termination
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
+
+        if sandbox:
             try:
                 sandbox.terminate()
             except ModalProxyError as e:
@@ -2036,7 +2035,7 @@ log "=== Shutdown script completed ==="
         )
 
         # Cache the new online host
-        self._host_by_id_cache[host_id] = restored_host
+        self._evict_cached_host(host_id, replacement=restored_host)
 
         return restored_host
 
@@ -2076,7 +2075,7 @@ log "=== Shutdown script completed ==="
             host_name = HostName(host_record.certified_host_data.host_name)
             self._sandbox_cache_by_name.pop(host_name, None)
         self._sandbox_cache_by_id.pop(host_id, None)
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         self._host_record_cache_by_id.pop(host_id, None)
 
     # =========================================================================
@@ -2140,7 +2139,7 @@ log "=== Shutdown script completed ==="
 
         # finally save to the cache and return
         if host_obj is not None:
-            self._host_by_id_cache[host_obj.id] = host_obj
+            self._evict_cached_host(host_obj.id, replacement=host_obj)
             return host_obj
         # or raise:
         else:
@@ -2244,7 +2243,7 @@ log "=== Shutdown script completed ==="
 
         # add these hosts to a cache so we don't need to look them up by name or id again
         for host in hosts:
-            self._host_by_id_cache[host.id] = host
+            self._evict_cached_host(host.id, replacement=host)
 
         return [
             DiscoveredHost(

@@ -34,7 +34,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
-
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -281,11 +280,11 @@ def _build_mngr_create_command(
         case LaunchMode.DEV:
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
-            mngr_command.extend(["--new-host", "--template", "docker"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "docker"])
         case LaunchMode.LIMA:
-            mngr_command.extend(["--new-host", "--template", "lima"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "lima"])
         case LaunchMode.CLOUD:
-            mngr_command.extend(["--new-host", "--template", "vultr"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -329,7 +328,6 @@ def run_mngr_create(
         )
 
     return api_key
-
 
 
 class AgentCreator(MutableModel):
@@ -493,4 +491,3 @@ class AgentCreator(MutableModel):
                 self._errors[aid] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
-

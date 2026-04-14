@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import UploadFileSpec
 
@@ -26,32 +25,6 @@ def test_upload_file_spec_from_string_handles_whitespace() -> None:
 def test_upload_file_spec_from_string_raises_without_colon() -> None:
     with pytest.raises(ValueError, match="LOCAL:REMOTE format"):
         UploadFileSpec.from_string("/just/a/path")
-
-
-# === FileModificationSpec Tests ===
-
-
-def test_file_modification_spec_from_string_parses_remote_text_pair() -> None:
-    spec = FileModificationSpec.from_string("/remote/file:some text content")
-    assert spec.remote_path == Path("/remote/file")
-    assert spec.text == "some text content"
-
-
-def test_file_modification_spec_from_string_handles_whitespace_in_path() -> None:
-    spec = FileModificationSpec.from_string("  /remote/file  :text")
-    assert spec.remote_path == Path("/remote/file")
-    assert spec.text == "text"
-
-
-def test_file_modification_spec_from_string_preserves_text_with_colons() -> None:
-    spec = FileModificationSpec.from_string("/remote/file:text:with:colons")
-    assert spec.remote_path == Path("/remote/file")
-    assert spec.text == "text:with:colons"
-
-
-def test_file_modification_spec_from_string_raises_without_colon() -> None:
-    with pytest.raises(ValueError, match="REMOTE:TEXT format"):
-        FileModificationSpec.from_string("/just/a/path")
 
 
 # === NamedCommand Tests ===

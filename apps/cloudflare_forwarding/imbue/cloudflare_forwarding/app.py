@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import secrets as secrets_module
+from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import NoReturn
@@ -25,6 +26,14 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 from pydantic import Field
+from supertokens_python import InputAppInfo
+from supertokens_python import SupertokensConfig
+from supertokens_python import init as supertokens_init
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
+from supertokens_python.recipe import session as st_session_recipe
+from supertokens_python.recipe.emailverification import EmailVerificationClaim
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import get_session_without_request_response
 
 logger = logging.getLogger(__name__)
 
@@ -711,11 +720,13 @@ class ForwardingCtx:
         self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
-        rules.append({
-            "hostname": hostname,
-            "service": service_url,
-            "originRequest": {"noTLSVerify": True},
-        })
+        rules.append(
+            {
+                "hostname": hostname,
+                "service": service_url,
+                "originRequest": {"noTLSVerify": True},
+            }
+        )
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
         self._apply_default_access_policy(tunnel_name, hostname)
@@ -884,11 +895,35 @@ class ForwardingCtx:
 
 
 def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
-    """Authenticate a request. Returns AdminAuth or AgentAuth."""
+    """Authenticate a request. Returns AdminAuth or AgentAuth.
+
+    Supports three auth methods:
+    1. Basic Auth (admin credentials from USER_CREDENTIALS)
+    2. Bearer token (base64-encoded tunnel token for agent auth)
+    3. Bearer token (SuperTokens JWT for user auth -- treated as admin)
+    """
     auth_header = request.headers.get("authorization", "")
 
     if auth_header.lower().startswith("bearer "):
-        return _authenticate_agent(auth_header[7:], ops)
+        token = auth_header[7:]
+        # Try tunnel token first
+        agent_exc: HTTPException | None = None
+        try:
+            return _authenticate_agent(token, ops)
+        except HTTPException as exc:
+            agent_exc = exc
+        # Only try SuperTokens JWT if it is configured; otherwise preserve the
+        # original agent auth error so callers receive a meaningful message.
+        if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+            assert agent_exc is not None
+            raise agent_exc
+        # If SuperTokens also fails, re-raise the original agent auth error so
+        # callers receive the most specific and useful error message.
+        try:
+            return _authenticate_supertokens(token)
+        except HTTPException:
+            assert agent_exc is not None
+            raise agent_exc from None
 
     if auth_header.lower().startswith("basic "):
         return _authenticate_admin(auth_header)
@@ -932,6 +967,42 @@ def _authenticate_agent(token: str, ops: CloudflareOps) -> AgentAuth:
         raise HTTPException(status_code=401, detail="Invalid tunnel token: tunnel not found")
 
     return AgentAuth(tunnel_id=tunnel_id, tunnel_name=tunnel["name"])
+
+
+_USER_ID_PREFIX_LENGTH = 16
+
+
+def _authenticate_supertokens(
+    token: str,
+    session_getter: Callable[..., Any] = get_session_without_request_response,
+) -> AdminAuth:
+    """Validate a SuperTokens JWT access token. Returns AdminAuth with user_id_prefix as username."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        raise HTTPException(status_code=401, detail="SuperTokens not configured")
+
+    try:
+        session = session_getter(
+            access_token=token,
+            anti_csrf_check=False,
+        )
+    except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
+
+    # Reject tokens where the email is not verified
+    payload = session.get_access_token_payload()
+    is_verified = EmailVerificationClaim.get_value_from_payload(payload)
+    if not is_verified:
+        raise HTTPException(status_code=401, detail="Email not verified")
+
+    user_id = session.get_user_id()
+    # Derive 16-char hex prefix from UUID
+    user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+    return AdminAuth(username=user_id_prefix)
 
 
 def require_admin(auth: AuthResult) -> AdminAuth:
@@ -1130,11 +1201,42 @@ def set_service_auth(request: Request, tunnel_name: str, service_name: str, body
 # Modal deployment
 # ---------------------------------------------------------------------------
 
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx")
+image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx", "supertokens-python")
 app = modal.App(name="cloudflare-forwarding", image=image)
 
 
-@app.function(secrets=[modal.Secret.from_name("cloudflare-forwarding-secrets")])
+def _init_supertokens() -> None:
+    """Initialize SuperTokens SDK for JWT validation if configured."""
+    connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+    if not connection_uri:
+        return
+
+    api_key = os.environ.get("SUPERTOKENS_API_KEY")
+
+    supertokens_init(
+        supertokens_config=SupertokensConfig(
+            connection_uri=connection_uri,
+            api_key=api_key,
+        ),
+        app_info=InputAppInfo(
+            app_name="CloudflareForwarding",
+            api_domain="https://cloudflare-forwarding.modal.run",
+            website_domain="https://cloudflare-forwarding.modal.run",
+            api_base_path="/auth",
+            website_base_path="/auth",
+        ),
+        framework="fastapi",
+        recipe_list=[st_session_recipe.init()],
+        mode="asgi",
+    )
+    logger.info("SuperTokens SDK initialized for JWT validation")
+
+
+@app.function(secrets=[
+    modal.Secret.from_name("cloudflare-forwarding-secrets"),
+    modal.Secret.from_name("supertokens-secrets"),
+])
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
+    _init_supertokens()
     return web_app

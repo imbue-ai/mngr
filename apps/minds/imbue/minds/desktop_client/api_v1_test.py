@@ -794,5 +794,3 @@ def test_cloudflare_disable_returns_200_on_success(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
-
-
