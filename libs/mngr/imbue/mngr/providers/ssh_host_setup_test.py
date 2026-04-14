@@ -402,3 +402,35 @@ def test_has_running_agent_sessions_returns_false_when_agents_exist_but_no_sessi
     # doesn't cause a false positive on freshly started CI runners.
     result = _run_bash_function(script_path, str(tmp_path), "AGENT_SESSION_GRACE_PERIOD=0\nhas_running_agent_sessions")
     assert result.returncode != 0
+
+
+def test_get_activity_sources_returns_empty_when_no_data_json(tmp_path: Path) -> None:
+    """get_activity_sources should return empty when data.json doesn't exist."""
+    script_path = _get_activity_watcher_script_path()
+    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
+def test_get_activity_sources_returns_empty_when_disabled(tmp_path: Path) -> None:
+    """get_activity_sources should return empty when activity_sources is an empty array (disabled mode)."""
+    data_json = tmp_path / "data.json"
+    data_json.write_text(json.dumps({"activity_sources": []}))
+
+    script_path = _get_activity_watcher_script_path()
+    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
+def test_get_activity_sources_returns_sources_when_configured(tmp_path: Path) -> None:
+    """get_activity_sources should return space-separated lowercase sources when configured."""
+    data_json = tmp_path / "data.json"
+    data_json.write_text(json.dumps({"activity_sources": ["BOOT", "AGENT"]}))
+
+    script_path = _get_activity_watcher_script_path()
+    result = _run_bash_function(script_path, str(tmp_path), "get_activity_sources")
+    assert result.returncode == 0
+    sources = result.stdout.strip().split()
+    assert "boot" in sources
+    assert "agent" in sources

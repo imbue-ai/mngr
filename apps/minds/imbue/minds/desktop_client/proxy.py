@@ -79,6 +79,9 @@ self.addEventListener('fetch', (event) => {{
 
   if (url.pathname.endsWith('__sw.js')) return;
 
+  // Don't intercept auth API calls -- they must reach the minds backend directly
+  if (url.pathname.startsWith('/auth/')) return;
+
   url.pathname = PREFIX + url.pathname;
 
   async function forwardRequest() {{

@@ -3,9 +3,13 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from starlette.testclient import TestClient
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 
 import imbue.cloudflare_forwarding.app as app_mod
+from imbue.cloudflare_forwarding.app import AdminAuth
 from imbue.cloudflare_forwarding.app import AuthPolicy
 from imbue.cloudflare_forwarding.app import CloudflareApiError
 from imbue.cloudflare_forwarding.app import InvalidTunnelComponentError
@@ -13,6 +17,7 @@ from imbue.cloudflare_forwarding.app import ServiceNotFoundError
 from imbue.cloudflare_forwarding.app import TunnelComponentTooLongError
 from imbue.cloudflare_forwarding.app import TunnelNotFoundError
 from imbue.cloudflare_forwarding.app import TunnelOwnershipError
+from imbue.cloudflare_forwarding.app import _authenticate_supertokens
 from imbue.cloudflare_forwarding.app import cf_check
 from imbue.cloudflare_forwarding.app import cf_list_all_pages
 from imbue.cloudflare_forwarding.app import extract_service_name
@@ -437,3 +442,122 @@ def test_tunnel_component_too_long_error_message() -> None:
     assert "Username" in str(exc_info.value)
     assert "toolong" in str(exc_info.value)
     assert "5" in str(exc_info.value)
+
+
+# -- _authenticate_supertokens tests --
+
+
+class _FakeSession:
+    """Minimal mock for supertokens SessionContainer."""
+
+    def __init__(self, user_id: str, email_verified: bool = True) -> None:
+        self._user_id = user_id
+        self._email_verified = email_verified
+
+    def get_user_id(self) -> str:
+        return self._user_id
+
+    def get_access_token_payload(self) -> dict[str, object]:
+        return {"st-ev": {"v": self._email_verified, "t": 0}}
+
+
+def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid token returns AdminAuth whose username is the first 16 hex chars of the user ID."""
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    result = _authenticate_supertokens(
+        "valid-token",
+        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
+    )
+    assert isinstance(result, AdminAuth)
+    assert result.username == "a1b2c3d4e5f67890"
+
+
+def test_authenticate_supertokens_raises_401_when_email_not_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the email is not verified, raises 401."""
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens(
+            "valid-token",
+            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
+        )
+    assert exc_info.value.status_code == 401
+    assert "verified" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_raises_401_when_email_verification_claim_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the email verification claim is absent from the payload, raises 401."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    class _SessionNoClaim:
+        def get_user_id(self) -> str:
+            return "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+
+        def get_access_token_payload(self) -> dict[str, object]:
+            return {}
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens("valid-token", session_getter=lambda **kwargs: _SessionNoClaim())
+    assert exc_info.value.status_code == 401
+    assert "verified" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_raises_401_when_connection_uri_not_set() -> None:
+    """When SUPERTOKENS_CONNECTION_URI is absent, raises 401."""
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens(
+            "any-token",
+            session_getter=lambda **kwargs: _FakeSession("ignored"),
+        )
+    assert exc_info.value.status_code == 401
+    assert "not configured" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_raises_401_when_session_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the session getter returns None, raises 401."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens(
+            "expired-token",
+            session_getter=lambda **kwargs: None,
+        )
+    assert exc_info.value.status_code == 401
+
+
+def test_authenticate_supertokens_raises_401_on_session_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the session getter raises SuperTokensSessionError, raises 401."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    def _raise(**kwargs: object) -> None:
+        raise SuperTokensSessionError("bad session")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens("bad-token", session_getter=_raise)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid token"
+
+
+def test_authenticate_supertokens_raises_401_on_general_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the SDK is not initialized (GeneralError), raises 401 instead of 500."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    def _raise(**kwargs: object) -> None:
+        raise SuperTokensGeneralError("Initialisation not done")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authenticate_supertokens("bad-token", session_getter=_raise)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid token"

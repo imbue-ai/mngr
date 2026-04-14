@@ -185,7 +185,9 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     </script>
     {% else %}
       {% if is_discovering %}
-    <p class="empty-state">Discovering agents...</p>
+    <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">
+      <p class="empty-state" style="padding: 0;">Discovering agents...</p>
+    </div>
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
     <div style="text-align: center; padding: 48px 0;">

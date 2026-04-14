@@ -23,6 +23,8 @@ from pyinfra.api.command import StringCommand
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -39,7 +41,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.primitives import ActivitySource
@@ -1372,98 +1373,6 @@ def test_provision_agent_upload_files(host_with_temp_dir: tuple[Host, Path], tmp
     assert remote_path.read_text() == "uploaded content"
 
 
-def test_provision_agent_append_to_existing_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent appends text to existing files."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "append.txt"
-    target_file.parent.mkdir(parents=True)
-    target_file.write_text("existing content\n")
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-append"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended text"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.read_text() == "existing content\nappended text"
-
-
-def test_provision_agent_append_to_new_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent creates file when appending to non-existent file."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "new_append.txt"
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-append-new"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            create_directories=(target_file.parent,),
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="new content"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.exists()
-    assert target_file.read_text() == "new content"
-
-
-def test_provision_agent_prepend_to_existing_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent prepends text to existing files."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "prepend.txt"
-    target_file.parent.mkdir(parents=True)
-    target_file.write_text("existing content")
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-prepend"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended: "),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.read_text() == "prepended: existing content"
-
-
-def test_provision_agent_prepend_to_new_file(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent creates file when prepending to non-existent file."""
-    host, temp_dir = host_with_temp_dir
-    agent = _create_minimal_agent(host, temp_dir)
-
-    target_file = temp_dir / "provision_test" / "new_prepend.txt"
-
-    options = CreateAgentOptions(
-        name=AgentName("prov-prepend-new"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            create_directories=(target_file.parent,),
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="new content"),),
-        ),
-    )
-
-    host.provision_agent(agent, options, host.mngr_ctx)
-
-    assert target_file.exists()
-    assert target_file.read_text() == "new content"
-
-
 def test_provision_agent_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
     """Test that provision_agent runs extra provision commands."""
     host, temp_dir = host_with_temp_dir
@@ -1578,7 +1487,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
 
     provision_dir = temp_dir / "provision_combined"
     remote_upload = provision_dir / "uploaded.txt"
-    append_file = provision_dir / "appended.txt"
     marker_file = provision_dir / "marker.txt"
 
     options = CreateAgentOptions(
@@ -1588,7 +1496,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
         provisioning=AgentProvisioningOptions(
             create_directories=(provision_dir,),
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=remote_upload),),
-            append_to_files=(FileModificationSpec(remote_path=append_file, text="appended content"),),
             extra_provision_commands=(f"echo 'marker' > {marker_file}",),
         ),
     )
@@ -1598,7 +1505,6 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
     # Verify all operations completed
     assert provision_dir.exists()
     assert remote_upload.read_text() == "uploaded"
-    assert append_file.read_text() == "appended content"
     assert marker_file.read_text().strip() == "marker"
 
 
@@ -1637,9 +1543,7 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
     The order should be:
     1. Create directories
     2. Upload files
-    3. Append to files
-    4. Prepend to files
-    5. Extra provision commands
+    3. Extra provision commands
     """
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
@@ -1661,23 +1565,16 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
             create_directories=(provision_dir,),
             # 2. Upload files - puts base content in place
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=target_file),),
-            # 3. Append - adds to end of uploaded content
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended\n"),),
-            # 4. Prepend - adds to beginning
-            prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended\n"),),
-            # 5. Extra provision commands - run last, can verify final state
+            # 3. Extra provision commands - run last, can verify final state
             extra_provision_commands=(f"cat {target_file} > {log_file}",),
         ),
     )
 
     host.provision_agent(agent, options, host.mngr_ctx)
 
-    # Verify the final order in the file
-    content = target_file.read_text()
-    assert content == "prepended\nuploaded\nappended\n"
-
-    # Log file should have captured the same content
-    assert log_file.read_text() == content
+    # Verify upload happened and extra command could read the file
+    assert target_file.read_text() == "uploaded\n"
+    assert log_file.read_text() == "uploaded\n"
 
 
 # =============================================================================
@@ -2877,3 +2774,165 @@ def test_create_work_dir_cross_host_generates_unique_paths(
     assert str(work_dir_2).startswith(str(target_host.host_dir / "projects"))
     assert work_dir_1 != work_dir_2
     assert (work_dir_2 / "file.txt").read_text() == "content"
+
+
+# =============================================================================
+# Agent Type Provisioning Integration Tests
+# =============================================================================
+
+
+def test_provision_agent_applies_agent_type_provisioning_fields(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """Agent type provisioning fields should be applied during provision_agent.
+
+    Verifies that extra_provision_command, env, and create_directory fields
+    from an agent type config are merged into CreateAgentOptions and executed
+    during provisioning.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    agent_type_name = AgentTypeName("my-custom-type")
+    marker_file = temp_dir / "agent_type_provision" / "marker.txt"
+    env_output_file = temp_dir / "agent_type_provision" / "env_output.txt"
+
+    # Configure the agent type with provisioning fields
+    agent_type_config = AgentTypeConfig(
+        extra_provision_command=(
+            f"echo 'agent_type_ran' > {marker_file}",
+            f"echo $CUSTOM_ENV_VAR > {env_output_file}",
+        ),
+        env=("CUSTOM_ENV_VAR=from_agent_type",),
+        create_directory=(str(marker_file.parent),),
+    )
+
+    # Create a new mngr_ctx with the agent type configured
+    updated_agent_types = {**host.mngr_ctx.config.agent_types, agent_type_name: agent_type_config}
+    updated_config = host.mngr_ctx.config.model_copy_update(
+        to_update(host.mngr_ctx.config.field_ref().agent_types, updated_agent_types),
+    )
+    updated_ctx = host.mngr_ctx.model_copy_update(
+        to_update(host.mngr_ctx.field_ref().config, updated_config),
+    )
+
+    agent = _create_minimal_agent(host, temp_dir)
+
+    options = CreateAgentOptions(
+        name=AgentName("prov-agent-type"),
+        agent_type=agent_type_name,
+        command=CommandString("sleep 1"),
+    )
+
+    host.provision_agent(agent, options, updated_ctx)
+
+    # Verify agent type provisioning was applied
+    assert marker_file.exists()
+    assert "agent_type_ran" in marker_file.read_text()
+    assert env_output_file.exists()
+    assert "from_agent_type" in env_output_file.read_text()
+
+
+def test_provision_agent_type_provisioning_stacks_with_cli(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """CLI provisioning options should stack on top of agent type provisioning.
+
+    Agent type commands run first (prepended), then CLI commands.
+    CLI env vars come after agent type env vars so they can override.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    agent_type_name = AgentTypeName("stacking-type")
+    output_file = temp_dir / "stacking_test" / "order.txt"
+
+    agent_type_config = AgentTypeConfig(
+        extra_provision_command=(f"echo 'agent_type_first' > {output_file}",),
+        env=("STACKING_VAR=from_type",),
+        create_directory=(str(output_file.parent),),
+    )
+
+    updated_agent_types = {**host.mngr_ctx.config.agent_types, agent_type_name: agent_type_config}
+    updated_config = host.mngr_ctx.config.model_copy_update(
+        to_update(host.mngr_ctx.config.field_ref().agent_types, updated_agent_types),
+    )
+    updated_ctx = host.mngr_ctx.model_copy_update(
+        to_update(host.mngr_ctx.field_ref().config, updated_config),
+    )
+
+    agent = _create_minimal_agent(host, temp_dir)
+
+    options = CreateAgentOptions(
+        name=AgentName("prov-stack"),
+        agent_type=agent_type_name,
+        command=CommandString("sleep 1"),
+        environment=AgentEnvironmentOptions(
+            env_vars=(EnvVar(key="STACKING_VAR", value="from_cli"),),
+        ),
+        provisioning=AgentProvisioningOptions(
+            extra_provision_commands=(f"echo 'cli_second' >> {output_file}",),
+        ),
+    )
+
+    host.provision_agent(agent, options, updated_ctx)
+
+    assert output_file.exists()
+    lines = output_file.read_text().strip().split("\n")
+    assert lines[0] == "agent_type_first"
+    assert lines[1] == "cli_second"
+
+    # CLI env var should override agent type env var (since it comes later in the tuple,
+    # and _collect_agent_env_vars iterates env_vars in order with later values winning)
+    env_path = host.get_agent_env_path(agent)
+    env_content = env_path.read_text()
+    assert "STACKING_VAR=from_cli" in env_content
+
+
+def test_provision_agent_inherits_parent_type_provisioning(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """Child agent types should inherit provisioning fields from their parent type.
+
+    When [agent_types.generic] has extra_provision_command, a child type
+    with parent_type = "generic" should inherit those commands even if
+    the child doesn't define its own provisioning fields.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    parent_type = AgentTypeName("generic")
+    child_type = AgentTypeName("child-of-generic")
+    marker_file = temp_dir / "parent_inherit_test" / "marker.txt"
+
+    parent_config = AgentTypeConfig(
+        extra_provision_command=(f"echo 'from_parent' > {marker_file}",),
+        create_directory=(str(marker_file.parent),),
+    )
+    child_config = AgentTypeConfig(
+        parent_type=parent_type,
+        cli_args=("--some-flag",),
+    )
+
+    updated_agent_types = {
+        **host.mngr_ctx.config.agent_types,
+        parent_type: parent_config,
+        child_type: child_config,
+    }
+    updated_config = host.mngr_ctx.config.model_copy_update(
+        to_update(host.mngr_ctx.config.field_ref().agent_types, updated_agent_types),
+    )
+    updated_ctx = host.mngr_ctx.model_copy_update(
+        to_update(host.mngr_ctx.field_ref().config, updated_config),
+    )
+
+    agent = _create_minimal_agent(host, temp_dir)
+
+    options = CreateAgentOptions(
+        name=AgentName("prov-inherit"),
+        agent_type=child_type,
+        command=CommandString("sleep 1"),
+    )
+
+    host.provision_agent(agent, options, updated_ctx)
+
+    # Parent's provisioning commands should have been executed
+    assert marker_file.exists()
+    assert "from_parent" in marker_file.read_text()

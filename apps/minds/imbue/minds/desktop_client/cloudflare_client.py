@@ -43,18 +43,43 @@ class OwnerEmail(NonEmptyStr):
 class CloudflareForwardingClient(FrozenModel):
     """Client for interacting with the Cloudflare forwarding API.
 
-    Uses Basic auth (admin credentials) for tunnel creation and management.
+    Supports two auth modes:
+    - Basic auth (admin credentials) via username/secret fields
+    - Bearer auth (SuperTokens JWT) via supertokens_token/supertokens_user_id_prefix fields
+
+    When SuperTokens fields are set, they take priority over Basic auth.
     """
 
     forwarding_url: CloudflareForwardingUrl = Field(description="Base URL of the cloudflare_forwarding API")
-    username: CloudflareUsername = Field(description="Username for admin Basic auth")
-    secret: CloudflareSecret = Field(description="Secret for admin Basic auth")
-    owner_email: OwnerEmail = Field(description="Email for default Google OAuth policy")
+    username: CloudflareUsername | None = Field(default=None, description="Username for admin Basic auth")
+    secret: CloudflareSecret | None = Field(default=None, description="Secret for admin Basic auth")
+    owner_email: OwnerEmail | None = Field(default=None, description="Email for default Google OAuth policy")
+    supertokens_token: str | None = Field(default=None, description="SuperTokens JWT access token for Bearer auth")
+    supertokens_user_id_prefix: str | None = Field(
+        default=None, description="First 16 hex chars of SuperTokens user ID for tunnel naming",
+    )
+    supertokens_email: str | None = Field(default=None, description="Email from SuperTokens session for access policies")
 
     def _auth_header(self) -> str:
-        """Build the Basic auth header value."""
-        credentials = f"{self.username}:{self.secret}"
-        return "Basic " + base64.b64encode(credentials.encode()).decode()
+        """Build the auth header value. Prefers SuperTokens Bearer token over Basic auth."""
+        if self.supertokens_token:
+            return f"Bearer {self.supertokens_token}"
+        if self.username and self.secret:
+            credentials = f"{self.username}:{self.secret}"
+            return "Basic " + base64.b64encode(credentials.encode()).decode()
+        raise ValueError("No auth credentials configured for cloudflare_forwarding")
+
+    def effective_owner_email(self) -> str | None:
+        """Return the email to use for default access policies."""
+        return self.supertokens_email or (str(self.owner_email) if self.owner_email else None)
+
+    def _effective_username(self) -> str:
+        """Return the username for tunnel naming."""
+        if self.supertokens_user_id_prefix:
+            return self.supertokens_user_id_prefix
+        if self.username:
+            return str(self.username)
+        raise ValueError("No username configured for tunnel naming")
 
     @staticmethod
     def _truncate_agent_id(agent_id: AgentId) -> str:
@@ -63,7 +88,7 @@ class CloudflareForwardingClient(FrozenModel):
 
     def make_tunnel_name(self, agent_id: AgentId) -> str:
         """Build the tunnel name for an agent."""
-        return f"{self.username}--{self._truncate_agent_id(agent_id)}"
+        return f"{self._effective_username()}--{self._truncate_agent_id(agent_id)}"
 
     def create_tunnel(self, agent_id: AgentId) -> tuple[str | None, str]:
         """Create a Cloudflare tunnel for the agent and return (token, message).
@@ -72,18 +97,22 @@ class CloudflareForwardingClient(FrozenModel):
         Returns (token, success_message) on success, or (None, error_message) on failure.
         """
         tunnel_name = self.make_tunnel_name(agent_id)
+        owner_email = self.effective_owner_email()
+        default_policy: dict[str, object] | None = None
+        if owner_email:
+            default_policy = {
+                "rules": [
+                    {"action": "allow", "include": [{"email": {"email": owner_email}}]},
+                ],
+            }
+        request_body: dict[str, object] = {"agent_id": str(agent_id)}
+        if default_policy:
+            request_body["default_auth_policy"] = default_policy
         try:
             response = httpx.post(
                 f"{self.forwarding_url}/tunnels",
                 headers={"Authorization": self._auth_header()},
-                json={
-                    "agent_id": str(agent_id),
-                    "default_auth_policy": {
-                        "rules": [
-                            {"action": "allow", "include": [{"email": {"email": str(self.owner_email)}}]},
-                        ],
-                    },
-                },
+                json=request_body,
                 timeout=30.0,
             )
             if response.status_code not in (200, 201):
