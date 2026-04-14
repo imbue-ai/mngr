@@ -804,9 +804,11 @@ function toggleSidebar() {
 
 function selectWorkspace(agentId) {
   navigateContent('/forwarding/' + agentId + '/');
-  // Close sidebar
+  // Close sidebar. In Electron, navigate-content already removes the sidebar
+  // WebContentsView on the main process side, so only reset the local state flag
+  // without sending another toggle-sidebar IPC (which would re-create it).
   if (isElectron) {
-    if (sidebarOpen) { window.minds.toggleSidebar(); sidebarOpen = false; }
+    sidebarOpen = false;
   } else {
     sidebarOpen = false;
     document.getElementById('sidebar-panel').classList.remove('sidebar-visible');
