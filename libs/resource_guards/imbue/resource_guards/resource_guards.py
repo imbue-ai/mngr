@@ -81,10 +81,21 @@ def register_resource_guard(name: str) -> None:
     mark name (e.g., register_resource_guard("tmux") guards the tmux binary
     and enforces @pytest.mark.tmux).
 
+    The corresponding pytest mark is auto-registered by conftest_hooks during
+    pytest_configure, so a separate register_marker() call is not needed.
+
     Duplicate registrations are ignored.
     """
     if name not in _guarded_resources:
         _guarded_resources.append(name)
+
+
+def get_guarded_resource_names() -> list[str]:
+    """Return the list of guarded resource names (binary + SDK guards).
+
+    Used by conftest_hooks to auto-register pytest marks for guarded resources.
+    """
+    return list(_guarded_resources)
 
 
 def generate_wrapper_script(resource: str, real_path: str) -> str:

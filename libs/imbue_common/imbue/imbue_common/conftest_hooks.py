@@ -50,6 +50,7 @@ from coverage.exceptions import CoverageException
 
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.resource_guards.resource_guards import get_guarded_resource_names
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -148,6 +149,8 @@ _SHARED_FILTER_WARNINGS: Final[list[str]] = [
     r"ignore:Module imbue\..* was previously imported, but not measured:coverage.exceptions.CoverageWarning",
     # record_xml_attribute is marked experimental but we rely on it for JUnit test ID customization.
     "ignore::pytest.PytestExperimentalApiWarning",
+    # Promote unknown-mark warnings to errors so unregistered marks are caught immediately.
+    "error::pytest.PytestUnknownMarkWarning",
 ]
 
 # Lines matching any of these patterns are excluded from coverage measurement.
@@ -597,6 +600,16 @@ def _pytest_configure(config: pytest.Config) -> None:
     # Register shared markers and any additional markers from register_marker()
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
+
+    # Auto-register marks for guarded resources so projects that call
+    # register_resource_guard() don't also need a separate register_marker().
+    registered_names = {m.split(":")[0].strip() for m in _SHARED_MARKERS + _registered_markers}
+    for name in get_guarded_resource_names():
+        if name not in registered_names:
+            config.addinivalue_line(
+                "markers",
+                f"{name}: marks tests that use the {name} resource (auto-registered by resource guard)",
+            )
 
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:

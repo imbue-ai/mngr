@@ -23,7 +23,7 @@ mngr provides Docker guards out of the box (in `imbue.mngr.register_guards_docke
 
 ## Setup
 
-In your `conftest.py`, register each resource you want to guard. You need two things per resource: a **marker** (so pytest knows about the mark) and a **guard** (so the enforcement hooks are installed).
+In your `conftest.py`, register each resource you want to guard. The corresponding pytest mark is auto-registered during `pytest_configure`, so you only need to register the guard itself.
 
 ```python
 # conftest.py
@@ -33,11 +33,8 @@ from imbue.resource_guards.resource_guards import (
     stop_resource_guards,
 )
 
-# Register a binary guard for tmux
+# Register a binary guard for tmux (also registers @pytest.mark.tmux automatically)
 register_resource_guard("tmux")
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "tmux: marks tests that use tmux")
 
 def pytest_sessionstart(session):
     start_resource_guards(session)
