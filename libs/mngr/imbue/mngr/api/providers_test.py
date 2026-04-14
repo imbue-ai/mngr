@@ -364,9 +364,9 @@ def test_get_all_provider_instances_skips_unavailable_default_backend(
 
         providers = get_all_provider_instances(mngr_ctx)
 
-        provider_names = [str(p.name) for p in providers]
-        assert str(_UNAVAILABLE_BACKEND_NAME) not in provider_names
-        assert "local" in provider_names
+        provider_names = [p.name for p in providers]
+        assert ProviderInstanceName(str(_UNAVAILABLE_BACKEND_NAME)) not in provider_names
+        assert LOCAL_PROVIDER_NAME in provider_names
     finally:
         del _backend_registry[_UNAVAILABLE_BACKEND_NAME]
         del _provider_config_registry[_UNAVAILABLE_BACKEND_NAME]
