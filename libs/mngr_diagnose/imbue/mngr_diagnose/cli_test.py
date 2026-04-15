@@ -14,7 +14,7 @@ from imbue.mngr_diagnose.cli import diagnose
 
 
 def test_get_mngr_version() -> None:
-    """_get_mngr_version returns a version string."""
+    """get_mngr_version returns a version string."""
     version = get_mngr_version()
     assert isinstance(version, str)
     assert len(version) > 0
