@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from typing import cast
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import CellDisplay
@@ -10,7 +9,8 @@ from imbue.mngr_kanpan.testing import make_agent_details
 
 
 def _make_ctx() -> MngrContext:
-    return cast(MngrContext, SimpleNamespace())
+    ctx: MngrContext = SimpleNamespace()  # ty: ignore[invalid-assignment]
+    return ctx
 
 
 def test_labels_data_source_is_not_remote() -> None:

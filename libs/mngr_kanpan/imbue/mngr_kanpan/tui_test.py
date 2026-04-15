@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from typing import cast
 
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
@@ -937,7 +936,7 @@ def test_refresh_display_none_snapshot() -> None:
 def test_load_user_commands_from_custom_command_instance() -> None:
     cmd = CustomCommand(name="my-cmd", command="echo hi")
     config = KanpanPluginConfig(commands={"c": cmd})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx: MngrContext = SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-assignment]
     result = _load_user_commands(ctx)
     assert "c" in result
     assert result["c"].name == "my-cmd"
@@ -945,14 +944,14 @@ def test_load_user_commands_from_custom_command_instance() -> None:
 
 def test_load_user_commands_from_dict() -> None:
     config = KanpanPluginConfig(commands={"c": CustomCommand(name="my-cmd", command="echo hi")})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx: MngrContext = SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-assignment]
     result = _load_user_commands(ctx)
     assert "c" in result
 
 
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx: MngrContext = SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-assignment]
     result = _build_command_map(ctx)
     # "r" is the builtin refresh key; "q" is quit and not a mapped command
     assert "r" in result
@@ -962,7 +961,7 @@ def test_build_command_map_includes_builtins() -> None:
 def test_build_command_map_user_overrides_builtin() -> None:
     custom = CustomCommand(name="my-refresh", command="echo refresh")
     config = KanpanPluginConfig(commands={_BUILTIN_COMMAND_KEY_REFRESH: custom})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx: MngrContext = SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-assignment]
     result = _build_command_map(ctx)
     assert result[_BUILTIN_COMMAND_KEY_REFRESH].name == "my-refresh"
 
@@ -970,7 +969,7 @@ def test_build_command_map_user_overrides_builtin() -> None:
 def test_build_command_map_excludes_disabled() -> None:
     disabled = CustomCommand(name="disabled-cmd", enabled=False)
     config = KanpanPluginConfig(commands={"z": disabled})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx: MngrContext = SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-assignment]
     result = _build_command_map(ctx)
     assert "z" not in result
 
