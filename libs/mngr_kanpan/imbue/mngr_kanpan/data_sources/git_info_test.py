@@ -1,7 +1,6 @@
 from pathlib import Path
 from subprocess import TimeoutExpired
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -84,7 +83,7 @@ def test_compute_local_agent_with_upstream(temp_git_repo: Path) -> None:
     ds = GitInfoDataSource()
     agent = make_agent_details(name="agent-1", provider_name="local", work_dir=temp_git_repo)
     with ConcurrencyGroup(name="test") as cg:
-        ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+        ctx: MngrContext = SimpleNamespace(concurrency_group=cg)  # ty: ignore[invalid-assignment]
         fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
@@ -98,7 +97,7 @@ def test_compute_remote_agent_no_work_dir() -> None:
     ds = GitInfoDataSource()
     agent = make_agent_details(name="agent-1", provider_name="modal")
     with ConcurrencyGroup(name="test") as cg:
-        ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+        ctx: MngrContext = SimpleNamespace(concurrency_group=cg)  # ty: ignore[invalid-assignment]
         fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
@@ -116,7 +115,7 @@ def test_compute_nonexistent_work_dir() -> None:
         work_dir=Path("/nonexistent/dir/that/does/not/exist"),
     )
     with ConcurrencyGroup(name="test") as cg:
-        ctx = cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+        ctx: MngrContext = SimpleNamespace(concurrency_group=cg)  # ty: ignore[invalid-assignment]
         fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
