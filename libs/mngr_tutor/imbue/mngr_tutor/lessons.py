@@ -117,30 +117,6 @@ LESSON_REMOTE_AGENTS = Lesson(
             ),
         ),
         LessonStep(
-            heading="Pull changes back to your local machine",
-            details=dedent("""\
-                The agent's changes exist only on the remote sandbox.
-                Use `mngr pull` to bring them back locally:
-                    mngr pull morpheus --sync-mode=git
-
-                This merges the agent's commits into your current local branch.
-                You can also pull files directly (useful for non-git-tracked changes):
-                    mngr pull morpheus
-
-                Alternatively, you can give the agent GitHub credentials so it can
-                `git push` on its own. See the Modal usage guide for details."""),
-            # This step is informational -- there is no check type that can verify
-            # a local pull happened. Auto-advances via permissive state check.
-            check=AgentInStateCheck(
-                agent_name=AgentName("morpheus"),
-                expected_states=(
-                    AgentLifecycleState.RUNNING,
-                    AgentLifecycleState.WAITING,
-                    AgentLifecycleState.STOPPED,
-                ),
-            ),
-        ),
-        LessonStep(
             heading="Stop the remote agent",
             details="Run `mngr stop morpheus`, or press Ctrl-T from within the tmux session.",
             check=AgentInStateCheck(
