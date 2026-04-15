@@ -9,6 +9,7 @@ Mutation operations (enable, disable, update auth) are handled via request
 events written to ``requests/events.jsonl``.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Final
@@ -113,6 +114,20 @@ def get_sharing_status(server_name: str) -> SharingStatus:
         raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
 
 
+def _extract_emails_from_auth_rules(auth_rules: list[dict[str, object]]) -> list[str]:
+    """Extract email addresses from Cloudflare Access auth policy rules."""
+    emails: list[str] = []
+    for rule in auth_rules:
+        raw = json.dumps(rule)
+        parsed = json.loads(raw)
+        for inc in parsed.get("include", []):
+            email_obj = inc.get("email", {})
+            email = email_obj.get("email", "")
+            if email:
+                emails.append(str(email))
+    return emails
+
+
 def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> None:
     """Create a sharing request event for editing sharing settings.
 
@@ -133,21 +148,7 @@ def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> No
             "auth_rules": status.auth_rules,
         }
         # Extract emails from auth rules for convenience
-        for rule in status.auth_rules:
-            includes = rule.get("include")
-            if not isinstance(includes, list):
-                continue
-            for inc_item in includes:
-                if not isinstance(inc_item, dict):
-                    continue
-                inc_dict: dict[str, object] = inc_item
-                email_entry = inc_dict.get("email")
-                if not isinstance(email_entry, dict):
-                    continue
-                email_dict: dict[str, object] = email_entry
-                email_value = email_dict.get("email")
-                if email_value:
-                    suggested_emails.append(str(email_value))
+        suggested_emails = _extract_emails_from_auth_rules(status.auth_rules)
     except SharingProxyError:
         logger.debug("Could not fetch current sharing status for pre-population")
 
