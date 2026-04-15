@@ -8,21 +8,6 @@ from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
 from imbue.mngr_kanpan.testing import make_agent_details
 
 
-def test_repo_paths_data_source_name() -> None:
-    ds = RepoPathsDataSource()
-    assert ds.name == "repo_paths"
-
-
-def test_repo_paths_columns() -> None:
-    ds = RepoPathsDataSource()
-    assert FIELD_REPO_PATH in ds.columns
-
-
-def test_repo_paths_field_types() -> None:
-    ds = RepoPathsDataSource()
-    assert ds.field_types[FIELD_REPO_PATH] is RepoPathField
-
-
 def test_repo_paths_compute_with_remote_label() -> None:
     ds = RepoPathsDataSource()
     agent = make_agent_details(

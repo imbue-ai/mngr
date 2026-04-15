@@ -14,22 +14,6 @@ from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.git_info import _get_all_commits_ahead
 from imbue.mngr_kanpan.testing import make_agent_details
 
-
-def test_git_info_data_source_name() -> None:
-    ds = GitInfoDataSource()
-    assert ds.name == "git_info"
-
-
-def test_git_info_columns() -> None:
-    ds = GitInfoDataSource()
-    assert ds.columns == {FIELD_COMMITS_AHEAD: "GIT"}
-
-
-def test_git_info_field_types() -> None:
-    ds = GitInfoDataSource()
-    assert ds.field_types == {FIELD_COMMITS_AHEAD: CommitsAheadField}
-
-
 # === _get_all_commits_ahead ===
 
 

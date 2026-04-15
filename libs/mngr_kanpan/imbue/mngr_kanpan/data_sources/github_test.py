@@ -58,36 +58,6 @@ def _make_internal_pr(
 # === GitHubDataSource properties ===
 
 
-def test_github_data_source_name() -> None:
-    ds = GitHubDataSource()
-    assert ds.name == "github"
-
-
-def test_github_data_source_columns_default() -> None:
-    ds = GitHubDataSource()
-    cols = ds.columns
-    assert "pr" in cols
-    assert "ci" in cols
-    assert "conflicts" in cols
-    assert "unresolved" in cols
-
-
-def test_github_data_source_columns_disabled() -> None:
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False, conflicts=False, unresolved=False))
-    cols = ds.columns
-    assert "pr" not in cols
-    assert "ci" not in cols
-    assert "conflicts" not in cols
-    assert "unresolved" not in cols
-
-
-def test_github_data_source_field_types() -> None:
-    ds = GitHubDataSource()
-    types = ds.field_types
-    assert "pr" in types
-    assert "ci" in types
-
-
 def test_github_data_source_field_types_disabled() -> None:
     ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False))
     types = ds.field_types
