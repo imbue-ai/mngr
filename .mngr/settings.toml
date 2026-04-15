@@ -25,6 +25,7 @@ provider = "modal"
 build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
+pass_env = ["GH_TOKEN"]
 target_path = "/code/mngr"
 
 [agent_types.coder]

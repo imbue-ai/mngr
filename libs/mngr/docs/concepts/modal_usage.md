@@ -1,8 +1,6 @@
 # Using Modal
 
-This guide walks through running coding agents on [Modal](https://modal.com) from start to finish. It assumes you are already comfortable creating and managing local agents with mngr.
-
-For the full list of Modal build arguments and features, see the [Modal provider reference](../core_plugins/providers/modal.md).
+Run coding agents on [Modal](https://modal.com) sandboxes. For general agent management, see [mngr create](../commands/primary/create.md). For the full list of Modal build arguments, see the [Modal provider reference](../core_plugins/providers/modal.md).
 
 ## Prerequisites
 
@@ -21,64 +19,45 @@ This builds a remote sandbox on Modal and drops you into a tmux session, just li
 
 ### Using a template
 
-If your project has a Modal template defined in `.mngr/settings.toml`, you can use it instead of passing `--provider modal` and other flags manually:
+If your project has a Modal template defined in `.mngr/settings.toml`, you can use `-t my-modal` instead of passing flags manually:
 
 ```bash
-mngr create my-agent -t modal
+mngr create my-agent -t my-modal
 ```
 
-Templates bundle provider settings, build arguments, environment setup, and more into a reusable preset. See [Create Templates](../customization.md#create-templates) for how to define your own.
+A typical Modal template includes `--dangerously-skip-permissions` since Modal sandboxes are disposable environments. This is safe for the sandbox itself, but be aware that any credentials you provide (e.g. `GH_TOKEN`) can be used by the agent without confirmation prompts.
+
+Example template:
+
+```toml
+[create_templates.my-modal]
+provider = "modal"
+agent_args = ["--dangerously-skip-permissions"]
+pass_env = ["GH_TOKEN"]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/<org>/<repo>.git && gh auth setup-git'"]
+```
+
+The `extra_window` creates a tmux window that trusts GitHub's host key, switches the remote to HTTPS (since the sandbox won't have your SSH keys), and configures git to authenticate via `gh` (which uses `GH_TOKEN`).
+
+See [Create Templates](../customization.md#create-templates) for the full set of template options.
 
 ### Timeouts
 
-Modal sandboxes have a default timeout of 15 minutes, after which they are terminated. For longer tasks, increase it:
+Modal sandboxes have a default timeout of 15 minutes (900 seconds), after which they are terminated. For longer tasks, increase the timeout in seconds:
 
 ```bash
 mngr create my-agent --provider modal -b timeout=3600
 ```
 
-The maximum is 24 hours.
-
-## Working with the agent
-
-Once created, working with a remote agent is the same as a local one:
-
-```bash
-# Connect to the agent's tmux session
-mngr connect my-agent
-
-# Send a message without connecting
-mngr message my-agent 'Run the test suite'
-
-# Check status
-mngr list
-```
+The maximum is 86400 (24 hours).
 
 ## Getting changes back
 
-Remote agents work in an isolated sandbox. When the agent makes changes (edits files, creates commits), those changes exist only on the remote machine. You need to transfer them back.
-
-There are two approaches: **let the agent push via git**, or **use `mngr pull`**.
+To retrieve changes from the remote sandbox, either **let the agent push via git** or **use `mngr pull`**.
 
 ### Option A: Give the agent git credentials
 
-If the agent has GitHub credentials, it can `git push` directly. Set up credentials by passing `GH_TOKEN` as an environment variable, or by configuring an `extra_window` in your template that runs `gh auth setup-git`.
-
-Example template in `.mngr/settings.toml`:
-
-```toml
-[create_templates.modal]
-provider = "modal"
-extra_window = ["github_setup='gh auth setup-git'"]
-```
-
-Or pass the token at create time:
-
-```bash
-mngr create my-agent --provider modal --pass-env GH_TOKEN
-```
-
-Once the agent can push, your normal git workflow applies: the agent pushes to a branch, you pull it locally or open a PR.
+If the agent has `GH_TOKEN` (via `pass_env` in a template or `--pass-env` on the CLI), it can `git push` directly.
 
 ### Option B: Use `mngr pull`
 
@@ -110,36 +89,25 @@ You can also pull a specific subdirectory:
 mngr pull my-agent:src ./local-src
 ```
 
+To push local changes to the agent (e.g. a config file you edited locally):
+
+```bash
+mngr push my-agent:config ./config
+```
+
 See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
 
-## Stopping and restarting
+## Lifecycle and snapshots
+
+`mngr connect`, `mngr message`, `mngr stop`, `mngr start`, `mngr destroy`, and `mngr list` all work the same as for local agents.
+
+The key difference: Modal sandboxes are terminated after their timeout expires or when idle detection kicks in. `mngr stop` only stops the agent's tmux session -- the sandbox keeps running until it times out or idle detection terminates it. Before terminating, idle detection automatically takes a snapshot so that `mngr start` can restore from it. You can also create named snapshots manually:
 
 ```bash
-# Stop (frees resources, preserves state)
-mngr stop my-agent
-
-# Restart
-mngr start my-agent
-mngr connect my-agent
-```
-
-## Snapshots
-
-Modal supports native filesystem snapshots, which are fast and incremental:
-
-```bash
-mngr snapshot create my-agent
 mngr snapshot create my-agent --name before-refactor
-mngr snapshot list my-agent
 ```
 
-Snapshots persist even after the sandbox is terminated. See [mngr snapshot](../commands/secondary/snapshot.md) for details.
-
-## Cleanup
-
-```bash
-mngr destroy my-agent
-```
+Snapshots are fast, incremental, and persist after the sandbox is gone. See [mngr snapshot](../commands/secondary/snapshot.md) for details.
 
 ## What else is possible
 
