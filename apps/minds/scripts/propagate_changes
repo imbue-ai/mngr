@@ -200,8 +200,10 @@ electron_start() {
     export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
     echo "[electron] Starting desktop client (MINDS_WORKSPACE_GIT_URL=${TEMPLATE_DIR})..."
-    setsid bash -c "cd '${MNGR_REPO_ROOT}/apps/minds' && npm start" >> /tmp/minds-electron.log 2>&1 &
-    disown
+    # Detach the child into a new session (so it survives this script exiting and
+    # its terminal closing). setsid(1) isn't available on default macOS, so we
+    # use python's subprocess.Popen(start_new_session=True) which is equivalent.
+    python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd ${MNGR_REPO_ROOT}/apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 }
 
 # Stop electron in parallel with agent update

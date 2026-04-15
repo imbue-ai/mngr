@@ -91,9 +91,11 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
-  setsid bash -c "cd apps/minds && npm start" >> /tmp/minds-electron.log 2>&1 &
+  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 )
 ```
+
+The `python3` invocation replaces a previous `setsid bash -c ... &` call -- `setsid(1)` isn't available on default macOS, and `subprocess.Popen(start_new_session=True)` is the stdlib equivalent (detaches into a new session so the Electron process survives the launching shell exiting).
 
 ### 6. Create the agent
 
