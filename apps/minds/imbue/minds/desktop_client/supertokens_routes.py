@@ -44,6 +44,8 @@ from supertokens_python.syncio import get_user
 from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
 
+from pydantic import PrivateAttr
+
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
@@ -87,20 +89,18 @@ class _MultiAccountSessionStoreAdapter(SuperTokensSessionStore):
     Provides the SuperTokensSessionStore interface by operating on the
     most recently added account (since the supertokens OAuth flow always
     produces a session for the account that just signed in).
-
-    Constructed via Pydantic (no __init__) with a data_directory pointing
-    to the multi_store's data_dir. The _multi_store is injected via
-    object.__setattr__ after construction.
     """
+
+    _multi_store: MultiAccountSessionStore = PrivateAttr()
 
     @staticmethod
     def create(multi_store: MultiAccountSessionStore) -> "_MultiAccountSessionStoreAdapter":
         """Create an adapter wrapping the given multi-account store."""
         adapter = _MultiAccountSessionStoreAdapter(data_directory=multi_store.data_dir / "supertokens")
-        object.__setattr__(adapter, "_multi_store", multi_store)
+        adapter._multi_store = multi_store
         return adapter
 
-    def store_session(
+    def store_session(  # type: ignore[override]
         self,
         access_token: str,
         refresh_token: str | None,
@@ -116,30 +116,27 @@ class _MultiAccountSessionStoreAdapter(SuperTokensSessionStore):
             display_name=display_name,
         )
 
-    def get_user_info(self) -> "UserInfo | None":
+    def get_user_info(self) -> UserInfo | None:  # type: ignore[override]
         accounts = self._multi_store.list_accounts()
         if not accounts:
             return None
-        # Return the first account's info (the supertokens routes only care
-        # about whether *any* account is signed in)
         latest = accounts[-1]
         return self._multi_store.get_user_info(str(latest.user_id))
 
-    def get_access_token(self) -> str | None:
+    def get_access_token(self) -> str | None:  # type: ignore[override]
         accounts = self._multi_store.list_accounts()
         if not accounts:
             return None
         latest = accounts[-1]
         return self._multi_store.get_access_token(str(latest.user_id))
 
-    def is_signed_in(self) -> bool:
+    def is_signed_in(self) -> bool:  # type: ignore[override]
         return self._multi_store.is_any_signed_in()
 
-    def has_signed_in_before(self) -> bool:
+    def has_signed_in_before(self) -> bool:  # type: ignore[override]
         return self._multi_store.has_signed_in_before()
 
-    def clear_session(self) -> None:
-        # Clear the most recently added account
+    def clear_session(self) -> None:  # type: ignore[override]
         accounts = self._multi_store.list_accounts()
         if accounts:
             self._multi_store.remove_session(str(accounts[-1].user_id))
@@ -543,7 +540,7 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
 
 
 def create_supertokens_router(
-    session_store: SuperTokensSessionStore,
+    session_store: SuperTokensSessionStore | MultiAccountSessionStore,
     server_port: int,
     output_format: OutputFormat,
 ) -> APIRouter:

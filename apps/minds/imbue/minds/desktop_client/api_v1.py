@@ -114,7 +114,7 @@ def get_cf_client_with_auth(
     Returns (client, None) on success, or (None, error_response) if auth is required but missing.
     """
     cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
-    multi_store: MultiAccountSessionStore | None = getattr(request.app.state, "session_store", None)
+    multi_store: MultiAccountSessionStore | None = request.app.state.session_store
     session_store: SuperTokensSessionStore | MultiAccountSessionStore | None = (
         request.app.state.supertokens_session_store
     )

@@ -1,8 +1,6 @@
 from pathlib import Path
 
-from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 
 
