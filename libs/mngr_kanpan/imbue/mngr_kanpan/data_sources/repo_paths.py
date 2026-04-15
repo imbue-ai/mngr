@@ -73,7 +73,7 @@ class RepoPathsDataSource(FrozenModel):
 
     @property
     def columns(self) -> dict[str, str]:
-        return {FIELD_REPO_PATH: ""}
+        return {FIELD_REPO_PATH: "REPO"}
 
     @property
     def field_types(self) -> dict[str, type[FieldValue]]:
