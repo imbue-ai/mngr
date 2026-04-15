@@ -13,11 +13,11 @@ import time
 from pathlib import Path
 
 from loguru import logger
+from pydantic import Field
+from pydantic import PrivateAttr
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
-from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -201,6 +201,7 @@ class SuperTokensSessionStore(MutableModel):
             logger.info("Refreshed expired SuperTokens access token")
             return new_access_token
         except (ValueError, TypeError, KeyError, OSError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            # FIXME: all of the warnings here--in this func, and other functions in this file--should be replaced with user notifications that tell them that something went wrong, and should make sure that they log in again / it shows that the login is outdated
             logger.warning("Failed to refresh SuperTokens session: {}", exc)
             return None
         except Exception as exc:
