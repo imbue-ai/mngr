@@ -142,9 +142,9 @@ def test_no_import_layer_violations() -> None:
 def test_no_ruff_lint_errors_repo_wide() -> None:
     """Ensure all Python files in the repo pass ruff lint checks.
 
-    Per-project test_ratchets.py files check within each project. This test covers
-    files outside projects (scripts/, repo-root files) and acts as a CI backstop
-    for the pre-commit hook.
+    Runs ruff check over the entire repo root. Per-project test_ratchets.py files
+    also run ruff within each project; this test acts as a CI backstop for the
+    pre-commit hook and ensures repo-root and scripts/ files are covered too.
     """
     result = subprocess.run(
         ["uv", "run", "ruff", "check", "--force-exclude", "--config", "pyproject.toml"],
