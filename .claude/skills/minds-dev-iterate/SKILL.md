@@ -95,8 +95,6 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
 )
 ```
 
-The `python3` invocation replaces a previous `setsid bash -c ... &` call -- `setsid(1)` isn't available on default macOS, and `subprocess.Popen(start_new_session=True)` is the stdlib equivalent (detaches into a new session so the Electron process survives the launching shell exiting).
-
 ### 6. Create the agent
 
 Use the Electron app's creation form to create a Docker agent. The form will default to the template path and agent name from the env vars.
