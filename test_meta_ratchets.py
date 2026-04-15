@@ -140,34 +140,36 @@ def test_no_import_layer_violations() -> None:
 
 
 def test_no_ruff_lint_errors_repo_wide() -> None:
-    """Ensure all Python files in the repo pass ruff lint checks.
+    """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs ruff check over the entire repo root. Per-project test_ratchets.py files
-    also run ruff within each project; this test acts as a CI backstop for the
-    pre-commit hook and ensures repo-root and scripts/ files are covered too.
+    Runs both ruff check and ruff format --check over the entire repo root.
+    Per-project test_ratchets.py files also run ruff check within each project;
+    this test acts as a CI backstop for the pre-commit hook and additionally
+    covers repo-root and scripts/ files.
     """
-    result = subprocess.run(
+    fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
+    errors: list[str] = []
+
+    lint = subprocess.run(
         ["uv", "run", "ruff", "check", "--force-exclude", "--config", "pyproject.toml"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            "Ruff lint errors found (run `uv run ruff check --fix .` to auto-fix):\n\n" + result.stdout
-        )
+    if lint.returncode != 0:
+        errors.append("Lint errors:\n" + lint.stdout)
 
-
-def test_no_ruff_format_errors() -> None:
-    """Ensure all Python files are formatted according to ruff format."""
-    result = subprocess.run(
+    fmt = subprocess.run(
         ["uv", "run", "ruff", "format", "--check", "--force-exclude", "--config", "pyproject.toml"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        raise AssertionError("Ruff format errors found (run `uv run ruff format .` to fix):\n\n" + result.stdout)
+    if fmt.returncode != 0:
+        errors.append("Format errors:\n" + fmt.stdout)
+
+    if errors:
+        raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
 def test_prevent_bash_without_strict_mode() -> None:
