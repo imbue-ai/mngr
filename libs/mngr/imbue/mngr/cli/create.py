@@ -675,6 +675,15 @@ def create(ctx: click.Context, **kwargs) -> None:
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
+        # Validate conflicting agent types early so both the headless and normal
+        # paths reject them (the normal path re-checks inside _parse_agent_opts,
+        # but the headless path returns before reaching that code).
+        if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
+            raise UserInputError(
+                f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
+                f"but --type says '{opts.type}'. Use one or the other."
+            )
+
         # Detect headless agent types and use the headless flow instead of the
         # normal interactive create path. The agent type (via StreamingHeadlessAgentMixin)
         # drives this -- no new CLI flags needed.

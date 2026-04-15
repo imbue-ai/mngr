@@ -911,6 +911,21 @@ def test_create_headless_rejects_multiple_incompatible_flags(
     assert "--reuse" in result.output
 
 
+def test_create_headless_rejects_conflicting_positional_and_type_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Conflicting positional agent type and --type flag should raise even for headless types."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "headless_command", "--type", "headless_claude"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Conflicting agent types" in result.output
+
+
 # =============================================================================
 # Tests for --command validation in _parse_agent_opts
 # =============================================================================
