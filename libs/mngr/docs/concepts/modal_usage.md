@@ -1,8 +1,6 @@
 # Using Modal
 
-This guide walks through running coding agents on [Modal](https://modal.com) from start to finish. It assumes you are already comfortable creating and managing local agents with mngr.
-
-For the full list of Modal build arguments and features, see the [Modal provider reference](../core_plugins/providers/modal.md).
+Run coding agents on [Modal](https://modal.com) sandboxes. For general agent management, see [mngr create](../commands/primary/create.md). For the full list of Modal build arguments, see the [Modal provider reference](../core_plugins/providers/modal.md).
 
 ## Prerequisites
 
@@ -21,23 +19,34 @@ This builds a remote sandbox on Modal and drops you into a tmux session, just li
 
 ### Using a template
 
-If your project has a Modal template defined in `.mngr/settings.toml`, you can use it instead of passing `--provider modal` and other flags manually:
+If your project has a Modal template defined in `.mngr/settings.toml`, you can use `-t modal` instead of passing flags manually:
 
 ```bash
 mngr create my-agent -t modal
 ```
 
-Templates bundle provider settings, build arguments, environment setup, and more into a reusable preset. See [Create Templates](../customization.md#create-templates) for how to define your own.
+A typical Modal template includes `--dangerously-skip-permissions` since Modal sandboxes are disposable environments. This is safe for the sandbox itself, but be aware that any credentials you provide (e.g. `GH_TOKEN`) can be used by the agent without confirmation prompts.
+
+Example template:
+
+```toml
+[create_templates.modal]
+provider = "modal"
+agent_args = ["--dangerously-skip-permissions"]
+pass_env = ["GH_TOKEN"]
+```
+
+See [Create Templates](../customization.md#create-templates) for the full set of template options.
 
 ### Timeouts
 
-Modal sandboxes have a default timeout of 15 minutes, after which they are terminated. For longer tasks, increase it:
+Modal sandboxes have a default timeout of 15 minutes (900 seconds), after which they are terminated. For longer tasks, increase the timeout in seconds:
 
 ```bash
 mngr create my-agent --provider modal -b timeout=3600
 ```
 
-The maximum is 24 hours.
+The maximum is 86400 (24 hours).
 
 ## Working with the agent
 
@@ -56,29 +65,11 @@ mngr list
 
 ## Getting changes back
 
-Remote agents work in an isolated sandbox. When the agent makes changes (edits files, creates commits), those changes exist only on the remote machine. You need to transfer them back.
-
-There are two approaches: **let the agent push via git**, or **use `mngr pull`**.
+To retrieve changes from the remote sandbox, either **let the agent push via git** or **use `mngr pull`**.
 
 ### Option A: Give the agent git credentials
 
-If the agent has GitHub credentials, it can `git push` directly. Set up credentials by passing `GH_TOKEN` as an environment variable, or by configuring an `extra_window` in your template that runs `gh auth setup-git`.
-
-Example template in `.mngr/settings.toml`:
-
-```toml
-[create_templates.modal]
-provider = "modal"
-extra_window = ["github_setup='gh auth setup-git'"]
-```
-
-Or pass the token at create time:
-
-```bash
-mngr create my-agent --provider modal --pass-env GH_TOKEN
-```
-
-Once the agent can push, your normal git workflow applies: the agent pushes to a branch, you pull it locally or open a PR.
+If the agent has `GH_TOKEN` (via `pass_env` in a template or `--pass-env` on the CLI), it can `git push` directly.
 
 ### Option B: Use `mngr pull`
 
