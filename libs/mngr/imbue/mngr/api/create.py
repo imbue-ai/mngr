@@ -147,8 +147,8 @@ def create(
                             agent_options.field_ref().label_options,
                             AgentLabelOptions(
                                 labels={
-                                    "source_repo_path": str(work_dir_result.source_repo_path),
                                     **agent_options.label_options.labels,
+                                    "source_repo_path": str(work_dir_result.source_repo_path),
                                 }
                             ),
                         ),
