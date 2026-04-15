@@ -101,6 +101,12 @@ You can also pull a specific subdirectory:
 mngr pull my-agent:src ./local-src
 ```
 
+To push local changes to the agent (e.g. a config file you edited locally):
+
+```bash
+mngr push my-agent:config ./config
+```
+
 See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
 
 ## Stopping and restarting
