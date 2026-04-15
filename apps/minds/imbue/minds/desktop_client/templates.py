@@ -1084,7 +1084,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 </head>
 <body>
   <div class="page">
-    <h1>Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ server_name }}</code>
+    <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ server_name }}</code>
       in <a href="/forwarding/{{ agent_id }}/" style="font-size:20px;">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
 
@@ -1124,10 +1124,12 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         {% if is_request %}
         <button class="btn btn-danger" id="deny-btn" onclick="submitDeny()">Deny</button>
         {% else %}
-        <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
-          Disable Sharing
-        </button>
-        <span></span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="window.location='/workspace/{{ agent_id }}/settings'">Cancel</button>
+          <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
+            Disable Sharing
+          </button>
+        </div>
         {% endif %}
         <button class="btn btn-success" id="action-btn" onclick="submitUpdate()">
           Update
@@ -1145,6 +1147,21 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   var agentId = {{ agent_id | tojson }};
   var isRequest = {{ is_request | tojson }};
   var requestId = {{ request_id | tojson }};
+  var wsName = {{ (ws_name or agent_id) | tojson }};
+  var accountEmail = {{ (account_email or '') | tojson }};
+
+  function setHeading(isEnabled) {
+    var h = document.getElementById('page-heading');
+    if (!h) return;
+    var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serverName + '</code>';
+    var ws = '<a href="/forwarding/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
+    var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
+    if (isEnabled) {
+      h.innerHTML = code + ' shared in ' + ws + acct;
+    } else {
+      h.innerHTML = 'Share ' + code + ' in ' + ws + acct + '?';
+    }
+  }
 
   // Three-state ACL: existing (already on server), added (proposed new), removed (proposed removal)
   var existing = [];  // emails currently on the server
@@ -1246,7 +1263,6 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   }
 
   function submitDisable() {
-    if (!confirm('Disable sharing for ' + serverName + '?')) return;
     setSubmitting(true);
     fetch('/sharing/' + agentId + '/' + serverName + '/disable', { method: 'POST' })
       .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
@@ -1291,6 +1307,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         // Sharing is already on: server emails are "existing"
         existing = serverEmails;
         document.getElementById('action-btn').textContent = 'Update';
+        setHeading(true);
         if (data.url) {
           document.getElementById('url-section').style.display = 'block';
           document.getElementById('share-url').value = data.url;
@@ -1303,6 +1320,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
           if (added.indexOf(e) < 0) added.push(e);
         });
         document.getElementById('action-btn').textContent = 'Share';
+        setHeading(false);
       }
 
       // Proposed emails that aren't already existing or added go to added

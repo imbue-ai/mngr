@@ -178,7 +178,6 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                   ])
                 : m("div", [
                     m("p", { style: "padding: 8px 0; color: #666;" }, "Sharing is not enabled for this server."),
-                    renderEmailList(emails),
                     m("div.share-modal-footer", [
                       m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
                       m("button.share-modal-btn.share-modal-btn", {
