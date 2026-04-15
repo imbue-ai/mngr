@@ -323,11 +323,24 @@ def _offer_diagnose(
     if not click.confirm("\nRun diagnostic agent now?", default=False):
         return
 
-    with ConcurrencyGroup(name="diagnose-launch") as cg:
-        cg.run_process_to_completion(
-            ["mngr", "diagnose", "--context-file", str(context_file_path)],
-            timeout=600,
-        )
+    # Look up the diagnose command from the CLI group and invoke it directly.
+    # Walk up to the root context (the AliasAwareGroup) to find the command.
+    root_ctx = ctx
+    while root_ctx is not None and root_ctx.parent is not None:
+        root_ctx = root_ctx.parent
+    if root_ctx is None or not isinstance(root_ctx.command, click.MultiCommand):
+        logger.warning("Could not find root CLI group to invoke diagnose command")
+        return
+
+    diagnose_command = root_ctx.command.get_command(root_ctx, "diagnose")
+    if diagnose_command is None:
+        logger.warning("Diagnose command not found in CLI group")
+        return
+
+    diagnose_args = ["--context-file", str(context_file_path)]
+    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
+    with diagnose_ctx:
+        diagnose_command.invoke(diagnose_ctx)
 
 
 def handle_unexpected_error(
