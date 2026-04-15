@@ -1,17 +1,14 @@
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
-from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.github import CiField
@@ -257,7 +254,7 @@ class _FailingDataSource:
 
 
 def test_run_data_sources_parallel_empty() -> None:
-    results, errors = _run_data_sources_parallel([], (), {}, cast(MngrContext, SimpleNamespace()))
+    results, errors = _run_data_sources_parallel([], (), {}, SimpleNamespace())  # ty: ignore[invalid-argument-type]
     assert results == {}
     assert errors == []
 
@@ -266,7 +263,7 @@ def test_run_data_sources_parallel_single_source() -> None:
     agent = AgentName("agent-1")
     pr = _make_pr()
     source = _MockDataSource("github", {agent: {"pr": pr}})
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
+    results, errors = _run_data_sources_parallel([source], (), {}, SimpleNamespace())  # ty: ignore[invalid-argument-type]
     assert "github" in results
     assert agent in results["github"]
     assert errors == []
@@ -274,13 +271,13 @@ def test_run_data_sources_parallel_single_source() -> None:
 
 def test_run_data_sources_parallel_source_with_errors() -> None:
     source = _MockDataSource("github", {}, errors=["some error"])
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
+    results, errors = _run_data_sources_parallel([source], (), {}, SimpleNamespace())  # ty: ignore[invalid-argument-type]
     assert "some error" in errors
 
 
 def test_run_data_sources_parallel_source_raises_exception() -> None:
     source = _FailingDataSource()
-    results, errors = _run_data_sources_parallel([source], (), {}, cast(MngrContext, SimpleNamespace()))
+    results, errors = _run_data_sources_parallel([source], (), {}, SimpleNamespace())  # ty: ignore[invalid-argument-type]
     assert any("failing" in e and "failed" in e for e in errors)
 
 
@@ -290,7 +287,7 @@ def test_run_data_sources_parallel_multiple_sources() -> None:
     ci = CiField(status=CiStatus.PASSING)
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
-    results, errors = _run_data_sources_parallel([s1, s2], (), {}, cast(MngrContext, SimpleNamespace()))
+    results, errors = _run_data_sources_parallel([s1, s2], (), {}, SimpleNamespace())  # ty: ignore[invalid-argument-type]
     assert "github" in results
     assert "git_info" in results
     assert errors == []
@@ -324,23 +321,20 @@ def test_get_local_work_dir_remote_agent() -> None:
 # === collect_data_sources ===
 
 
-def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> MngrContext:
+def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> object:
     """Build a minimal mock MngrContext for collect_data_sources tests."""
     hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [sources])
     pm = SimpleNamespace(hook=hook)
-    return cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: config,
-            pm=pm,
-        ),
+    return SimpleNamespace(
+        get_plugin_config=lambda name, cls: config,
+        pm=pm,
     )
 
 
 def test_collect_data_sources_returns_all_enabled() -> None:
     source = _MockDataSource("github", {})
     ctx = _make_mock_mngr_ctx(KanpanPluginConfig(), [source])
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert any(s.name == "github" for s in sources)
 
 
@@ -348,7 +342,7 @@ def test_collect_data_sources_excludes_disabled() -> None:
     source = _MockDataSource("github", {})
     config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
     ctx = _make_mock_mngr_ctx(config, [source])
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert not any(s.name == "github" for s in sources)
 
 
@@ -356,21 +350,18 @@ def test_collect_data_sources_includes_enabled_source() -> None:
     source = _MockDataSource("git_info", {})
     config = KanpanPluginConfig(data_sources={"git_info": DataSourceConfig(enabled=True)})
     ctx = _make_mock_mngr_ctx(config, [source])
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert any(s.name == "git_info" for s in sources)
 
 
 def test_collect_data_sources_skips_none_results() -> None:
     hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [None])
     pm = SimpleNamespace(hook=hook)
-    ctx = cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: KanpanPluginConfig(),
-            pm=pm,
-        ),
+    ctx = SimpleNamespace(
+        get_plugin_config=lambda name, cls: KanpanPluginConfig(),
+        pm=pm,
     )
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert sources == []
 
 
@@ -379,16 +370,13 @@ def test_collect_data_sources_dict_config_disabled() -> None:
     source = _MockDataSource("github", {})
     hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
     pm = SimpleNamespace(hook=hook)
-    ctx = cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: SimpleNamespace(
-                data_sources={"github": {"enabled": False}},
-            ),
-            pm=pm,
+    ctx = SimpleNamespace(
+        get_plugin_config=lambda name, cls: SimpleNamespace(
+            data_sources={"github": {"enabled": False}},
         ),
+        pm=pm,
     )
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert not any(s.name == "github" for s in sources)
 
 
@@ -397,29 +385,26 @@ def test_collect_data_sources_dict_config_enabled() -> None:
     source = _MockDataSource("github", {})
     hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
     pm = SimpleNamespace(hook=hook)
-    ctx = cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: SimpleNamespace(
-                data_sources={"github": {"enabled": True}},
-            ),
-            pm=pm,
+    ctx = SimpleNamespace(
+        get_plugin_config=lambda name, cls: SimpleNamespace(
+            data_sources={"github": {"enabled": True}},
         ),
+        pm=pm,
     )
-    sources = collect_data_sources(ctx)
+    sources = collect_data_sources(ctx)  # ty: ignore[invalid-argument-type]
     assert any(s.name == "github" for s in sources)
 
 
 # === plugin.kanpan_data_sources ===
 
 
-def _make_plugin_mngr_ctx(config: KanpanPluginConfig) -> MngrContext:
-    return cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+def _make_plugin_mngr_ctx(config: KanpanPluginConfig) -> object:
+    return SimpleNamespace(get_plugin_config=lambda name, cls: config)
 
 
 def test_plugin_kanpan_data_sources_default() -> None:
     ctx = _make_plugin_mngr_ctx(KanpanPluginConfig())
-    result = kanpan_data_sources(mngr_ctx=ctx)
+    result = kanpan_data_sources(mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert result is not None
     names = [s.name for s in result]
     assert "repo_paths" in names
@@ -432,7 +417,7 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
         shell_commands={"my_cmd": ShellCommandSourceConfig(name="My Command", header="CMD", command="echo hi")}
     )
     ctx = _make_plugin_mngr_ctx(config)
-    result = kanpan_data_sources(mngr_ctx=ctx)
+    result = kanpan_data_sources(mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert result is not None
     names = [s.name for s in result]
     assert "shell_my_cmd" in names
@@ -440,33 +425,27 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
 
 def test_plugin_kanpan_data_sources_github_config_as_dict() -> None:
     # GitHub config as a raw dict (tests the isinstance dict branch in plugin.py)
-    ctx = cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: SimpleNamespace(
-                data_sources={"github": {"enabled": True, "pr": True}},
-                shell_commands={},
-                columns={},
-            )
-        ),
+    ctx = SimpleNamespace(
+        get_plugin_config=lambda name, cls: SimpleNamespace(
+            data_sources={"github": {"enabled": True, "pr": True}},
+            shell_commands={},
+            columns={},
+        )
     )
-    result = kanpan_data_sources(mngr_ctx=ctx)
+    result = kanpan_data_sources(mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert result is not None
 
 
 def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
     # Shell command config as a raw dict (tests the isinstance dict branch for shell)
-    ctx = cast(
-        MngrContext,
-        SimpleNamespace(
-            get_plugin_config=lambda name, cls: SimpleNamespace(
-                data_sources={},
-                shell_commands={"my_cmd": {"name": "My Command", "header": "CMD", "command": "echo hi"}},
-                columns={},
-            )
-        ),
+    ctx = SimpleNamespace(
+        get_plugin_config=lambda name, cls: SimpleNamespace(
+            data_sources={},
+            shell_commands={"my_cmd": {"name": "My Command", "header": "CMD", "command": "echo hi"}},
+            columns={},
+        )
     )
-    result = kanpan_data_sources(mngr_ctx=ctx)
+    result = kanpan_data_sources(mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert result is not None
     names = [s.name for s in result]
     assert "shell_my_cmd" in names
@@ -475,16 +454,13 @@ def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
 # === save_field_cache / load_field_cache ===
 
 
-def _make_cache_ctx(profile_dir: Path) -> MngrContext:
-    return cast(MngrContext, SimpleNamespace(profile_dir=profile_dir))
+def _make_cache_ctx(profile_dir: Path) -> object:
+    return SimpleNamespace(profile_dir=profile_dir)
 
 
-def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> KanpanDataSource:
-    return cast(
-        KanpanDataSource,
-        SimpleNamespace(
-            field_types={field_key: field_type},
-        ),
+def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> object:
+    return SimpleNamespace(
+        field_types={field_key: field_type},
     )
 
 
@@ -495,7 +471,7 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent_name: {"pr_count": StringField(value="3")},
     }
-    save_field_cache(ctx, cached)
+    save_field_cache(ctx, cached)  # ty: ignore[invalid-argument-type]
     cache_file = tmp_path / "kanpan" / "field_cache.json"
     assert cache_file.exists()
 
@@ -503,7 +479,7 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
 def test_load_field_cache_returns_empty_when_no_file(tmp_path: Path) -> None:
     """load_field_cache returns empty dict when the cache file does not exist."""
     ctx = _make_cache_ctx(tmp_path)
-    result = load_field_cache(ctx, [])
+    result = load_field_cache(ctx, [])  # ty: ignore[invalid-argument-type]
     assert result == {}
 
 
@@ -515,8 +491,8 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
         agent_name: {"status": StringField(value="hello")},
     }
     data_sources = [_make_mock_data_source("status", StringField)]
-    save_field_cache(ctx, original)
-    loaded = load_field_cache(ctx, data_sources)
+    save_field_cache(ctx, original)  # ty: ignore[invalid-argument-type]
+    loaded = load_field_cache(ctx, data_sources)  # ty: ignore[invalid-argument-type]
     assert agent_name in loaded
     field = loaded[agent_name]["status"]
     assert isinstance(field, StringField)
@@ -529,7 +505,7 @@ def test_load_field_cache_returns_empty_on_corrupt_json(tmp_path: Path) -> None:
     cache_dir.mkdir(parents=True)
     (cache_dir / "field_cache.json").write_text("not valid json {{{")
     ctx = _make_cache_ctx(tmp_path)
-    result = load_field_cache(ctx, [])
+    result = load_field_cache(ctx, [])  # ty: ignore[invalid-argument-type]
     assert result == {}
 
 
@@ -540,9 +516,9 @@ def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     original: dict[AgentName, dict[str, FieldValue]] = {
         agent_name: {"status": StringField(value="hello")},
     }
-    save_field_cache(ctx, original)
+    save_field_cache(ctx, original)  # ty: ignore[invalid-argument-type]
     # Load with no data sources (empty type registry) -- field should be skipped
-    loaded = load_field_cache(ctx, [])
+    loaded = load_field_cache(ctx, [])  # ty: ignore[invalid-argument-type]
     assert loaded == {}
 
 
@@ -553,6 +529,6 @@ def test_save_field_cache_swallows_errors(tmp_path: Path) -> None:
     readonly_dir.chmod(0o444)
     ctx = _make_cache_ctx(readonly_dir / "subdir_that_cannot_exist")
     try:
-        save_field_cache(ctx, {})
+        save_field_cache(ctx, {})  # ty: ignore[invalid-argument-type]
     finally:
         readonly_dir.chmod(0o755)

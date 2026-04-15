@@ -1,10 +1,8 @@
 import json
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
@@ -488,15 +486,15 @@ def test_fetch_repo_prs_error() -> None:
 # === GitHubDataSource.compute ===
 
 
-def _make_mock_mngr_ctx(cg: MagicMock) -> MngrContext:
-    return cast(MngrContext, SimpleNamespace(concurrency_group=cg))
+def _make_mock_mngr_ctx(cg: MagicMock) -> object:
+    return SimpleNamespace(concurrency_group=cg)
 
 
 def test_compute_no_agents() -> None:
     ds = GitHubDataSource()
     cg = MagicMock()
     ctx = _make_mock_mngr_ctx(cg)
-    fields, errors = ds.compute(agents=(), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert fields == {}
     assert errors == []
 
@@ -506,7 +504,7 @@ def test_compute_agents_without_repo() -> None:
     cg = MagicMock()
     ctx = _make_mock_mngr_ctx(cg)
     agent = make_agent_details(name="a1", initial_branch="mngr/test", labels={})
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert fields == {}
     assert errors == []
 
@@ -521,7 +519,7 @@ def test_compute_agents_with_cached_repo_path() -> None:
     agent_with_label = make_agent_details(
         name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
     )
-    fields, errors = ds.compute(agents=(agent_with_label,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent_with_label,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert agent_with_label.name in fields
     assert FIELD_PR in fields[agent_with_label.name]
     assert FIELD_CI in fields[agent_with_label.name]
@@ -538,7 +536,7 @@ def test_compute_no_pr_for_branch_generates_create_url() -> None:
     # Return empty PR list so no PRs exist for branch
     cg = _make_fetch_cg("[]", "[]")
     ctx = _make_mock_mngr_ctx(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert agent.name in fields
     assert FIELD_CREATE_PR_URL in fields[agent.name]
     create_url_field = fields[agent.name][FIELD_CREATE_PR_URL]
@@ -556,7 +554,7 @@ def test_compute_pr_fetch_error_adds_error() -> None:
     fail_proc.returncode = 1
     cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
     ctx = _make_mock_mngr_ctx(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert len(errors) > 0
 
 
@@ -596,7 +594,7 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     cg.run_process_in_background.side_effect = [pr_open_proc, pr_all_proc, conflicts_proc, unresolved_proc]
 
     ctx = _make_mock_mngr_ctx(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     assert agent.name in fields
     assert FIELD_PR in fields[agent.name]
     assert FIELD_CONFLICTS in fields[agent.name]
@@ -612,7 +610,7 @@ def test_compute_disabled_pr_and_ci() -> None:
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = _make_mock_mngr_ctx(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)  # ty: ignore[invalid-argument-type]
     # pr=False means no FIELD_PR; ci=False means no FIELD_CI
     agent_fields = fields.get(agent.name, {})
     assert FIELD_PR not in agent_fields
