@@ -5,11 +5,11 @@ import click
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.create import create as create_cmd
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.issue_reporting import get_mngr_version
-from imbue.imbue_common.pure import pure
 from imbue.mngr_diagnose.clone import ensure_mngr_clone
 from imbue.mngr_diagnose.context_file import read_diagnose_context
 from imbue.mngr_diagnose.prompt import build_diagnose_initial_message
@@ -90,10 +90,14 @@ def diagnose(
 
     # Build create command args
     create_args: list[str] = [
-        "--from", f":{resolved_clone_dir}",
-        "--transfer", "git-worktree",
-        "--branch", "main:",
-        "--message", message,
+        "--from",
+        f":{resolved_clone_dir}",
+        "--transfer",
+        "git-worktree",
+        "--branch",
+        "main:",
+        "--message",
+        message,
         "--no-ensure-clean",
     ]
     if agent_type is not None:
@@ -122,8 +126,6 @@ ask the user for details interactively.""",
         ("Diagnose from error context", "mngr diagnose --context-file /tmp/mngr-diagnose-context-abc123.json"),
         ("Both description and context", 'mngr diagnose "spaces bug" --context-file /tmp/ctx.json'),
     ),
-    see_also=(
-        ("create", "Create an agent (full option set)"),
-    ),
+    see_also=(("create", "Create an agent (full option set)"),),
 ).register()
 add_pager_help_option(diagnose)
