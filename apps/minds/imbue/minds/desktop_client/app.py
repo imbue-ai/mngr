@@ -1370,10 +1370,12 @@ async def _handle_workspace_associate(
         return Response(status_code=403, content="Not authenticated")
     form = await request.form()
     user_id = str(form.get("user_id", ""))
+    redirect_url = str(form.get("redirect", ""))
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     if session_store and user_id:
         session_store.associate_workspace(user_id, agent_id)
-    return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
+    location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
+    return Response(status_code=303, headers={"Location": location})
 
 
 async def _handle_workspace_disassociate(
@@ -1505,6 +1507,7 @@ def _handle_request_page(
         request_id=request_id,
         has_account=has_account,
         accounts=accounts,
+        redirect_url=f"/requests/{request_id}",
     )
     return HTMLResponse(content=html)
 
@@ -1530,6 +1533,7 @@ def _handle_sharing_page(
         is_request=False,
         has_account=has_account,
         accounts=accounts,
+        redirect_url=f"/sharing/{agent_id}/{server_name}",
     )
     return HTMLResponse(content=html)
 

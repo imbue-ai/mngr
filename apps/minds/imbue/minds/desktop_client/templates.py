@@ -1051,6 +1051,7 @@ _ASSOCIATE_SNIPPET: Final[str] = """
           <option value="{{ acct.user_id }}">{{ acct.email }}</option>
           {% endfor %}
         </select>
+        {% if redirect_url %}<input type="hidden" name="redirect" value="{{ redirect_url }}">{% endif %}
         <button type="submit" class="btn btn-primary">Associate</button>
       </form>
       {% else %}
@@ -1285,6 +1286,7 @@ def render_sharing_editor(
     request_id: str = "",
     has_account: bool = True,
     accounts: Sequence[object] | None = None,
+    redirect_url: str = "",
 ) -> str:
     """Render the sharing editor page used for both request approval and direct editing."""
     template = _JINJA_ENV.from_string(_SHARING_EDITOR_TEMPLATE)
@@ -1297,6 +1299,7 @@ def render_sharing_editor(
         request_id=request_id,
         has_account=has_account,
         accounts=accounts or [],
+        redirect_url=redirect_url,
     )
 
 
