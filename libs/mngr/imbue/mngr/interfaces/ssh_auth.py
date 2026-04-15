@@ -45,17 +45,19 @@ class SSHAuthMethod(FrozenModel, ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "auth_type" in cls.model_fields:
-            field = cls.model_fields["auth_type"]
-            default = field.default
-            if default is not None:
-                existing = SSHAuthMethod._registry.get(default)
-                if existing is not None and existing is not cls:
-                    raise TypeError(
-                        f"Duplicate SSHAuthMethod auth_type {default!r}: "
-                        f"{cls.__name__} conflicts with {existing.__name__}"
-                    )
-                SSHAuthMethod._registry[default] = cls
+        # Extract auth_type default from class annotations, since Pydantic's
+        # model_fields is not yet populated when __init_subclass__ runs.
+        auth_type_default = cls.__dict__.get("auth_type")
+        # Skip if no default was set in this class (inherited or abstract)
+        if auth_type_default is None or not isinstance(auth_type_default, str):
+            return
+        existing = SSHAuthMethod._registry.get(auth_type_default)
+        if existing is not None and existing is not cls:
+            raise TypeError(
+                f"Duplicate SSHAuthMethod auth_type {auth_type_default!r}: "
+                f"{cls.__name__} conflicts with {existing.__name__}"
+            )
+        SSHAuthMethod._registry[auth_type_default] = cls
 
     @abstractmethod
     def configure_pyinfra_host_data(self, host_data: dict[str, Any]) -> None:
