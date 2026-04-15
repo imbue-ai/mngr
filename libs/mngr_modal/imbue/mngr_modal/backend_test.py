@@ -1,7 +1,14 @@
 from pathlib import Path
 
+import pytest
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import get_files_for_deploy
+from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.testing import TestingModalInterface
 
 # =============================================================================
 # get_files_for_deploy Tests
@@ -57,3 +64,37 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
     assert len(result) == 1
     matched_values = list(result.values())
     assert matched_values[0] == config_file
+
+
+# =============================================================================
+# _get_or_create_app Error Propagation Tests
+# =============================================================================
+
+
+class _FailingModalInterface(TestingModalInterface):
+    """Concrete ModalInterface that raises ModalProxyError on app_lookup."""
+
+    def app_lookup(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+    ) -> AppInterface:
+        raise ModalProxyError("Could not connect to the Modal server.")
+
+
+def test_get_or_create_app_propagates_modal_proxy_error(tmp_path: Path) -> None:
+    """ModalProxyError from the interface propagates out of _get_or_create_app."""
+    failing_interface = _FailingModalInterface(
+        root_dir=tmp_path,
+        concurrency_group=ConcurrencyGroup(name="test"),
+    )
+    with pytest.raises(ModalProxyError, match="Could not connect"):
+        ModalProviderBackend._get_or_create_app(
+            app_name="fail-test",
+            environment_name="test-env",
+            is_persistent=True,
+            modal_interface=failing_interface,
+            is_testing=True,
+        )
