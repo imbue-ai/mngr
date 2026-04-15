@@ -8,9 +8,38 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr_diagnose.cli import DIAGNOSE_CLONE_DIR
 from imbue.mngr.cli.issue_reporting import get_mngr_version
+from imbue.mngr_diagnose.cli import DIAGNOSE_CLONE_DIR
 from imbue.mngr_diagnose.cli import diagnose
+
+
+def _stub_clone_and_capture_create_args(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Stub out the clone step and capture the args passed to `create`.
+
+    Patches `ensure_mngr_clone` to be a no-op (just mkdir) and replaces
+    `click.Command.make_context` with a spy that records the args list
+    whenever the diagnose command invokes the create command, then raises
+    SystemExit(0) to short-circuit the actual agent creation.
+
+    Returns the (initially empty) list that will be populated with one
+    entry per intercepted invocation.
+    """
+    def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
+        clone_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
+
+    captured: list[list[str]] = []
+    original_make_context = click.Command.make_context
+
+    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
+        if info_name == "diagnose" and "--from" in args:
+            captured.append(args)
+            raise SystemExit(0)
+        return original_make_context(self, info_name, args, **kwargs)
+
+    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
+    return captured
 
 
 def test_get_mngr_version() -> None:
@@ -35,24 +64,7 @@ def test_diagnose_with_context_file(
         "error_message": "oops",
     }))
 
-    def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
-        clone_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
-
-    # Capture the create invocation by replacing the module-level create_cmd reference
-    captured_args: list[list[str]] = []
-
-    original_make_context = click.Command.make_context
-
-    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
-        if info_name == "diagnose" and "--from" in args:
-            # This is the create_cmd.make_context call from within diagnose
-            captured_args.append(args)
-            raise SystemExit(0)
-        return original_make_context(self, info_name, args, **kwargs)
-
-    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
+    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -80,21 +92,7 @@ def test_diagnose_with_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose with just a description passes it through."""
-    def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
-        clone_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
-
-    captured_args: list[list[str]] = []
-    original_make_context = click.Command.make_context
-
-    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
-        if info_name == "diagnose" and "--from" in args:
-            captured_args.append(args)
-            raise SystemExit(0)
-        return original_make_context(self, info_name, args, **kwargs)
-
-    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
+    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -115,21 +113,7 @@ def test_diagnose_with_agent_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose with --type passes it through to create."""
-    def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
-        clone_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
-
-    captured_args: list[list[str]] = []
-    original_make_context = click.Command.make_context
-
-    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
-        if info_name == "diagnose" and "--from" in args:
-            captured_args.append(args)
-            raise SystemExit(0)
-        return original_make_context(self, info_name, args, **kwargs)
-
-    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
+    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -150,21 +134,7 @@ def test_diagnose_no_type_omits_type_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When --type is not specified, the create args should not contain --type."""
-    def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
-        clone_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
-
-    captured_args: list[list[str]] = []
-    original_make_context = click.Command.make_context
-
-    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
-        if info_name == "diagnose" and "--from" in args:
-            captured_args.append(args)
-            raise SystemExit(0)
-        return original_make_context(self, info_name, args, **kwargs)
-
-    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
+    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
