@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
+from imbue.mngr.cli.issue_reporting import _offer_diagnose
 from imbue.mngr.cli.issue_reporting import build_issue_body
 from imbue.mngr.cli.issue_reporting import build_issue_title
 from imbue.mngr.cli.issue_reporting import build_new_issue_url
@@ -17,6 +19,8 @@ from imbue.mngr.cli.issue_reporting import build_unexpected_error_issue_title
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
 from imbue.mngr.cli.issue_reporting import search_for_existing_issue
+from imbue.mngr.cli.issue_reporting import write_diagnose_context_file
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def _fake_finished_process(returncode: int, stdout: str, command: tuple[str, ...] = ("fake",)) -> FinishedProcess:
@@ -363,3 +367,68 @@ def test_build_unexpected_error_issue_body_includes_traceback() -> None:
     assert "missing_key" in body
     assert "Traceback" in body
     assert "Bug Report" in body
+
+
+# =============================================================================
+# Tests for write_diagnose_context_file
+# =============================================================================
+
+
+def test_write_diagnose_context_file_creates_json() -> None:
+    path = write_diagnose_context_file(
+        traceback_str="Traceback:\n  ValueError: oops",
+        mngr_version="0.2.4",
+        error_type="ValueError",
+        error_message="oops",
+    )
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["traceback_str"] == "Traceback:\n  ValueError: oops"
+    assert data["mngr_version"] == "0.2.4"
+    assert data["error_type"] == "ValueError"
+    assert data["error_message"] == "oops"
+    # Clean up
+    path.unlink(missing_ok=True)
+
+
+def test_write_diagnose_context_file_deterministic_name() -> None:
+    """Same inputs produce the same file path (content-addressed)."""
+    path1 = write_diagnose_context_file("tb", "0.2.4", "Err", "msg")
+    path2 = write_diagnose_context_file("tb", "0.2.4", "Err", "msg")
+    assert path1 == path2
+    assert path1.name.startswith("mngr-diagnose-context-")
+    assert path1.name.endswith(".json")
+    # Clean up
+    path1.unlink(missing_ok=True)
+
+
+def test_write_diagnose_context_file_different_inputs() -> None:
+    """Different inputs produce different file paths."""
+    path1 = write_diagnose_context_file("tb1", "0.2.4", "Err", "msg1")
+    path2 = write_diagnose_context_file("tb2", "0.2.4", "Err", "msg2")
+    assert path1 != path2
+    # Clean up
+    path1.unlink(missing_ok=True)
+    path2.unlink(missing_ok=True)
+
+
+# =============================================================================
+# Tests for _offer_diagnose
+# =============================================================================
+
+
+def test_offer_diagnose_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_offer_diagnose returns immediately when IS_AUTONOMOUS=1."""
+    monkeypatch.setenv("IS_AUTONOMOUS", "1")
+    with capture_loguru(level="INFO") as log_output:
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    assert log_output.getvalue() == ""
+
+
+def test_offer_diagnose_shows_install_hint_when_no_plugin() -> None:
+    """_offer_diagnose shows install instructions when ctx is None (no plugin manager)."""
+    with capture_loguru(level="INFO") as log_output:
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    output = log_output.getvalue()
+    assert "mngr diagnose --context-file" in output
+    assert "mngr plugin add imbue-mngr-diagnose" in output
