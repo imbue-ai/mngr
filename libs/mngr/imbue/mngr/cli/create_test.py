@@ -868,6 +868,49 @@ def test_create_rejects_command_for_headless_non_command_accepting_type(
     assert "does not accept -c/--command" in result.output
 
 
+def test_create_headless_rejects_incompatible_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Headless agent types should reject flags that don't apply to the headless flow."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "-c", "echo hello", "--env", "FOO=bar"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "does not support" in result.output
+    assert "--env" in result.output
+
+
+def test_create_headless_rejects_multiple_incompatible_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Error message should list all incompatible flags that were explicitly set."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "-c",
+            "echo hello",
+            "--message",
+            "hi",
+            "--reuse",
+            "--env",
+            "FOO=bar",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--env" in result.output
+    assert "--message" in result.output
+    assert "--reuse" in result.output
+
+
 # =============================================================================
 # Tests for --command validation in _parse_agent_opts
 # =============================================================================

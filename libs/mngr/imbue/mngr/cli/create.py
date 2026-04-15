@@ -40,6 +40,7 @@ from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_source_location
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import is_param_explicit
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
@@ -205,6 +206,58 @@ def _validate_command_accepted(agent_type_name: str, command: str | None) -> Non
         raise UserInputError(
             f"Agent type '{agent_type_name}' does not accept -c/--command. "
             f"Only command-accepting agent types (like 'generic' or 'headless_command') support -c."
+        )
+
+
+_HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
+    ("source", "--from/--source"),
+    ("branch", "--branch"),
+    ("transfer", "--transfer"),
+    ("rsync", "--rsync/--no-rsync"),
+    ("rsync_args", "--rsync-args"),
+    ("ensure_clean", "--ensure-clean/--no-ensure-clean"),
+    ("include_unclean", "--include-unclean/--exclude-unclean"),
+    ("include_gitignored", "--include-gitignored"),
+    ("target_path", "--target-path"),
+    ("env", "--env"),
+    ("env_file", "--env-file"),
+    ("pass_env", "--pass-env"),
+    ("grant", "--grant"),
+    ("extra_provision_command", "--extra-provision-command"),
+    ("upload_file", "--upload-file"),
+    ("extra_window", "--extra-window/-w"),
+    ("message", "--message"),
+    ("message_file", "--message-file"),
+    ("edit_message", "--edit-message"),
+    ("connect", "--connect/--no-connect"),
+    ("reconnect", "--reconnect/--no-reconnect"),
+    ("attach_command", "--attach-command"),
+    ("connect_command", "--connect-command"),
+    ("reuse", "--reuse/--no-reuse"),
+    ("update", "--update/--no-update"),
+    ("worktree_base_folder", "--worktree-base-folder"),
+    ("start_on_boot", "--start-on-boot/--no-start-on-boot"),
+)
+
+
+def _reject_incompatible_headless_flags(ctx: click.Context, agent_type_name: str) -> None:
+    """Raise UserInputError if any flags incompatible with the headless path were explicitly set.
+
+    The headless path skips source resolution, git operations, provisioning,
+    environment setup, and connection. Flags for those features are silently
+    ignored, which could confuse users. This function catches that early.
+    """
+    explicit_flags: list[str] = []
+    for param_name, display_name in _HEADLESS_INCOMPATIBLE_FLAGS:
+        if is_param_explicit(ctx, param_name):
+            explicit_flags.append(display_name)
+
+    if explicit_flags:
+        flags_str = ", ".join(explicit_flags)
+        raise UserInputError(
+            f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
+            f"The headless flow creates a temporary directory, streams output, and auto-destroys. "
+            f"Source, git, provisioning, environment, and connection options do not apply."
         )
 
 
@@ -630,6 +683,7 @@ def create(ctx: click.Context, **kwargs) -> None:
             agent_class = get_agent_class(resolved_agent_type)
             if issubclass(agent_class, StreamingHeadlessAgentMixin):
                 _validate_command_accepted(resolved_agent_type, opts.command)
+                _reject_incompatible_headless_flags(ctx, resolved_agent_type)
                 _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
                 return
 
