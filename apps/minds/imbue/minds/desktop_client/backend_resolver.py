@@ -26,6 +26,7 @@ from imbue.minds.primitives import ServerName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostAuthInfoEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
@@ -508,6 +509,8 @@ class MngrStreamManager(MutableModel):
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
+        elif isinstance(event, HostAuthInfoEvent):
+            self._handle_host_auth_info(event)
         elif isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
         elif isinstance(event, AgentDiscoveryEvent):
@@ -554,6 +557,32 @@ class MngrStreamManager(MutableModel):
         for agent in event.agents:
             ssh_info = self._get_ssh_info_for_agent(agent.agent_id)
             self._fire_agent_discovered_callbacks(agent.agent_id, ssh_info, str(agent.provider_name))
+
+    def _handle_host_auth_info(self, event: HostAuthInfoEvent) -> None:
+        """Update SSH auth info from a stdout-only auth event (carries unmasked credentials).
+
+        HOST_AUTH_INFO events are emitted directly to stdout (never written to the events
+        file) and carry plaintext credentials. This takes priority over HOST_SSH_INFO
+        because it has the real auth data needed for connecting.
+        """
+        auth = SSHKeyAuth.model_validate(event.auth_data)
+        ssh_info = RemoteSSHInfo(
+            user=event.user,
+            host=event.hostname,
+            port=event.port,
+            auth=auth,
+        )
+        host_id_str = str(event.host_id)
+        with self._lock:
+            self._ssh_by_host_id[host_id_str] = ssh_info
+            agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
+            agents_on_host = tuple(AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str)
+
+        self._update_resolver(agent_ids)
+
+        for agent_id in agents_on_host:
+            provider = self._get_provider_name_for_agent(agent_id)
+            self._fire_agent_discovered_callbacks(agent_id, ssh_info, provider)
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Update SSH info for a host and refresh the resolver."""

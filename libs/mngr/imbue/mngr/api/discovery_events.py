@@ -12,6 +12,7 @@ from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.event_envelope import EventEnvelope
@@ -35,6 +36,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import SSHInfo
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/discovery")
@@ -49,6 +52,7 @@ class DiscoveryEventType(UpperCaseStrEnum):
     HOST_DESTROYED = auto()
     DISCOVERY_FULL = auto()
     HOST_SSH_INFO = auto()
+    HOST_AUTH_INFO = auto()
 
 
 # === Event Data Types ===
@@ -88,10 +92,30 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
 
 
 class HostSSHInfoEvent(EventEnvelope):
-    """Records SSH connection info for a host."""
+    """Records SSH connection info for a host (file-safe, secrets masked)."""
 
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
+
+
+class HostAuthInfoEvent(EventEnvelope):
+    """Carries SSH auth credentials for a host (stdout-only, secrets exposed).
+
+    This event is NEVER written to the events.jsonl file. It is emitted only to
+    stdout during the discovery stream so the desktop client can obtain the real
+    credentials needed to connect. The password/secret values are serialized in
+    plaintext specifically because the consumer needs them to authenticate.
+
+    The events.jsonl file uses HostSSHInfoEvent instead, which masks secrets
+    via SecretStr's default serialization.
+    """
+
+    host_id: HostId = Field(description="ID of the host")
+    user: str = Field(description="SSH username")
+    hostname: str = Field(description="SSH hostname")
+    port: int = Field(description="SSH port")
+    auth_type: str = Field(description="Auth method type discriminator")
+    auth_data: dict[str, str] = Field(description="Auth method data with secrets exposed as plaintext")
 
 
 # === Path Helpers ===
@@ -286,7 +310,7 @@ def emit_host_destroyed(
 
 
 def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> None:
-    """Build and append a host SSH info event."""
+    """Build and append a host SSH info event (file-safe, secrets masked)."""
     timestamp, event_id = _make_envelope_fields()
     event = HostSSHInfoEvent(
         timestamp=timestamp,
@@ -298,6 +322,59 @@ def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> Non
     )
     append_discovery_event(config, event)
     logger.trace("Emitted host_ssh_info event for {}", host_id)
+
+
+def _build_auth_data_with_secrets(auth: SSHAuthMethod) -> dict[str, str]:
+    """Serialize an SSHAuthMethod with secrets exposed as plaintext.
+
+    DANGER: output contains plaintext secrets. Only use for stdout-only events
+    that are never written to disk.
+    """
+    data = auth.model_dump(mode="json")
+    # Unwrap any SecretStr values that Pydantic masked as '**********'
+    for key, field_info in auth.model_fields.items():
+        if field_info.annotation is SecretStr:
+            secret_field: SecretStr = auth.__dict__[key]
+            data[key] = secret_field.get_secret_value()
+    return {k: str(v) for k, v in data.items() if v is not None}
+
+
+def build_host_auth_info_line(host_id: HostId, conn: SSHConnectionInfo) -> str:
+    """Build a HOST_AUTH_INFO JSONL line with secrets exposed.
+
+    This line is intended for stdout-only delivery to the desktop client.
+    It must NEVER be written to the events.jsonl file.
+    """
+    timestamp, event_id = _make_envelope_fields()
+    event = HostAuthInfoEvent(
+        timestamp=timestamp,
+        type=EventType(DiscoveryEventType.HOST_AUTH_INFO),
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        host_id=host_id,
+        user=conn.user,
+        hostname=conn.hostname,
+        port=conn.port,
+        auth_type=conn.auth.auth_type,
+        auth_data=_build_auth_data_with_secrets(conn.auth),
+    )
+    return json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+
+
+def emit_stdout_only_auth_events(
+    host_ssh_infos: dict[HostId, SSHConnectionInfo],
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+) -> None:
+    """Emit HOST_AUTH_INFO events directly to stdout (or on_line callback).
+
+    These events carry unmasked credentials for the desktop client.
+    They are NEVER written to the events.jsonl file.
+    """
+    for host_id, conn in host_ssh_infos.items():
+        line = build_host_auth_info_line(host_id, conn)
+        _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
 
 
 def emit_discovery_events_for_host(
@@ -370,6 +447,7 @@ DiscoveryEvent = (
     | HostDestroyedEvent
     | FullDiscoverySnapshotEvent
     | HostSSHInfoEvent
+    | HostAuthInfoEvent
 )
 
 
@@ -401,6 +479,8 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
             return FullDiscoverySnapshotEvent.model_validate(data)
         case DiscoveryEventType.HOST_SSH_INFO:
             return HostSSHInfoEvent.model_validate(data)
+        case DiscoveryEventType.HOST_AUTH_INFO:
+            return HostAuthInfoEvent.model_validate(data)
         case _:
             return None
 
@@ -609,29 +689,68 @@ def _discovery_stream_tail_events_file(
         stop_event.wait(timeout=1.0)
 
 
-def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
+def _write_unfiltered_full_snapshot(
+    mngr_ctx: MngrContext, error_behavior: ErrorBehavior
+) -> dict[HostId, SSHConnectionInfo]:
     """Run an unfiltered list to trigger a full discovery snapshot event.
 
     The snapshot is written as a side effect of list_agents when the listing is
     unfiltered and error-free. This function exists to trigger that side effect
     explicitly (e.g. for the discovery stream's periodic re-polls).
+
+    Returns a mapping of host_id -> SSHConnectionInfo for hosts with SSH auth,
+    so callers can emit stdout-only auth events.
     """
     from imbue.mngr.api.list import list_agents
 
-    list_agents(
+    result = list_agents(
         mngr_ctx=mngr_ctx,
         is_streaming=False,
         error_behavior=error_behavior,
         reset_caches=True,
     )
+    return _extract_ssh_connection_infos(result.agents)
 
 
-def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
+def _extract_ssh_connection_infos(
+    agents: Sequence["AgentDetails"],
+) -> dict[HostId, SSHConnectionInfo]:
+    """Extract SSH connection infos from agent details, keyed by host ID."""
+    infos: dict[HostId, SSHConnectionInfo] = {}
+    for agent in agents:
+        host = agent.host
+        if host.ssh is not None and host.id not in infos:
+            infos[host.id] = SSHConnectionInfo(
+                user=host.ssh.user,
+                hostname=host.ssh.host,
+                port=host.ssh.port,
+                auth=host.ssh.auth,
+            )
+    return infos
+
+
+def _write_unfiltered_full_snapshot_logged(
+    mngr_ctx: MngrContext, error_behavior: ErrorBehavior
+) -> dict[HostId, SSHConnectionInfo]:
     """Run an unfiltered full snapshot, logging any errors instead of raising."""
     try:
-        _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
+        return _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
     except (BaseMngrError, OSError) as e:
         logger.warning("Failed to write discovery snapshot: {}", e)
+        return {}
+
+
+def _sync_snapshot_and_emit_auth(
+    mngr_ctx: MngrContext,
+    error_behavior: ErrorBehavior,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+) -> None:
+    """Run a full snapshot sync and emit stdout-only auth events."""
+    host_auth_infos = _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
+    if host_auth_infos:
+        emit_stdout_only_auth_events(host_auth_infos, emitted_event_ids, emit_lock, on_line)
 
 
 def run_discovery_stream(
@@ -681,15 +800,16 @@ def run_discovery_stream(
     # Phase 3: run the initial full sync
     # If we had a cached snapshot, run this in the background so the caller sees results immediately.
     # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+    sync_args = (mngr_ctx, error_behavior, emitted_event_ids, emit_lock, on_line)
     if has_cached_snapshot:
         initial_sync = threading.Thread(
-            target=_write_unfiltered_full_snapshot_logged,
-            args=(mngr_ctx, error_behavior),
+            target=_sync_snapshot_and_emit_auth,
+            args=sync_args,
             daemon=True,
         )
         initial_sync.start()
     else:
-        _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
+        _sync_snapshot_and_emit_auth(*sync_args)
         # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
@@ -705,8 +825,10 @@ def run_discovery_stream(
             if stop_event.is_set():
                 break
             try:
-                _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
+                host_auth_infos = _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
                 # The tail thread will pick up the new snapshot and emit it
+                if host_auth_infos:
+                    emit_stdout_only_auth_events(host_auth_infos, emitted_event_ids, emit_lock, on_line)
             except (BaseMngrError, OSError) as e:
                 logger.warning("Discovery stream poll failed (continuing): {}", e)
     except KeyboardInterrupt:
