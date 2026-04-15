@@ -101,90 +101,15 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
-            <div class="menu-wrapper">
-              <button class="menu-btn" onclick="event.stopPropagation(); toggleMenu('{{ agent_id }}')"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-              <div class="menu-dropdown" id="menu-{{ agent_id }}">
-                <button class="menu-item"
-                        onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'">Settings</button>
-                {% if telegram_enabled %}
-                  {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
-                <span class="menu-item" style="color: #16a34a; cursor: default;">Telegram active</span>
-                  {% else %}
-                <button class="menu-item" id="tg-btn-{{ agent_id }}"
-                        onclick="event.stopPropagation(); setupTelegram('{{ agent_id }}')">Setup Telegram</button>
-                  {% endif %}
-                {% endif %}
-                <button class="menu-item destructive"
-                        onclick="event.stopPropagation(); alert('Not implemented')">Delete</button>
-              </div>
-            </div>
+            <button class="menu-btn" onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'" title="Settings">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    <script>
-    function toggleMenu(agentId) {
-      document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
-        if (el.id !== 'menu-' + agentId) el.classList.remove('open');
-      });
-      document.getElementById('menu-' + agentId).classList.toggle('open');
-    }
-    document.addEventListener('click', function(e) {
-      if (!e.target.closest('.menu-wrapper')) {
-        document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
-          el.classList.remove('open');
-        });
-      }
-    });
-    async function setupTelegram(agentId) {
-      var btn = document.getElementById('tg-btn-' + agentId);
-      btn.disabled = true;
-      btn.textContent = 'Setting up...';
-      try {
-        var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
-        if (!resp.ok) {
-          var data = await resp.json();
-          alert('Failed: ' + (data.error || resp.statusText));
-          btn.disabled = false;
-          btn.textContent = 'Setup Telegram';
-          return;
-        }
-        pollTelegramStatus(agentId, btn);
-      } catch (e) {
-        alert('Failed: ' + e.message);
-        btn.disabled = false;
-        btn.textContent = 'Setup Telegram';
-      }
-    }
-    function pollTelegramStatus(agentId, btn) {
-      var interval = setInterval(async function() {
-        try {
-          var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
-          if (!resp.ok) return;
-          var data = await resp.json();
-          btn.textContent = formatStatus(data.status);
-          if (data.status === 'DONE') {
-            clearInterval(interval);
-            btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
-            btn.disabled = false;
-            btn.style.color = '#16a34a';
-            btn.style.cursor = 'default';
-          } else if (data.status === 'FAILED') {
-            clearInterval(interval);
-            btn.textContent = 'Setup failed';
-            btn.disabled = false;
-            alert('Telegram setup failed: ' + (data.error || 'unknown error'));
-          }
-        } catch (e) {}
-      }, 2000);
-    }
-    function formatStatus(s) {
-      return {'CHECKING_CREDENTIALS':'Checking credentials...','WAITING_FOR_LOGIN':'Waiting for login...',
-        'CREATING_BOT':'Creating bot...','INJECTING_CREDENTIALS':'Injecting credentials...',
-        'DONE':'Done','FAILED':'Failed'}[s] || s;
-    }
-    </script>
+    <script></script>
     {% else %}
       {% if is_discovering %}
     <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">

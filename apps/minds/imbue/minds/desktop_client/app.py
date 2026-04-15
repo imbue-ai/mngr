@@ -1323,53 +1323,106 @@ def _handle_workspace_settings(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Render workspace settings page for associating/disassociating with accounts."""
+    """Render workspace settings page with account, telegram, and delete options."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     current_account = session_store.get_account_for_workspace(agent_id) if session_store else None
     accounts = session_store.list_accounts() if session_store else []
 
+    ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(AgentId(agent_id))
+        ws_name = info.agent_name if info else agent_id
+
+    # Account association section
     if current_account:
-        content = (
+        account_section = (
             f'<p>Currently associated with: <strong>{current_account.email}</strong></p>'
             f'<form method="POST" action="/workspace/{agent_id}/disassociate">'
             f'<p style="color:#f59e0b;font-size:13px;margin:8px 0;">Warning: Disassociating will '
             f'remove all sharing (tunnels) for this workspace.</p>'
-            f'<button type="submit" style="background:#7f1d1d;color:#fca5a5;border:none;padding:8px 16px;'
-            f'border-radius:4px;cursor:pointer;">Disassociate from {current_account.email}</button></form>'
+            f'<button type="submit" class="btn btn-danger">Disassociate from {current_account.email}</button></form>'
         )
     else:
         options = "".join(
             f'<option value="{acct.user_id}">{acct.email}</option>' for acct in accounts
         )
         if accounts:
-            form_action = f"/workspace/{agent_id}/associate"
-            content = (
+            account_section = (
                 '<p>This workspace is private (not associated with any account).</p>'
-                f'<form method="POST" action="{form_action}">'
-                '<select name="user_id" style="padding:8px;border-radius:4px;background:#1e293b;'
-                f'color:#e2e8f0;border:1px solid #334155;">{options}</select>'
-                '<button type="submit" style="margin-left:8px;background:#1e3a5f;color:#93c5fd;'
-                'border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">Associate</button>'
+                f'<form method="POST" action="/workspace/{agent_id}/associate">'
+                '<select name="user_id" class="select-input">'
+                f'{options}</select>'
+                '<button type="submit" class="btn btn-primary" style="margin-left:8px;">Associate</button>'
                 '</form>'
             )
         else:
-            content = (
+            account_section = (
                 '<p>This workspace is private (not associated with any account).</p>'
                 '<p>No accounts available. <a href="/auth/login">Log in</a> first.</p>'
             )
 
+    # Telegram section
+    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    if telegram_orchestrator is not None:
+        has_telegram = telegram_orchestrator.agent_has_telegram(AgentId(agent_id))
+        if has_telegram:
+            telegram_section = '<p style="color:#22c55e;">Telegram is active for this workspace.</p>'
+        else:
+            telegram_section = (
+                f'<button class="btn btn-primary" id="tg-btn" '
+                f'onclick="setupTelegram(\'{agent_id}\')">Setup Telegram</button>'
+            )
+    else:
+        telegram_section = '<p style="color:#64748b;">Telegram not configured.</p>'
+
     html = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Workspace Settings</title>'
+        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Settings: ' + ws_name + '</title>'
         '<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;'
-        'padding:24px;margin:0;}h1{font-size:20px;color:#e2e8f0;margin-bottom:16px;}'
-        'a{color:#60a5fa;text-decoration:none;}a:hover{text-decoration:underline;}</style></head>'
-        f'<body><h1>Workspace Settings</h1>'
-        f'<p style="color:#64748b;font-size:13px;">Agent: {agent_id}</p>'
-        f'{content}'
-        f'<div style="margin-top:16px;"><a href="/">Back to workspaces</a></div>'
+        'padding:24px;margin:0;}h1{font-size:20px;color:#e2e8f0;margin-bottom:4px;}'
+        'h2{font-size:16px;color:#94a3b8;margin:24px 0 8px;padding-top:16px;border-top:1px solid #334155;}'
+        'a{color:#60a5fa;text-decoration:none;}a:hover{text-decoration:underline;}'
+        '.btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;}'
+        '.btn-primary{background:#1e3a5f;color:#93c5fd;}'
+        '.btn-danger{background:#7f1d1d;color:#fca5a5;}'
+        '.select-input{padding:8px;border-radius:4px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;}'
+        '</style></head>'
+        f'<body><h1>{ws_name}</h1>'
+        f'<p style="color:#64748b;font-size:12px;margin-bottom:16px;">{agent_id}</p>'
+        f'<h2>Account</h2>{account_section}'
+        f'<h2>Telegram</h2>{telegram_section}'
+        '<h2>Danger Zone</h2>'
+        '<p style="color:#64748b;font-size:13px;margin-bottom:8px;">Permanently delete this workspace and all its data.</p>'
+        f'<button class="btn btn-danger" onclick="alert(\'Not implemented\')">Delete workspace</button>'
+        f'<div style="margin-top:24px;"><a href="/">Back to workspaces</a></div>'
+        '<script>'
+        'async function setupTelegram(agentId) {'
+        '  var btn = document.getElementById("tg-btn");'
+        '  btn.disabled = true; btn.textContent = "Setting up...";'
+        '  try {'
+        '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
+        '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
+        '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
+        '    pollTelegramStatus(agentId, btn);'
+        '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
+        '}'
+        'function pollTelegramStatus(agentId, btn) {'
+        '  var interval = setInterval(async function() {'
+        '    try { var resp = await fetch("/api/agents/" + agentId + "/telegram/status");'
+        '      if (!resp.ok) return; var data = await resp.json();'
+        '      if (data.status === "DONE") { clearInterval(interval);'
+        '        btn.textContent = "Telegram active"; btn.style.color = "#22c55e"; }'
+        '      else if (data.status === "FAILED") { clearInterval(interval);'
+        '        btn.textContent = "Setup failed"; btn.disabled = false;'
+        '        alert("Telegram setup failed: " + (data.error || "unknown")); }'
+        '      else { btn.textContent = data.status; }'
+        '    } catch (e) {}'
+        '  }, 2000);'
+        '}'
+        '</script>'
         '</body></html>'
     )
     return HTMLResponse(content=html)
@@ -1436,11 +1489,11 @@ def _handle_requests_panel(
         agent_id = req.agent_id
         event_id = str(req.event_id)
         cards.append(
-            f'<a href="/requests/{event_id}" style="display:block;padding:12px;border:1px solid #334155;'
-            f'border-radius:8px;margin:8px;background:#1e293b;text-decoration:none;color:inherit;">'
+            f'<div onclick="navigateToRequest(\'{event_id}\')" style="display:block;padding:12px;border:1px solid #334155;'
+            f'border-radius:8px;margin:8px;background:#1e293b;cursor:pointer;">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{req_type}: {server_name}</div>'
             f'<div style="font-size:11px;color:#64748b;margin-top:4px;">Agent: {agent_id[:16]}...</div>'
-            f'<div style="font-size:11px;color:#64748b;">{str(req.timestamp)}</div></a>'
+            f'<div style="font-size:11px;color:#64748b;">{str(req.timestamp)}</div></div>'
         )
 
     html = (
@@ -1449,7 +1502,14 @@ def _handle_requests_panel(
         'margin:0;padding:0;overflow-y:auto;height:100vh;}'
         'h2{font-size:15px;color:#e2e8f0;padding:12px;margin:0;border-bottom:1px solid #334155;}'
         '</style></head>'
-        f'<body><h2>Requests ({len(pending)})</h2>'
+        f'<body>'
+        f'<script>'
+        f'function navigateToRequest(eventId) {{'
+        f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
+        f'  else window.top.location = "/requests/" + eventId;'
+        f'}}'
+        f'</script>'
+        f'<h2>Requests ({len(pending)})</h2>'
         f'<div>{"".join(cards) if cards else "<p style=padding:12px;color:#64748b;>No pending requests.</p>"}</div>'
         f'<div style="position:fixed;bottom:0;left:0;right:0;padding:12px;border-top:1px solid #334155;'
         f'background:#0f172a;">'
