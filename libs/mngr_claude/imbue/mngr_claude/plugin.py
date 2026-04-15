@@ -104,12 +104,14 @@ _INSTALLED_PLUGINS_RELATIVE_PATH: Final[Path] = Path("plugins") / "installed_plu
 _KNOWN_MARKETPLACES_RELATIVE_PATH: Final[Path] = Path("plugins") / "known_marketplaces.json"
 
 _INSTALLED_PLUGINS_SENTINEL_PREFIX: Final[str] = "/__mngr_plugins_source__"
-"""Sentinel prefix written into installPath values at deploy build time.
+"""Sentinel prefix written into plugin/marketplace path values at deploy build time.
 
 At build time, ``get_files_for_deploy`` rewrites absolute local paths
-(e.g. /home/user/.claude/plugins/cache/...) to use this sentinel prefix.
-At runtime, the fixup rewrites the sentinel to the actual per-agent config dir.
-This avoids depending on the build machine's home directory path.
+(e.g. /home/user/.claude/plugins/cache/...) to use this sentinel prefix
+in both installed_plugins.json (installPath) and known_marketplaces.json
+(installLocation).  At runtime, ``_resolve_installed_plugins_sentinel``
+rewrites the sentinel to the actual per-agent config dir.  This avoids
+depending on the build machine's home directory path.
 """
 
 
