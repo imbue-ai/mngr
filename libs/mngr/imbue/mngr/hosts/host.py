@@ -1129,7 +1129,8 @@ class Host(BaseHost, OnlineHostInterface):
         if source_repo_label is None:
             raise AgentStartError(
                 str(agent.name),
-                f"Work directory {agent.work_dir} is missing and no source_repo_path label is set",
+                f"Work directory {agent.work_dir} is missing and no source_repo_path label is set."
+                f" Set it with: mngr label {agent.name} -l source_repo_path=/path/to/repo",
             )
         source_repo = Path(source_repo_label)
 

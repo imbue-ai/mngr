@@ -744,7 +744,7 @@ def test_ensure_work_dir_exists_raises_when_no_source_repo_label(
         agent_config=AgentTypeConfig(command=CommandString("sleep 1")),
     )
 
-    with pytest.raises(AgentStartError, match="no source_repo_path label is set"):
+    with pytest.raises(AgentStartError, match="no source_repo_path label is set.*mngr label"):
         host._ensure_work_dir_exists(agent)
 
 
