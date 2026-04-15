@@ -10,6 +10,7 @@ dependencies = [
     "imbue-common",
     "modal>=1.3.1",
     "pydantic>=2.0",
+    "supertokens-python>=0.27.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [

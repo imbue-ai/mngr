@@ -242,3 +242,23 @@ def test_raise_no_output_error_surfaces_pane_content_when_no_files(
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="pane-err-content")
     with pytest.raises(MngrError, match="pane-err-content"):
         agent._raise_no_output_error()
+
+
+def test_raise_no_output_error_surfaces_pane_content_when_files_exist_but_empty(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When redirect files exist but are empty, pane content is still surfaced.
+
+    Shell redirects (> stdout 2> stderr) create empty files even when the
+    process fails immediately. The pane capture should be used as a fallback
+    regardless of whether the redirect files exist.
+    """
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="startup-crash-output")
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "stdout.log").write_text("")
+    (agent_dir / "stderr.log").write_text("")
+    with pytest.raises(MngrError, match="startup-crash-output"):
+        agent._raise_no_output_error()

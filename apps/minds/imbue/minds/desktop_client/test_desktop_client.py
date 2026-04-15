@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -349,7 +350,8 @@ def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> Non
     assert "serviceWorker.register" in response.text
 
 
-def test_browser_navigation_serves_info_bar_wrapper(tmp_path: Path) -> None:
+def test_browser_navigation_serves_bootstrap_directly(tmp_path: Path) -> None:
+    """Browser navigation now gets bootstrap page directly (no info bar wrapper)."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -362,47 +364,7 @@ def test_browser_navigation_serves_info_bar_wrapper(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert "info-bar" in response.text
-    assert "?_embed=1" in response.text
-    assert str(agent_id) in response.text
-    assert str(DEFAULT_SERVER_NAME) in response.text
-
-
-def test_browser_navigation_info_bar_preserves_query_params(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/some/path?foo=bar",
-        headers={
-            "sec-fetch-mode": "navigate",
-            "user-agent": "Mozilla/5.0 Firefox/130.0",
-        },
-    )
-
-    assert response.status_code == 200
-    assert "info-bar" in response.text
-    # The iframe src should include the original query params plus _embed=1
-    assert "foo=bar" in response.text
-    assert "_embed=1" in response.text
-
-
-def test_browser_navigation_with_embed_bypasses_info_bar(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/?_embed=1",
-        headers={
-            "sec-fetch-mode": "navigate",
-            "user-agent": "Mozilla/5.0 Firefox/130.0",
-        },
-    )
-
-    assert response.status_code == 200
-    # With _embed=1, should get the bootstrap page (SW registration), not the info bar
     assert "serviceWorker.register" in response.text
-    assert "info-bar" not in response.text
 
 
 def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
@@ -1444,3 +1406,60 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     response = client.get("/explode")
     assert response.status_code == 500
     assert "test boom" in response.text
+
+
+# -- Chrome routes --
+
+
+def test_chrome_page_renders_without_auth(tmp_path: Path) -> None:
+    """The /_chrome route is unauthenticated and returns the chrome HTML."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome")
+    assert response.status_code == 200
+    assert "minds-titlebar" in response.text
+    assert "content-frame" in response.text
+
+
+def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome")
+    assert response.status_code == 200
+    assert "sidebar-toggle" in response.text
+    assert "sidebar-panel" in response.text
+
+
+def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
+    """The /_chrome/sidebar route returns the standalone sidebar HTML."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome/sidebar")
+    assert response.status_code == 200
+    assert "sidebar-workspaces" in response.text
+    assert "EventSource" in response.text
+
+
+def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
+    """The /_chrome/events SSE endpoint returns auth_required for unauthenticated users."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome/events")
+    assert response.status_code == 200
+    assert "auth_required" in response.text
+
+
+def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path) -> None:
+    """The /_chrome/events SSE endpoint returns workspace list for authenticated users.
+
+    We test the underlying _build_workspace_list helper since the SSE endpoint
+    is an infinite stream that the TestClient cannot consume without blocking.
+    """
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {str(DEFAULT_SERVER_NAME): "http://test-backend"}},
+    )
+
+    workspaces = _build_workspace_list(backend_resolver)
+    assert len(workspaces) == 1
+    assert workspaces[0]["id"] == str(agent_id)

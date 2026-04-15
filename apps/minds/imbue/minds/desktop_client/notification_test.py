@@ -1,5 +1,4 @@
 import json
-import threading
 import types
 from types import SimpleNamespace
 from typing import Any
@@ -236,15 +235,6 @@ def test_dispatcher_default_constructor_resolves_tkinter() -> None:
     # _tk is set by model_post_init; it will be a ModuleType or None (if tkinter is absent)
     # Just verify the attribute is accessible (not undefined)
     _ = dispatcher._tk
-
-
-def test_show_tkinter_toast_with_no_tkinter_runs_in_thread() -> None:
-    """_show_tkinter_toast with tk=None starts a daemon thread that exits immediately."""
-    before_count = threading.active_count()
-    request = NotificationRequest(message="thread test")
-    _show_tkinter_toast(request, "agent-thread", tk=None)
-    # Thread is daemon and should start; we can't easily join it but verify no exception
-    assert threading.active_count() >= before_count
 
 
 # -- macOS notification tests --

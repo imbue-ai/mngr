@@ -614,21 +614,6 @@ class UploadFileSpec(FrozenModel):
         return cls(local_path=Path(local.strip()), remote_path=Path(remote.strip()))
 
 
-class FileModificationSpec(FrozenModel):
-    """Specification for modifying a file: REMOTE:TEXT."""
-
-    remote_path: Path = Field(description="Remote path to the file")
-    text: str = Field(description="Text to append/prepend")
-
-    @classmethod
-    def from_string(cls, s: str) -> "FileModificationSpec":
-        """Parse a REMOTE:TEXT string into a FileModificationSpec."""
-        if ":" not in s:
-            raise ParseSpecError(f"File modification must be in REMOTE:TEXT format, got: {s}")
-        remote, text = s.split(":", 1)
-        return cls(remote_path=Path(remote.strip()), text=text)
-
-
 class AgentProvisioningOptions(FrozenModel):
     """Simple provisioning options for the agent."""
 
@@ -640,18 +625,22 @@ class AgentProvisioningOptions(FrozenModel):
         default=(),
         description="Files to upload (LOCAL:REMOTE pairs)",
     )
-    append_to_files: tuple[FileModificationSpec, ...] = Field(
-        default=(),
-        description="Text to append to files (REMOTE:TEXT pairs)",
-    )
-    prepend_to_files: tuple[FileModificationSpec, ...] = Field(
-        default=(),
-        description="Text to prepend to files (REMOTE:TEXT pairs)",
-    )
     create_directories: tuple[Path, ...] = Field(
         default=(),
         description="Directories to create on the remote",
     )
+
+
+# Mapping from raw-string config/CLI field names to AgentProvisioningOptions
+# target fields and their parsers.  Covers the three fields that map to
+# AgentProvisioningOptions; env/env_file are handled separately because they
+# map to AgentEnvironmentOptions instead.  Used by both the CLI (create.py) and
+# the agent-type merge path (host.py) so the two stay in sync.
+PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+    ("extra_provision_command", "extra_provision_commands", str),
+    ("upload_file", "upload_files", UploadFileSpec.from_string),
+    ("create_directory", "create_directories", Path),
+)
 
 
 class NamedCommand(FrozenModel):

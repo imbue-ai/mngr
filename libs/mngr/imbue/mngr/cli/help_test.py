@@ -8,6 +8,7 @@ from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help import get_all_topics
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.main import cli
+from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
 # Topic registry tests
@@ -241,9 +242,10 @@ def test_help_nonexistent_topic(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """'mngr help nonexistent' exits with an error message."""
-    result = cli_runner.invoke(cli, ["help", "nonexistent-xyz"], obj=plugin_manager, catch_exceptions=False)
+    with capture_loguru(level="ERROR") as log_output:
+        result = cli_runner.invoke(cli, ["help", "nonexistent-xyz"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code != 0
-    assert "No help found" in result.output
+    assert "No help found" in log_output.getvalue()
 
 
 def test_help_help_shows_self(

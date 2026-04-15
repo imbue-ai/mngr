@@ -558,8 +558,10 @@ def _discovery_stream_emit_line(
         logger.trace("Skipped malformed JSONL line in discovery event stream")
         return
     event_id = data.get("event_id")
+    event_type = data.get("type", "unknown")
     with emit_lock:
         if event_id and event_id in emitted_event_ids:
+            logger.trace("Discovery stream: skipping already-emitted event {} (type={})", event_id, event_type)
             return
         if event_id:
             emitted_event_ids.add(event_id)
@@ -586,13 +588,21 @@ def _discovery_stream_tail_events_file(
                 file_size = events_path.stat().st_size
                 # Handle file truncation (reset to start)
                 if file_size < current_offset:
+                    logger.debug(
+                        "Discovery events file truncated (size {} < offset {}), resetting", file_size, current_offset
+                    )
                     current_offset = 0
                 if file_size > current_offset:
+                    bytes_new = file_size - current_offset
                     with open(events_path) as f:
                         f.seek(current_offset)
                         new_content = f.read()
                         current_offset = f.tell()
-                    for file_line in new_content.splitlines():
+                    new_lines = new_content.splitlines()
+                    logger.debug(
+                        "Discovery tail: read {} new bytes, {} lines from events file", bytes_new, len(new_lines)
+                    )
+                    for file_line in new_lines:
                         if stop_event.is_set():
                             break
                         _discovery_stream_emit_line(file_line, emitted_event_ids, emit_lock, on_line)

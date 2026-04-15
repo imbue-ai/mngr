@@ -498,3 +498,41 @@ def test_persist_multiple_agents_for_same_host(docker_provider: DockerProviderIn
     assert len(records) == 2
     agent_ids = {r["id"] for r in records}
     assert agent_ids == {agent_id_1, agent_id_2}
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_disconnect_closes_paramiko_ssh_client(docker_provider: DockerProviderInstance) -> None:
+    """Verify that Host.disconnect() closes the underlying paramiko SSH client.
+
+    pyinfra's disconnect() only clears its SFTP cache and sets connected=False.
+    It does NOT close the paramiko SSHClient, so when connect() is called again
+    (e.g. during a retry after a transient SSH error), the old TCP connection
+    leaks as an orphaned sshd-session on the server.
+
+    This test creates a real Docker host, establishes an SSH connection, grabs
+    a reference to the paramiko transport, disconnects, and verifies that the
+    transport was actually closed.
+    """
+    host = docker_provider.create_host(HostName("test-disconnect"))
+
+    # Establish the SSH connection by running a command
+    result = host.execute_idempotent_command("echo connected")
+    assert result.success
+
+    # Grab the paramiko transport from the live connection.
+    # Access pyinfra internals directly (not part of the public type surface);
+    # the ty: ignore suppresses the unresolved-attribute type error.
+    old_client = host.connector.host.connector.client  # ty: ignore[unresolved-attribute]
+    assert old_client is not None
+    old_transport = old_client.get_transport()
+    assert old_transport is not None
+    assert old_transport.is_active()
+
+    # Disconnect
+    host.disconnect()
+
+    # The paramiko transport should be closed after disconnect
+    assert not old_transport.is_active(), (
+        "paramiko transport is still active after disconnect -- the SSH connection was leaked"
+    )
