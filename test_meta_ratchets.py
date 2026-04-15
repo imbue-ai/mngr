@@ -139,30 +139,22 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
-def test_no_ruff_pre_commit_errors() -> None:
-    """Ensure repo passes the same ruff lint rules enforced by the pre-commit hook.
+def test_no_ruff_lint_errors_repo_wide() -> None:
+    """Ensure all Python files in the repo pass ruff lint checks.
 
-    Checks UP006/UP007 (modern type hints), I (import sorting), F401 (unused imports).
+    Per-project test_ratchets.py files check within each project. This test covers
+    files outside projects (scripts/, repo-root files) and acts as a CI backstop
+    for the pre-commit hook.
     """
     result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "ruff",
-            "check",
-            "--select",
-            "UP006,UP007,I,F401",
-            "--force-exclude",
-            "--config",
-            "pyproject.toml",
-        ],
+        ["uv", "run", "ruff", "check", "--force-exclude", "--config", "pyproject.toml"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         raise AssertionError(
-            "Ruff pre-commit lint rules found errors (run the pre-commit hook to auto-fix):\n\n" + result.stdout
+            "Ruff lint errors found (run `uv run ruff check --fix .` to auto-fix):\n\n" + result.stdout
         )
 
 
