@@ -67,7 +67,7 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
 
 
 # =============================================================================
-# _get_or_create_app Error Propagation Tests
+# build_provider_instance Error Conversion Tests
 # =============================================================================
 
 
@@ -84,8 +84,15 @@ class _FailingModalInterface(TestingModalInterface):
         raise ModalProxyError("Could not connect to the Modal server.")
 
 
-def test_get_or_create_app_propagates_modal_proxy_error(tmp_path: Path) -> None:
-    """ModalProxyError from the interface propagates out of _get_or_create_app."""
+def test_get_or_create_app_raises_modal_proxy_error_on_connection_failure(tmp_path: Path) -> None:
+    """ModalProxyError from a failing ModalInterface propagates out of _get_or_create_app.
+
+    build_provider_instance calls _get_or_create_app inside a try block with an
+    except ModalProxyError clause that converts the error to ProviderUnavailableError.
+    This test verifies that the error path from _get_or_create_app is reachable:
+    a ModalProxyError raised by app_lookup escapes _get_or_create_app unchanged,
+    which is the precondition for build_provider_instance's conversion clause to fire.
+    """
     failing_interface = _FailingModalInterface(
         root_dir=tmp_path,
         concurrency_group=ConcurrencyGroup(name="test"),
