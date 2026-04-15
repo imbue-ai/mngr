@@ -1163,14 +1163,16 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
 ) -> None:
     """_maybe_write_full_discovery_snapshot logs a warning when OSError occurs.
 
-    Makes the discovery events file read-only so that the write attempt
-    fails with PermissionError (a subclass of OSError). The function should
-    log the warning and return normally rather than propagating the error.
+    Makes the discovery events path a directory so that the write attempt
+    fails with IsADirectoryError (a subclass of OSError). This works
+    regardless of whether the process runs as root, unlike chmod-based
+    approaches. The function should log the warning and return normally
+    rather than propagating the error.
     """
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text("")
-    events_path.chmod(0o444)
+    # Make the events path a directory -- writing to a directory raises IsADirectoryError
+    events_path.mkdir(exist_ok=True)
 
     host_details = _make_host_details()
     agent = _make_agent_details("oserror-agent", host_details)
@@ -1185,8 +1187,6 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
             include_filters=(),
             exclude_filters=(),
         )
-
-    events_path.chmod(0o644)
 
     output = log_output.getvalue()
     assert "Failed to write full discovery snapshot" in output
