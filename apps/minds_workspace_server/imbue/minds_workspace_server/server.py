@@ -505,13 +505,13 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
 
 
 async def _create_chat_agent(request: Request) -> JSONResponse:
-    """Create a new chat agent in the same work directory."""
+    """Create a new chat agent in the primary agent's work directory."""
     agent_manager: AgentManager = request.app.state.agent_manager
     body = await request.json()
 
     try:
         create_request = CreateChatRequest(**body)
-        agent_id = agent_manager.create_chat_agent(create_request.name, create_request.parent_agent_id)
+        agent_id = agent_manager.create_chat_agent(create_request.name)
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,

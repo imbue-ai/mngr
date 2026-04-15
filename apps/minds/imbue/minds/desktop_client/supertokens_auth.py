@@ -5,13 +5,19 @@ The stored access token (JWT) is used for authenticating with the
 cloudflare_forwarding service. Refresh tokens allow automatic renewal.
 """
 
+import base64
+import binascii
 import json
 import threading
+import time
 from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
+from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -76,6 +82,23 @@ def derive_user_id_prefix(user_id: str) -> UserIdPrefix:
     return UserIdPrefix(hex_chars[:_USER_ID_PREFIX_LENGTH])
 
 
+_TOKEN_EXPIRY_BUFFER_SECONDS = 60
+
+
+def _jwt_seconds_until_expiry(token: str) -> float | None:
+    """Return seconds until the JWT expires, or None if the expiry cannot be determined."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if exp is None:
+            return None
+        return float(exp) - time.time()
+    except (IndexError, ValueError, json.JSONDecodeError, binascii.Error):
+        return None
+
+
 class SuperTokensSessionStore(MutableModel):
     """Manages a single global SuperTokens session stored on disk.
 
@@ -134,11 +157,58 @@ class SuperTokensSessionStore(MutableModel):
                 logger.info("Cleared SuperTokens session")
 
     def get_access_token(self) -> str | None:
-        """Return the stored access token, or None if not signed in."""
+        """Return a valid access token, refreshing automatically if expired.
+
+        Returns None if not signed in or if the token cannot be refreshed.
+        """
         session = self.load_session()
         if session is None:
             return None
-        return str(session.access_token)
+
+        token = str(session.access_token)
+        seconds_left = _jwt_seconds_until_expiry(token)
+        if seconds_left is not None and seconds_left < _TOKEN_EXPIRY_BUFFER_SECONDS:
+            refreshed = self._try_refresh(session)
+            if refreshed is not None:
+                return refreshed
+            if seconds_left < 0:
+                logger.warning("Access token expired and refresh failed")
+                return None
+
+        return token
+
+    def _try_refresh(self, session: "StoredSession") -> str | None:
+        """Attempt to refresh the access token using the stored refresh token.
+
+        Returns the new access token on success, or None on failure.
+        """
+        if session.refresh_token is None:
+            return None
+        try:
+            new_session = refresh_session_without_request_response(
+                refresh_token=str(session.refresh_token),
+            )
+            tokens = new_session.get_all_session_tokens_dangerously()
+            new_access_token = tokens["accessToken"]
+            new_refresh_token = tokens.get("refreshToken") or str(session.refresh_token)
+            self.store_session(
+                access_token=new_access_token,
+                refresh_token=new_refresh_token,
+                user_id=str(session.user_id),
+                email=session.email,
+                display_name=session.display_name,
+            )
+            logger.info("Refreshed expired SuperTokens access token")
+            return new_access_token
+        except (ValueError, TypeError, KeyError, OSError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            # FIXME: all of the warnings here--in this func, and other functions in this file--should be replaced with user notifications that tell them that something went wrong, and should make sure that they log in again / it shows that the login is outdated
+            logger.warning("Failed to refresh SuperTokens session: {}", exc)
+            return None
+        except Exception as exc:
+            # The supertokens Querier raises bare Exception for network failures,
+            # HTTP errors from the core, and core availability issues.
+            logger.warning("Failed to refresh SuperTokens session (unexpected error): {}", exc)
+            return None
 
     def get_user_info(self) -> UserInfo | None:
         """Return user info from the stored session, or None if not signed in."""

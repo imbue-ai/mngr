@@ -365,7 +365,7 @@ ipcMain.on('navigate-content', (_event, url) => {
     contentView.webContents.loadURL(url);
   }
   // Close sidebar after navigation
-  if (sidebarView) {
+  if (sidebarView && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.contentView.removeChildView(sidebarView);
     sidebarView.webContents.close();
     sidebarView = null;
@@ -399,17 +399,21 @@ ipcMain.on('retry', async () => {
         nodeIntegration: false,
       },
     });
-    mainWindow.contentView.addChildView(chromeView);
+    // chromeView is never removed during the error path, so only add contentView
     mainWindow.contentView.addChildView(contentView);
     updateViewBounds();
   }
 
   if (chromeView && !chromeView.webContents.isDestroyed()) {
-    await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
-    // Reset chrome bounds to title bar height since we're back in loading mode
+    // Expand chrome view to full window and hide content view for the loading screen
     if (mainWindow && !mainWindow.isDestroyed()) {
-      updateViewBounds();
+      const { width, height } = mainWindow.getContentBounds();
+      chromeView.setBounds({ x: 0, y: 0, width, height });
+      if (contentView) {
+        contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
     }
+    await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
     startBackendWithRetry();
   }
 });
