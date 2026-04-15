@@ -99,7 +99,8 @@ class KanpanPluginConfig(PluginConfig):
     column_order: list[str] | None = Field(
         default=None,
         description="Display order for columns. Uses field keys from data sources. "
-        "Built-in names: name, state, commits_ahead, pr, ci, create_pr_url, conflicts, unresolved. "
+        "Built-in column names: name, state. "
+        "Data source field keys: commits_ahead, pr, ci, create_pr_url, conflicts, unresolved. "
         "If None, defaults to columns declared by data sources.",
     )
     section_order: list[BoardSection] | None = Field(

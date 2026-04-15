@@ -34,6 +34,7 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import DataSourceConfig
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
 PLUGIN_NAME = "kanpan"
@@ -198,14 +199,14 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
     if not isinstance(pr, PrField):
         raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
 
-    if pr.is_draft:
-        return BoardSection.PR_DRAFT
     match pr.state:
         case PrState.MERGED:
             return BoardSection.PR_MERGED
         case PrState.CLOSED:
             return BoardSection.PR_CLOSED
         case PrState.OPEN:
+            if pr.is_draft:
+                return BoardSection.PR_DRAFT
             ci = fields.get(FIELD_CI)
             match ci:
                 case None:
@@ -279,7 +280,6 @@ def _cache_file_path(mngr_ctx: MngrContext) -> Path:
 def save_field_cache(
     mngr_ctx: MngrContext,
     cached_fields: dict[AgentName, dict[str, FieldValue]],
-    data_sources: Sequence[KanpanDataSource],
 ) -> None:
     """Persist cached fields to a local JSON file atomically.
 
@@ -376,7 +376,7 @@ def collect_data_sources(
         if isinstance(source_config, dict):
             if not source_config.get("enabled", True):
                 continue
-        elif source_config is not None and hasattr(source_config, "enabled"):
+        elif isinstance(source_config, DataSourceConfig):
             if not source_config.enabled:
                 continue
         enabled_sources.append(source)

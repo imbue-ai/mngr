@@ -495,8 +495,7 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent_name: {"pr_count": StringField(value="3")},
     }
-    data_sources = [_make_mock_data_source("pr_count", StringField)]
-    save_field_cache(ctx, cached, data_sources)
+    save_field_cache(ctx, cached)
     cache_file = tmp_path / "kanpan" / "field_cache.json"
     assert cache_file.exists()
 
@@ -516,7 +515,7 @@ def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
         agent_name: {"status": StringField(value="hello")},
     }
     data_sources = [_make_mock_data_source("status", StringField)]
-    save_field_cache(ctx, original, data_sources)
+    save_field_cache(ctx, original)
     loaded = load_field_cache(ctx, data_sources)
     assert agent_name in loaded
     field = loaded[agent_name]["status"]
@@ -541,8 +540,7 @@ def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     original: dict[AgentName, dict[str, FieldValue]] = {
         agent_name: {"status": StringField(value="hello")},
     }
-    data_sources = [_make_mock_data_source("status", StringField)]
-    save_field_cache(ctx, original, data_sources)
+    save_field_cache(ctx, original)
     # Load with no data sources (empty type registry) -- field should be skipped
     loaded = load_field_cache(ctx, [])
     assert loaded == {}
@@ -555,6 +553,6 @@ def test_save_field_cache_swallows_errors(tmp_path: Path) -> None:
     readonly_dir.chmod(0o444)
     ctx = _make_cache_ctx(readonly_dir / "subdir_that_cannot_exist")
     try:
-        save_field_cache(ctx, {}, [])
+        save_field_cache(ctx, {})
     finally:
         readonly_dir.chmod(0o755)

@@ -12,8 +12,6 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
-from imbue.mngr_kanpan.data_sources.github import CiField
-from imbue.mngr_kanpan.data_sources.github import PrField
 
 _SHELL_TIMEOUT_SECONDS = 30.0
 
@@ -118,17 +116,6 @@ def _build_shell_env(
 
     # Add cached field values as env vars
     for key, field_value in agent_cached.items():
-        env_key = f"MNGR_FIELD_{key.upper()}"
-        if isinstance(field_value, PrField):
-            env["MNGR_FIELD_PR_NUMBER"] = str(field_value.number)
-            env["MNGR_FIELD_PR_URL"] = field_value.url
-            env["MNGR_FIELD_PR_STATE"] = str(field_value.state)
-        elif isinstance(field_value, CiField):
-            env["MNGR_FIELD_CI_STATUS"] = str(field_value.status)
-        elif isinstance(field_value, StringField):
-            env[env_key] = field_value.value
-        else:
-            cell = field_value.display()
-            env[env_key] = cell.text
+        env.update(field_value.env_vars(key))
 
     return env

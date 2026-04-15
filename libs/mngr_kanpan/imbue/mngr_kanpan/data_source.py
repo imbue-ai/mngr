@@ -37,6 +37,14 @@ class FieldValue(FrozenModel):
     def display(self) -> CellDisplay:
         return CellDisplay(text=str(self))
 
+    def env_vars(self, key: str) -> dict[str, str]:
+        """Return env var name -> value pairs for shell command injection.
+
+        The default implementation exposes display text as MNGR_FIELD_{KEY}.
+        Subclasses may override to provide more structured env vars (e.g. PR number, URL).
+        """
+        return {f"MNGR_FIELD_{key.upper()}": self.display().text}
+
 
 class StringField(FieldValue):
     """Simple string field for shell data sources and similar."""
@@ -45,6 +53,9 @@ class StringField(FieldValue):
 
     def display(self) -> CellDisplay:
         return CellDisplay(text=self.value)
+
+    def env_vars(self, key: str) -> dict[str, str]:
+        return {f"MNGR_FIELD_{key.upper()}": self.value}
 
 
 class BoolField(FieldValue):

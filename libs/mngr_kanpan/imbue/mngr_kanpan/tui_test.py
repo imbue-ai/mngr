@@ -511,7 +511,7 @@ def test_build_field_color_palette_with_colors() -> None:
     snapshot = _make_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert len(entries) == 2
-    assert "field_ci_light red" in names
+    assert "field_ci_light_red" in names
 
 
 def test_build_field_color_palette_no_colors() -> None:
@@ -600,7 +600,7 @@ def test_field_cell_markup_fn_call() -> None:
 
 
 def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
-    """CI FAILING cell has color='light red', so markup uses field_ci_light red attr."""
+    """CI FAILING cell has color='light red', so markup uses field_ci_light_red attr."""
     ci = CiField(status=CiStatus.FAILING)
     cell = ci.display()
     entry = _make_entry(
@@ -609,7 +609,7 @@ def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
     )
     markup = _field_cell_markup(entry, FIELD_CI)
     assert isinstance(markup, tuple)
-    assert markup[0] == f"field_{FIELD_CI}_light red"
+    assert markup[0] == f"field_{FIELD_CI}_light_red"
     assert markup[1] == cell.text
 
 
@@ -628,7 +628,7 @@ def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
 
 
 def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
-    """CI PASSING cell has color='light green', so markup uses field_ci_light green attr."""
+    """CI PASSING cell has color='light green', so markup uses field_ci_light_green attr."""
     ci = CiField(status=CiStatus.PASSING)
     cell = ci.display()
     entry = _make_entry(
@@ -637,7 +637,7 @@ def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
     )
     markup = _field_cell_markup(entry, FIELD_CI)
     assert isinstance(markup, tuple)
-    assert markup[0] == f"field_{FIELD_CI}_light green"
+    assert markup[0] == f"field_{FIELD_CI}_light_green"
     assert markup[1] == cell.text
 
 

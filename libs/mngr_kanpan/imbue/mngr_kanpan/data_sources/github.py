@@ -70,6 +70,13 @@ class PrField(FieldValue):
     def display(self) -> CellDisplay:
         return CellDisplay(text=f"#{self.number}", url=self.url)
 
+    def env_vars(self, key: str) -> dict[str, str]:
+        return {
+            "MNGR_FIELD_PR_NUMBER": str(self.number),
+            "MNGR_FIELD_PR_URL": self.url,
+            "MNGR_FIELD_PR_STATE": str(self.state),
+        }
+
 
 class CiField(FieldValue):
     """CI check status field value."""
@@ -80,6 +87,9 @@ class CiField(FieldValue):
         if self.status == CiStatus.UNKNOWN:
             return CellDisplay(text="")
         return CellDisplay(text=self.status.lower(), color=self.status.color)
+
+    def env_vars(self, key: str) -> dict[str, str]:
+        return {"MNGR_FIELD_CI_STATUS": str(self.status)}
 
 
 class CreatePrUrlField(FieldValue):
@@ -300,9 +310,6 @@ class GitHubDataSourceConfig(FrozenModel):
     )
 
 
-_DEFAULT_CONFIG = GitHubDataSourceConfig()
-
-
 class GitHubDataSource(FrozenModel):
     """Fetches GitHub PR, CI, conflict, and unresolved comment data.
 
@@ -428,6 +435,13 @@ class _PrFieldInternal(PrField):
     internal_check_status: CiStatus = Field(default=CiStatus.UNKNOWN, description="CI check status for internal use")
 
 
+class _FetchPrsResult(FrozenModel):
+    """Result of fetching PRs from GitHub, using PrField."""
+
+    prs: tuple[_PrFieldInternal, ...] = Field(description="Fetched PRs as PrField objects")
+    error: str | None = Field(default=None, description="Error message if fetch failed")
+
+
 def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName) -> str | None:
     """Get repo path from cached fields if available."""
     agent_cached = cached_fields.get(agent_name)
@@ -439,7 +453,7 @@ def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]],
     return None
 
 
-def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, "_FetchPrsResult"]:
+def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPrsResult]:
     """Fetch PRs for a single repo."""
     result = fetch_all_prs(cg, repo=repo_path)
     # Convert PrInfo objects to PrField objects
@@ -457,13 +471,6 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, "_FetchP
             )
         )
     return repo_path, _FetchPrsResult(prs=tuple(pr_fields), error=result.error)
-
-
-class _FetchPrsResult(FrozenModel):
-    """Result of fetching PRs from GitHub, using PrField."""
-
-    prs: tuple[_PrFieldInternal, ...] = Field(description="Fetched PRs as PrField objects")
-    error: str | None = Field(default=None, description="Error message if fetch failed")
 
 
 @pure
@@ -615,9 +622,11 @@ def _build_unresolved_query(repo: str, pr_number: int) -> str:
 def _parse_unresolved(stdout: str, ignore_user: str | None = None) -> bool:
     """Check for unresolved review threads or unanswered PR conversation comments.
 
-    Checks two things:
+    Always checks:
     1. Inline review threads that are not resolved
-    2. PR conversation comments where the last comment is by someone else
+
+    Only when ignore_user is set:
+    2. PR conversation comments where the last comment is not by ignore_user
 
     If ignore_user is set, threads/comments where the last author matches
     that username are skipped (you already replied, ball is in their court).

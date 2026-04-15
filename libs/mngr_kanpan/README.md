@@ -76,7 +76,27 @@ Shell commands run once per agent in parallel. The stdout (trimmed) becomes the 
 | `MNGR_AGENT_PROVIDER` | Provider instance name |
 | `MNGR_FIELD_PR_NUMBER` | PR number (from cached fields) |
 | `MNGR_FIELD_PR_URL` | PR URL (from cached fields) |
+| `MNGR_FIELD_PR_STATE` | PR state: OPEN, MERGED, or CLOSED (from cached fields) |
 | `MNGR_FIELD_CI_STATUS` | CI status (from cached fields) |
+| `MNGR_FIELD_<KEY>` | Display text for any other cached field, uppercased key (e.g. `MNGR_FIELD_COMMITS_AHEAD`) |
+
+### Label-backed columns
+
+Add extra columns that read from agent labels:
+
+```toml
+# Column showing the agent's "blocked" label value
+[plugins.kanpan.columns.blocked]
+header = "BLOCKED"
+# label_key defaults to the field key ("blocked") if omitted
+label_key = "blocked"
+
+[plugins.kanpan.columns.blocked.colors]
+yes = "light red"
+no = "light green"
+```
+
+Each entry defines a column keyed by the field key (e.g. `blocked`). The `label_key` specifies which agent label to read (defaults to the field key). Use `colors` to map label values to urwid color names.
 
 ### Disabling a data source
 

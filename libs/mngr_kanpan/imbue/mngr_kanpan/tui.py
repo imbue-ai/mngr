@@ -33,6 +33,8 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_kanpan.data_source import BoolField
+from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -681,12 +683,29 @@ def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
         _start_local_refresh(state.loop, state)
 
 
+def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEntry:
+    """Return an updated AgentBoardEntry with the mute state applied.
+
+    Updates fields, cells, section, and is_muted so the board renders correctly.
+    """
+    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted)}
+    updated_cells = {key: field.display() for key, field in updated_fields.items()}
+    updated_section = compute_section(updated_fields)
+    ref = entry.field_ref()
+    return entry.model_copy_update(
+        to_update(ref.is_muted, is_muted),
+        to_update(ref.fields, updated_fields),
+        to_update(ref.cells, updated_cells),
+        to_update(ref.section, updated_section),
+    )
+
+
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
-    """Update the snapshot in-place by toggling is_muted on the named agent."""
+    """Update the snapshot in-place by toggling mute state on the named agent."""
     if state.snapshot is None:
         return
     new_entries = tuple(
-        entry.model_copy(update={"is_muted": is_muted}) if entry.name == agent_name else entry
+        _apply_mute_to_entry(entry, is_muted) if entry.name == agent_name else entry
         for entry in state.snapshot.entries
     )
     state.snapshot = state.snapshot.model_copy_update(
@@ -932,11 +951,12 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     try:
         fetch_result = state.refresh_future.result()
         new_snapshot = fetch_result.snapshot
-        # Update in-memory field cache
-        state.cached_fields = fetch_result.cached_fields
-        # Persist cache to disk after full refreshes
+        # Update in-memory field cache only for full refreshes: local-only refreshes do not
+        # produce remote fields (PR, CI, etc.), so overwriting would lose the remote data that
+        # the next full refresh needs as its cached_fields input.
         if not was_local_only:
-            save_field_cache(state.mngr_ctx, state.cached_fields, state.data_sources)
+            state.cached_fields = fetch_result.cached_fields
+            save_field_cache(state.mngr_ctx, state.cached_fields)
         # For local-only refreshes, carry forward fields from previous snapshot
         if was_local_only and state.snapshot is not None:
             new_snapshot = _carry_forward_fields(state.snapshot, new_snapshot)
@@ -1071,7 +1091,7 @@ def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Ha
     if cell is None:
         return ""
     if cell.color is not None:
-        return (f"field_{field_key}_{cell.color}", cell.text)
+        return (f"field_{field_key}_{cell.color.replace(' ', '_')}", cell.text)
     return cell.text
 
 
@@ -1081,7 +1101,7 @@ class _ColumnDef(FrozenModel):
     name: str
     header: str
     text_fn: Callable[[AgentBoardEntry], str]
-    markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
+    markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]]
     flexible: bool
 
 
@@ -1106,7 +1126,7 @@ class _FieldCellMarkupFn(FrozenModel):
 # Built-in column definitions for name and state (always present)
 _BUILTIN_COLUMN_DEFS: list[_ColumnDef] = [
     _ColumnDef(
-        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_text, flexible=False
+        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_markup, flexible=False
     ),
     _ColumnDef(
         name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
@@ -1195,7 +1215,7 @@ def _build_field_color_palette(
     for entry in snapshot.entries:
         for field_key, cell in entry.cells.items():
             if cell.color is not None:
-                attr = f"field_{field_key}_{cell.color}"
+                attr = f"field_{field_key}_{cell.color.replace(' ', '_')}"
                 if attr not in seen:
                     seen.add(attr)
                     entries.append((attr, cell.color, ""))
