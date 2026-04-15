@@ -19,10 +19,10 @@ This builds a remote sandbox on Modal and drops you into a tmux session, just li
 
 ### Using a template
 
-If your project has a Modal template defined in `.mngr/settings.toml`, you can use `-t modal` instead of passing flags manually:
+If your project has a Modal template defined in `.mngr/settings.toml`, you can use `-t my-modal` instead of passing flags manually:
 
 ```bash
-mngr create my-agent -t modal
+mngr create my-agent -t my-modal
 ```
 
 A typical Modal template includes `--dangerously-skip-permissions` since Modal sandboxes are disposable environments. This is safe for the sandbox itself, but be aware that any credentials you provide (e.g. `GH_TOKEN`) can be used by the agent without confirmation prompts.
@@ -30,7 +30,7 @@ A typical Modal template includes `--dangerously-skip-permissions` since Modal s
 Example template:
 
 ```toml
-[create_templates.modal]
+[create_templates.my-modal]
 provider = "modal"
 agent_args = ["--dangerously-skip-permissions"]
 pass_env = ["GH_TOKEN"]
