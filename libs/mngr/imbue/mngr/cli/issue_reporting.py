@@ -366,15 +366,19 @@ def handle_unexpected_error(
     if not is_interactive_resolved:
         raise SystemExit(1)
 
-    # Write context file and offer diagnose
+    # Write context file and offer diagnose (best-effort; must not prevent
+    # the traditional GitHub issue reporting below from running)
     error_message = str(error) if str(error) else type(error).__name__
-    context_path = write_diagnose_context_file(
-        traceback_str=tb_str,
-        mngr_version=get_mngr_version(),
-        error_type=type(error).__name__,
-        error_message=error_message,
-    )
-    _offer_diagnose(context_path, ctx)
+    try:
+        context_path = write_diagnose_context_file(
+            traceback_str=tb_str,
+            mngr_version=get_mngr_version(),
+            error_type=type(error).__name__,
+            error_message=error_message,
+        )
+        _offer_diagnose(context_path, ctx)
+    except Exception as diagnose_exc:
+        logger.debug("Diagnose step failed: {}", diagnose_exc)
 
     # Also offer the traditional GitHub issue reporting
     title = build_unexpected_error_issue_title(error)
