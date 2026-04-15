@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
@@ -1691,6 +1692,19 @@ def create_desktop_client(
         app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
+
+    # Register callback to process incoming request events from agents
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+
+        def _on_request_event(agent_id_str: str, raw_line: str) -> None:
+            event = parse_request_event(raw_line)
+            if event is not None:
+                current_inbox: RequestInbox | None = app.state.request_inbox
+                if current_inbox is not None:
+                    app.state.request_inbox = current_inbox.add_request(event)
+                    logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+
+        backend_resolver.add_on_request_callback(_on_request_event)
 
     # Mount the SuperTokens auth routes
     if session_store is not None:
