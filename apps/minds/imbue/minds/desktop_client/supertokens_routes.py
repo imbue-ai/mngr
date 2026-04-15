@@ -48,6 +48,8 @@ from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.supertokens_auth import SuperTokensUserId as AuthSuperTokensUserId
+from imbue.minds.desktop_client.supertokens_auth import UserIdPrefix as AuthUserIdPrefix
 from imbue.minds.desktop_client.supertokens_auth import UserInfo
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
@@ -125,10 +127,10 @@ class _MultiAccountSessionStoreAdapter(SuperTokensSessionStore):
         if info is None:
             return None
         return UserInfo(
-            user_id=info.user_id,
+            user_id=AuthSuperTokensUserId(str(info.user_id)),
             email=info.email,
             display_name=info.display_name,
-            user_id_prefix=info.user_id_prefix,
+            user_id_prefix=AuthUserIdPrefix(str(info.user_id_prefix)),
         )
 
     def get_access_token(self) -> str | None:
