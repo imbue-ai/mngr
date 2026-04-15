@@ -158,6 +158,64 @@ def test_derive_user_id_prefix() -> None:
     assert str(prefix) == "abcd123456789abc"
 
 
+def test_remove_nonexistent_session_is_noop(tmp_path: Path) -> None:
+    """Removing a session that doesn't exist does nothing."""
+    store = _make_store(tmp_path)
+    store.remove_session("nonexistent-user")
+    assert store.list_accounts() == []
+
+
+def test_disassociate_from_nonexistent_user_is_noop(tmp_path: Path) -> None:
+    """Disassociating from a user that doesn't exist does nothing."""
+    store = _make_store(tmp_path)
+    store.disassociate_workspace("nonexistent-user", "agent-xyz")
+
+
+def test_disassociate_nonexistent_workspace_is_noop(tmp_path: Path) -> None:
+    """Disassociating a workspace that isn't associated does nothing."""
+    store = _make_store(tmp_path)
+    _add_user(store, "user-1")
+    store.disassociate_workspace("user-1", "agent-not-associated")
+    session = store.get_session("user-1")
+    assert session is not None
+    assert session.workspace_ids == []
+
+
+def test_associate_to_nonexistent_user_is_noop(tmp_path: Path) -> None:
+    """Associating a workspace with a nonexistent user does nothing."""
+    store = _make_store(tmp_path)
+    store.associate_workspace("nonexistent-user", "agent-xyz")
+    assert store.list_accounts() == []
+
+
+def test_get_access_token_returns_token(tmp_path: Path) -> None:
+    """get_access_token returns the stored token when not expired."""
+    store = _make_store(tmp_path)
+    _add_user(store, "user-1")
+    token = store.get_access_token("user-1")
+    assert token == "tok-user-1"
+
+
+def test_get_access_token_nonexistent_user_returns_none(tmp_path: Path) -> None:
+    """get_access_token returns None for nonexistent user."""
+    store = _make_store(tmp_path)
+    assert store.get_access_token("nonexistent") is None
+
+
+def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:
+    """get_user_info returns None for nonexistent user."""
+    store = _make_store(tmp_path)
+    assert store.get_user_info("nonexistent") is None
+
+
+def test_has_signed_in_before(tmp_path: Path) -> None:
+    """has_signed_in_before checks for sessions.json existence."""
+    store = _make_store(tmp_path)
+    assert not store.has_signed_in_before()
+    _add_user(store, "user-1")
+    assert store.has_signed_in_before()
+
+
 def test_persistence_across_store_instances(tmp_path: Path) -> None:
     """Data written by one store instance is readable by a new one."""
     store1 = _make_store(tmp_path)
