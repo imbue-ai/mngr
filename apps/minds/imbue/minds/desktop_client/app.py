@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -42,9 +43,7 @@ from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
-from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
-from imbue.minds.desktop_client.proxy import is_electron_client
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -54,11 +53,13 @@ from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -576,27 +577,7 @@ async def _handle_proxy_http(
             media_type="application/javascript",
         )
 
-    # For non-Electron browsers, wrap the agent content in an info bar iframe on
-    # the initial navigation (when _embed is not in the query params). The iframe
-    # loads the same URL with _embed=1, which bypasses this check and serves the
-    # normal proxied content.
-    user_agent = request.headers.get("user-agent", "")
     is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
-    is_embed = request.query_params.get("_embed") == "1"
-
-    if is_navigation and not is_electron_client(user_agent) and not is_embed:
-        agent_info = backend_resolver.get_agent_display_info(parsed_id)
-        agent_display_name = agent_info.agent_name if agent_info else str(parsed_id)
-        host_id = agent_info.host_id if agent_info else "localhost"
-        html = generate_browser_info_bar_html(
-            agent_id=parsed_id,
-            server_name=parsed_server,
-            agent_display_name=agent_display_name,
-            host_id=host_id,
-            path=path,
-            query_string=str(request.url.query) if request.url.query else "",
-        )
-        return HTMLResponse(content=html)
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
@@ -1115,6 +1096,122 @@ def _handle_telegram_status(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# -- Chrome (persistent shell) route handlers --
+
+
+def _handle_chrome_page(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Serve the persistent chrome page (title bar + sidebar + content iframe).
+
+    This route is unauthenticated -- the chrome renders for all users. The sidebar
+    shows an empty state for unauthenticated users; the SSE stream populates it
+    after authentication.
+    """
+    user_agent = request.headers.get("user-agent", "")
+    is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
+
+    authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
+    initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
+
+    html = render_chrome_page(
+        is_mac=is_mac,
+        is_authenticated=authenticated,
+        initial_workspaces=initial_workspaces,
+    )
+    return HTMLResponse(content=html)
+
+
+def _handle_chrome_sidebar(request: Request) -> Response:
+    """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
+    html = render_sidebar_page()
+    return HTMLResponse(content=html)
+
+
+async def _handle_chrome_events(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """SSE endpoint that streams workspace list and auth status changes to the chrome.
+
+    The chrome subscribes to this on load. If unauthenticated, sends an auth_required
+    event. Once authenticated, sends the current workspace list and pushes updates
+    whenever the backend resolver's data changes (driven by MngrStreamManager's
+    discovery and events streams).
+    """
+    authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
+
+    async def _event_generator() -> AsyncGenerator[str, None]:
+        if not authenticated:
+            yield "data: {}\n\n".format(json.dumps({"type": "auth_required"}))
+            return
+
+        # Use an asyncio.Event to wake up when the resolver's data changes.
+        # The resolver fires callbacks from background threads, so we use
+        # call_soon_threadsafe to signal the event on the event loop.
+        change_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def _on_change() -> None:
+            loop.call_soon_threadsafe(change_event.set)
+
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.add_on_change_callback(_on_change)
+
+        try:
+            # Send initial workspace list
+            last_workspace_data = _build_workspace_list(backend_resolver)
+            yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+
+            # Wait for changes and push updates until client disconnects
+            connected = not await request.is_disconnected()
+            while connected:
+                # Wait for a change signal or timeout (timeout for disconnect checks)
+                change_event.clear()
+                try:
+                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                except TimeoutError:
+                    pass
+
+                connected = not await request.is_disconnected()
+                if not connected:
+                    break
+
+                current_data = _build_workspace_list(backend_resolver)
+                if current_data != last_workspace_data:
+                    last_workspace_data = current_data
+                    yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+        finally:
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.remove_on_change_callback(_on_change)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _build_workspace_list(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
+    """Build a JSON-serializable list of workspaces from the backend resolver."""
+    agent_ids = backend_resolver.list_known_workspace_ids()
+    workspaces: list[dict[str, str]] = []
+    for aid in agent_ids:
+        ws_name = backend_resolver.get_workspace_name(aid)
+        if not ws_name:
+            info = backend_resolver.get_agent_display_info(aid)
+            ws_name = info.agent_name if info else str(aid)
+        workspaces.append({"id": str(aid), "name": ws_name})
+    return workspaces
+
+
 # -- App factory --
 
 
@@ -1195,6 +1292,11 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Chrome (persistent shell) routes
+    app.get("/_chrome")(_handle_chrome_page)
+    app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
+    app.get("/_chrome/events")(_handle_chrome_events)
 
     # Register routes
     app.get("/login")(_handle_login)
