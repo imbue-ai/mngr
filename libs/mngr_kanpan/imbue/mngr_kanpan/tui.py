@@ -34,7 +34,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import BoolField
+from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
+from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -1077,9 +1080,23 @@ def _get_name_cell_markup(
     return f"  {entry.name}"
 
 
+def _resolve_cell(entry: AgentBoardEntry, field_key: str) -> CellDisplay | None:
+    """Resolve the CellDisplay for a field key, with fallbacks.
+
+    For the 'pr' column, falls back to 'create_pr_url' when no PR exists,
+    so the PR column shows '+PR' with a create link when there's no open PR.
+    """
+    cell = entry.cells.get(field_key)
+    if cell is not None:
+        return cell
+    if field_key == FIELD_PR:
+        return entry.cells.get(FIELD_CREATE_PR_URL)
+    return None
+
+
 def _field_cell_text(entry: AgentBoardEntry, field_key: str) -> str:
     """Get plain text for a field-based column cell."""
-    cell = entry.cells.get(field_key)
+    cell = _resolve_cell(entry, field_key)
     if cell is None:
         return ""
     return cell.text
@@ -1087,7 +1104,7 @@ def _field_cell_text(entry: AgentBoardEntry, field_key: str) -> str:
 
 def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Hashable, str]:
     """Build urwid text markup for a field-based column cell."""
-    cell = entry.cells.get(field_key)
+    cell = _resolve_cell(entry, field_key)
     if cell is None:
         return ""
     if cell.color is not None:
@@ -1273,8 +1290,8 @@ def _build_agent_row(
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
-        cell = entry.cells.get(defn.name)
-        cell_url = cell.url if cell is not None else None
+        resolved = _resolve_cell(entry, defn.name)
+        cell_url = resolved.url if resolved is not None else None
         if cell_url:
             hyperlink_widget = _HyperlinkText(cell_markup[defn.name])
             hyperlink_widget._hyperlink_url = cell_url
