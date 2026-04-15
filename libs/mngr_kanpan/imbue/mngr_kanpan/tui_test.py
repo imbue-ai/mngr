@@ -485,8 +485,9 @@ class _MockDataSource:
 def test_build_data_source_column_defs() -> None:
     defs = _build_data_source_column_defs([_MockDataSource()])
     names = [d.name for d in defs]
+    # All columns returned, including empty-header ones (filtered later by _assemble_column_defs)
     assert "mock_field" in names
-    assert "empty_header" not in names
+    assert "empty_header" in names
 
 
 def test_build_data_source_column_defs_deduplicates() -> None:
