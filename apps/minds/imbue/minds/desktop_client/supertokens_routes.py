@@ -100,7 +100,7 @@ class _MultiAccountSessionStoreAdapter(SuperTokensSessionStore):
         adapter._multi_store = multi_store
         return adapter
 
-    def store_session(  # type: ignore[override]
+    def store_session(
         self,
         access_token: str,
         refresh_token: str | None,
@@ -116,27 +116,27 @@ class _MultiAccountSessionStoreAdapter(SuperTokensSessionStore):
             display_name=display_name,
         )
 
-    def get_user_info(self) -> UserInfo | None:  # type: ignore[override]
+    def get_user_info(self) -> UserInfo | None:
         accounts = self._multi_store.list_accounts()
         if not accounts:
             return None
         latest = accounts[-1]
         return self._multi_store.get_user_info(str(latest.user_id))
 
-    def get_access_token(self) -> str | None:  # type: ignore[override]
+    def get_access_token(self) -> str | None:
         accounts = self._multi_store.list_accounts()
         if not accounts:
             return None
         latest = accounts[-1]
         return self._multi_store.get_access_token(str(latest.user_id))
 
-    def is_signed_in(self) -> bool:  # type: ignore[override]
+    def is_signed_in(self) -> bool:
         return self._multi_store.is_any_signed_in()
 
-    def has_signed_in_before(self) -> bool:  # type: ignore[override]
+    def has_signed_in_before(self) -> bool:
         return self._multi_store.has_signed_in_before()
 
-    def clear_session(self) -> None:  # type: ignore[override]
+    def clear_session(self) -> None:
         accounts = self._multi_store.list_accounts()
         if accounts:
             self._multi_store.remove_session(str(accounts[-1].user_id))
