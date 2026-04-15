@@ -61,7 +61,10 @@ from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
+from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_agent_servers_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -1254,36 +1257,7 @@ def _handle_accounts_page(
     minds_config: MindsConfig | None = request.app.state.minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    accounts_html = []
-    for acct in accounts:
-        is_default = str(acct.user_id) == default_account_id
-        accounts_html.append(
-            f'<div style="padding:12px;border:1px solid #334155;border-radius:8px;margin:8px 0;background:#1e293b;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center;">'
-            f'<div><strong style="color:#e2e8f0;">{acct.email}</strong>'
-            f'{" (default)" if is_default else ""}'
-            f'<br><span style="color:#64748b;font-size:12px;">ID: {str(acct.user_id)[:16]}...</span>'
-            f'<br><span style="color:#64748b;font-size:12px;">Workspaces: {len(acct.workspace_ids)}</span></div>'
-            f'<div style="display:flex;gap:8px;">'
-            f'<form method="POST" action="/accounts/set-default" style="display:inline;">'
-            f'<input type="hidden" name="user_id" value="{acct.user_id}">'
-            f'<button type="submit" style="background:#334155;color:#94a3b8;border:none;padding:4px 12px;'
-            f'border-radius:4px;cursor:pointer;">{"Default" if is_default else "Set default"}</button></form>'
-            f'<form method="POST" action="/accounts/{acct.user_id}/logout" style="display:inline;">'
-            f'<button type="submit" style="background:#7f1d1d;color:#fca5a5;border:none;padding:4px 12px;'
-            f'border-radius:4px;cursor:pointer;">Log out</button></form></div></div></div>'
-        )
-    html = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Manage Accounts</title>'
-        '<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;'
-        'padding:24px;margin:0;}h1{font-size:20px;color:#e2e8f0;margin-bottom:16px;}'
-        'a{color:#60a5fa;text-decoration:none;}a:hover{text-decoration:underline;}</style></head>'
-        f'<body><h1>Manage Accounts</h1>'
-        f'{"".join(accounts_html) if accounts_html else "<p>No accounts logged in.</p>"}'
-        f'<div style="margin-top:16px;"><a href="/auth/login">Add account</a></div>'
-        f'<div style="margin-top:8px;"><a href="/">Back to workspaces</a></div>'
-        '</body></html>'
-    )
+    html = render_accounts_page(accounts=accounts, default_account_id=default_account_id)
     return HTMLResponse(content=html)
 
 
@@ -1325,7 +1299,7 @@ def _handle_workspace_settings(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Render workspace settings page with account, telegram, and delete options."""
+    """Render workspace settings page with account, sharing, telegram, and delete options."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
@@ -1337,93 +1311,51 @@ def _handle_workspace_settings(
         info = backend_resolver.get_agent_display_info(AgentId(agent_id))
         ws_name = info.agent_name if info else agent_id
 
-    # Account association section
-    if current_account:
-        account_section = (
-            f'<p>Currently associated with: <strong>{current_account.email}</strong></p>'
-            f'<form method="POST" action="/workspace/{agent_id}/disassociate">'
-            f'<p style="color:#f59e0b;font-size:13px;margin:8px 0;">Warning: Disassociating will '
-            f'remove all sharing (tunnels) for this workspace.</p>'
-            f'<button type="submit" class="btn btn-danger">Disassociate from {current_account.email}</button></form>'
-        )
-    else:
-        options = "".join(
-            f'<option value="{acct.user_id}">{acct.email}</option>' for acct in accounts
-        )
-        if accounts:
-            account_section = (
-                '<p>This workspace is private (not associated with any account).</p>'
-                f'<form method="POST" action="/workspace/{agent_id}/associate">'
-                '<select name="user_id" class="select-input">'
-                f'{options}</select>'
-                '<button type="submit" class="btn btn-primary" style="margin-left:8px;">Associate</button>'
-                '</form>'
-            )
-        else:
-            account_section = (
-                '<p>This workspace is private (not associated with any account).</p>'
-                '<p>No accounts available. <a href="/auth/login">Log in</a> first.</p>'
-            )
+    servers = [str(s) for s in backend_resolver.list_servers_for_agent(AgentId(agent_id))]
 
     # Telegram section
+    telegram_section = ""
+    telegram_js = ""
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
     if telegram_orchestrator is not None:
         has_telegram = telegram_orchestrator.agent_has_telegram(AgentId(agent_id))
         if has_telegram:
-            telegram_section = '<p style="color:#22c55e;">Telegram is active for this workspace.</p>'
+            telegram_section = '<p style="color:#16a34a;">Telegram is active for this workspace.</p>'
         else:
             telegram_section = (
                 f'<button class="btn btn-primary" id="tg-btn" '
                 f'onclick="setupTelegram(\'{agent_id}\')">Setup Telegram</button>'
             )
-    else:
-        telegram_section = '<p style="color:#64748b;">Telegram not configured.</p>'
+            telegram_js = (
+                'async function setupTelegram(agentId) {'
+                '  var btn = document.getElementById("tg-btn");'
+                '  btn.disabled = true; btn.textContent = "Setting up...";'
+                '  try {'
+                '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
+                '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
+                '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
+                '    var interval = setInterval(async function() {'
+                '      try { var r = await fetch("/api/agents/" + agentId + "/telegram/status");'
+                '        if (!r.ok) return; var d = await r.json();'
+                '        if (d.status === "DONE") { clearInterval(interval);'
+                '          btn.textContent = "Telegram active"; btn.style.color = "#16a34a"; }'
+                '        else if (d.status === "FAILED") { clearInterval(interval);'
+                '          btn.textContent = "Setup failed"; btn.disabled = false; }'
+                '        else { btn.textContent = d.status; }'
+                '      } catch (e) {}'
+                '    }, 2000);'
+                '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
+                '}'
+            )
 
-    html = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Settings: ' + ws_name + '</title>'
-        '<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;'
-        'padding:24px;margin:0;}h1{font-size:20px;color:#e2e8f0;margin-bottom:4px;}'
-        'h2{font-size:16px;color:#94a3b8;margin:24px 0 8px;padding-top:16px;border-top:1px solid #334155;}'
-        'a{color:#60a5fa;text-decoration:none;}a:hover{text-decoration:underline;}'
-        '.btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;}'
-        '.btn-primary{background:#1e3a5f;color:#93c5fd;}'
-        '.btn-danger{background:#7f1d1d;color:#fca5a5;}'
-        '.select-input{padding:8px;border-radius:4px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;}'
-        '</style></head>'
-        f'<body><h1>{ws_name}</h1>'
-        f'<p style="color:#64748b;font-size:12px;margin-bottom:16px;">{agent_id}</p>'
-        f'<h2>Account</h2>{account_section}'
-        f'<h2>Telegram</h2>{telegram_section}'
-        '<h2>Danger Zone</h2>'
-        '<p style="color:#64748b;font-size:13px;margin-bottom:8px;">Permanently delete this workspace and all its data.</p>'
-        f'<button class="btn btn-danger" onclick="alert(\'Not implemented\')">Delete workspace</button>'
-        f'<div style="margin-top:24px;"><a href="/">Back to workspaces</a></div>'
-        '<script>'
-        'async function setupTelegram(agentId) {'
-        '  var btn = document.getElementById("tg-btn");'
-        '  btn.disabled = true; btn.textContent = "Setting up...";'
-        '  try {'
-        '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
-        '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
-        '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
-        '    pollTelegramStatus(agentId, btn);'
-        '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
-        '}'
-        'function pollTelegramStatus(agentId, btn) {'
-        '  var interval = setInterval(async function() {'
-        '    try { var resp = await fetch("/api/agents/" + agentId + "/telegram/status");'
-        '      if (!resp.ok) return; var data = await resp.json();'
-        '      if (data.status === "DONE") { clearInterval(interval);'
-        '        btn.textContent = "Telegram active"; btn.style.color = "#22c55e"; }'
-        '      else if (data.status === "FAILED") { clearInterval(interval);'
-        '        btn.textContent = "Setup failed"; btn.disabled = false;'
-        '        alert("Telegram setup failed: " + (data.error || "unknown")); }'
-        '      else { btn.textContent = data.status; }'
-        '    } catch (e) {}'
-        '  }, 2000);'
-        '}'
-        '</script>'
-        '</body></html>'
+    html = render_workspace_settings(
+        agent_id=agent_id,
+        ws_name=ws_name,
+        current_account=current_account,
+        accounts=accounts,
+        servers=servers,
+        telegram_section=telegram_section,
+        telegram_js=telegram_js,
     )
     return HTMLResponse(content=html)
 
@@ -1543,7 +1475,7 @@ def _handle_request_page(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Render the request editing page (sharing request form)."""
+    """Render the request editing page using the shared sharing editor."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -1555,51 +1487,160 @@ def _handle_request_page(
 
     is_sharing = isinstance(req_event, SharingRequestEvent)
     server_name = req_event.server_name if is_sharing else ""
-    current_url = ""
-    current_enabled = False
     emails: list[str] = []
-    if is_sharing and req_event.current_status is not None:
-        current_url = req_event.current_status.url or ""
-        current_enabled = req_event.current_status.enabled
-        for rule in req_event.current_status.auth_rules:
-            for inc in rule.get("include", []):
-                if isinstance(inc, dict):
-                    email_obj = inc.get("email")
-                    if isinstance(email_obj, dict):
-                        email = email_obj.get("email")
-                        if email:
-                            emails.append(str(email))
     if is_sharing:
         emails.extend(req_event.suggested_emails)
     emails = list(dict.fromkeys(emails))
 
-    html = (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Sharing Request</title>'
-        '<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;'
-        'padding:24px;margin:0;}h1{font-size:20px;color:#e2e8f0;margin-bottom:16px;}'
-        'a{color:#60a5fa;text-decoration:none;}a:hover{text-decoration:underline;}'
-        '.btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;}'
-        '.btn-grant{background:#065f46;color:#6ee7b7;}'
-        '.btn-deny{background:#7f1d1d;color:#fca5a5;margin-left:8px;}'
-        '</style></head>'
-        f'<body><h1>Sharing Request: {server_name}</h1>'
-        f'<p style="color:#64748b;font-size:13px;">Agent: {req_event.agent_id}</p>'
-        f'<p>Status: {"Enabled" if current_enabled else "Not enabled"}</p>'
-        f'{"<p>URL: <code>" + current_url + "</code></p>" if current_url else ""}'
-        f'<div style="margin:16px 0;">'
-        f'<p style="font-size:14px;font-weight:500;">Access list:</p>'
-        f'{"".join("<p style=margin:4px 0;>" + e + "</p>" for e in emails) if emails else "<p style=color:#64748b;>No emails configured</p>"}'
-        f'</div>'
-        f'<div style="margin-top:24px;">'
-        f'<form method="POST" action="/requests/{request_id}/grant" style="display:inline;">'
-        f'<button type="submit" class="btn btn-grant">{"Enable" if not current_enabled else "Update"} Sharing</button></form>'
-        f'<form method="POST" action="/requests/{request_id}/deny" style="display:inline;">'
-        f'<button type="submit" class="btn btn-deny">Deny</button></form>'
-        f'</div>'
-        f'<div style="margin-top:16px;"><a href="/">Back to workspaces</a></div>'
-        '</body></html>'
+    html = render_sharing_editor(
+        agent_id=req_event.agent_id,
+        server_name=server_name,
+        title=f"Sharing Request: {server_name}",
+        initial_emails=emails,
+        is_request=True,
+        request_id=request_id,
     )
     return HTMLResponse(content=html)
+
+
+def _handle_sharing_page(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Render the sharing editor page for direct editing (from workspace settings)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    html = render_sharing_editor(
+        agent_id=agent_id,
+        server_name=server_name,
+        title=f"Sharing: {server_name}",
+        is_request=False,
+    )
+    return HTMLResponse(content=html)
+
+
+async def _handle_sharing_enable(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Enable or update sharing for a server. Handles both request approval and direct editing."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    form = await request.form()
+    emails_json = str(form.get("emails", "[]"))
+    try:
+        emails = json.loads(emails_json)
+    except json.JSONDecodeError:
+        emails = []
+
+    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
+    if cf_client is not None:
+        parsed_id = AgentId(agent_id)
+        parsed_server = ServerName(server_name)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        if backend_url:
+            paths: WorkspacePaths = request.app.state.api_v1_paths
+            stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
+            if stored_token is None:
+                token, _ = cf_client.create_tunnel(parsed_id)
+                if token:
+                    _save_tunnel_token(paths.data_dir, parsed_id, token)
+                    inject_tunnel_token_into_agent(parsed_id, token)
+            cf_client.add_service(parsed_id, parsed_server, backend_url)
+            # Apply auth rules if emails were provided
+            if emails:
+                auth_rules = [{"action": "allow", "include": [{"email": {"email": e}} for e in emails]}]
+                cf_client.set_service_auth(parsed_id, server_name, auth_rules)
+
+    # If there's a pending request for this agent/server, mark it as granted
+    inbox: RequestInbox | None = request.app.state.request_inbox
+    if inbox is not None:
+        for req in inbox.get_pending_requests():
+            if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.server_name == server_name:
+                paths = request.app.state.api_v1_paths
+                response_event = create_request_response_event(
+                    request_event_id=str(req.event_id),
+                    status=RequestStatus.GRANTED,
+                    agent_id=agent_id,
+                    request_type=req.request_type,
+                    server_name=server_name,
+                )
+                append_response_event(paths.data_dir, response_event)
+                request.app.state.request_inbox = inbox.add_response(response_event)
+                break
+
+    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{server_name}"})
+
+
+async def _handle_sharing_disable(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Disable sharing for a server."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
+    if cf_client is not None:
+        cf_client.remove_service(AgentId(agent_id), server_name)
+
+    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{server_name}"})
+
+
+def _handle_sharing_status_api(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """JSON API to get current sharing status for the editor JS."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+
+    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
+    if error_response is not None:
+        return Response(
+            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
+            media_type="application/json",
+        )
+    if cf_client is None:
+        return Response(
+            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+    services = cf_client.list_services(parsed_id)
+    if services is None:
+        default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+        return Response(
+            content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+            media_type="application/json",
+        )
+
+    hostname = services.get(server_name)
+    if hostname:
+        auth_rules = cf_client.get_service_auth(parsed_id, server_name)
+        if auth_rules is None:
+            auth_rules = cf_client.get_tunnel_auth(parsed_id) or []
+        return Response(
+            content=json.dumps({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules}),
+            media_type="application/json",
+        )
+
+    default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    return Response(
+        content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+        media_type="application/json",
+    )
 
 
 async def _handle_request_grant(
@@ -1608,7 +1649,7 @@ async def _handle_request_grant(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Grant a request: execute the sharing action and write a response event."""
+    """Grant a request by redirecting to the sharing enable handler."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -1618,37 +1659,10 @@ async def _handle_request_grant(
     if req_event is None:
         return HTMLResponse(content="Request not found", status_code=404)
 
-    # Execute the sharing action if this is a sharing request
-    is_sharing = isinstance(req_event, SharingRequestEvent)
-    if is_sharing:
-        cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(req_event.agent_id))
-        if cf_client is not None:
-            parsed_id = AgentId(req_event.agent_id)
-            parsed_server = ServerName(req_event.server_name)
-            # Get the backend URL for the service
-            backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-            if backend_url:
-                paths: WorkspacePaths = request.app.state.api_v1_paths
-                if paths:
-                    stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
-                    if stored_token is None:
-                        token, _ = cf_client.create_tunnel(parsed_id)
-                        if token:
-                            _save_tunnel_token(paths.data_dir, parsed_id, token)
-                            inject_tunnel_token_into_agent(parsed_id, token)
-                cf_client.add_service(parsed_id, parsed_server, backend_url)
-
-    # Write response event
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    response_event = create_request_response_event(
-        request_event_id=request_id,
-        status=RequestStatus.GRANTED,
-        agent_id=req_event.agent_id,
-        request_type=req_event.request_type,
-        server_name=req_event.server_name if isinstance(req_event, SharingRequestEvent) else None,
-    )
-    append_response_event(paths.data_dir, response_event)
-    request.app.state.request_inbox = inbox.add_response(response_event)
+    if isinstance(req_event, SharingRequestEvent):
+        return await _handle_sharing_enable(
+            req_event.agent_id, req_event.server_name, request, auth_store, backend_resolver
+        )
 
     return Response(status_code=303, headers={"Location": "/"})
 
@@ -1806,6 +1820,12 @@ def create_desktop_client(
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)
+
+    # Sharing editor routes (used by both request approval and direct editing)
+    app.get("/sharing/{agent_id}/{server_name}")(_handle_sharing_page)
+    app.post("/sharing/{agent_id}/{server_name}/enable")(_handle_sharing_enable)
+    app.post("/sharing/{agent_id}/{server_name}/disable")(_handle_sharing_disable)
+    app.get("/api/sharing-status/{agent_id}/{server_name}")(_handle_sharing_status_api)
 
     # Agent creation routes
     app.get("/create")(_handle_create_page)

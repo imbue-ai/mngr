@@ -989,3 +989,402 @@ def render_sidebar_page() -> str:
     """
     template = _JINJA_ENV.from_string(_SIDEBAR_TEMPLATE)
     return template.render()
+
+
+# -- Page styles shared across settings, sharing, and accounts pages --
+
+_PAGE_STYLES: Final[str] = """
+    body { background: #f8fafc; padding: 0; font-size: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; }
+    .page { max-width: 640px; margin: 0 auto; padding: 48px 24px; }
+    h1 { font-size: 20px; color: #0f172a; margin-bottom: 4px; }
+    h2 { font-size: 15px; color: #64748b; margin: 28px 0 10px; padding-top: 20px;
+      border-top: 1px solid #e2e8f0; font-weight: 500; }
+    p { color: #334155; margin: 6px 0; font-size: 14px; line-height: 1.5; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .subtitle { color: #94a3b8; font-size: 12px; margin-bottom: 20px; }
+    .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 6px;
+      cursor: pointer; font-size: 13px; font-weight: 500; font-family: inherit; }
+    .btn-primary { background: #1e293b; color: white; }
+    .btn-primary:hover { background: #334155; }
+    .btn-success { background: #065f46; color: #d1fae5; }
+    .btn-success:hover { background: #047857; }
+    .btn-danger { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .btn-danger:hover { background: #fee2e2; }
+    .btn-secondary { background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .select-input { padding: 8px 12px; border-radius: 6px; background: white;
+      color: #0f172a; border: 1px solid #cbd5e1; font-size: 13px; font-family: inherit; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 8px 0; }
+    .warning { color: #92400e; font-size: 13px; background: #fffbeb; border: 1px solid #fde68a;
+      border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+    .input-row { display: flex; gap: 8px; margin: 8px 0; }
+    .text-input { flex: 1; padding: 8px 12px; border-radius: 6px; border: 1px solid #cbd5e1;
+      font-size: 13px; font-family: inherit; }
+    .email-tag { display: inline-flex; align-items: center; gap: 4px; background: #f1f5f9;
+      border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px 8px; margin: 2px; font-size: 13px; }
+    .email-tag button { background: none; border: none; cursor: pointer; color: #94a3b8;
+      font-size: 16px; line-height: 1; padding: 0 2px; }
+    .email-tag button:hover { color: #dc2626; }
+    .url-box { display: flex; gap: 8px; align-items: center; background: #f8fafc;
+      border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+    .url-box input { flex: 1; background: none; border: none; font-size: 13px; color: #0f172a;
+      font-family: monospace; outline: none; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-enabled { background: #22c55e; }
+    .status-disabled { background: #94a3b8; }
+    .loading { color: #94a3b8; padding: 16px 0; }
+    .error { color: #dc2626; margin: 8px 0; }
+    .actions { display: flex; gap: 8px; margin-top: 20px; }
+"""
+
+
+_SHARING_EDITOR_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>{{ title }}</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>{{ title }}</h1>
+    <p class="subtitle">{{ agent_id }}</p>
+
+    <div id="sharing-editor">
+      <div class="loading" id="loading-state">Loading sharing status...</div>
+    </div>
+
+    <div id="editor-content" style="display:none;">
+      <div id="status-display" style="margin:12px 0;">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text"></span>
+      </div>
+
+      <div id="url-section" style="display:none;">
+        <p style="font-weight:500;margin-bottom:4px;">Shared URL</p>
+        <div class="url-box">
+          <input type="text" id="share-url" readonly onclick="this.select()">
+          <button class="btn btn-secondary" onclick="copyUrl()" id="copy-btn">Copy</button>
+        </div>
+      </div>
+
+      <h2 style="border-top:none;padding-top:0;margin-top:16px;">Access List</h2>
+      <div id="email-list"></div>
+      <div class="input-row">
+        <input type="email" class="text-input" id="new-email" placeholder="user@example.com"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();addEmail();}">
+        <button class="btn btn-secondary" onclick="addEmail()">Add</button>
+      </div>
+
+      <div class="actions">
+        {% if is_request %}
+        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/enable" id="grant-form">
+          <input type="hidden" name="emails" id="emails-hidden">
+          <button type="submit" class="btn btn-success" id="action-btn" onclick="prepareSubmit()">
+            Enable Sharing
+          </button>
+        </form>
+        <form method="POST" action="/requests/{{ request_id }}/deny" style="display:inline;">
+          <button type="submit" class="btn btn-danger">Deny</button>
+        </form>
+        {% else %}
+        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/enable" id="grant-form">
+          <input type="hidden" name="emails" id="emails-hidden">
+          <button type="submit" class="btn btn-success" id="action-btn" onclick="prepareSubmit()">
+            Save
+          </button>
+        </form>
+        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/disable" id="disable-form"
+              style="display:none;">
+          <button type="submit" class="btn btn-danger">Disable Sharing</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <div id="result-state" style="display:none;">
+      <div class="card" id="result-card"></div>
+    </div>
+
+    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
+  </div>
+
+  <script>
+  var emails = {{ initial_emails | tojson }};
+  var serverName = {{ server_name | tojson }};
+  var agentId = {{ agent_id | tojson }};
+  var isEnabled = false;
+
+  function renderEmails() {
+    var container = document.getElementById('email-list');
+    if (emails.length === 0) {
+      container.innerHTML = '<p style="color:#94a3b8;font-size:13px;">No one added yet</p>';
+      return;
+    }
+    container.innerHTML = emails.map(function(e) {
+      return '<span class="email-tag">' + e +
+        ' <button onclick="removeEmail(\\'' + e + '\\')">&times;</button></span>';
+    }).join(' ');
+  }
+
+  function addEmail() {
+    var input = document.getElementById('new-email');
+    var email = input.value.trim();
+    if (!email || emails.indexOf(email) >= 0) return;
+    emails.push(email);
+    input.value = '';
+    renderEmails();
+  }
+
+  function removeEmail(email) {
+    emails = emails.filter(function(e) { return e !== email; });
+    renderEmails();
+  }
+
+  function prepareSubmit() {
+    document.getElementById('emails-hidden').value = JSON.stringify(emails);
+  }
+
+  function copyUrl() {
+    var input = document.getElementById('share-url');
+    navigator.clipboard.writeText(input.value);
+    var btn = document.getElementById('copy-btn');
+    btn.textContent = 'Copied';
+    setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+  }
+
+  // Load current sharing status
+  fetch('/api/sharing-status/' + agentId + '/' + serverName)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      document.getElementById('loading-state').style.display = 'none';
+      document.getElementById('editor-content').style.display = 'block';
+
+      isEnabled = data.enabled;
+      var dot = document.getElementById('status-dot');
+      var text = document.getElementById('status-text');
+      if (data.enabled) {
+        dot.className = 'status-dot status-enabled';
+        text.textContent = 'Sharing is enabled';
+        document.getElementById('action-btn').textContent = 'Update Sharing';
+        var disableForm = document.getElementById('disable-form');
+        if (disableForm) disableForm.style.display = 'inline';
+      } else {
+        dot.className = 'status-dot status-disabled';
+        text.textContent = 'Sharing is not enabled';
+        document.getElementById('action-btn').textContent = 'Enable Sharing';
+      }
+
+      if (data.url) {
+        document.getElementById('url-section').style.display = 'block';
+        document.getElementById('share-url').value = data.url;
+      }
+
+      // Merge fetched emails with initial emails
+      if (data.auth_rules) {
+        data.auth_rules.forEach(function(rule) {
+          (rule.include || []).forEach(function(inc) {
+            if (inc.email && inc.email.email && emails.indexOf(inc.email.email) < 0) {
+              emails.push(inc.email.email);
+            }
+          });
+        });
+      }
+      renderEmails();
+    })
+    .catch(function(err) {
+      document.getElementById('loading-state').innerHTML =
+        '<p class="error">Failed to load sharing status: ' + err.message + '</p>';
+      document.getElementById('editor-content').style.display = 'block';
+      renderEmails();
+    });
+  </script>
+</body>
+</html>"""
+)
+
+
+@pure
+def render_sharing_editor(
+    agent_id: str,
+    server_name: str,
+    title: str,
+    initial_emails: list[str] | None = None,
+    is_request: bool = False,
+    request_id: str = "",
+) -> str:
+    """Render the sharing editor page used for both request approval and direct editing."""
+    template = _JINJA_ENV.from_string(_SHARING_EDITOR_TEMPLATE)
+    return template.render(
+        title=title,
+        agent_id=agent_id,
+        server_name=server_name,
+        initial_emails=initial_emails or [],
+        is_request=is_request,
+        request_id=request_id,
+    )
+
+
+_WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Settings: {{ ws_name }}</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>{{ ws_name }}</h1>
+    <p class="subtitle">{{ agent_id }}</p>
+
+    <h2>Account</h2>
+    {% if current_account %}
+    <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+    <form method="POST" action="/workspace/{{ agent_id }}/disassociate">
+      <p class="warning">Disassociating will remove all sharing (tunnels) for this workspace.
+        You will need to set up sharing again after re-associating.</p>
+      <button type="submit" class="btn btn-danger">Disassociate</button>
+    </form>
+    {% else %}
+    <p>This workspace is private (not associated with any account).</p>
+      {% if accounts %}
+    <form method="POST" action="/workspace/{{ agent_id }}/associate" style="margin-top:8px;">
+      <select name="user_id" class="select-input">
+        {% for acct in accounts %}
+        <option value="{{ acct.user_id }}">{{ acct.email }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary" style="margin-left:8px;">Associate</button>
+    </form>
+      {% else %}
+    <p><a href="/auth/login">Log in</a> to associate this workspace with an account.</p>
+      {% endif %}
+    {% endif %}
+
+    <h2>Sharing</h2>
+    {% for server in servers %}
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-weight:500;">{{ server }}</span>
+      <a href="/sharing/{{ agent_id }}/{{ server }}" class="btn btn-secondary">Manage sharing</a>
+    </div>
+    {% else %}
+    <p style="color:#94a3b8;">No servers discovered for this workspace.</p>
+    {% endfor %}
+
+    {% if telegram_section %}
+    <h2>Telegram</h2>
+    {{ telegram_section }}
+    {% endif %}
+
+    <h2>Danger Zone</h2>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:8px;">
+      Permanently delete this workspace and all its data.</p>
+    <button class="btn btn-danger" onclick="alert('Not implemented')">Delete workspace</button>
+
+    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
+  </div>
+
+  {% if telegram_js %}
+  <script>
+  {{ telegram_js }}
+  </script>
+  {% endif %}
+</body>
+</html>"""
+)
+
+
+@pure
+def render_workspace_settings(
+    agent_id: str,
+    ws_name: str,
+    current_account: object | None,
+    accounts: Sequence[object],
+    servers: Sequence[str],
+    telegram_section: str = "",
+    telegram_js: str = "",
+) -> str:
+    """Render the workspace settings page."""
+    template = _JINJA_ENV.from_string(_WORKSPACE_SETTINGS_TEMPLATE)
+    return template.render(
+        agent_id=agent_id,
+        ws_name=ws_name,
+        current_account=current_account,
+        accounts=accounts,
+        servers=servers,
+        telegram_section=telegram_section,
+        telegram_js=telegram_js,
+    )
+
+
+_ACCOUNTS_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Manage Accounts</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>Manage Accounts</h1>
+
+    {% if accounts %}
+    {% for acct in accounts %}
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-weight:500;color:#0f172a;">{{ acct.email }}</div>
+        <div style="font-size:12px;color:#94a3b8;">{{ acct.workspace_ids | length }} workspace(s)
+          {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        {% if acct.user_id | string != default_account_id %}
+        <form method="POST" action="/accounts/set-default">
+          <input type="hidden" name="user_id" value="{{ acct.user_id }}">
+          <button type="submit" class="btn btn-secondary">Set default</button>
+        </form>
+        {% else %}
+        <span class="btn btn-secondary" style="cursor:default;opacity:0.6;">Default</span>
+        {% endif %}
+        <form method="POST" action="/accounts/{{ acct.user_id }}/logout">
+          <button type="submit" class="btn btn-danger">Log out</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p style="color:#94a3b8;">No accounts logged in.</p>
+    {% endif %}
+
+    <div style="margin-top:16px;">
+      <a href="/auth/login" class="btn btn-primary">Add account</a>
+    </div>
+    <div style="margin-top:16px;"><a href="/">&larr; Back to workspaces</a></div>
+  </div>
+</body>
+</html>"""
+)
+
+
+@pure
+def render_accounts_page(
+    accounts: Sequence[object],
+    default_account_id: str | None = None,
+) -> str:
+    """Render the manage accounts page."""
+    template = _JINJA_ENV.from_string(_ACCOUNTS_PAGE_TEMPLATE)
+    return template.render(
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )
