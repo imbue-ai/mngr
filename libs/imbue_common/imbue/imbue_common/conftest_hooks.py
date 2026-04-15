@@ -537,19 +537,6 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
         deadline = _compute_lock_deadline(start_time)
         _write_lock_info(lock_handle, os.getpid(), deadline)
 
-    # Auto-register marks for guarded resources. Done here (not in
-    # pytest_configure) because pytest_plugins conftest modules are imported
-    # after the declaring conftest's pytest_configure fires, so guards
-    # registered in inherited conftest files aren't visible at configure time.
-    # By session start, all conftest files have been imported.
-    registered_names = {m.split(":")[0].strip() for m in _SHARED_MARKERS + _registered_markers}
-    for name in get_guarded_resource_names():
-        if name not in registered_names:
-            session.config.addinivalue_line(
-                "markers",
-                f"{name}: marks tests that use the {name} resource (auto-registered by resource guard)",
-            )
-
     start_resource_guards(session)
 
 
@@ -613,6 +600,16 @@ def _pytest_configure(config: pytest.Config) -> None:
     # Register shared markers and any additional markers from register_marker()
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
+
+    # Auto-register marks for guarded resources so projects that call
+    # register_resource_guard() don't also need a separate register_marker().
+    registered_names = {m.split(":")[0].strip() for m in _SHARED_MARKERS + _registered_markers}
+    for name in get_guarded_resource_names():
+        if name not in registered_names:
+            config.addinivalue_line(
+                "markers",
+                f"{name}: marks tests that use the {name} resource (auto-registered by resource guard)",
+            )
 
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:
