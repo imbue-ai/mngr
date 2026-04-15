@@ -11,7 +11,7 @@ repos:
     hooks:
     -   id: ruff
         name: "Python formatter + import sorter (ruff)"
-        entry: bash -c 'uv run ruff check --select UP006,UP007,I,F401 --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
+        entry: bash -c 'uv run ruff check --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
         language: system
         types: [python]
     -   id: regenerate-cli-docs
