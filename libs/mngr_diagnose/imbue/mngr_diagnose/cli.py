@@ -9,11 +9,23 @@ from imbue.mngr.cli.create import create as create_cmd
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.issue_reporting import get_mngr_version
+from imbue.imbue_common.pure import pure
 from imbue.mngr_diagnose.clone import ensure_mngr_clone
 from imbue.mngr_diagnose.context_file import read_diagnose_context
 from imbue.mngr_diagnose.prompt import build_diagnose_initial_message
 
 DIAGNOSE_CLONE_DIR: Final[Path] = Path("/tmp/mngr-diagnose")
+
+
+@pure
+def _build_description_from_context(error_type: str | None, error_message: str | None) -> str | None:
+    """Build a fallback description from context error fields.
+
+    Returns None if neither field is present.
+    """
+    if error_type is not None and error_message is not None:
+        return f"{error_type}: {error_message}"
+    return error_type or error_message
 
 
 @click.command()
@@ -61,12 +73,7 @@ def diagnose(
         mngr_version = context.mngr_version
         # Use error info as description if no explicit description given
         if description is None:
-            if context.error_type is not None and context.error_message is not None:
-                description = f"{context.error_type}: {context.error_message}"
-            elif context.error_message is not None:
-                description = context.error_message
-            elif context.error_type is not None:
-                description = context.error_type
+            description = _build_description_from_context(context.error_type, context.error_message)
 
     # Clone or update the repo
     with ConcurrencyGroup(name="diagnose-clone") as cg:
