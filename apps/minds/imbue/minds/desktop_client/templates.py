@@ -1082,29 +1082,20 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         <button class="btn btn-secondary" onclick="addEmail()">Add</button>
       </div>
 
-      <div class="actions">
+      <div class="actions" id="action-buttons">
+        <button class="btn btn-success" id="action-btn" onclick="submitEnable()">
+          Enable Sharing
+        </button>
         {% if is_request %}
-        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/enable" id="grant-form">
-          <input type="hidden" name="emails" id="emails-hidden">
-          <button type="submit" class="btn btn-success" id="action-btn" onclick="prepareSubmit()">
-            Enable Sharing
-          </button>
-        </form>
-        <form method="POST" action="/requests/{{ request_id }}/deny" style="display:inline;">
-          <button type="submit" class="btn btn-danger">Deny</button>
-        </form>
+        <button class="btn btn-danger" id="deny-btn" onclick="submitDeny()">Deny</button>
         {% else %}
-        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/enable" id="grant-form">
-          <input type="hidden" name="emails" id="emails-hidden">
-          <button type="submit" class="btn btn-success" id="action-btn" onclick="prepareSubmit()">
-            Save
-          </button>
-        </form>
-        <form method="POST" action="/sharing/{{ agent_id }}/{{ server_name }}/disable" id="disable-form"
-              style="display:none;">
-          <button type="submit" class="btn btn-danger">Disable Sharing</button>
-        </form>
+        <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
+          Disable Sharing
+        </button>
         {% endif %}
+      </div>
+      <div id="submit-spinner" style="display:none;padding:16px 0;">
+        <span style="color:#94a3b8;">Saving changes...</span>
       </div>
     </div>
 
@@ -1119,6 +1110,8 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   var emails = {{ initial_emails | tojson }};
   var serverName = {{ server_name | tojson }};
   var agentId = {{ agent_id | tojson }};
+  var isRequest = {{ is_request | tojson }};
+  var requestId = {{ request_id | tojson }};
   var isEnabled = false;
 
   function renderEmails() {
@@ -1147,8 +1140,48 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     renderEmails();
   }
 
-  function prepareSubmit() {
-    document.getElementById('emails-hidden').value = JSON.stringify(emails);
+  function setSubmitting(submitting) {
+    document.getElementById('action-buttons').style.display = submitting ? 'none' : 'flex';
+    document.getElementById('submit-spinner').style.display = submitting ? 'block' : 'none';
+    // Disable all inputs while submitting
+    var inputs = document.querySelectorAll('input, button, select');
+    inputs.forEach(function(el) { el.disabled = submitting; });
+    var editor = document.getElementById('editor-content');
+    editor.style.opacity = submitting ? '0.5' : '1';
+    editor.style.pointerEvents = submitting ? 'none' : 'auto';
+  }
+
+  function submitEnable() {
+    setSubmitting(true);
+    var form = new FormData();
+    form.append('emails', JSON.stringify(emails));
+    fetch('/sharing/' + agentId + '/' + serverName + '/enable', { method: 'POST', body: form })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+      .catch(function(err) {
+        alert('Failed: ' + err.message);
+        setSubmitting(false);
+      });
+  }
+
+  function submitDisable() {
+    if (!confirm('Disable sharing for ' + serverName + '?')) return;
+    setSubmitting(true);
+    fetch('/sharing/' + agentId + '/' + serverName + '/disable', { method: 'POST' })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+      .catch(function(err) {
+        alert('Failed: ' + err.message);
+        setSubmitting(false);
+      });
+  }
+
+  function submitDeny() {
+    setSubmitting(true);
+    fetch('/requests/' + requestId + '/deny', { method: 'POST' })
+      .then(function(r) { window.location.href = '/'; })
+      .catch(function(err) {
+        alert('Failed: ' + err.message);
+        setSubmitting(false);
+      });
   }
 
   function copyUrl() {
@@ -1173,8 +1206,8 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         dot.className = 'status-dot status-enabled';
         text.textContent = 'Sharing is enabled';
         document.getElementById('action-btn').textContent = 'Update Sharing';
-        var disableForm = document.getElementById('disable-form');
-        if (disableForm) disableForm.style.display = 'inline';
+        var disableBtn = document.getElementById('disable-btn');
+        if (disableBtn) disableBtn.style.display = 'inline-block';
       } else {
         dot.className = 'status-dot status-disabled';
         text.textContent = 'Sharing is not enabled';
