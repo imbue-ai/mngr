@@ -9,7 +9,6 @@ Mutation operations (enable, disable, update auth) are handled via request
 events written to ``requests/events.jsonl``.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Final
@@ -135,7 +134,10 @@ def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> No
         }
         # Extract emails from auth rules for convenience
         for rule in status.auth_rules:
-            for inc in rule.get("include", []):
+            includes = rule.get("include", [])
+            if not isinstance(includes, list):
+                continue
+            for inc in includes:
                 if isinstance(inc, dict):
                     email_obj = inc.get("email")
                     if isinstance(email_obj, dict):
