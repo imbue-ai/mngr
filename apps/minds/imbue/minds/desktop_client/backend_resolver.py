@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
 from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -504,7 +505,14 @@ class MngrStreamManager(MutableModel):
         try:
             event = parse_discovery_event_line(line)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error("Failed to parse discovery event line: {} (line: {})", e, line[:200])
+            # Never log the raw line -- it may contain plaintext credentials
+            # from HOST_AUTH_INFO events. Log only the error and event type.
+            event_type = "unknown"
+            try:
+                event_type = json.loads(line).get("type", "unknown")
+            except (json.JSONDecodeError, ValueError):
+                pass
+            logger.error("Failed to parse discovery event (type={}): {}", event_type, e)
             return
 
         if isinstance(event, FullDiscoverySnapshotEvent):
@@ -565,7 +573,8 @@ class MngrStreamManager(MutableModel):
         file) and carry plaintext credentials. This takes priority over HOST_SSH_INFO
         because it has the real auth data needed for connecting.
         """
-        auth = SSHKeyAuth.model_validate(event.auth_data)
+        auth_cls = SSHAuthMethod._registry.get(event.auth_type, SSHKeyAuth)
+        auth = auth_cls.model_validate(event.auth_data)
         ssh_info = RemoteSSHInfo(
             user=event.user,
             host=event.hostname,

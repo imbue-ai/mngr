@@ -1683,9 +1683,34 @@ class Host(BaseHost, OnlineHostInterface):
                     raise MngrError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
             else:
-                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+                # Remote-source-to-remote-target: the command runs on the remote source
+                # host via SSH. Secret env vars (like SSHPASS) must not appear in the
+                # command string because they'd be visible in `ps` output. We write
+                # secrets to a temporary env file (mode 0600), source it, run the
+                # command, and delete the file -- all in a single shell invocation with
+                # a trap to ensure cleanup even on failure.
+                secret_env = expose_secrets_for_subprocess(transport.env)
+                non_secret_env = {k: v for k, v in env.items() if k not in secret_env}
+                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in non_secret_env.items())
                 refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
-                push_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+                git_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+
+                if secret_env:
+                    # Write secrets to a temp file, source it, run git, clean up.
+                    # The file is 0600 and deleted immediately after use via trap.
+                    env_file_lines = [f"export {k}={shlex.quote(v)}" for k, v in secret_env.items()]
+                    env_file_content = "\\n".join(env_file_lines)
+                    push_cmd = (
+                        f"_mngr_env=$(mktemp) && "
+                        f"trap 'rm -f \"$_mngr_env\"' EXIT && "
+                        f"printf '{env_file_content}\\n' > \"$_mngr_env\" && "
+                        f"chmod 600 \"$_mngr_env\" && "
+                        f". \"$_mngr_env\" && "
+                        f"{git_cmd}"
+                    )
+                else:
+                    push_cmd = git_cmd
+
                 result = source_host.execute_idempotent_command(push_cmd, cwd=source_path)
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
@@ -1950,6 +1975,10 @@ class Host(BaseHost, OnlineHostInterface):
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
 
+        # Extra env vars for subprocess (e.g. SSHPASS for password auth).
+        # Populated by transport.env when SSH is involved.
+        rsync_env: dict[str, str] = {}
+
         if source_host.is_local and self.is_local:
             # Local to local
             rsync_args.extend([source_path_str, target_path_str])
@@ -1961,6 +1990,7 @@ class Host(BaseHost, OnlineHostInterface):
             target_known_hosts = get_ssh_known_hosts_file(self)
             transport = target_conn.auth.build_transport_command(target_conn.port, target_known_hosts)
             rsync_args.extend(["-e", transport.command])
+            rsync_env.update(expose_secrets_for_subprocess(transport.env))
             rsync_args.extend([source_path_str, f"{target_conn.user}@{target_conn.hostname}:{target_path_str}"])
             rsync_description = f"rsync: local to remote {target_conn.user}@{target_conn.hostname}:{target_conn.port}"
         elif not source_host.is_local and self.is_local:
@@ -1970,6 +2000,7 @@ class Host(BaseHost, OnlineHostInterface):
             source_known_hosts = get_ssh_known_hosts_file(source_host)
             transport = source_conn.auth.build_transport_command(source_conn.port, source_known_hosts)
             rsync_args.extend(["-e", transport.command])
+            rsync_env.update(expose_secrets_for_subprocess(transport.env))
             rsync_args.extend([f"{source_conn.user}@{source_conn.hostname}:{source_path_str}", target_path_str])
             rsync_description = f"rsync: remote to local {source_conn.user}@{source_conn.hostname}:{source_conn.port}"
         else:
@@ -1997,8 +2028,9 @@ class Host(BaseHost, OnlineHostInterface):
                     src_transport = source_conn.auth.build_transport_command(source_conn.port, src_known_hosts)
                     pull_args.extend(["-e", src_transport.command])
                     pull_args.extend([f"{source_conn.user}@{source_conn.hostname}:{source_path_str}", temp_path_str])
+                    src_env = {**os.environ, **expose_secrets_for_subprocess(src_transport.env)}
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args, env=src_env)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (pull from source): {e.stderr}") from e
                     logger.trace("Ran rsync pull command: {}", " ".join(pull_args))
@@ -2014,17 +2046,19 @@ class Host(BaseHost, OnlineHostInterface):
                     tgt_transport = target_conn.auth.build_transport_command(target_conn.port, tgt_known_hosts)
                     push_args.extend(["-e", tgt_transport.command])
                     push_args.extend([temp_path_str, f"{target_conn.user}@{target_conn.hostname}:{target_path_str}"])
+                    tgt_env = {**os.environ, **expose_secrets_for_subprocess(tgt_transport.env)}
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(push_args, env=tgt_env)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (push to target): {e.stderr}") from e
                     logger.trace("Ran rsync push command: {}", " ".join(push_args))
 
             return
 
+        subprocess_env = {**os.environ, **rsync_env} if rsync_env else None
         with log_span("{}", rsync_description):
             try:
-                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args, env=subprocess_env)
             except ProcessError as e:
                 raise MngrError(f"rsync failed: {e.stderr}") from e
             logger.trace("Ran rsync command: {}", " ".join(rsync_args))
