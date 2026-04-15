@@ -1,3 +1,4 @@
+import hashlib
 import os
 import select
 import shlex
@@ -146,7 +147,10 @@ class SSHTunnelManager(MutableModel):
 
             client = self._get_or_create_connection(ssh_info)
             transport = _ssh_connection_transport(client)
-            socket_path = self._get_tmpdir() / f"tunnel-{tunnel_key.replace(':', '-').replace('>', '')}.sock"
+            # Use a short hash to keep the socket path under the 104-byte
+            # AF_UNIX limit on macOS.
+            short_hash = hashlib.sha256(tunnel_key.encode()).hexdigest()[:12]
+            socket_path = self._get_tmpdir() / f"t-{short_hash}.sock"
 
             if socket_path.exists():
                 socket_path.unlink()

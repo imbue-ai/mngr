@@ -1655,6 +1655,33 @@ class Host(BaseHost, OnlineHostInterface):
 
         with log_span("Pushing git repo to target: {}", git_url):
             if source_host.is_local:
+                # Unshallow the source repo if needed -- git refuses to push
+                # shallow clones to bare repositories ("shallow update not
+                # allowed").  This can happen when the minds desktop client
+                # clones with --depth 1 for speed.
+                is_shallow_result = self.mngr_ctx.concurrency_group.run_process_to_completion(
+                    ["git", "-C", str(source_path), "rev-parse", "--is-shallow-repository"],
+                    is_checked_after=False,
+                )
+                if is_shallow_result.stdout.strip() == "true":
+                    with log_span("Unshallowing source repo before push"):
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(
+                            ["git", "-C", str(source_path), "fetch", "--unshallow"],
+                        )
+
+                # When updating an existing repo, the --prune flag can fail if
+                # it tries to delete the currently checked-out branch on the
+                # remote. Detach HEAD and allow current branch deletion so the
+                # push can replace all branches cleanly.
+                if not self.is_local:
+                    detach_cmd = (
+                        "git -C " + shlex.quote(str(target_path))
+                        + " checkout --detach HEAD 2>/dev/null;"
+                        " git -C " + shlex.quote(str(target_path))
+                        + " config receive.denyDeleteCurrent ignore"
+                    )
+                    self.execute_idempotent_command(detach_cmd)
+
                 command_args = [
                     "git",
                     "-C",
