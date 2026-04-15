@@ -67,8 +67,19 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
 
 
 # =============================================================================
-# build_provider_instance Error Conversion Tests
+# _get_or_create_app Error Propagation Tests
 # =============================================================================
+#
+# build_provider_instance wraps _get_or_create_app in a try/except block:
+#
+#   except ModalProxyError as e:
+#       raise ProviderUnavailableError(name, str(e)) from e
+#
+# The test below verifies the precondition for this conversion: that a
+# ModalProxyError raised inside _get_or_create_app propagates out unchanged.
+# Because build_provider_instance constructs its own ModalInterface internally
+# with no injection point, the conversion clause itself cannot be exercised
+# at the unit-test level without structural changes to the production code.
 
 
 class _FailingModalInterface(TestingModalInterface):
@@ -84,14 +95,12 @@ class _FailingModalInterface(TestingModalInterface):
         raise ModalProxyError("Could not connect to the Modal server.")
 
 
-def test_get_or_create_app_raises_modal_proxy_error_on_connection_failure(tmp_path: Path) -> None:
-    """ModalProxyError from a failing ModalInterface propagates out of _get_or_create_app.
+def test_modal_proxy_error_propagates_out_of_get_or_create_app(tmp_path: Path) -> None:
+    """ModalProxyError raised by app_lookup escapes _get_or_create_app unchanged.
 
-    build_provider_instance calls _get_or_create_app inside a try block with an
-    except ModalProxyError clause that converts the error to ProviderUnavailableError.
-    This test verifies that the error path from _get_or_create_app is reachable:
-    a ModalProxyError raised by app_lookup escapes _get_or_create_app unchanged,
-    which is the precondition for build_provider_instance's conversion clause to fire.
+    This verifies the precondition for build_provider_instance's error conversion:
+    _get_or_create_app does not swallow ModalProxyError, so the caller's
+    except-ModalProxyError clause can convert it to ProviderUnavailableError.
     """
     failing_interface = _FailingModalInterface(
         root_dir=tmp_path,
