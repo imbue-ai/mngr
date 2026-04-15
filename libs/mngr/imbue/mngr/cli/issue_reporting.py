@@ -1,8 +1,11 @@
+import hashlib
+import importlib.metadata
 import json
 import os
 import sys
 import traceback
 import webbrowser
+from pathlib import Path
 from typing import Final
 from typing import NoReturn
 from urllib.parse import quote
@@ -256,7 +259,82 @@ def build_unexpected_error_issue_body(error: Exception, traceback_str: str) -> s
     )
 
 
-def handle_unexpected_error(error: Exception, is_interactive: bool | None = None) -> NoReturn:
+def _get_mngr_version() -> str:
+    """Get the installed mngr version, falling back to 'unknown'."""
+    try:
+        return importlib.metadata.version("imbue-mngr")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def write_diagnose_context_file(
+    traceback_str: str,
+    mngr_version: str,
+    error_type: str,
+    error_message: str,
+) -> Path:
+    """Write error context to a temp JSON file for use by `mngr diagnose`.
+
+    Returns the path to the written file.
+    """
+    content = json.dumps({
+        "traceback_str": traceback_str,
+        "mngr_version": mngr_version,
+        "error_type": error_type,
+        "error_message": error_message,
+    })
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:12]
+    path = Path(f"/tmp/mngr-diagnose-context-{content_hash}.json")
+    path.write_text(content)
+    return path
+
+
+def _offer_diagnose(
+    context_file_path: Path,
+    ctx: click.Context | None,
+) -> None:
+    """Print the diagnose command and offer to run it.
+
+    If the diagnose plugin is not installed, also prints install instructions.
+    """
+    # don't bother with diagnostics when running autonomously
+    if os.environ.get("IS_AUTONOMOUS", "0") == "1":
+        return
+
+    diagnose_cmd = f"mngr diagnose --context-file {context_file_path}"
+
+    # Check if the diagnose plugin is installed
+    pm = ctx.obj if ctx is not None else None
+    has_diagnose = pm is not None and pm.has_plugin("diagnose")
+
+    logger.info("")
+    logger.info("Launch a diagnostic agent with:")
+    logger.info("  {}", diagnose_cmd)
+
+    if not has_diagnose:
+        logger.info("")
+        logger.info("(The diagnose plugin is not installed. Install it with:")
+        logger.info("  mngr plugin add imbue-mngr-diagnose")
+        logger.info(")")
+
+    if not has_diagnose:
+        return
+
+    if not click.confirm("\nRun diagnostic agent now?", default=False):
+        return
+
+    with ConcurrencyGroup(name="diagnose-launch") as cg:
+        cg.run_process_to_completion(
+            ["mngr", "diagnose", "--context-file", str(context_file_path)],
+            timeout=600,
+        )
+
+
+def handle_unexpected_error(
+    error: Exception,
+    is_interactive: bool | None = None,
+    ctx: click.Context | None = None,
+) -> NoReturn:
     """Handle an unexpected error by showing the traceback and optionally reporting it."""
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
 
@@ -270,8 +348,17 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
     if not is_interactive_resolved:
         raise SystemExit(1)
 
-    # In interactive mode, offer to report
+    # Write context file and offer diagnose
     error_message = str(error) if str(error) else type(error).__name__
+    context_path = write_diagnose_context_file(
+        traceback_str=tb_str,
+        mngr_version=_get_mngr_version(),
+        error_type=type(error).__name__,
+        error_message=error_message,
+    )
+    _offer_diagnose(context_path, ctx)
+
+    # Also offer the traditional GitHub issue reporting
     title = build_unexpected_error_issue_title(error)
     body = build_unexpected_error_issue_body(error, tb_str)
     _prompt_and_report_issue(title, body, error_message)

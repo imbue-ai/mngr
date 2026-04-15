@@ -50,6 +50,7 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="mngr_recursive", pypi_name="imbue-mngr-recursive", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_ttyd", pypi_name="imbue-mngr-ttyd", internal_deps=("imbue-mngr",)),
     PackageInfo(dir_name="mngr_wait", pypi_name="imbue-mngr-wait", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_diagnose", pypi_name="imbue-mngr-diagnose", internal_deps=("imbue-mngr",)),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}
