@@ -20,8 +20,12 @@ run_args = "--cov --cov-fail-under=0 -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 0
-# Exclude acceptance and release tests
 filters = "-m 'not acceptance and not release'"
+# When flaky tests exist, add a [groups.flaky] section:
+# [groups.flaky]
+# retry_count = 5
+# filters = "-m 'flaky and not acceptance and not release'"
+# and add 'and not flaky' to the groups.all filter above.
 
 [report]
 output_dir = "test-results"

@@ -55,7 +55,7 @@ Only after doing all of the above should you begin writing code.
 - Use the shared fixtures (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of creating your own.
 - Do NOT create tests for test utilities (e.g. never create `testing_test.py`). Code in `testing.py` and `conftest.py` is exercised by the tests that use it and does not need its own test file.
 - Do NOT create tests that code raises NotImplementedError.
-- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Flaky tests must be fixed as soon as possible. Ideally you should finish your task, then if you are allowed to commit, commit, and try to fix the flaky test in a separate commit.
+- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
