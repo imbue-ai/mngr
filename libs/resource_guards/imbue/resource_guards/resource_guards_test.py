@@ -20,6 +20,7 @@ from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.resource_guards.resource_guards import generate_stub_wrapper_script
 from imbue.resource_guards.resource_guards import generate_wrapper_script
 from imbue.resource_guards.resource_guards import get_guarded_resource_names
+from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.resource_guards.resource_guards import register_sdk_guard
 from imbue.resource_guards.resource_guards import start_resource_guards
@@ -349,6 +350,34 @@ def test_get_guarded_resource_names_returns_binary_and_sdk_guards(
     names = get_guarded_resource_names()
     assert "binary_guard" in names
     assert "sdk_guard" in names
+
+
+def test_register_guarded_resource_markers(
+    isolated_guard_state: None,
+    pytestconfig: pytest.Config,
+) -> None:
+    """register_guarded_resource_markers registers marks on the config."""
+    register_resource_guard("test_res_a")
+    register_resource_guard("test_res_b")
+
+    register_guarded_resource_markers(pytestconfig, skip_names={"test_res_a"})
+
+    marker_names = {m.split(":")[0] for m in pytestconfig.getini("markers")}
+    assert "test_res_b" in marker_names
+    assert "test_res_a" not in marker_names
+
+
+def test_register_guarded_resource_markers_no_skip(
+    isolated_guard_state: None,
+    pytestconfig: pytest.Config,
+) -> None:
+    """register_guarded_resource_markers with no skip_names registers all."""
+    register_resource_guard("test_all")
+
+    register_guarded_resource_markers(pytestconfig)
+
+    marker_names = {m.split(":")[0] for m in pytestconfig.getini("markers")}
+    assert "test_all" in marker_names
 
 
 def test_custom_sdk_guard_end_to_end(
@@ -858,11 +887,11 @@ def test_register_resource_guard_auto_registers_pytest_mark(
 
 
 # Conftest that mirrors the README example: standalone pytest_configure
-# using get_guarded_resource_names() to register marks (no conftest_hooks).
+# using register_guarded_resource_markers() (no conftest_hooks).
 _PYTESTER_STANDALONE_CONFTEST = """\
 import os
 from imbue.resource_guards.resource_guards import (
-    get_guarded_resource_names,
+    register_guarded_resource_markers,
     register_resource_guard,
     start_resource_guards,
     stop_resource_guards,
@@ -873,8 +902,7 @@ os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
 register_resource_guard("cat")
 
 def pytest_configure(config):
-    for name in get_guarded_resource_names():
-        config.addinivalue_line("markers", f"{name}: marks tests that use {name}")
+    register_guarded_resource_markers(config)
 
 def pytest_sessionstart(session):
     start_resource_guards(session)

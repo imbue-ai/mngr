@@ -89,11 +89,29 @@ def register_resource_guard(name: str) -> None:
 
 
 def get_guarded_resource_names() -> tuple[str, ...]:
-    """Return the guarded resource names (binary + SDK guards).
-
-    Used by conftest_hooks to auto-register pytest marks for guarded resources.
-    """
+    """Return the guarded resource names (binary + SDK guards)."""
     return tuple(_guarded_resources)
+
+
+def register_guarded_resource_markers(
+    config: pytest.Config,
+    *,
+    skip_names: set[str] | None = None,
+) -> None:
+    """Register pytest markers for all guarded resources.
+
+    Call this from pytest_configure to register marks for every resource
+    registered via register_resource_guard() or register_sdk_guard().
+
+    Args overlap with existing markers can be skipped via skip_names.
+    """
+    skip = skip_names or set()
+    for name in _guarded_resources:
+        if name not in skip:
+            config.addinivalue_line(
+                "markers",
+                f"{name}: marks tests that use the {name} resource",
+            )
 
 
 def generate_wrapper_script(resource: str, real_path: str) -> str:

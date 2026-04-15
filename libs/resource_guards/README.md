@@ -28,7 +28,7 @@ In your `conftest.py`, register each resource you want to guard. You need two th
 ```python
 # conftest.py
 from imbue.resource_guards.resource_guards import (
-    get_guarded_resource_names,
+    register_guarded_resource_markers,
     register_resource_guard,
     start_resource_guards,
     stop_resource_guards,
@@ -37,8 +37,7 @@ from imbue.resource_guards.resource_guards import (
 register_resource_guard("tmux")
 
 def pytest_configure(config):
-    for name in get_guarded_resource_names():
-        config.addinivalue_line("markers", f"{name}: marks tests that use {name}")
+    register_guarded_resource_markers(config)
 
 def pytest_sessionstart(session):
     start_resource_guards(session)
