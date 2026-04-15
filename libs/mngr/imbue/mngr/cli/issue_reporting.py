@@ -340,9 +340,12 @@ def _offer_diagnose(
         return
 
     diagnose_args = ["--context-file", str(context_file_path)]
-    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
-    with diagnose_ctx:
-        diagnose_command.invoke(diagnose_ctx)
+    try:
+        diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
+        with diagnose_ctx:
+            diagnose_command.invoke(diagnose_ctx)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Diagnose command failed: {}", exc)
 
 
 def handle_unexpected_error(
