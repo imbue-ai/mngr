@@ -917,13 +917,12 @@ def authenticate_request(request: Request, ops: CloudflareOps) -> AuthResult:
         if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
             assert agent_exc is not None
             raise agent_exc
-        # If SuperTokens also fails, re-raise the original agent auth error so
-        # callers receive the most specific and useful error message.
+        # If SuperTokens also fails, raise the SuperTokens error since the
+        # token is clearly a JWT (not a base64 tunnel token).
         try:
             return _authenticate_supertokens(token)
-        except HTTPException:
-            assert agent_exc is not None
-            raise agent_exc from None
+        except HTTPException as st_exc:
+            raise st_exc from None
 
     if auth_header.lower().startswith("basic "):
         return _authenticate_admin(auth_header)
@@ -1219,7 +1218,7 @@ def _init_supertokens() -> None:
             api_key=api_key,
         ),
         app_info=InputAppInfo(
-            app_name="CloudflareForwarding",
+            app_name="Minds",
             api_domain="https://cloudflare-forwarding.modal.run",
             website_domain="https://cloudflare-forwarding.modal.run",
             api_base_path="/auth",
@@ -1232,10 +1231,12 @@ def _init_supertokens() -> None:
     logger.info("SuperTokens SDK initialized for JWT validation")
 
 
-@app.function(secrets=[
-    modal.Secret.from_name("cloudflare-forwarding-secrets"),
-    modal.Secret.from_name("supertokens-secrets"),
-])
+@app.function(
+    secrets=[
+        modal.Secret.from_name("cloudflare-forwarding-secrets"),
+        modal.Secret.from_name("supertokens-secrets"),
+    ]
+)
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
     _init_supertokens()

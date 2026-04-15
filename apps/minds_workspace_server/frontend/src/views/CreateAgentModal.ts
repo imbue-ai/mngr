@@ -4,11 +4,10 @@
  */
 
 import m from "mithril";
-import { apiUrl } from "../base-path";
+import { apiUrl, getPrimaryAgentId } from "../base-path";
 
 interface CreateAgentModalAttrs {
   mode: "worktree" | "chat";
-  parentAgentId?: string;
   onCreated: (agentId: string, agentName: string) => void;
   onCancel: () => void;
 }
@@ -47,8 +46,8 @@ export function CreateAgentModal(): m.Component<CreateAgentModalAttrs> {
 
       const body: Record<string, string> =
         attrs.mode === "worktree"
-          ? { name: name.trim(), selected_agent_id: attrs.parentAgentId ?? "" }
-          : { name: name.trim(), parent_agent_id: attrs.parentAgentId ?? "" };
+          ? { name: name.trim(), selected_agent_id: getPrimaryAgentId() }
+          : { name: name.trim() };
 
       const response = await m.request<{ agent_id: string }>({
         method: "POST",
