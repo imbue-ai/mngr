@@ -24,13 +24,13 @@ def test_getting_started_lesson_has_expected_structure() -> None:
 
 def test_remote_agents_lesson_has_expected_structure() -> None:
     assert LESSON_REMOTE_AGENTS.title == "Remote Agents on Modal (WIP)"
-    assert len(LESSON_REMOTE_AGENTS.steps) == 5
+    assert len(LESSON_REMOTE_AGENTS.steps) == 6
 
     # First step creates a remote agent
     assert isinstance(LESSON_REMOTE_AGENTS.steps[0].check, AgentExistsCheck)
 
     # Last step destroys the agent
-    assert isinstance(LESSON_REMOTE_AGENTS.steps[4].check, AgentNotExistsCheck)
+    assert isinstance(LESSON_REMOTE_AGENTS.steps[5].check, AgentNotExistsCheck)
 
 
 def test_all_lessons_have_non_empty_steps() -> None:
