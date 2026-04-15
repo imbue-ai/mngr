@@ -137,13 +137,15 @@ def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> No
             includes = rule.get("include", [])
             if not isinstance(includes, list):
                 continue
-            for inc in includes:
-                if isinstance(inc, dict):
-                    email_obj = inc.get("email")
-                    if isinstance(email_obj, dict):
-                        email = email_obj.get("email")
-                        if email:
-                            suggested_emails.append(str(email))
+            for inc_item in includes:
+                if not isinstance(inc_item, dict):
+                    continue
+                email_entry = inc_item.get("email")
+                if not isinstance(email_entry, dict):
+                    continue
+                email_value = email_entry.get("email")
+                if email_value:
+                    suggested_emails.append(str(email_value))
     except SharingProxyError:
         logger.debug("Could not fetch current sharing status for pre-population")
 
