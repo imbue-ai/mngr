@@ -114,7 +114,6 @@ def diagnose(ctx: click.Context, **kwargs: object) -> None:
         "--message",
         message,
         "--no-ensure-clean",
-        "-y",
     ]
     if opts.agent_type is not None:
         create_args.extend(["--type", opts.agent_type])

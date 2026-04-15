@@ -146,13 +146,13 @@ def test_diagnose_no_type_omits_type_flag(
     assert "--type" not in captured_args[0]
 
 
-def test_diagnose_passes_auto_approve_flag(
+def test_diagnose_does_not_pass_auto_approve(
     tmp_path: Path,
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Diagnose passes -y to create so the clone directory is auto-trusted."""
+    """Diagnose relies on interactive trust prompts, not blanket -y."""
     captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
     cli_runner.invoke(
@@ -162,7 +162,7 @@ def test_diagnose_passes_auto_approve_flag(
     )
 
     assert len(captured_args) == 1
-    assert "-y" in captured_args[0]
+    assert "-y" not in captured_args[0]
 
 
 def test_diagnose_default_clone_dir() -> None:
