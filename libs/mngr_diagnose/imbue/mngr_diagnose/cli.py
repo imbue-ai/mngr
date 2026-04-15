@@ -1,4 +1,3 @@
-import importlib.metadata
 from pathlib import Path
 from typing import Final
 
@@ -9,19 +8,12 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.create import create as create_cmd
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.issue_reporting import get_mngr_version
 from imbue.mngr_diagnose.clone import ensure_mngr_clone
 from imbue.mngr_diagnose.context_file import read_diagnose_context
 from imbue.mngr_diagnose.prompt import build_diagnose_initial_message
 
 DIAGNOSE_CLONE_DIR: Final[Path] = Path("/tmp/mngr-diagnose")
-
-
-def _get_mngr_version() -> str:
-    """Get the installed mngr version, falling back to 'unknown'."""
-    try:
-        return importlib.metadata.version("imbue-mngr")
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
 
 
 @click.command()
@@ -61,7 +53,7 @@ def diagnose(
 
     # Read context file if provided
     traceback_str: str | None = None
-    mngr_version = _get_mngr_version()
+    mngr_version = get_mngr_version()
 
     if context_file is not None:
         context = read_diagnose_context(Path(context_file))

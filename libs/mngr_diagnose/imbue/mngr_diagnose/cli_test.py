@@ -9,13 +9,13 @@ from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_diagnose.cli import DIAGNOSE_CLONE_DIR
-from imbue.mngr_diagnose.cli import _get_mngr_version
+from imbue.mngr.cli.issue_reporting import get_mngr_version
 from imbue.mngr_diagnose.cli import diagnose
 
 
 def test_get_mngr_version() -> None:
     """_get_mngr_version returns a version string."""
-    version = _get_mngr_version()
+    version = get_mngr_version()
     assert isinstance(version, str)
     assert len(version) > 0
 

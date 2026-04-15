@@ -259,7 +259,7 @@ def build_unexpected_error_issue_body(error: Exception, traceback_str: str) -> s
     )
 
 
-def _get_mngr_version() -> str:
+def get_mngr_version() -> str:
     """Get the installed mngr version, falling back to 'unknown'."""
     try:
         return importlib.metadata.version("imbue-mngr")
@@ -316,23 +316,25 @@ def _offer_diagnose(
         logger.info("(The diagnose plugin is not installed. Install it with:")
         logger.info("  mngr plugin add imbue-mngr-diagnose")
         logger.info(")")
-
-    if not has_diagnose:
         return
 
     if not click.confirm("\nRun diagnostic agent now?", default=False):
         return
 
-    # Look up the diagnose command from the CLI group and invoke it directly.
-    # Walk up to the root context (the AliasAwareGroup) to find the command.
+    # Walk up to the root context (the AliasAwareGroup) to find the diagnose command.
     root_ctx = ctx
     while root_ctx is not None and root_ctx.parent is not None:
         root_ctx = root_ctx.parent
-    if root_ctx is None or not isinstance(root_ctx.command, click.MultiCommand):
+    if root_ctx is None:
         logger.warning("Could not find root CLI group to invoke diagnose command")
         return
 
-    diagnose_command = root_ctx.command.get_command(root_ctx, "diagnose")
+    root_command = root_ctx.command
+    if not isinstance(root_command, click.Group):
+        logger.warning("Root CLI command is not a group")
+        return
+
+    diagnose_command = root_command.get_command(root_ctx, "diagnose")
     if diagnose_command is None:
         logger.warning("Diagnose command not found in CLI group")
         return
@@ -365,7 +367,7 @@ def handle_unexpected_error(
     error_message = str(error) if str(error) else type(error).__name__
     context_path = write_diagnose_context_file(
         traceback_str=tb_str,
-        mngr_version=_get_mngr_version(),
+        mngr_version=get_mngr_version(),
         error_type=type(error).__name__,
         error_message=error_message,
     )
