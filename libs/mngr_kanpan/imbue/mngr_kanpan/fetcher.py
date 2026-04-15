@@ -199,14 +199,14 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
     if not isinstance(pr, PrField):
         raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
 
-    if pr.is_draft:
-        return BoardSection.PR_DRAFT
     match pr.state:
         case PrState.MERGED:
             return BoardSection.PR_MERGED
         case PrState.CLOSED:
             return BoardSection.PR_CLOSED
         case PrState.OPEN:
+            if pr.is_draft:
+                return BoardSection.PR_DRAFT
             ci = fields.get(FIELD_CI)
             match ci:
                 case None:
