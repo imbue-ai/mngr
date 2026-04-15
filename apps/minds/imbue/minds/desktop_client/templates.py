@@ -746,8 +746,12 @@ body {
   </div>
   <span class="minds-title" id="page-title">Minds</span>
   <div class="minds-user-area">
-    <button id="user-btn" class="minds-user-btn" title="Account">Login</button>
+    <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>
+  <button id="requests-toggle" title="Requests" style="position:relative;">
+    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    <span id="requests-badge" style="display:none;position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#ef4444;"></span>
+  </button>
   <div class="minds-wc">
     <button id="min-btn" title="Minimize">
       <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="6" x2="10" y2="6"/></svg>
@@ -861,19 +865,24 @@ function updateAuthUI(data) {
   var btn = document.getElementById('user-btn');
   if (data.signedIn) {
     signedIn = true;
-    btn.textContent = data.displayName || data.email || 'Account';
-    btn.title = data.email || 'Account';
+    btn.textContent = 'Manage account(s)';
+    btn.title = data.email || 'Manage accounts';
   } else {
     signedIn = false;
-    btn.textContent = 'Login';
+    btn.textContent = 'Log in';
     btn.title = 'Sign in to your account';
   }
 }
 refreshAuthStatus();
 
 document.getElementById('user-btn').onclick = function() {
-  if (signedIn) navigateContent('/auth/settings');
+  if (signedIn) navigateContent('/accounts');
   else navigateContent('/auth/login');
+};
+
+// -- Requests panel toggle --
+document.getElementById('requests-toggle').onclick = function() {
+  if (isElectron) window.minds.toggleRequestsPanel();
 };
 
 // -- SSE for workspace list (browser mode sidebar) --
@@ -883,10 +892,32 @@ function renderWorkspaces(workspaces) {
     container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
     return;
   }
-  container.innerHTML = workspaces.map(function(w) {
-    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
-      (w.name || w.id) + '</div>';
-  }).join('');
+  // Group by account
+  var groups = {};
+  workspaces.forEach(function(w) {
+    var key = w.account || 'Private';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(w);
+  });
+  // Render with Private first, then alphabetical
+  var keys = Object.keys(groups).sort(function(a, b) {
+    if (a === 'Private') return -1;
+    if (b === 'Private') return 1;
+    return a.localeCompare(b);
+  });
+  var html = '';
+  keys.forEach(function(key) {
+    html += '<div style="padding:6px 16px 2px;font-size:11px;color:#787774;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
+    groups[key].forEach(function(w) {
+      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+    });
+  });
+  container.innerHTML = html;
+}
+
+function updateRequestsBadge(count) {
+  var badge = document.getElementById('requests-badge');
+  if (badge) badge.style.display = count > 0 ? 'block' : 'none';
 }
 
 var evtSource = null;
@@ -898,6 +929,7 @@ function connectSSE() {
       var data = JSON.parse(event.data);
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
+      if (data.type === 'request_count') updateRequestsBadge(data.count);
     } catch(e) {}
   };
   evtSource.onerror = function() {
@@ -955,10 +987,25 @@ function renderWorkspaces(workspaces) {
     container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
     return;
   }
-  container.innerHTML = workspaces.map(function(w) {
-    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
-      (w.name || w.id) + '</div>';
-  }).join('');
+  var groups = {};
+  workspaces.forEach(function(w) {
+    var key = w.account || 'Private';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(w);
+  });
+  var keys = Object.keys(groups).sort(function(a, b) {
+    if (a === 'Private') return -1;
+    if (b === 'Private') return 1;
+    return a.localeCompare(b);
+  });
+  var html = '';
+  keys.forEach(function(key) {
+    html += '<div style="padding:6px 16px 2px;font-size:11px;color:#787774;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
+    groups[key].forEach(function(w) {
+      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+    });
+  });
+  container.innerHTML = html;
 }
 
 var evtSource = null;

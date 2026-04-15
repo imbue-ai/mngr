@@ -1171,9 +1171,13 @@ async def _handle_chrome_events(
             backend_resolver.add_on_change_callback(_on_change)
 
         try:
-            # Send initial workspace list
-            last_workspace_data = _build_workspace_list(backend_resolver)
+            # Send initial workspace list and request count
+            session_store: MultiAccountSessionStore | None = request.app.state.session_store
+            last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+            inbox: RequestInbox | None = request.app.state.request_inbox
+            last_request_count = inbox.get_pending_count() if inbox else 0
+            yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
 
             # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
@@ -1189,10 +1193,16 @@ async def _handle_chrome_events(
                 if not connected:
                     break
 
-                current_data = _build_workspace_list(backend_resolver)
+                current_data = _build_workspace_list(backend_resolver, session_store)
                 if current_data != last_workspace_data:
                     last_workspace_data = current_data
                     yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+
+                inbox = request.app.state.request_inbox
+                current_request_count = inbox.get_pending_count() if inbox else 0
+                if current_request_count != last_request_count:
+                    last_request_count = current_request_count
+                    yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": current_request_count}))
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
@@ -1208,7 +1218,10 @@ async def _handle_chrome_events(
     )
 
 
-def _build_workspace_list(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
+def _build_workspace_list(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None = None,
+) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver."""
     agent_ids = backend_resolver.list_known_workspace_ids()
     workspaces: list[dict[str, str]] = []
@@ -1217,7 +1230,12 @@ def _build_workspace_list(backend_resolver: BackendResolverInterface) -> list[di
         if not ws_name:
             info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
-        workspaces.append({"id": str(aid), "name": ws_name})
+        entry: dict[str, str] = {"id": str(aid), "name": ws_name}
+        if session_store is not None:
+            account = session_store.get_account_for_workspace(str(aid))
+            if account is not None:
+                entry["account"] = account.email
+        workspaces.append(entry)
     return workspaces
 
 
