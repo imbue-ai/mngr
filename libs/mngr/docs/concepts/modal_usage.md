@@ -113,7 +113,7 @@ See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary
 
 `mngr stop`, `mngr start`, `mngr connect`, and `mngr destroy` all work the same as for local agents.
 
-Modal sandboxes are also terminated after their timeout expires. `mngr stop` automatically takes a snapshot before terminating, and `mngr start` restores from it. You can also create named snapshots manually:
+Modal sandboxes are terminated after their timeout expires or when idle detection kicks in. Unlike local agents, stopping the agent's tmux session (`mngr stop`) does not stop the sandbox -- the sandbox keeps running until it times out or idle detection terminates it. Before terminating, idle detection automatically takes a snapshot so that `mngr start` can restore from it. You can also create named snapshots manually at any time:
 
 ```bash
 mngr snapshot create my-agent --name before-refactor
