@@ -199,7 +199,7 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
         raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
 
     if pr.is_draft:
-        return BoardSection.STILL_COOKING
+        return BoardSection.PR_DRAFT
     match pr.state:
         case PrState.MERGED:
             return BoardSection.PR_MERGED

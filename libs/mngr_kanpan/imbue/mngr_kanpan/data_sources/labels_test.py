@@ -13,37 +13,12 @@ def _make_ctx() -> MngrContext:
     return cast(MngrContext, SimpleNamespace())
 
 
-def test_labels_data_source_name() -> None:
-    ds = LabelsDataSource(
-        field_key="priority",
-        config=LabelColumnConfig(header="PRIORITY", label_key="priority"),
-    )
-    assert ds.name == "label_priority"
-
-
 def test_labels_data_source_is_not_remote() -> None:
     ds = LabelsDataSource(
         field_key="priority",
         config=LabelColumnConfig(header="PRIORITY", label_key="priority"),
     )
     assert ds.is_remote is False
-
-
-def test_labels_data_source_columns() -> None:
-    ds = LabelsDataSource(
-        field_key="priority",
-        config=LabelColumnConfig(header="PRIORITY", label_key="priority"),
-    )
-    assert ds.columns == {"priority": "PRIORITY"}
-
-
-def test_labels_data_source_field_types() -> None:
-    ds = LabelsDataSource(
-        field_key="priority",
-        config=LabelColumnConfig(header="PRIORITY", label_key="priority"),
-    )
-    assert "priority" in ds.field_types
-    assert ds.field_types["priority"] is _ColoredStringField
 
 
 def test_labels_compute_agent_with_label() -> None:

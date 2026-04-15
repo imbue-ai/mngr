@@ -20,7 +20,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
@@ -82,21 +81,12 @@ def work_dir(tmp_path: Path) -> Path:
     return d
 
 
-@pytest.fixture
-def git_work_dir(tmp_path: Path, setup_git_config: None) -> Path:
-    """Create a temporary git repository to use as an agent work directory."""
-    d = tmp_path / "git_work_dir"
-    init_git_repo(d)
-    return d
-
-
 # =============================================================================
 # fetch_board_snapshot
 # =============================================================================
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_fetch_board_snapshot_with_no_agents(temp_mngr_ctx: MngrContext) -> None:
     """Board snapshot with no real agents returns an empty snapshot."""
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
@@ -165,11 +155,11 @@ def test_fetch_board_snapshot_with_repo_paths_source(
 @pytest.mark.tmux
 def test_fetch_board_snapshot_with_git_info_source(
     local_host: Host,
-    git_work_dir: Path,
+    temp_git_repo: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """GitInfoDataSource populates commits_ahead field from agent work dir."""
-    create_test_agent_state(local_host, git_work_dir, "git-info-agent")
+    create_test_agent_state(local_host, temp_git_repo, "git-info-agent")
     result = fetch_board_snapshot(temp_mngr_ctx, [GitInfoDataSource()], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("git-info-agent")]
@@ -216,7 +206,7 @@ def test_fetch_board_snapshot_cached_fields_updated(
 @pytest.mark.tmux
 def test_fetch_local_snapshot_skips_remote_sources(
     local_host: Host,
-    git_work_dir: Path,
+    temp_git_repo: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """fetch_local_snapshot only runs non-remote data sources.
@@ -224,7 +214,7 @@ def test_fetch_local_snapshot_skips_remote_sources(
     GitInfoDataSource (is_remote=False) should run; a fabricated remote source
     should be skipped.
     """
-    create_test_agent_state(local_host, git_work_dir, "git-local-agent")
+    create_test_agent_state(local_host, temp_git_repo, "git-local-agent")
     result = fetch_local_snapshot(
         temp_mngr_ctx,
         [GitInfoDataSource(), _FakeRemoteDataSource()],
@@ -244,7 +234,6 @@ def test_fetch_local_snapshot_skips_remote_sources(
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_load_muted_agents_returns_empty_when_no_agents_muted(
     local_host: Host,
     work_dir: Path,
@@ -257,7 +246,6 @@ def test_load_muted_agents_returns_empty_when_no_agents_muted(
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_load_muted_agents_after_toggle(
     local_host: Host,
     work_dir: Path,
@@ -277,7 +265,6 @@ def test_load_muted_agents_after_toggle(
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_toggle_agent_mute_twice_returns_to_unmuted(
     local_host: Host,
     work_dir: Path,

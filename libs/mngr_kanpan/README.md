@@ -127,14 +127,14 @@ Built-in column names: `name`, `state`. Data source field keys: `commits_ahead`,
 
 ## Section order
 
-By default, sections are displayed in this order: Done (PR merged), Cancelled (PR closed), In review (PR pending), In progress (no PR), In progress (PRs not loaded), Muted. To customize:
+By default, sections are displayed in this order: Done (PR merged), Cancelled (PR closed), In review (PR pending), In progress (draft PR), In progress (no PR yet), In progress (PRs failed), Muted. To customize:
 
 ```toml
 [plugins.kanpan]
-section_order = ["STILL_COOKING", "PR_BEING_REVIEWED", "PR_MERGED", "PR_CLOSED", "MUTED"]
+section_order = ["STILL_COOKING", "PR_DRAFT", "PR_BEING_REVIEWED", "PR_MERGED", "PR_CLOSED", "MUTED"]
 ```
 
-Valid section names are: `PR_MERGED`, `PR_CLOSED`, `PR_BEING_REVIEWED`, `STILL_COOKING`, `PRS_FAILED`, `MUTED`. Sections not listed in `section_order` are omitted.
+Valid section names are: `PR_MERGED`, `PR_CLOSED`, `PR_BEING_REVIEWED`, `PR_DRAFT`, `STILL_COOKING`, `PRS_FAILED`, `MUTED`. Sections not listed in `section_order` are omitted.
 
 The PR column displays clickable hyperlinks (OSC 8) in terminals that support them. When an agent has a PR, the column shows `#<number>` linked to the PR URL. When no PR exists but the branch is pushable, it shows `+PR` linked to the create-PR URL.
 

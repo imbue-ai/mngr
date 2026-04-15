@@ -96,7 +96,7 @@ def test_compute_section_no_pr() -> None:
 
 def test_compute_section_draft_pr() -> None:
     fields: dict[str, FieldValue] = {FIELD_PR: _make_pr(is_draft=True)}
-    assert compute_section(fields) == BoardSection.STILL_COOKING
+    assert compute_section(fields) == BoardSection.PR_DRAFT
 
 
 def test_compute_section_merged_pr() -> None:

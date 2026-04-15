@@ -18,6 +18,7 @@ class BoardSection(UpperCaseStrEnum):
     """Sections for grouping agents on the board, based on PR state."""
 
     STILL_COOKING = auto()
+    PR_DRAFT = auto()
     PRS_FAILED = auto()
     PR_BEING_REVIEWED = auto()
     PR_MERGED = auto()

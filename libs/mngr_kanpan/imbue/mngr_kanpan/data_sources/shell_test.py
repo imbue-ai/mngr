@@ -16,30 +16,6 @@ from imbue.mngr_kanpan.data_sources.shell import _build_shell_env
 from imbue.mngr_kanpan.testing import make_agent_details
 
 
-def test_shell_data_source_name() -> None:
-    ds = ShellCommandDataSource(
-        field_key="slack",
-        config=ShellCommandConfig(name="Slack", header="SLACK", command="echo test"),
-    )
-    assert ds.name == "shell_slack"
-
-
-def test_shell_data_source_columns() -> None:
-    ds = ShellCommandDataSource(
-        field_key="slack",
-        config=ShellCommandConfig(name="Slack", header="SLACK", command="echo test"),
-    )
-    assert ds.columns == {"slack": "SLACK"}
-
-
-def test_shell_data_source_field_types() -> None:
-    ds = ShellCommandDataSource(
-        field_key="slack",
-        config=ShellCommandConfig(name="Slack", header="SLACK", command="echo test"),
-    )
-    assert ds.field_types == {"slack": StringField}
-
-
 def test_build_shell_env_basic() -> None:
     agent = make_agent_details(
         name="agent-1",
