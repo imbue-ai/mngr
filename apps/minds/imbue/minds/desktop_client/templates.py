@@ -1074,7 +1074,11 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     <h1>{{ title }}</h1>
+    {% if ws_name %}
+    <p class="subtitle">{{ ws_name }}{% if account_email %} &middot; {{ account_email }}{% endif %}</p>
+    {% else %}
     <p class="subtitle">{{ agent_id }}</p>
+    {% endif %}
 
     {% if not has_account %}
     """
@@ -1085,7 +1089,6 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
       <button type="submit" class="btn btn-danger">Deny request</button>
     </form>
     {% endif %}
-    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
     {% else %}
 
     <div id="sharing-editor">
@@ -1114,28 +1117,23 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         <button class="btn btn-secondary" onclick="addEmail()">Add</button>
       </div>
 
-      <div class="actions" id="action-buttons">
-        <button class="btn btn-success" id="action-btn" onclick="submitEnable()">
-          Enable Sharing
-        </button>
+      <div class="actions" id="action-buttons" style="justify-content:space-between;">
         {% if is_request %}
         <button class="btn btn-danger" id="deny-btn" onclick="submitDeny()">Deny</button>
         {% else %}
         <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
           Disable Sharing
         </button>
+        <span></span>
         {% endif %}
+        <button class="btn btn-success" id="action-btn" onclick="submitEnable()">
+          Enable Sharing
+        </button>
       </div>
       <div id="submit-spinner" style="display:none;padding:16px 0;">
         <span style="color:#94a3b8;">Saving changes...</span>
       </div>
     </div>
-
-    <div id="result-state" style="display:none;">
-      <div class="card" id="result-card"></div>
-    </div>
-
-    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
   </div>
 
   <script>
@@ -1153,9 +1151,12 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
       return;
     }
     container.innerHTML = emails.map(function(e) {
-      return '<span class="email-tag">' + e +
-        ' <button onclick="removeEmail(\\'' + e + '\\')">&times;</button></span>';
-    }).join(' ');
+      return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;' +
+        'border:1px solid #e2e8f0;border-radius:6px;margin:4px 0;background:white;">' +
+        '<span style="font-size:13px;color:#334155;">' + e + '</span>' +
+        '<button onclick="removeEmail(\\'' + e + '\\')" style="background:none;border:none;cursor:pointer;' +
+        'color:#94a3b8;font-size:18px;line-height:1;padding:0 4px;">&times;</button></div>';
+    }).join('');
   }
 
   function addEmail() {
@@ -1241,8 +1242,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         var disableBtn = document.getElementById('disable-btn');
         if (disableBtn) disableBtn.style.display = 'inline-block';
       } else {
-        dot.className = 'status-dot status-disabled';
-        text.textContent = 'Sharing is not enabled';
+        document.getElementById('status-display').style.display = 'none';
         document.getElementById('action-btn').textContent = 'Enable Sharing';
       }
 
@@ -1287,6 +1287,8 @@ def render_sharing_editor(
     has_account: bool = True,
     accounts: Sequence[object] | None = None,
     redirect_url: str = "",
+    ws_name: str = "",
+    account_email: str = "",
 ) -> str:
     """Render the sharing editor page used for both request approval and direct editing."""
     template = _JINJA_ENV.from_string(_SHARING_EDITOR_TEMPLATE)
@@ -1300,6 +1302,8 @@ def render_sharing_editor(
         has_account=has_account,
         accounts=accounts or [],
         redirect_url=redirect_url,
+        ws_name=ws_name,
+        account_email=account_email,
     )
 
 

@@ -1472,10 +1472,30 @@ async def _handle_requests_auto_open(
     return Response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _resolve_ws_name_and_account(
+    agent_id: str,
+    request: Request,
+    backend_resolver: BackendResolverInterface,
+) -> tuple[str, str, bool, list[object]]:
+    """Resolve workspace name, account email, has_account flag, and accounts list."""
+    parsed_id = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(parsed_id)
+        ws_name = info.agent_name if info else agent_id
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    account = session_store.get_account_for_workspace(agent_id) if session_store else None
+    account_email = account.email if account else ""
+    has_account = account is not None
+    accounts = session_store.list_accounts() if session_store else []
+    return ws_name, account_email, has_account, accounts
+
+
 def _handle_request_page(
     request_id: str,
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render the request editing page using the shared sharing editor."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -1494,9 +1514,9 @@ def _handle_request_page(
         emails.extend(req_event.suggested_emails)
     emails = list(dict.fromkeys(emails))
 
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    has_account = session_store.get_account_for_workspace(req_event.agent_id) is not None if session_store else False
-    accounts = session_store.list_accounts() if session_store else []
+    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
+        req_event.agent_id, request, backend_resolver,
+    )
 
     html = render_sharing_editor(
         agent_id=req_event.agent_id,
@@ -1508,6 +1528,8 @@ def _handle_request_page(
         has_account=has_account,
         accounts=accounts,
         redirect_url=f"/requests/{request_id}",
+        ws_name=ws_name,
+        account_email=account_email,
     )
     return HTMLResponse(content=html)
 
@@ -1517,14 +1539,15 @@ def _handle_sharing_page(
     server_name: str,
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render the sharing editor page for direct editing (from workspace settings)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    has_account = session_store.get_account_for_workspace(agent_id) is not None if session_store else False
-    accounts = session_store.list_accounts() if session_store else []
+    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
+        agent_id, request, backend_resolver,
+    )
 
     html = render_sharing_editor(
         agent_id=agent_id,
@@ -1534,6 +1557,8 @@ def _handle_sharing_page(
         has_account=has_account,
         accounts=accounts,
         redirect_url=f"/sharing/{agent_id}/{server_name}",
+        ws_name=ws_name,
+        account_email=account_email,
     )
     return HTMLResponse(content=html)
 
