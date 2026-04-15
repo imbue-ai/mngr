@@ -37,15 +37,15 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
 
     try:
-        # Step 1: Deploy a trigger that runs mngr run headless_command.
-        # mngr run executes the command synchronously and captures its output,
-        # which run_scheduled_trigger() returns via fn.remote().
+        # Step 1: Deploy a trigger that runs mngr create with a headless agent type.
+        # mngr create auto-detects headless agent types (StreamingHeadlessAgentMixin)
+        # and streams their output, which run_scheduled_trigger() returns via fn.remote().
         add_result = deploy_test_trigger(
             trigger_name,
             env,
             _ENABLED_PLUGINS,
-            command="run",
-            args="headless_command -c 'echo hello-from-schedule-run' --context /tmp",
+            command="create",
+            args="--type headless_command -c 'echo hello-from-schedule-run'",
         )
         assert add_result.returncode == 0, (
             f"schedule add failed\nstdout: {add_result.stdout}\nstderr: {add_result.stderr}"
@@ -81,7 +81,7 @@ def test_schedule_run_and_remove_modal_trigger() -> None:
         )
 
         # Step 4: Verify the echo output proves the command ran end-to-end.
-        # mngr run headless_command captures the command's stdout synchronously.
+        # mngr create with a headless agent type streams its stdout synchronously.
         # run_scheduled_trigger() returns it via fn.remote(), and schedule run
         # prints it to stdout.
         assert "hello-from-schedule-run" in run_result.stdout, (
