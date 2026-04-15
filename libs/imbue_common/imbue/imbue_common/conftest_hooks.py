@@ -601,13 +601,8 @@ def _pytest_configure(config: pytest.Config) -> None:
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
 
-    # Register marks for guarded resources. Standalone users would call
-    # register_guarded_resource_markers(config) from their own pytest_configure
-    # (see libs/resource_guards/README.md). We can't do that here because
-    # register_conftest_hooks injects _pytest_configure, not a user-defined one,
-    # so we inline the call to avoid needing a separate hook.
-    registered_names = {m.split(":")[0].strip() for m in _SHARED_MARKERS + _registered_markers}
-    register_guarded_resource_markers(config, skip_names=registered_names)
+    # Register marks for guarded resources (see libs/resource_guards/README.md).
+    register_guarded_resource_markers(config)
 
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:
