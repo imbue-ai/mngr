@@ -33,6 +33,8 @@ from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_kanpan.data_source import BoolField
+from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -681,12 +683,29 @@ def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
         _start_local_refresh(state.loop, state)
 
 
+def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEntry:
+    """Return an updated AgentBoardEntry with the mute state applied.
+
+    Updates fields, cells, section, and is_muted so the board renders correctly.
+    """
+    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted)}
+    updated_cells = {key: field.display() for key, field in updated_fields.items()}
+    updated_section = compute_section(updated_fields)
+    ref = entry.field_ref()
+    return entry.model_copy_update(
+        to_update(ref.is_muted, is_muted),
+        to_update(ref.fields, updated_fields),
+        to_update(ref.cells, updated_cells),
+        to_update(ref.section, updated_section),
+    )
+
+
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
-    """Update the snapshot in-place by toggling is_muted on the named agent."""
+    """Update the snapshot in-place by toggling mute state on the named agent."""
     if state.snapshot is None:
         return
     new_entries = tuple(
-        entry.model_copy(update={"is_muted": is_muted}) if entry.name == agent_name else entry
+        _apply_mute_to_entry(entry, is_muted) if entry.name == agent_name else entry
         for entry in state.snapshot.entries
     )
     state.snapshot = state.snapshot.model_copy_update(
