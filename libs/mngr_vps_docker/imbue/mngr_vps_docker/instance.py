@@ -31,6 +31,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -358,8 +359,10 @@ class VpsDockerProvider(BaseProviderInstance):
         )
 
         connector = PyinfraConnector(pyinfra_host)
+        ssh_auth = SSHKeyAuth(key_path=container_key_path, known_hosts_file=self._container_known_hosts_path())
         host = Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -1345,15 +1348,13 @@ class VpsDockerProvider(BaseProviderInstance):
     ) -> HostDetails:
         """Construct HostDetails from cached host record and SSH-collected data."""
         ssh_info: SSHInfo | None = None
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
 
         boot_time = timestamp_to_datetime(raw.get("btime"))

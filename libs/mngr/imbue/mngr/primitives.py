@@ -9,6 +9,7 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
+from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -16,6 +17,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.mngr.interfaces.ssh_auth import SSHAuthField
 
 # === Enums ===
 
@@ -366,13 +368,48 @@ class CertifiedDataError(Exception):
 
 
 class SSHInfo(FrozenModel):
-    """SSH connection information for a remote host."""
+    """SSH connection information for a remote host.
+
+    Used in discovery events and listing output. The auth field carries the
+    full SSHAuthMethod (extensible discriminated union). The display_command
+    is computed on demand via auth.get_display_command().
+    """
 
     user: str = Field(description="SSH username")
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
-    key_path: Path = Field(description="Path to SSH private key")
-    command: str = Field(description="Full SSH command to connect")
+    auth: SSHAuthField = Field(description="SSH authentication method")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_legacy_fields(cls, data: Any) -> Any:
+        """Strip legacy 'command' and 'key_path' fields from deserialization input.
+
+        These fields were present in the old SSHInfo format. During deserialization
+        (e.g. from events.jsonl), they appear as extra fields. Strip them so
+        FrozenModel's extra='forbid' doesn't reject them.
+        """
+        if isinstance(data, dict):
+            data.pop("command", None)
+            data.pop("key_path", None)
+        return data
+
+    @property
+    def command(self) -> str:
+        """Human-readable SSH command string (no secrets)."""
+        return self.auth.get_display_command(self.user, self.host, self.port)
+
+    @property
+    def key_path(self) -> Path | None:
+        """Path to SSH private key, if using key-based auth."""
+        return self.auth.key_path
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Override to include command and key_path for backward compatibility."""
+        data = super().model_dump(**kwargs)
+        data["command"] = self.command
+        data["key_path"] = str(self.key_path) if self.key_path is not None else None
+        return data
 
 
 class DiscoveredHost(FrozenModel):

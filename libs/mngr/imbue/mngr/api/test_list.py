@@ -32,6 +32,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import create_test_agent_via_cli
@@ -574,8 +575,7 @@ def test_agent_details_to_cel_context_with_host_ssh() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/keys/id_rsa"),
-        command="ssh -i /keys/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/keys/id_rsa")),
     )
     host_details = HostDetails(
         id=HostId.generate(),

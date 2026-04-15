@@ -12,6 +12,8 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.local_process import RunningProcess
@@ -193,11 +195,19 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
             continue
 
         try:
+            # Support both new format (auth object) and legacy format (key_path string)
+            if "auth" in ssh:
+                auth = SSHKeyAuth.model_validate(ssh["auth"])
+            elif "key_path" in ssh:
+                auth = SSHKeyAuth(key_path=Path(ssh["key_path"]))
+            else:
+                logger.warning("SSH info for agent {} has no auth or key_path", agent_id_str)
+                continue
             ssh_info = RemoteSSHInfo(
                 user=ssh["user"],
                 host=ssh["host"],
                 port=ssh["port"],
-                key_path=Path(ssh["key_path"]),
+                auth=auth,
             )
             ssh_info_by_id[agent_id_str] = ssh_info
         except (KeyError, ValueError) as e:
@@ -551,7 +561,7 @@ class MngrStreamManager(MutableModel):
             user=event.ssh.user,
             host=event.ssh.host,
             port=event.ssh.port,
-            key_path=event.ssh.key_path,
+            auth=event.ssh.auth,
         )
         host_id_str = str(event.host_id)
         with self._lock:

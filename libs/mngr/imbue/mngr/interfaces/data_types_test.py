@@ -14,7 +14,8 @@ from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import RelativePath
-from imbue.mngr.interfaces.data_types import SSHInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
+from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -68,8 +69,7 @@ def test_ssh_info_basic_creation() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/home/user/.ssh/id_rsa"),
-        command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/home/user/.ssh/id_rsa")),
     )
     assert ssh_info.user == "root"
     assert ssh_info.host == "example.com"
@@ -84,8 +84,7 @@ def test_ssh_info_custom_port() -> None:
         user="deploy",
         host="192.168.1.100",
         port=2222,
-        key_path=Path("/keys/deploy.pem"),
-        command="ssh -i /keys/deploy.pem -p 2222 deploy@192.168.1.100",
+        auth=SSHKeyAuth(key_path=Path("/keys/deploy.pem")),
     )
     assert ssh_info.port == 2222
 
@@ -96,8 +95,7 @@ def test_ssh_info_serialization() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/home/user/.ssh/id_rsa"),
-        command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/home/user/.ssh/id_rsa")),
     )
     data = ssh_info.model_dump(mode="json")
     assert data["user"] == "root"
@@ -139,8 +137,7 @@ def test_host_details_with_extended_fields() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/home/user/.ssh/id_rsa"),
-        command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/home/user/.ssh/id_rsa")),
     )
     resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
 
@@ -178,8 +175,7 @@ def test_host_details_serialization_with_extended_fields() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/keys/id_rsa"),
-        command="ssh -i /keys/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/keys/id_rsa")),
     )
 
     host_details = HostDetails(

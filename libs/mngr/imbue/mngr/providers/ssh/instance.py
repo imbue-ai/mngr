@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -111,8 +112,16 @@ class SSHProviderInstance(BaseProviderInstance):
         pyinfra_host = self._create_pyinfra_host(host_config)
         connector = PyinfraConnector(pyinfra_host)
 
+        ssh_auth: SSHKeyAuth | None = None
+        if host_config.key_file is not None:
+            ssh_auth = SSHKeyAuth(
+                key_path=host_config.key_file,
+                known_hosts_file=host_config.known_hosts_file,
+            )
+
         return Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

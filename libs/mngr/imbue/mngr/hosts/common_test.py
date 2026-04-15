@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import cast
 
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
-from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -312,16 +312,14 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: N
 
 
 # =========================================================================
-# build_ssh_transport_command tests
+# SSHKeyAuth.build_transport_command tests
 # =========================================================================
 
 
-def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> None:
-    result = build_ssh_transport_command(
-        key_path=Path("/tmp/test_key"),
-        port=2222,
-        known_hosts_file=Path("/tmp/known_hosts"),
-    )
+def test_build_transport_command_with_known_hosts_uses_strict_checking() -> None:
+    auth = SSHKeyAuth(key_path=Path("/tmp/test_key"))
+    transport = auth.build_transport_command(port=2222, known_hosts_file=Path("/tmp/known_hosts"))
+    result = transport.command
     assert "ssh" in result
     assert "-i /tmp/test_key" in result
     assert "-p 2222" in result
@@ -329,31 +327,25 @@ def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> 
     assert "-o StrictHostKeyChecking=yes" in result
 
 
-def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() -> None:
-    result = build_ssh_transport_command(
-        key_path=Path("/tmp/test_key"),
-        port=22,
-        known_hosts_file=None,
-    )
+def test_build_transport_command_without_known_hosts_uses_strict_checking() -> None:
+    auth = SSHKeyAuth(key_path=Path("/tmp/test_key"))
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    result = transport.command
     assert "-o StrictHostKeyChecking=yes" in result
     assert "UserKnownHostsFile" not in result
 
 
-def test_build_ssh_transport_command_quotes_key_path_with_spaces() -> None:
-    result = build_ssh_transport_command(
-        key_path=Path("/path with spaces/key"),
-        port=22,
-        known_hosts_file=None,
-    )
+def test_build_transport_command_quotes_key_path_with_spaces() -> None:
+    auth = SSHKeyAuth(key_path=Path("/path with spaces/key"))
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    result = transport.command
     assert "'/path with spaces/key'" in result
 
 
-def test_build_ssh_transport_command_quotes_known_hosts_path_with_spaces() -> None:
-    result = build_ssh_transport_command(
-        key_path=Path("/tmp/key"),
-        port=22,
-        known_hosts_file=Path("/path with spaces/known_hosts"),
-    )
+def test_build_transport_command_quotes_known_hosts_path_with_spaces() -> None:
+    auth = SSHKeyAuth(key_path=Path("/tmp/key"))
+    transport = auth.build_transport_command(port=22, known_hosts_file=Path("/path with spaces/known_hosts"))
+    result = transport.command
     assert "'/path with spaces/known_hosts'" in result
     # Verify the full command parses correctly when split
     parsed = shlex.split(result)

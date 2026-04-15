@@ -16,6 +16,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -371,10 +372,10 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> SSHConnectionInfo | None:
         """Get SSH connection info for this host if it's remote.
 
-        Returns (user, hostname, port, private_key_path) if remote, None if local.
+        Returns SSHConnectionInfo if remote, None if local.
         """
         ...
 

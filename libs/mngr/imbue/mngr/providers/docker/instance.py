@@ -32,6 +32,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -476,6 +477,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
         connector = PyinfraConnector(pyinfra_host)
+        ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
 
         host_record = HostRecord(
             ssh_host=ssh_host,
@@ -489,6 +491,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host = Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -800,9 +803,11 @@ kill -TERM 1
             private_key_path,
         )
         connector = PyinfraConnector(pyinfra_host)
+        ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
 
         return Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,

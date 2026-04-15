@@ -47,6 +47,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -1116,6 +1117,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 # Create pyinfra host and connector
                 pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
                 connector = PyinfraConnector(pyinfra_host)
+                ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
 
                 # for latency reasons, we set this afterwards:
                 true_on_updated_host_data = self._on_certified_host_data_updated
@@ -1123,6 +1125,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 # Create the Host object with callback for future certified data updates
                 host = Host(
                     id=host_id,
+                    ssh_auth=ssh_auth,
                     connector=connector,
                     provider_instance=self,
                     mngr_ctx=self.mngr_ctx,
@@ -1603,9 +1606,11 @@ log "=== Shutdown script completed ==="
                     private_key_path,
                 )
                 connector = PyinfraConnector(pyinfra_host)
+                ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
 
             return Host(
                 id=host_id,
+                ssh_auth=ssh_auth,
                 connector=connector,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
@@ -2546,15 +2551,13 @@ log "=== Shutdown script completed ==="
         """Construct HostDetails from cached host record and SSH-collected data."""
         # SSH info from host connector (local data, no SSH needed)
         ssh_info: SSHInfo | None = None
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
 
         # Boot time and uptime from SSH-collected data

@@ -9,6 +9,7 @@ from pydantic import PrivateAttr
 from pydantic import ValidationError
 
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.minds.desktop_client.ssh_tunnel import ReverseTunnelInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
@@ -211,12 +212,12 @@ def test_remote_ssh_info_constructs_with_valid_fields() -> None:
         user="root",
         host="example.com",
         port=2222,
-        key_path=Path("/tmp/test_key"),
+        auth=SSHKeyAuth(key_path=Path("/tmp/test_key")),
     )
     assert info.user == "root"
     assert info.host == "example.com"
     assert info.port == 2222
-    assert info.key_path == Path("/tmp/test_key")
+    assert info.auth == SSHKeyAuth(key_path=Path("/tmp/test_key"))
 
 
 def test_remote_ssh_info_is_frozen() -> None:
@@ -224,7 +225,7 @@ def test_remote_ssh_info_is_frozen() -> None:
         user="root",
         host="example.com",
         port=2222,
-        key_path=Path("/tmp/test_key"),
+        auth=SSHKeyAuth(key_path=Path("/tmp/test_key")),
     )
     with pytest.raises(ValidationError):
         info.user = "other"
@@ -493,7 +494,7 @@ def test_reverse_tunnel_info_stores_metadata() -> None:
         user="root",
         host="192.168.1.1",
         port=22,
-        key_path=Path("/tmp/test_key"),
+        auth=SSHKeyAuth(key_path=Path("/tmp/test_key")),
     )
     info = ReverseTunnelInfo(
         ssh_info=ssh_info,
@@ -577,7 +578,7 @@ def _sample_ssh_info(tmp_path: Path) -> RemoteSSHInfo:
         user="root",
         host="192.0.2.1",
         port=22,
-        key_path=tmp_path / "key",
+        auth=SSHKeyAuth(key_path=tmp_path / "key"),
     )
 
 

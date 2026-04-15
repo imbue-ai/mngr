@@ -55,6 +55,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
@@ -1205,8 +1206,7 @@ def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
         user="ubuntu",
         host="10.0.0.1",
         port=22,
-        key_path=Path("/tmp/test-key"),
-        command="ssh -i /tmp/test-key -p 22 ubuntu@10.0.0.1",
+        auth=SSHKeyAuth(key_path=Path("/tmp/test-key")),
     )
     host_details = HostDetails(
         id=HostId.generate(),

@@ -23,6 +23,8 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.testing import init_git_repo
@@ -433,14 +435,14 @@ def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
 
 
 def test_build_ssh_git_url_produces_correct_url() -> None:
-    ssh_info = ("root", "example.com", 2222, Path("/tmp/key"))
-    result = _build_ssh_git_url(ssh_info, Path("/home/user/project"))
+    conn = SSHConnectionInfo(user="root", hostname="example.com", port=2222, auth=SSHKeyAuth(key_path=Path("/tmp/key")))
+    result = _build_ssh_git_url(conn, Path("/home/user/project"))
     assert result == "ssh://root@example.com:2222/home/user/project/.git"
 
 
 def test_build_ssh_git_url_with_default_port() -> None:
-    ssh_info = ("user", "myhost.local", 22, Path("/key"))
-    result = _build_ssh_git_url(ssh_info, Path("/work"))
+    conn = SSHConnectionInfo(user="user", hostname="myhost.local", port=22, auth=SSHKeyAuth(key_path=Path("/key")))
+    result = _build_ssh_git_url(conn, Path("/work"))
     assert result == "ssh://user@myhost.local:22/work/.git"
 
 
@@ -468,11 +470,11 @@ def test_build_rsync_command_adds_delete_flag() -> None:
 
 
 def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
-    ssh_info = ("root", "example.com", 22, Path("/tmp/key"))
+    conn = SSHConnectionInfo(user="root", hostname="example.com", port=22, auth=SSHKeyAuth(key_path=Path("/tmp/key")))
     cmd = _build_remote_rsync_command(
         source_path=Path("/local/src"),
         destination_path=Path("/remote/dst"),
-        ssh_info=ssh_info,
+        conn=conn,
         known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=False,
@@ -484,11 +486,11 @@ def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
 
 
 def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
-    ssh_info = ("user", "host.com", 2222, Path("/key"))
+    conn = SSHConnectionInfo(user="user", hostname="host.com", port=2222, auth=SSHKeyAuth(key_path=Path("/key")))
     cmd = _build_remote_rsync_command(
         source_path=Path("/remote/src"),
         destination_path=Path("/local/dst"),
-        ssh_info=ssh_info,
+        conn=conn,
         known_hosts_file=None,
         mode=SyncMode.PULL,
         is_dry_run=False,
@@ -499,11 +501,11 @@ def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
 
 
 def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
-    ssh_info = ("root", "host", 22, Path("/key"))
+    conn = SSHConnectionInfo(user="root", hostname="host", port=22, auth=SSHKeyAuth(key_path=Path("/key")))
     cmd = _build_remote_rsync_command(
         source_path=Path("/src"),
         destination_path=Path("/dst"),
-        ssh_info=ssh_info,
+        conn=conn,
         known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=True,

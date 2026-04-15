@@ -81,15 +81,13 @@ def _build_host_details_from_host(
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, OnlineHostInterface):
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()

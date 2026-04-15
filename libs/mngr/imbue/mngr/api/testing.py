@@ -15,6 +15,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.sync import LocalGitContext
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import AgentName
 
 
@@ -30,9 +31,9 @@ class FakeHost(MutableModel):
 
     is_local: bool = Field(default=True, description="Whether this is a local host")
     host_dir: Path = Field(default_factory=lambda: Path("/fake/host_dir"), description="Host state directory")
-    ssh_info: tuple[str, str, int, Path] | None = Field(
+    ssh_info: SSHConnectionInfo | None = Field(
         default=None,
-        description="SSH connection info (user, hostname, port, key_path) for remote hosts",
+        description="SSH connection info for remote hosts",
     )
     ssh_known_hosts_file: str | None = Field(
         default=None,
@@ -124,7 +125,7 @@ class FakeHost(MutableModel):
         target_path.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_path, target_path, dirs_exist_ok=True)
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> SSHConnectionInfo | None:
         """Return configured SSH connection info, or None for local hosts."""
         if self.is_local:
             return None

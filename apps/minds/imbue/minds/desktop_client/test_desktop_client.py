@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
@@ -784,7 +785,7 @@ _TEST_SSH_INFO: RemoteSSHInfo = RemoteSSHInfo(
     user="root",
     host="remote.example.com",
     port=22,
-    key_path=Path("/tmp/fake_key"),
+    auth=SSHKeyAuth(key_path=Path("/tmp/fake_key")),
 )
 
 

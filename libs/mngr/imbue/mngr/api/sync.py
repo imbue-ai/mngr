@@ -20,8 +20,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
-from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -36,8 +37,6 @@ from imbue.mngr.utils.git_utils import is_ancestor
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
-# Type alias for SSH connection info: (user, hostname, port, private_key_path)
-SshConnectionInfo = tuple[str, str, int, Path]
 
 # === Error Classes ===
 
@@ -376,34 +375,25 @@ def _build_rsync_command(
 
 
 @pure
-def _build_ssh_transport_args(ssh_info: SshConnectionInfo, known_hosts_file: Path | None) -> str:
-    """Build the SSH transport string for rsync -e or GIT_SSH_COMMAND."""
-    _, _, port, key_path = ssh_info
-    return build_ssh_transport_command(key_path, port, known_hosts_file)
-
-
-@pure
-def _build_ssh_git_url(ssh_info: SshConnectionInfo, remote_path: Path) -> str:
+def _build_ssh_git_url(conn: SSHConnectionInfo, remote_path: Path) -> str:
     """Build an SSH git URL from connection info and a remote path."""
-    user, hostname, port, key_path = ssh_info
-    return f"ssh://{user}@{hostname}:{port}{remote_path}/.git"
+    return f"ssh://{conn.user}@{conn.hostname}:{conn.port}{remote_path}/.git"
 
 
 @pure
 def _build_remote_rsync_command(
     source_path: Path,
     destination_path: Path,
-    ssh_info: SshConnectionInfo,
+    conn: SSHConnectionInfo,
     known_hosts_file: Path | None,
     mode: SyncMode,
     is_dry_run: bool,
     is_delete: bool,
 ) -> list[str]:
     """Build an rsync command that transfers files over SSH to/from a remote host."""
-    user, hostname, port, key_path = ssh_info
-    ssh_transport = _build_ssh_transport_args(ssh_info, known_hosts_file)
+    transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
 
-    rsync_cmd = ["rsync", "-avz", "--stats", "--exclude=.git", "-e", ssh_transport]
+    rsync_cmd = ["rsync", "-avz", "--stats", "--exclude=.git", "-e", transport.command]
 
     if is_dry_run:
         rsync_cmd.append("--dry-run")
@@ -421,13 +411,13 @@ def _build_remote_rsync_command(
             if not dest_str.endswith("/"):
                 dest_str += "/"
             rsync_cmd.append(source_str)
-            rsync_cmd.append(f"{user}@{hostname}:{dest_str}")
+            rsync_cmd.append(f"{conn.user}@{conn.hostname}:{dest_str}")
         case SyncMode.PULL:
             # Remote source -> local destination
             source_str = str(source_path)
             if not source_str.endswith("/"):
                 source_str += "/"
-            rsync_cmd.append(f"{user}@{hostname}:{source_str}")
+            rsync_cmd.append(f"{conn.user}@{conn.hostname}:{source_str}")
             rsync_cmd.append(str(destination_path))
         case _ as unreachable:
             assert_never(unreachable)
@@ -507,14 +497,14 @@ def sync_files(
             rsync_stdout = result.stdout
         else:
             # Remote host: run rsync locally with SSH transport
-            ssh_info = host.get_ssh_connection_info()
-            assert ssh_info is not None, "Remote host must provide SSH connection info"
+            conn = host.get_ssh_connection_info()
+            assert conn is not None, "Remote host must provide SSH connection info"
 
             known_hosts_file = get_ssh_known_hosts_file(host)
             rsync_cmd = _build_remote_rsync_command(
                 source_path=source_path,
                 destination_path=destination_path,
-                ssh_info=ssh_info,
+                conn=conn,
                 known_hosts_file=known_hosts_file,
                 mode=mode,
                 is_dry_run=is_dry_run,
@@ -742,7 +732,7 @@ def _remote_git_push_mirror(
     local_path: Path,
     destination_path: Path,
     host: OnlineHostInterface,
-    ssh_info: SshConnectionInfo,
+    conn: SSHConnectionInfo,
     source_branch: str,
     is_dry_run: bool,
     cg: ConcurrencyGroup,
@@ -755,10 +745,10 @@ def _remote_git_push_mirror(
 
     Returns the number of commits transferred.
     """
-    git_url = _build_ssh_git_url(ssh_info, destination_path)
+    git_url = _build_ssh_git_url(conn, destination_path)
     known_hosts_file = get_ssh_known_hosts_file(host)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
+    transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
+    env = {**os.environ, "GIT_SSH_COMMAND": transport.command, "GIT_LFS_SKIP_PUSH": "1", **expose_secrets_for_subprocess(transport.env)}
 
     logger.debug("Performing mirror push to {}", git_url)
 
@@ -825,7 +815,7 @@ def _remote_git_push_branch(
     local_path: Path,
     destination_path: Path,
     host: OnlineHostInterface,
-    ssh_info: SshConnectionInfo,
+    conn: SSHConnectionInfo,
     source_branch: str,
     target_branch: str,
     is_dry_run: bool,
@@ -835,10 +825,10 @@ def _remote_git_push_branch(
 
     Returns the number of commits transferred.
     """
-    git_url = _build_ssh_git_url(ssh_info, destination_path)
+    git_url = _build_ssh_git_url(conn, destination_path)
     known_hosts_file = get_ssh_known_hosts_file(host)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
+    transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
+    env = {**os.environ, "GIT_SSH_COMMAND": transport.command, "GIT_LFS_SKIP_PUSH": "1", **expose_secrets_for_subprocess(transport.env)}
 
     logger.debug("Pushing branch {} to {} via SSH", source_branch, git_url)
 
@@ -933,14 +923,14 @@ def _sync_git_push(
                     cg,
                 )
         else:
-            ssh_info = host.get_ssh_connection_info()
-            assert ssh_info is not None, "Remote host must provide SSH connection info"
+            conn = host.get_ssh_connection_info()
+            assert conn is not None, "Remote host must provide SSH connection info"
             if is_mirror:
                 commits_transferred = _remote_git_push_mirror(
                     local_path,
                     destination_path,
                     host,
-                    ssh_info,
+                    conn,
                     source_branch,
                     is_dry_run,
                     cg,
@@ -950,7 +940,7 @@ def _sync_git_push(
                     local_path,
                     destination_path,
                     host,
-                    ssh_info,
+                    conn,
                     source_branch,
                     target_branch,
                     is_dry_run,
@@ -979,7 +969,7 @@ def _fetch_and_merge(
     original_branch: str,
     is_dry_run: bool,
     cg: ConcurrencyGroup,
-    ssh_info: SshConnectionInfo | None,
+    conn: SSHConnectionInfo | None,
     known_hosts_file: Path | None,
 ) -> int:
     """Fetch from source repo and merge into target branch.
@@ -988,15 +978,15 @@ def _fetch_and_merge(
     restores original_branch on both success and failure. Returns the number
     of commits transferred.
 
-    When ssh_info is provided, fetches from the remote host via SSH URL instead
+    When conn is provided, fetches from the remote host via SSH URL instead
     of a local path.
     """
     # Fetch from the agent's repository (sets FETCH_HEAD)
-    if ssh_info is not None:
+    if conn is not None:
         # Remote host: fetch via SSH URL
-        git_url = _build_ssh_git_url(ssh_info, source_path)
-        git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-        fetch_env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd}
+        git_url = _build_ssh_git_url(conn, source_path)
+        transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
+        fetch_env = {**os.environ, "GIT_SSH_COMMAND": transport.command, **expose_secrets_for_subprocess(transport.env)}
         logger.debug("Fetching from remote agent repository via SSH: {}", git_url)
         try:
             cg.run_process_to_completion(
@@ -1100,8 +1090,8 @@ def _sync_git_pull(
     git_ctx = LocalGitContext(cg=cg)
     original_branch = get_current_branch(local_path, cg)
 
-    # Get SSH info for remote hosts so _fetch_and_merge can use SSH URLs
-    ssh_info = host.get_ssh_connection_info() if not host.is_local else None
+    # Get SSH connection info for remote hosts so _fetch_and_merge can use SSH URLs
+    conn = host.get_ssh_connection_info() if not host.is_local else None
     known_hosts_file = get_ssh_known_hosts_file(host) if not host.is_local else None
 
     with _stash_guard(git_ctx, local_path, uncommitted_changes):
@@ -1113,7 +1103,7 @@ def _sync_git_pull(
             original_branch=original_branch,
             is_dry_run=is_dry_run,
             cg=cg,
-            ssh_info=ssh_info,
+            conn=conn,
             known_hosts_file=known_hosts_file,
         )
 

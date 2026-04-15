@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.primitives import ServerName
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -316,7 +317,8 @@ def test_parse_agents_from_json_extracts_ssh_info() -> None:
     assert ssh_info.user == "root"
     assert ssh_info.host == "remote.example.com"
     assert ssh_info.port == 12345
-    assert ssh_info.key_path == Path("/home/user/.mngr/providers/modal/modal_ssh_key")
+    assert isinstance(ssh_info.auth, SSHKeyAuth)
+    assert ssh_info.auth.key_path == Path("/home/user/.mngr/providers/modal/modal_ssh_key")
 
 
 def test_parse_agents_from_json_returns_none_ssh_for_local_agents() -> None:
@@ -721,8 +723,7 @@ def test_stream_manager_host_ssh_info_populates_resolver() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 2222,
-        "key_path": "/tmp/test_key",
-        "command": "ssh -i /tmp/test_key -p 2222 root@remote.example.com",
+        "auth": {"auth_type": "key", "key_path": "/tmp/test_key"},
     }
 
     with manager._cg:
@@ -741,7 +742,8 @@ def test_stream_manager_host_ssh_info_populates_resolver() -> None:
     assert ssh_info is not None
     assert ssh_info.host == "remote.example.com"
     assert ssh_info.port == 2222
-    assert ssh_info.key_path == Path("/tmp/test_key")
+    assert isinstance(ssh_info.auth, SSHKeyAuth)
+    assert ssh_info.auth.key_path == Path("/tmp/test_key")
 
 
 def test_stream_manager_no_ssh_for_local_hosts() -> None:
@@ -769,8 +771,7 @@ def test_stream_manager_mixed_local_and_remote() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 2222,
-        "key_path": "/tmp/key",
-        "command": "ssh -i /tmp/key -p 2222 root@remote.example.com",
+        "auth": {"auth_type": "key", "key_path": "/tmp/key"},
     }
 
     with manager._cg:
@@ -797,8 +798,7 @@ def test_stream_manager_ssh_info_before_full_snapshot() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 2222,
-        "key_path": "/tmp/key",
-        "command": "ssh -i /tmp/key -p 2222 root@remote.example.com",
+        "auth": {"auth_type": "key", "key_path": "/tmp/key"},
     }
 
     with manager._cg:
@@ -1047,8 +1047,7 @@ def test_callback_re_fired_with_ssh_info_when_host_ssh_info_arrives() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 22,
-        "key_path": "/tmp/key",
-        "command": "ssh -i /tmp/key root@remote.example.com",
+        "auth": {"auth_type": "key", "key_path": "/tmp/key"},
     }
     ssh_line = _make_host_ssh_info_line(_HOST_CALLBACK_TEST, ssh_data)
     manager._handle_discovery_line(ssh_line)

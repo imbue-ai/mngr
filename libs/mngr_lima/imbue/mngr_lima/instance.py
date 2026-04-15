@@ -22,6 +22,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -243,9 +244,11 @@ class LimaProviderInstance(BaseProviderInstance):
             ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
+        ssh_auth = SSHKeyAuth(key_path=ssh_config.identity_file, known_hosts_file=self._known_hosts_path)
 
         return Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
