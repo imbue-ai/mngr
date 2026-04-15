@@ -818,14 +818,10 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
 
 # Conftest that uses register_conftest_hooks for the auto-registration path.
 # Notably, there is NO manual config.addinivalue_line("markers", ...) call --
-# the mark is registered automatically by conftest_hooks._pytest_configure.
+# the mark is registered automatically by conftest_hooks._pytest_sessionstart.
 _PYTESTER_AUTO_MARKER_CONFTEST = """\
 import os
-from imbue.resource_guards.resource_guards import (
-    register_resource_guard,
-    start_resource_guards,
-    stop_resource_guards,
-)
+from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 
 # Clear inherited guard state so we create fresh wrappers for our resources.
@@ -833,22 +829,16 @@ os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
 
 register_resource_guard("cat")
 
-# register_conftest_hooks injects pytest_configure, which auto-registers markers
-# for all resources registered via register_resource_guard().
+# register_conftest_hooks injects pytest_sessionstart, which auto-registers
+# markers for all resources and calls start_resource_guards().
 register_conftest_hooks(globals())
-
-def pytest_sessionstart(session):
-    start_resource_guards(session)
-
-def pytest_sessionfinish(session, exitstatus):
-    stop_resource_guards()
 """
 
 
 def test_register_resource_guard_auto_registers_pytest_mark(
     pytester: pytest.Pytester,
 ) -> None:
-    """register_resource_guard() auto-registers the pytest mark via conftest_hooks.
+    """register_resource_guard() auto-registers the pytest mark at session start.
 
     With --strict-markers, an unregistered mark causes a collection error.
     This test verifies that calling register_resource_guard("cat") is sufficient
