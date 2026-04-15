@@ -139,6 +139,45 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+def test_no_ruff_pre_commit_errors() -> None:
+    """Ensure repo passes the same ruff lint rules enforced by the pre-commit hook.
+
+    Checks UP006/UP007 (modern type hints), I (import sorting), F401 (unused imports).
+    """
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "ruff",
+            "check",
+            "--select",
+            "UP006,UP007,I,F401",
+            "--force-exclude",
+            "--config",
+            "pyproject.toml",
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "Ruff pre-commit lint rules found errors (run the pre-commit hook to auto-fix):\n\n" + result.stdout
+        )
+
+
+def test_no_ruff_format_errors() -> None:
+    """Ensure all Python files are formatted according to ruff format."""
+    result = subprocess.run(
+        ["uv", "run", "ruff", "format", "--check", "--force-exclude", "--config", "pyproject.toml"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError("Ruff format errors found (run `uv run ruff format .` to fix):\n\n" + result.stdout)
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling."""
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
