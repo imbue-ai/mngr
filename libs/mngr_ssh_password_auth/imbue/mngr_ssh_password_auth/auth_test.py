@@ -64,16 +64,27 @@ def test_password_masked_in_model_dump() -> None:
     assert "hunter2" not in str(data)
 
 
-def test_ssh_info_with_password_auth_masks_password() -> None:
-    from imbue.mngr.primitives import SSHInfo
-
-    # SSHInfo.auth is typed as SSHKeyAuth (SSHAuthField), but at runtime
-    # we can construct with any SSHAuthMethod subclass for testing masking.
-    # For this test, we verify the password auth serialization directly.
+def test_password_auth_model_dump_json_masks_password() -> None:
     auth = SSHPasswordAuth(password=SecretStr("hunter2"))
     data = auth.model_dump(mode="json")
     assert "hunter2" not in str(data)
     assert data["password"] == "**********"
+
+
+def test_password_never_appears_in_events_file_serialization() -> None:
+    """Simulate the events file serialization path and verify the password is masked.
+
+    This is critical: the events.jsonl file persists on disk indefinitely and is
+    readable by multiple processes. Passwords must NEVER appear in it.
+    """
+    import json
+
+    auth = SSHPasswordAuth(password=SecretStr("super-secret-password-123"))
+    # Simulate the exact serialization path used by append_discovery_event():
+    # json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    serialized = json.dumps(auth.model_dump(mode="json"), separators=(",", ":"))
+    assert "super-secret-password-123" not in serialized
+    assert "**********" in serialized
 
 
 # =========================================================================
