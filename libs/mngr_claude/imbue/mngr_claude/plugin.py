@@ -109,7 +109,7 @@ _INSTALLED_PLUGINS_SENTINEL_PREFIX: Final[str] = "/__mngr_plugins_source__"
 At build time, ``get_files_for_deploy`` rewrites absolute local paths
 (e.g. /home/user/.claude/plugins/cache/...) to use this sentinel prefix
 in both installed_plugins.json (installPath) and known_marketplaces.json
-(installLocation).  At runtime, ``_resolve_installed_plugins_sentinel``
+(installLocation).  At runtime, ``_resolve_plugins_dir_sentinel``
 rewrites the sentinel to the actual per-agent config dir.  This avoids
 depending on the build machine's home directory path.
 """
@@ -960,7 +960,7 @@ def _rsync_claude_home_directories(
         host.copy_directory(local_host, local_claude_dir, config_dir, extra_args=" ".join(include_args))
 
 
-def _resolve_installed_plugins_sentinel(host: OnlineHostInterface) -> None:
+def _resolve_plugins_dir_sentinel(host: OnlineHostInterface) -> None:
     """Resolve sentinel-prefixed paths in the claude home plugins directory.
 
     Deploy images have paths rewritten to a sentinel prefix at build time
@@ -1815,7 +1815,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # (because the container's home dir isn't known at build). Resolve
         # them to the actual ~/.claude/ path now, so all downstream code
         # can assume paths use ~/.claude/ as the prefix.
-        _resolve_installed_plugins_sentinel(host)
+        _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
