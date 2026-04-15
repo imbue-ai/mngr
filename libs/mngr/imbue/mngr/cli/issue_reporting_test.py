@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
+from imbue.mngr.cli.issue_reporting import _offer_diagnose
 from imbue.mngr.cli.issue_reporting import build_issue_body
 from imbue.mngr.cli.issue_reporting import build_issue_title
 from imbue.mngr.cli.issue_reporting import build_new_issue_url
@@ -18,6 +20,7 @@ from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
 from imbue.mngr.cli.issue_reporting import search_for_existing_issue
 from imbue.mngr.cli.issue_reporting import write_diagnose_context_file
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def _fake_finished_process(returncode: int, stdout: str, command: tuple[str, ...] = ("fake",)) -> FinishedProcess:
@@ -407,3 +410,25 @@ def test_write_diagnose_context_file_different_inputs() -> None:
     # Clean up
     path1.unlink(missing_ok=True)
     path2.unlink(missing_ok=True)
+
+
+# =============================================================================
+# Tests for _offer_diagnose
+# =============================================================================
+
+
+def test_offer_diagnose_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_offer_diagnose returns immediately when IS_AUTONOMOUS=1."""
+    monkeypatch.setenv("IS_AUTONOMOUS", "1")
+    with capture_loguru(level="INFO") as log_output:
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    assert log_output.getvalue() == ""
+
+
+def test_offer_diagnose_shows_install_hint_when_no_plugin() -> None:
+    """_offer_diagnose shows install instructions when ctx is None (no plugin manager)."""
+    with capture_loguru(level="INFO") as log_output:
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    output = log_output.getvalue()
+    assert "mngr diagnose --context-file" in output
+    assert "mngr plugin add imbue-mngr-diagnose" in output
