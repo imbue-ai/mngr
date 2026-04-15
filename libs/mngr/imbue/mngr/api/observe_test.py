@@ -3,6 +3,11 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.event_envelope import EventType
+from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveryEventType
+from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.api.observe import AGENT_STATES_EVENT_SOURCE
 from imbue.mngr.api.observe import AgentObserver
@@ -30,6 +35,7 @@ from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
@@ -676,3 +682,56 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
     assert data["new_host_state"] == "PAUSED"
     assert data["old_state"] == "RUNNING"
     assert data["new_state"] == "RUNNING"
+
+
+def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """Verify that _handle_host_destroyed removes the host from known_hosts."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    host = make_test_discovered_host()
+
+    with observer._concurrency_group:
+        # Populate known_hosts via a full snapshot
+        snapshot = make_full_discovery_snapshot_event([], [host])
+        observer._handle_full_snapshot(snapshot)
+        assert str(host.host_id) in observer._known_hosts
+
+        # Destroy the host
+        timestamp, event_id = _make_envelope_fields()
+        destroyed_event = HostDestroyedEvent(
+            timestamp=timestamp,
+            type=EventType(DiscoveryEventType.HOST_DESTROYED),
+            event_id=event_id,
+            source=DISCOVERY_EVENT_SOURCE,
+            host_id=host.host_id,
+            agent_ids=(),
+        )
+        observer._handle_host_destroyed(destroyed_event)
+        assert str(host.host_id) not in observer._known_hosts
+
+
+def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """Verify that _on_discovery_stream_output dispatches HostDestroyedEvent correctly."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    host = make_test_discovered_host()
+
+    with observer._concurrency_group:
+        # Populate known_hosts
+        snapshot = make_full_discovery_snapshot_event([], [host])
+        observer._handle_full_snapshot(snapshot)
+        assert str(host.host_id) in observer._known_hosts
+
+        # Feed a serialized HostDestroyedEvent through _on_discovery_stream_output
+        timestamp, event_id = _make_envelope_fields()
+        destroyed_event = HostDestroyedEvent(
+            timestamp=timestamp,
+            type=EventType(DiscoveryEventType.HOST_DESTROYED),
+            event_id=event_id,
+            source=DISCOVERY_EVENT_SOURCE,
+            host_id=host.host_id,
+            agent_ids=(),
+        )
+        line = json.dumps(destroyed_event.model_dump(mode="json"), separators=(",", ":"))
+        observer._on_discovery_stream_output(line, is_stdout=True)
+        assert str(host.host_id) not in observer._known_hosts
