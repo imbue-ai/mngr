@@ -129,6 +129,8 @@ LESSON_REMOTE_AGENTS = Lesson(
 
                 Alternatively, you can give the agent GitHub credentials so it can
                 `git push` on its own. See the Modal usage guide for details."""),
+            # This step is informational -- there is no check type that can verify
+            # a local pull happened. Auto-advances via permissive state check.
             check=AgentInStateCheck(
                 agent_name=AgentName("morpheus"),
                 expected_states=(

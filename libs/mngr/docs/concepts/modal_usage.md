@@ -2,7 +2,7 @@
 
 This guide walks through running coding agents on [Modal](https://modal.com) from start to finish. It assumes you are already comfortable creating and managing local agents with mngr.
 
-For the full list of Modal build arguments and features, see the [Modal provider reference](core_plugins/providers/modal.md).
+For the full list of Modal build arguments and features, see the [Modal provider reference](../core_plugins/providers/modal.md).
 
 ## Prerequisites
 
@@ -27,7 +27,7 @@ If your project has a Modal template defined in `.mngr/settings.toml`, you can u
 mngr create my-agent -t modal
 ```
 
-Templates bundle provider settings, build arguments, environment setup, and more into a reusable preset. See [Create Templates](customization.md#create-templates) for how to define your own.
+Templates bundle provider settings, build arguments, environment setup, and more into a reusable preset. See [Create Templates](../customization.md#create-templates) for how to define your own.
 
 ### Timeouts
 
@@ -75,7 +75,7 @@ extra_window = ["github_setup='gh auth setup-git'"]
 Or pass the token at create time:
 
 ```bash
-mngr create my-agent --provider modal --env GH_TOKEN
+mngr create my-agent --provider modal --pass-env GH_TOKEN
 ```
 
 Once the agent can push, your normal git workflow applies: the agent pushes to a branch, you pull it locally or open a PR.
@@ -110,7 +110,7 @@ You can also pull a specific subdirectory:
 mngr pull my-agent:src ./local-src
 ```
 
-See [mngr pull](commands/primary/pull.md) and [mngr push](commands/primary/push.md) for all options.
+See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
 
 ## Stopping and restarting
 
@@ -133,7 +133,7 @@ mngr snapshot create my-agent --name before-refactor
 mngr snapshot list my-agent
 ```
 
-Snapshots persist even after the sandbox is terminated. See [mngr snapshot](commands/secondary/snapshot.md) for details.
+Snapshots persist even after the sandbox is terminated. See [mngr snapshot](../commands/secondary/snapshot.md) for details.
 
 ## Cleanup
 
