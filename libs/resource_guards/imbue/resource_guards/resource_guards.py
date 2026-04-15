@@ -90,12 +90,12 @@ def register_resource_guard(name: str) -> None:
         _guarded_resources.append(name)
 
 
-def get_guarded_resource_names() -> list[str]:
-    """Return the list of guarded resource names (binary + SDK guards).
+def get_guarded_resource_names() -> tuple[str, ...]:
+    """Return the guarded resource names (binary + SDK guards).
 
     Used by conftest_hooks to auto-register pytest marks for guarded resources.
     """
-    return list(_guarded_resources)
+    return tuple(_guarded_resources)
 
 
 def generate_wrapper_script(resource: str, real_path: str) -> str:
