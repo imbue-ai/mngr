@@ -649,7 +649,7 @@ def test_ensure_work_dir_exists_raises_when_no_branch(
     missing_dir = tmp_path / "nonexistent"
     agent, host = _create_testable_agent(local_provider, temp_host_dir, missing_dir)
 
-    with pytest.raises(AgentStartError, match="no branch recorded"):
+    with pytest.raises(AgentStartError, match="no branch is recorded"):
         host._ensure_work_dir_exists(agent)
 
 
@@ -745,6 +745,33 @@ def test_ensure_work_dir_exists_raises_when_no_source_repo_label(
     )
 
     with pytest.raises(AgentStartError, match="no source_repo_path label is set"):
+        host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_raises_when_branch_deleted(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """_ensure_work_dir_exists should raise when the branch no longer exists in the source repo."""
+    missing_dir = tmp_path / "worktrees" / "deleted-branch"
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    options = CreateAgentOptions(
+        name=AgentName("test-deleted-branch"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"source_repo_path": str(temp_git_repo)}),
+    )
+    agent = host.create_agent_state(
+        missing_dir,
+        options,
+        created_branch_name="mngr/nonexistent-branch",
+    )
+
+    with pytest.raises(AgentStartError, match="no longer exists"):
         host._ensure_work_dir_exists(agent)
 
 

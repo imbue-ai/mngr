@@ -1118,13 +1118,14 @@ class Host(BaseHost, OnlineHostInterface):
             return
 
         branch = agent.get_created_branch_name()
+        source_repo_label = agent.get_labels().get("source_repo_path")
+
         if branch is None:
             raise AgentStartError(
                 str(agent.name),
-                f"Work directory {agent.work_dir} does not exist and is not a git worktree (no branch recorded)",
+                f"Work directory {agent.work_dir} does not exist and no branch is recorded for this agent",
             )
 
-        source_repo_label = agent.get_labels().get("source_repo_path")
         if source_repo_label is None:
             raise AgentStartError(
                 str(agent.name),
@@ -1132,6 +1133,16 @@ class Host(BaseHost, OnlineHostInterface):
                 " (agent was created before worktree reinstatement support was added)",
             )
         source_repo = Path(source_repo_label)
+
+        # Verify the branch still exists in the source repo before attempting reinstatement
+        branch_check = self.execute_idempotent_command(
+            f"git -C {shlex.quote(str(source_repo))} rev-parse --verify {shlex.quote('refs/heads/' + branch)}"
+        )
+        if not branch_check.success:
+            raise AgentStartError(
+                str(agent.name),
+                f"Branch {branch} no longer exists in {source_repo}",
+            )
 
         logger.warning(
             "Agent {} work_dir {} is missing, attempting to reinstate worktree on branch {}",
