@@ -130,6 +130,13 @@ test-offload-release args="":
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" || [[ $? -eq 2 ]]
 
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
 test-unit:
   uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
 
