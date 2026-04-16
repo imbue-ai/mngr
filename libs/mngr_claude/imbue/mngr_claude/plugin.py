@@ -881,9 +881,10 @@ def _write_generated_files(
         for relative, content in generated_files.items():
             dest = config_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
-            # Remove any symlink so we write a regular file instead of
-            # following the symlink back into ~/.claude/ (which would
-            # corrupt the user's global config with agent-scoped paths).
+            # Break any existing symlink so we write a regular file instead
+            # of following the symlink back to the source (e.g. ~/.claude/).
+            # _sync_user_resources creates child-level symlinks for plugins/;
+            # writing through them would corrupt the user's original files.
             if dest.is_symlink():
                 dest.unlink()
             host.write_text_file(dest, content)
@@ -1777,6 +1778,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
             if installed_plugins:
                 generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins
+        if config.sync_home_settings:
+            # Rewrite marketplace installLocation for both local and remote hosts.
+            # Claude Code expects installLocation to point inside $CLAUDE_CONFIG_DIR.
+            # Without rewriting, the paths point to ~/.claude/plugins/marketplaces/
+            # which Claude Code treats as "corrupted", silently skipping marketplace
+            # refreshes and leaving the plugin cache stale.
             known_marketplaces = _generate_known_marketplaces_content(source_claude_dir, config_dir)
             if known_marketplaces:
                 generated_files[_KNOWN_MARKETPLACES_RELATIVE_PATH] = known_marketplaces

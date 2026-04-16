@@ -3802,3 +3802,33 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """When a generated file targets a path that is a symlink, the symlink is broken and a regular file is written.
+
+    This prevents corruption of the source file (e.g. ~/.claude/plugins/known_marketplaces.json)
+    when _sync_user_resources creates child-level symlinks and a generated file needs to overwrite one.
+    """
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_file = source_dir / "known_marketplaces.json"
+    source_file.write_text('{"original": true}')
+
+    config_dir = tmp_path / "config"
+    plugins_dir = config_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    symlink = plugins_dir / "known_marketplaces.json"
+    symlink.symlink_to(source_file)
+
+    host = cast(OnlineHostInterface, FakeHost())
+    rewritten_content = '{"rewritten": true}'
+    generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
+
+    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+
+    # The symlink should be replaced with a regular file containing the rewritten content
+    assert not symlink.is_symlink()
+    assert symlink.read_text() == rewritten_content
+    # The original source file must NOT be modified
+    assert json.loads(source_file.read_text()) == {"original": True}
