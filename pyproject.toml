@@ -57,8 +57,6 @@ testpaths = [
   "scripts",
 ]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.mngr",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
@@ -80,13 +78,10 @@ addopts = [
   "--cov=imbue.slack_exporter",
   "--cov=imbue.cloudflare_forwarding",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=80",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
   "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",

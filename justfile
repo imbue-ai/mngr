@@ -90,25 +90,27 @@ test-offload-acceptance args="":
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal-acceptance.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
 
+# Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
+# so they don't leak into offload sandboxes (which run `-p no:xdist`).
+_parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
+
 test-unit:
-  uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest
+  uv run pytest {{_parallel}} --cov-report=html --cov-fail-under=80
 
 # can run without coverage to make things slightly faster when checking locally
 test-quick:
-  uv run pytest --no-cov --cov-fail-under=0
+  uv run pytest {{_parallel}} --no-cov --cov-fail-under=0
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "no release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "acceptance or not acceptance"
+  PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest {{_parallel}} --no-cov -m "acceptance or not acceptance"
 
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
 test-timings:
