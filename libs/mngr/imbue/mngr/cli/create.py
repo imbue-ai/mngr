@@ -466,6 +466,12 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--connect/--no-connect", default=True, help="Connect to the agent after creation [default: connect]")
 @optgroup.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types",
+)
+@optgroup.option(
     "--auto-start/--no-auto-start",
     "start_host",
     default=True,
@@ -684,17 +690,31 @@ def create(ctx: click.Context, **kwargs) -> None:
                 f"but --type says '{opts.type}'. Use one or the other."
             )
 
-        # Detect headless agent types and use the headless flow instead of the
-        # normal interactive create path. The agent type (via StreamingHeadlessAgentMixin)
-        # drives this -- no new CLI flags needed.
+        # Detect headless agent types and enforce the --foreground flag.
+        # --foreground is required for headless types (makes the behavior explicit)
+        # and rejected for non-headless types (it doesn't apply).
         resolved_agent_type = _resolve_early_agent_type(opts)
+        is_headless = False
         if resolved_agent_type is not None:
             agent_class = get_agent_class(resolved_agent_type)
-            if issubclass(agent_class, StreamingHeadlessAgentMixin):
-                _validate_command_accepted(resolved_agent_type, opts.command)
-                _reject_incompatible_headless_flags(ctx, resolved_agent_type)
-                _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
-                return
+            is_headless = issubclass(agent_class, StreamingHeadlessAgentMixin)
+
+        if is_headless and not opts.foreground:
+            raise UserInputError(
+                f"Agent type '{resolved_agent_type}' is a headless agent type. "
+                f"Use --foreground to run it (streams output and auto-destroys when done)."
+            )
+        if opts.foreground and not is_headless:
+            type_desc = f"'{resolved_agent_type}'" if resolved_agent_type else "'claude' (default)"
+            raise UserInputError(
+                f"--foreground is only valid with headless agent types, but {type_desc} is not headless."
+            )
+
+        if is_headless:
+            _validate_command_accepted(resolved_agent_type, opts.command)
+            _reject_incompatible_headless_flags(ctx, resolved_agent_type)
+            _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
+            return
 
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
@@ -1826,7 +1846,7 @@ by pushing all local branches and tags via git. Use --transfer to override the d
         ("Create without connecting", "mngr create my-agent --no-connect"),
         ("Add extra tmux windows", 'mngr create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mngr create my-agent --reuse"),
-        ("Run a shell command (headless)", 'mngr create --type headless_command -c "echo hello world"'),
+        ("Run a shell command (headless)", 'mngr create --type headless_command -c "echo hello world" --foreground'),
     ),
     see_also=(
         ("connect", "Connect to an existing agent"),

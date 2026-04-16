@@ -61,6 +61,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         type=None,
         reuse=False,
         connect=True,
+        foreground=False,
         ensure_clean=True,
         name=None,
         id=None,

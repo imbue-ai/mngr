@@ -860,7 +860,7 @@ def test_create_rejects_command_for_headless_non_command_accepting_type(
     runner = CliRunner()
     result = runner.invoke(
         create,
-        ["--type", "mock_headless_no_cmd", "--command", "echo should-not-run"],
+        ["--type", "mock_headless_no_cmd", "--command", "echo should-not-run", "--foreground"],
         obj=plugin_manager,
     )
 
@@ -875,7 +875,7 @@ def test_create_headless_rejects_incompatible_flags(
     """Headless agent types should reject flags that don't apply to the headless flow."""
     result = cli_runner.invoke(
         create,
-        ["--type", "headless_command", "-c", "echo hello", "--env", "FOO=bar"],
+        ["--type", "headless_command", "-c", "echo hello", "--foreground", "--env", "FOO=bar"],
         obj=plugin_manager,
     )
 
@@ -896,6 +896,7 @@ def test_create_headless_rejects_multiple_incompatible_flags(
             "headless_command",
             "-c",
             "echo hello",
+            "--foreground",
             "--message",
             "hi",
             "--reuse",
@@ -924,6 +925,58 @@ def test_create_headless_rejects_conflicting_positional_and_type_flag(
 
     assert result.exit_code != 0
     assert "Conflicting agent types" in result.output
+
+
+# =============================================================================
+# Tests for --foreground flag
+# =============================================================================
+
+
+def test_create_headless_without_foreground_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Headless agent types require --foreground."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "-c", "echo hello"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
+    assert "headless" in result.output.lower()
+
+
+def test_create_foreground_with_non_headless_type_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--foreground with a non-headless agent type should be rejected."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "claude", "--foreground"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
+    assert "not headless" in result.output
+
+
+def test_create_foreground_without_type_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--foreground without any agent type (default claude) should be rejected."""
+    result = cli_runner.invoke(
+        create,
+        ["--foreground"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
 
 
 # =============================================================================
