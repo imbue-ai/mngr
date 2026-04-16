@@ -65,7 +65,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
     echo "print('hello world')" > /tmp/my_random_folder/script.py
-    mngr create my-task --from /tmp/my_random_folder --type python -- script.py
+    mngr create my-task --from /tmp/my_random_folder python -- script.py
     """)
     source_dir = tmp_path / "my_random_folder"
     source_dir.mkdir()

@@ -12,8 +12,9 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 def test_create_with_custom_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can run *any* literal command instead of a named agent type:
-    mngr create my-task --type python -- my_script.py
+    # any program on PATH can be used directly as an agent type (falls back to
+    # running the program as-is), and arguments to the program go after `--`:
+    mngr create my-task python -- my_script.py
     # remember that the arguments to the "agent" (or command) come after the `--` separator
     """)
     expect(
@@ -39,8 +40,8 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
-    # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-    mngr create my-task --type python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
+    # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
+    mngr create my-task python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
     # Idle timeout requires a remote provider (local provider rejects it).
