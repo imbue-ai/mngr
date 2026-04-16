@@ -210,6 +210,7 @@ def _validate_command_accepted(agent_type_name: str, command: str | None) -> Non
 
 
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
+    ("command", "--command/-c"),
     ("source", "--from/--source"),
     ("branch", "--branch"),
     ("transfer", "--transfer"),
@@ -302,6 +303,8 @@ def _create_headless(
     """
     host = _resolve_online_host(opts, address, mngr_ctx)
 
+    # Forward command from templates/config (explicit CLI --command is blocked by
+    # _reject_incompatible_headless_flags, but template-set values pass through).
     command_override = CommandString(opts.command) if opts.command else None
     agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
@@ -711,7 +714,7 @@ def create(ctx: click.Context, **kwargs) -> None:
             )
 
         if is_headless:
-            _validate_command_accepted(resolved_agent_type, opts.command)
+            assert resolved_agent_type is not None
             _reject_incompatible_headless_flags(ctx, resolved_agent_type)
             _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
             return
@@ -1846,7 +1849,7 @@ by pushing all local branches and tags via git. Use --transfer to override the d
         ("Create without connecting", "mngr create my-agent --no-connect"),
         ("Add extra tmux windows", 'mngr create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mngr create my-agent --reuse"),
-        ("Run a shell command (headless)", 'mngr create --type headless_command -c "echo hello world" --foreground'),
+        ("Run a headless agent", "mngr create --type headless_command --foreground -t my-command-template"),
     ),
     see_also=(
         ("connect", "Connect to an existing agent"),

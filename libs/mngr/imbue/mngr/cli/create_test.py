@@ -1,7 +1,6 @@
 """Tests for create module helper functions."""
 
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -19,7 +18,6 @@ from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
-from imbue.mngr.cli.create import _create_headless
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -37,13 +35,10 @@ from imbue.mngr.cli.create import _split_address_and_target_path
 from imbue.mngr.cli.create import _split_cli_args
 from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
-from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
-from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -808,27 +803,31 @@ def test_resolve_early_agent_type_explicit_type_overrides_command(
 
 @pytest.mark.tmux
 def test_create_headless_streams_output(
-    default_create_cli_opts: CreateCliOptions,
-    temp_mngr_ctx: MngrContext,
-    capsys: pytest.CaptureFixture[str],
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """_create_headless should stream output from a headless_command agent."""
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
-        to_update(default_create_cli_opts.field_ref().command, "echo headless-test-output"),
-    )
-    output_opts = OutputOptions()
+    """Creating a headless_command agent with --foreground should stream output.
 
-    _create_headless(
-        mngr_ctx=temp_mngr_ctx,
-        output_opts=output_opts,
-        opts=opts,
-        address=AgentAddress(),
-        agent_type_name="headless_command",
+    Uses a template to set the command (--command is not allowed on the headless
+    path from the CLI; headless agents get their command from config/templates).
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--setting",
+            "create_templates.headless-echo.command=echo headless-test-output",
+            "--template",
+            "headless-echo",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
     )
 
-    captured = capsys.readouterr()
-    assert "headless-test-output" in captured.out
+    assert result.exit_code == 0
+    assert "headless-test-output" in result.output
 
 
 # =============================================================================
@@ -836,36 +835,20 @@ def test_create_headless_streams_output(
 # =============================================================================
 
 
-def test_create_rejects_command_for_headless_non_command_accepting_type(
+def test_create_headless_rejects_command_flag(
+    cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """The early headless path must reject -c for types that are not CommandAcceptingAgentMixin.
-
-    When a StreamingHeadlessAgentMixin type that does NOT implement
-    CommandAcceptingAgentMixin receives -c/--command, create must raise
-    a UserInputError before reaching _create_headless.
-    """
-
-    # Create a mock headless type that is NOT CommandAcceptingAgentMixin.
-    # We register it so is_agent_class_registered() returns True.
-    class _MockHeadlessNoCommand(StreamingHeadlessAgentMixin):
-        def output(self) -> str:
-            return ""
-
-        def stream_output(self) -> Iterator[str]:
-            return iter([])
-
-    register_agent_class("mock_headless_no_cmd", _MockHeadlessNoCommand)
-
-    runner = CliRunner()
-    result = runner.invoke(
+    """The headless path must reject explicit --command (command comes from templates/config)."""
+    result = cli_runner.invoke(
         create,
-        ["--type", "mock_headless_no_cmd", "--command", "echo should-not-run", "--foreground"],
+        ["--type", "headless_command", "--command", "echo should-not-run", "--foreground"],
         obj=plugin_manager,
     )
 
     assert result.exit_code != 0
-    assert "does not accept -c/--command" in result.output
+    assert "--command/-c" in result.output
+    assert "does not support" in result.output
 
 
 def test_create_headless_rejects_incompatible_flags(

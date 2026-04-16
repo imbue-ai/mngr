@@ -373,8 +373,8 @@ $ mngr create my-agent -w server="npm run dev"
 $ mngr create my-agent --reuse
 ```
 
-**Run a shell command (headless)**
+**Run a headless agent**
 
 ```bash
-$ mngr create --type headless_command -c "echo hello world" --foreground
+$ mngr create --type headless_command --foreground -t my-command-template
 ```
