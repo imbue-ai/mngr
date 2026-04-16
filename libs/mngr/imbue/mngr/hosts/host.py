@@ -1125,7 +1125,7 @@ class Host(BaseHost, OnlineHostInterface):
             str(agent.name),
             f"Work directory {agent.work_dir} does not exist."
             f" To recreate it, run:\n"
-            f"  git worktree add {agent.work_dir} {branch}",
+            f"  git worktree add {shlex.quote(str(agent.work_dir))} {shlex.quote(branch)}",
         )
 
     def set_plugin_data(self, plugin_name: str, data: dict[str, Any]) -> None:
