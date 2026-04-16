@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pluggy
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
@@ -2037,7 +2038,7 @@ class _CertifiedDataAuthErrorHost(_RemoteHost):
 class _DestroyableProvider(MockProviderInstance):
     """MockProviderInstance that supports destroy_host."""
 
-    destroyed_hosts: list[HostId] = []
+    destroyed_hosts: list[HostId] = Field(default_factory=list)
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
         for h in self.mock_hosts:
