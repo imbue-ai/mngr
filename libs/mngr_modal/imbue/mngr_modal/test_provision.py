@@ -54,8 +54,6 @@ def test_provision_stopped_modal_agent(
         "--no-ensure-clean",
         "--source",
         str(source_dir),
-        "--type",
-        "test_sleep",
         "--env",
         env_marker,
         env=env,
