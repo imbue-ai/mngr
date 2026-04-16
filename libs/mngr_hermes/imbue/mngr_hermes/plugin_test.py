@@ -186,7 +186,7 @@ def test_provision_seeds_files_from_hermes_dir(
 
     # HOME is already set to tmp_path by the autouse fixture.
     # Create .hermes under the fake HOME so _get_user_hermes_dir() finds it.
-    hermes_dir = _create_fake_hermes_dir(tmp_path)
+    _create_fake_hermes_dir(tmp_path)
 
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
