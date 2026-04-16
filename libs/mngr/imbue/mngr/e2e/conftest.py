@@ -57,7 +57,10 @@ class E2eSession(Session):
                 "claude pane",
             ),
             (
-                f"mngr exec {agent_name} 'ls -la /mngr/agents/*/session_started 2>/dev/null"
+                # Agent state lives at $MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/ per
+                # libs/mngr/docs/conventions.md, and MNGR_HOST_DIR defaults to
+                # ~/.mngr (i.e. /root/.mngr on remote hosts where HOME=/root).
+                f'mngr exec {agent_name} \'ls -la "$HOME/.mngr/agents"/*/session_started 2>/dev/null'
                 " || echo session_started-not-found'",
                 "session_started",
             ),
