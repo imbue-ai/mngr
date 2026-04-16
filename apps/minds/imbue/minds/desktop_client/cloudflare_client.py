@@ -261,3 +261,26 @@ class CloudflareForwardingClient(FrozenModel):
         except httpx.HTTPError as e:
             logger.warning("Failed to remove service {} from {}: {}", service_name, tunnel_name, e)
             return False
+
+    def delete_tunnel(self, agent_id: AgentId) -> bool:
+        """Delete the entire Cloudflare tunnel for an agent. Returns True on success."""
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.delete(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}",
+                headers={"Authorization": self._auth_header()},
+                timeout=30.0,
+            )
+            if response.status_code not in (200, 204):
+                logger.warning(
+                    "Failed to delete tunnel {}: {} {}",
+                    tunnel_name,
+                    response.status_code,
+                    response.text,
+                )
+                return False
+            logger.info("Deleted Cloudflare tunnel: {}", tunnel_name)
+            return True
+        except httpx.HTTPError as e:
+            logger.warning("Failed to delete tunnel {}: {}", tunnel_name, e)
+            return False

@@ -188,6 +188,7 @@ def _rsync_worktree_over_clone(
     command = [
         "rsync",
         "-a",
+        "--delete",
         "--exclude=.git",
         "--exclude=__pycache__",
         "--exclude=.venv",
