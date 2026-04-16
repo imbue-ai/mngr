@@ -644,6 +644,27 @@ class ModalProviderInstance(BaseProviderInstance):
         self._evict_cached_host(host_id)
         self._host_record_cache_by_id.pop(host_id, None)
 
+    def _mark_host_destroyed(self, host_id: HostId) -> None:
+        """Set stop_reason to DESTROYED on the host record.
+
+        This marks the host as DESTROYED for state derivation while preserving
+        snapshot records so gc_snapshots can age-gate their deletion.
+        """
+        host_record = self._read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            return
+
+        updated_certified_data = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
+            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        self._write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified_data),
+            )
+        )
+        logger.debug("Marked host as DESTROYED: {}", host_id)
+
     def _clear_snapshots_from_host_record(self, host_id: HostId) -> None:
         """Clear all snapshot records from a host record on the state volume.
 
@@ -2045,11 +2066,14 @@ log "=== Shutdown script completed ==="
 
         Snapshot records are intentionally preserved so that gc_snapshots can
         age-gate their deletion (keeping them around for recovery via
-        ``mngr create --snapshot``).
+        ``mngr create --snapshot``).  The host is marked DESTROYED via
+        stop_reason so the state derivation returns DESTROYED even when
+        snapshot records still exist.
         """
         self.stop_host(host, create_snapshot=False)
         host_id = host.id if isinstance(host, HostInterface) else host
         self._destroy_agents_on_host(host_id)
+        self._mark_host_destroyed(host_id)
         # FOLLOWUP: once Modal enables deleting Images, this will be the place to do it
         if self.config.is_host_volume_created:
             self._delete_host_volume(host_id)
