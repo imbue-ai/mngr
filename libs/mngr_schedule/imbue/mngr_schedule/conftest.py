@@ -72,17 +72,16 @@ def bare_temp_mngr_ctx(
 
 @pytest.fixture()
 def monorepo_root() -> Path:
-    """Get the git root from this file's location.
+    """Get the monorepo root from this file's location.
 
     mngr schedule add needs to package the repo, so the subprocess must run
-    from the git root. We can't use cwd because isolate_home() chdir's to a
-    temp directory.
+    from the monorepo root. We can't use cwd because isolate_home() chdir's
+    to a temp directory.
+
+    The path is derived from this file's location
+    (libs/mngr_schedule/imbue/mngr_schedule/conftest.py), mirroring the
+    pattern used in libs/mngr/imbue/mngr/conftest.py and other sibling
+    modules. Avoiding a git subprocess keeps fixtures fast and makes the
+    fixture work in non-git checkouts.
     """
-    with ConcurrencyGroup(name="git-toplevel") as cg:
-        result = cg.run_process_to_completion(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=Path(__file__).parent,
-            is_checked_after=False,
-        )
-    assert result.returncode == 0, f"git rev-parse failed: {result.stderr}"
-    return Path(result.stdout.strip())
+    return Path(__file__).resolve().parents[4]
