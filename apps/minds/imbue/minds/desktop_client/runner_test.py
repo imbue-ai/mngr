@@ -1,10 +1,10 @@
 import os
 from pathlib import Path
 
+from pydantic import AnyUrl
 from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
-from imbue.minds.desktop_client.runner import _DEFAULT_MNGR_HOST_DIR
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -19,6 +19,7 @@ def test_agent_discovery_handler_writes_local_url_file(tmp_path: Path) -> None:
         tunnel_manager=tunnel_manager,
         server_port=8420,
         mngr_host_dir=tmp_path,
+        data_dir=tmp_path.parent,
     )
 
     agent_id = AgentId()
@@ -33,53 +34,54 @@ def test_agent_discovery_handler_writes_local_url_file(tmp_path: Path) -> None:
     tunnel_manager.cleanup()
 
 
-def test_agent_discovery_handler_callable() -> None:
+def test_agent_discovery_handler_callable(tmp_path: Path) -> None:
     """Verify AgentDiscoveryHandler is callable with the expected signature."""
     tunnel_manager = SSHTunnelManager()
-    handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=9000)
+    handler = AgentDiscoveryHandler(
+        tunnel_manager=tunnel_manager,
+        server_port=9000,
+        mngr_host_dir=tmp_path,
+        data_dir=tmp_path.parent,
+    )
     assert callable(handler)
     assert handler.server_port == 9000
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_returns_none_when_not_configured() -> None:
-    """Without env vars, _build_cloudflare_client returns None."""
+def test_build_cloudflare_client_returns_client_with_only_url() -> None:
+    """Without auth env vars, client is still built (URL comes from minds config)."""
     for key in (
-        "CLOUDFLARE_FORWARDING_URL",
         "CLOUDFLARE_FORWARDING_USERNAME",
         "CLOUDFLARE_FORWARDING_SECRET",
         "OWNER_EMAIL",
     ):
         os.environ.pop(key, None)
-    result = _build_cloudflare_client()
-    assert result is None
+    forwarding_url = AnyUrl("https://example.com/")
+    result = _build_cloudflare_client(forwarding_url)
+    assert result is not None
+    assert result.username is None
+    assert result.secret is None
+    assert result.owner_email is None
 
 
-def test_build_cloudflare_client_returns_client_when_configured() -> None:
-    """With all env vars set, _build_cloudflare_client returns a CloudflareForwardingClient."""
-    os.environ["CLOUDFLARE_FORWARDING_URL"] = "https://example.com"
+def test_build_cloudflare_client_reads_auth_from_env() -> None:
+    """Auth fields come from env vars; URL comes from the parameter."""
     os.environ["CLOUDFLARE_FORWARDING_USERNAME"] = "user"
     os.environ["CLOUDFLARE_FORWARDING_SECRET"] = "secret"
     os.environ["OWNER_EMAIL"] = "owner@example.com"
     try:
-        result = _build_cloudflare_client()
+        forwarding_url = AnyUrl("https://example.com/")
+        result = _build_cloudflare_client(forwarding_url)
         assert result is not None
+        assert str(result.forwarding_url) == "https://example.com/"
+        assert str(result.username) == "user"
     finally:
         for key in (
-            "CLOUDFLARE_FORWARDING_URL",
             "CLOUDFLARE_FORWARDING_USERNAME",
             "CLOUDFLARE_FORWARDING_SECRET",
             "OWNER_EMAIL",
         ):
             os.environ.pop(key, None)
-
-
-def test_agent_discovery_handler_default_mngr_host_dir() -> None:
-    """Verify the default mngr_host_dir matches the module-level constant."""
-    tunnel_manager = SSHTunnelManager()
-    handler = AgentDiscoveryHandler(tunnel_manager=tunnel_manager, server_port=9000)
-    assert handler.mngr_host_dir == _DEFAULT_MNGR_HOST_DIR
-    tunnel_manager.cleanup()
 
 
 def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> None:
@@ -95,6 +97,7 @@ def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> No
         tunnel_manager=tunnel_manager,
         server_port=8420,
         mngr_host_dir=tmp_path,
+        data_dir=tmp_path.parent,
     )
     agent_id = AgentId()
     handler(agent_id, None, "local")
@@ -149,6 +152,7 @@ def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
         tunnel_manager=fake_manager,
         server_port=8420,
         mngr_host_dir=tmp_path,
+        data_dir=tmp_path,
     )
     agent_id = AgentId()
     handler(agent_id, ssh_info, "docker")
@@ -177,6 +181,7 @@ def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Pat
         tunnel_manager=fake_manager,
         server_port=8420,
         mngr_host_dir=tmp_path,
+        data_dir=tmp_path,
     )
     agent_id = AgentId()
     # Should not raise even though setup_reverse_tunnel raises SSHTunnelError
