@@ -293,11 +293,11 @@ def _gc_single_host(
         if not isinstance(host, OnlineHostInterface):
             seconds_since_stopped = host.get_seconds_since_stopped()
             # Gate on max of both thresholds so snapshot records survive long
-            # enough for gc_snapshots to find and clean them up.
-            min_offline_age = max(
-                provider.get_max_destroyed_host_persisted_seconds(),
-                provider.get_min_destroyed_snapshot_age_seconds(),
-            )
+            # enough for gc_snapshots to find and clean them up.  Only consider
+            # the snapshot age when the provider actually supports snapshots.
+            min_offline_age = provider.get_max_destroyed_host_persisted_seconds()
+            if provider.supports_snapshots:
+                min_offline_age = max(min_offline_age, provider.get_min_destroyed_snapshot_age_seconds())
             if seconds_since_stopped is not None and seconds_since_stopped > min_offline_age:
                 agent_refs = host.discover_agents()
                 if len(agent_refs) == 0 or host.get_state() in (
