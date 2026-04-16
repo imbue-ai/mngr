@@ -395,7 +395,7 @@ def handle_unexpected_error(
         _prompt_and_report_issue(title, body, error_message)
         raise SystemExit(1)
 
-    # Normal command crash: offer diagnose
+    # Normal command crash: always offer diagnose, never GitHub issue reporting.
     try:
         context_path = write_diagnose_context_file(
             traceback_str=tb_str,
@@ -403,15 +403,8 @@ def handle_unexpected_error(
             error_type=type(error).__name__,
             error_message=error_message,
         )
-        diagnose_ran = _offer_diagnose(context_path, ctx)
+        _offer_diagnose(context_path, ctx)
     except Exception as exc:
         logger.debug("Diagnose step failed: {}", exc)
-        diagnose_ran = False
-
-    # Fall back to GitHub issue reporting only if diagnose didn't run
-    if not diagnose_ran:
-        title = build_unexpected_error_issue_title(error)
-        body = build_unexpected_error_issue_body(error, tb_str)
-        _prompt_and_report_issue(title, body, error_message)
 
     raise SystemExit(1)
