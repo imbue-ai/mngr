@@ -29,6 +29,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
@@ -420,6 +421,10 @@ class AgentObserver(MutableModel):
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
+        elif isinstance(event, HostDestroyedEvent):
+            self._handle_host_destroyed(event)
+        else:
+            pass
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update known hosts from a full discovery snapshot and sync activity streams."""
@@ -447,6 +452,13 @@ class AgentObserver(MutableModel):
         for host_id_str in new_host_ids - previously_known:
             host = new_hosts[host_id_str]
             self._start_activity_stream(host_id_str, host.host_name)
+
+    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
+        """Remove a destroyed host from known hosts and stop its activity stream."""
+        host_id_str = str(event.host_id)
+        with self._lock:
+            self._known_hosts.pop(host_id_str, None)
+        self._stop_activity_stream(host_id_str)
 
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
     #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
