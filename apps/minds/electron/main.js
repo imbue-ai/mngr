@@ -12,11 +12,13 @@ let mainWindow = null;
 let chromeView = null;
 let contentView = null;
 let sidebarView = null;
+let requestsPanelView = null;
 let backendBaseUrl = null;
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
 const SIDEBAR_WIDTH = 260;
+const REQUESTS_PANEL_WIDTH = 320;
 
 // -- Single instance lock --
 const gotLock = require('electron').app.requestSingleInstanceLock();
@@ -109,6 +111,7 @@ function createWindow() {
     chromeView = null;
     contentView = null;
     sidebarView = null;
+    requestsPanelView = null;
   });
 
   mainWindow.on('resize', updateViewBounds);
@@ -142,10 +145,19 @@ function updateViewBounds() {
     chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
   }
   if (contentView) {
-    contentView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width, height: height - TITLEBAR_HEIGHT });
+    const rightOffset = requestsPanelView ? REQUESTS_PANEL_WIDTH : 0;
+    contentView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: width - rightOffset, height: height - TITLEBAR_HEIGHT });
   }
   if (sidebarView) {
     sidebarView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: SIDEBAR_WIDTH, height: height - TITLEBAR_HEIGHT });
+  }
+  if (requestsPanelView) {
+    requestsPanelView.setBounds({
+      x: width - REQUESTS_PANEL_WIDTH,
+      y: TITLEBAR_HEIGHT,
+      width: REQUESTS_PANEL_WIDTH,
+      height: height - TITLEBAR_HEIGHT,
+    });
   }
 }
 
@@ -172,6 +184,39 @@ function toggleSidebar() {
     if (backendBaseUrl) {
       sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
     }
+  }
+}
+
+function toggleRequestsPanel() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (requestsPanelView) {
+    // Remove requests panel
+    mainWindow.contentView.removeChildView(requestsPanelView);
+    requestsPanelView.webContents.close();
+    requestsPanelView = null;
+    updateViewBounds();
+  } else {
+    openRequestsPanel();
+  }
+}
+
+function openRequestsPanel() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (requestsPanelView) return; // Already open
+
+  requestsPanelView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  mainWindow.contentView.addChildView(requestsPanelView);
+  updateViewBounds();
+
+  if (backendBaseUrl) {
+    requestsPanelView.webContents.loadURL(backendBaseUrl + '/_chrome/requests-panel');
   }
 }
 
@@ -244,6 +289,16 @@ async function startBackendWithRetry() {
       const notification = new Notification({
         title,
         body: event.message,
+      });
+      notification.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.focus();
+          if (event.url && contentView && !contentView.webContents.isDestroyed()) {
+            const navUrl = event.url.startsWith('/') ? `http://127.0.0.1:${port}${event.url}` : event.url;
+            contentView.webContents.loadURL(navUrl);
+          }
+        }
       });
       notification.show();
     }, (event) => {
@@ -365,7 +420,7 @@ ipcMain.on('navigate-content', (_event, url) => {
     contentView.webContents.loadURL(url);
   }
   // Close sidebar after navigation
-  if (sidebarView) {
+  if (sidebarView && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.contentView.removeChildView(sidebarView);
     sidebarView.webContents.close();
     sidebarView = null;
@@ -388,6 +443,14 @@ ipcMain.on('toggle-sidebar', () => {
   toggleSidebar();
 });
 
+ipcMain.on('toggle-requests-panel', () => {
+  toggleRequestsPanel();
+});
+
+ipcMain.on('open-requests-panel', () => {
+  openRequestsPanel();
+});
+
 ipcMain.on('retry', async () => {
   await shutdown();
 
@@ -399,17 +462,21 @@ ipcMain.on('retry', async () => {
         nodeIntegration: false,
       },
     });
-    mainWindow.contentView.addChildView(chromeView);
+    // chromeView is never removed during the error path, so only add contentView
     mainWindow.contentView.addChildView(contentView);
     updateViewBounds();
   }
 
   if (chromeView && !chromeView.webContents.isDestroyed()) {
-    await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
-    // Reset chrome bounds to title bar height since we're back in loading mode
+    // Expand chrome view to full window and hide content view for the loading screen
     if (mainWindow && !mainWindow.isDestroyed()) {
-      updateViewBounds();
+      const { width, height } = mainWindow.getContentBounds();
+      chromeView.setBounds({ x: 0, y: 0, width, height });
+      if (contentView) {
+        contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
     }
+    await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
     startBackendWithRetry();
   }
 });

@@ -38,7 +38,10 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -143,9 +146,19 @@ def start_desktop_client(
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
+    minds_config = MindsConfig(data_dir=data_directory)
 
-    # Initialize SuperTokens if configured
-    supertokens_session_store = _init_supertokens(
+    # Initialize multi-account session store
+    session_store = MultiAccountSessionStore(data_dir=data_directory)
+
+    # Initialize request inbox from stored response events
+    response_events = load_response_events(data_directory)
+    request_inbox = RequestInbox()
+    for resp in response_events:
+        request_inbox = request_inbox.add_response(resp)
+
+    # Initialize SuperTokens SDK if configured
+    _init_supertokens(
         data_directory=data_directory,
         host=host,
         port=port,
@@ -191,7 +204,9 @@ def start_desktop_client(
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         stream_manager=stream_manager,
-        supertokens_session_store=supertokens_session_store,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=request_inbox,
         server_port=port,
         output_format=output_format,
     )
@@ -217,12 +232,12 @@ def _init_supertokens(
     data_directory: Path,
     host: str,
     port: int,
-) -> SuperTokensSessionStore | None:
-    """Initialize the SuperTokens SDK and return a session store, or None if not configured."""
+) -> None:
+    """Initialize the SuperTokens SDK if configured."""
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
         logger.info("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
-        return None
+        return
 
     api_key = os.environ.get("SUPERTOKENS_API_KEY")
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
@@ -289,11 +304,7 @@ def _init_supertokens(
         mode="asgi",
     )
 
-    session_store = SuperTokensSessionStore(
-        data_directory=data_directory / "supertokens",
-    )
     logger.info("SuperTokens initialized (core: {})", connection_uri)
-    return session_store
 
 
 def _build_cloudflare_client() -> CloudflareForwardingClient | None:

@@ -56,9 +56,12 @@ class CloudflareForwardingClient(FrozenModel):
     owner_email: OwnerEmail | None = Field(default=None, description="Email for default Google OAuth policy")
     supertokens_token: str | None = Field(default=None, description="SuperTokens JWT access token for Bearer auth")
     supertokens_user_id_prefix: str | None = Field(
-        default=None, description="First 16 hex chars of SuperTokens user ID for tunnel naming",
+        default=None,
+        description="First 16 hex chars of SuperTokens user ID for tunnel naming",
     )
-    supertokens_email: str | None = Field(default=None, description="Email from SuperTokens session for access policies")
+    supertokens_email: str | None = Field(
+        default=None, description="Email from SuperTokens session for access policies"
+    )
 
     def _auth_header(self) -> str:
         """Build the auth header value. Prefers SuperTokens Bearer token over Basic auth."""
@@ -257,4 +260,27 @@ class CloudflareForwardingClient(FrozenModel):
             return True
         except httpx.HTTPError as e:
             logger.warning("Failed to remove service {} from {}: {}", service_name, tunnel_name, e)
+            return False
+
+    def delete_tunnel(self, agent_id: AgentId) -> bool:
+        """Delete the entire Cloudflare tunnel for an agent. Returns True on success."""
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.delete(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}",
+                headers={"Authorization": self._auth_header()},
+                timeout=30.0,
+            )
+            if response.status_code not in (200, 204):
+                logger.warning(
+                    "Failed to delete tunnel {}: {} {}",
+                    tunnel_name,
+                    response.status_code,
+                    response.text,
+                )
+                return False
+            logger.info("Deleted Cloudflare tunnel: {}", tunnel_name)
+            return True
+        except httpx.HTTPError as e:
+            logger.warning("Failed to delete tunnel {}: {}", tunnel_name, e)
             return False

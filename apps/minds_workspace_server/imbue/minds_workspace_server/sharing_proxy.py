@@ -4,10 +4,12 @@ The minds desktop client exposes its API to agents via a reverse SSH tunnel.
 The URL is written to ``$MNGR_AGENT_STATE_DIR/minds_api_url``. Authentication
 uses the ``MINDS_API_KEY`` environment variable as a Bearer token.
 
-All sharing operations (GET status, PUT enable, DELETE disable) are proxied
-through the desktop client API.
+Only read-only status queries are proxied through the desktop client API.
+Mutation operations (enable, disable, update auth) are handled via request
+events written to ``requests/events.jsonl``.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Final
@@ -17,6 +19,7 @@ from loguru import logger as _loguru_logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds_workspace_server.request_writer import write_sharing_request
 
 logger = _loguru_logger
 
@@ -111,70 +114,51 @@ def get_sharing_status(server_name: str) -> SharingStatus:
         raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
 
 
-def enable_sharing(server_name: str, auth_rules: list[dict[str, object]] | None = None) -> SharingStatus:
-    """Enable Cloudflare forwarding for a server via the desktop client API.
+def _extract_emails_from_auth_rules(auth_rules: list[dict[str, object]]) -> list[str]:
+    """Extract email addresses from Cloudflare Access auth policy rules."""
+    emails: list[str] = []
+    for rule in auth_rules:
+        raw = json.dumps(rule)
+        parsed = json.loads(raw)
+        for inc in parsed.get("include", []):
+            email_obj = inc.get("email", {})
+            email = email_obj.get("email", "")
+            if email:
+                emails.append(str(email))
+    return emails
 
-    After enabling, queries the status to get the resulting URL.
+
+def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> None:
+    """Create a sharing request event for editing sharing settings.
+
+    Reads the current status via the desktop client API, then writes a
+    request event to ``requests/events.jsonl`` with the current state
+    as structured data for pre-populating the desktop client form.
     """
-    url = _cloudflare_url(server_name)
-    headers = _get_desktop_client_auth_headers()
+    agent_id = _get_own_agent_id()
 
-    body: dict[str, object] = {}
-    if auth_rules is not None:
-        body["auth_rules"] = auth_rules
-
+    # Try to get current status for pre-population
+    current_status_dict: dict[str, object] | None = None
+    suggested_emails: list[str] = []
     try:
-        response = httpx.put(url, headers=headers, json=body if body else None, timeout=_REQUEST_TIMEOUT_SECONDS)
-        if response.status_code == 200:
-            # Return a provisional enabled status. The frontend will re-fetch
-            # to get the full status (URL, auth) without blocking on a second
-            # round trip that could cause a timeout.
-            return SharingStatus(enabled=True, auth_rules=auth_rules or [])
+        status = get_sharing_status(server_name)
+        current_status_dict = {
+            "enabled": status.enabled,
+            "url": status.url,
+            "auth_rules": status.auth_rules,
+        }
+        # Extract emails from auth rules for convenience
+        suggested_emails = _extract_emails_from_auth_rules(status.auth_rules)
+    except SharingProxyError:
+        logger.debug("Could not fetch current sharing status for pre-population")
 
-        error_msg = _extract_error(response)
-        raise SharingProxyError(f"Failed to enable sharing: {error_msg}")
-
-    except httpx.HTTPError as e:
-        raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
-
-
-def update_sharing_auth(server_name: str, auth_rules: list[dict[str, object]]) -> SharingStatus:
-    """Update the auth policy for an already-enabled service."""
-    url = _cloudflare_url(server_name)
-    headers = _get_desktop_client_auth_headers()
-
-    try:
-        response = httpx.put(
-            url,
-            headers=headers,
-            json={"auth_rules": auth_rules},
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
-        if response.status_code == 200:
-            return SharingStatus(enabled=True, auth_rules=auth_rules)
-
-        error_msg = _extract_error(response)
-        raise SharingProxyError(f"Failed to update sharing auth: {error_msg}")
-
-    except httpx.HTTPError as e:
-        raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
-
-
-def disable_sharing(server_name: str) -> SharingStatus:
-    """Disable Cloudflare forwarding for a server via the desktop client API."""
-    url = _cloudflare_url(server_name)
-    headers = _get_desktop_client_auth_headers()
-
-    try:
-        response = httpx.delete(url, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
-        if response.status_code == 200:
-            return SharingStatus(enabled=False)
-
-        error_msg = _extract_error(response)
-        raise SharingProxyError(f"Failed to disable sharing: {error_msg}")
-
-    except httpx.HTTPError as e:
-        raise SharingProxyError(f"Failed to communicate with desktop client: {e}") from e
+    write_sharing_request(
+        agent_id=agent_id,
+        server_name=server_name,
+        is_user_requested=is_user_requested,
+        current_status=current_status_dict,
+        suggested_emails=suggested_emails,
+    )
 
 
 def _extract_error(response: httpx.Response) -> str:

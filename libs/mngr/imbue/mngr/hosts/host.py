@@ -1730,21 +1730,13 @@ class Host(BaseHost, OnlineHostInterface):
                 )
                 for line in result.stdout.split("\n"):
                     if line:
-                        # git status --porcelain format: "XY filename" (2 status chars + space + filename)
-                        filename = line[3:]
-                        if " -> " in filename:
-                            filename = filename.split(" -> ")[1]
-                        files_to_include.append(filename)
+                        files_to_include.extend(_parse_porcelain_line(line))
             else:
                 result = source_host.execute_idempotent_command("git status --porcelain", cwd=source_path)
                 if result.success:
                     for line in result.stdout.split("\n"):
                         if line:
-                            # git status --porcelain format: "XY filename" (2 status chars + space + filename)
-                            filename = line[3:]
-                            if " -> " in filename:
-                                filename = filename.split(" -> ")[1]
-                            files_to_include.append(filename)
+                            files_to_include.extend(_parse_porcelain_line(line))
 
         is_include_gitignored = options.git.is_include_gitignored if options.git else False
         if is_include_gitignored:
@@ -2137,13 +2129,22 @@ class Host(BaseHost, OnlineHostInterface):
             # _mkdirs uses mkdir -p, which is idempotent for existing directories
             events_dir = state_dir / "events"
             servers_events_dir = events_dir / "servers"
-            self._mkdirs([state_dir, events_dir, servers_events_dir, state_dir / "activity", state_dir / "commands"])
+            requests_events_dir = events_dir / "requests"
+            self._mkdirs([
+                state_dir,
+                events_dir,
+                servers_events_dir,
+                requests_events_dir,
+                state_dir / "activity",
+                state_dir / "commands",
+            ])
 
-            # Pre-create empty events.jsonl so that `mngr events --follow` finds
-            # the source immediately on startup, rather than waiting for a 10-second
-            # rescan after the agent's services start writing events.
+            # Pre-create empty events.jsonl files so that `mngr events --follow`
+            # finds the sources immediately on startup, rather than waiting for a
+            # 10-second rescan after the agent's services start writing events.
             servers_events_file = servers_events_dir / "events.jsonl"
-            self.execute_idempotent_command(f"touch '{servers_events_file}'")
+            requests_events_file = requests_events_dir / "events.jsonl"
+            self.execute_idempotent_command(f"touch '{servers_events_file}' '{requests_events_file}'")
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:
@@ -2904,6 +2905,28 @@ To reconnect later, run:
   mngr connect
 
 This popup won't show again in future sessions."""
+
+
+@pure
+def _parse_porcelain_line(line: str) -> list[str]:
+    """Parse a git status --porcelain line and return filenames to transfer.
+
+    The porcelain format is ``XY filename`` where X is the index status and Y
+    is the work-tree status. Files with status D (deleted) in either position
+    cannot be rsynced because they no longer exist on disk, so they are skipped.
+    Renames (``old -> new``) return only the new filename.
+    """
+    if len(line) < 4:
+        return []
+    status_x = line[0]
+    status_y = line[1]
+    # Skip deleted files -- they don't exist on disk and can't be transferred
+    if status_x == "D" or status_y == "D":
+        return []
+    filename = line[3:]
+    if " -> " in filename:
+        filename = filename.split(" -> ")[1]
+    return [filename]
 
 
 @pure

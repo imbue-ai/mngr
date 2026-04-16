@@ -48,33 +48,18 @@ def test_sharing_status_disabled() -> None:
     assert status.url is None
 
 
-def test_enable_sharing_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from imbue.minds_workspace_server.sharing_proxy import enable_sharing
-
-    api_url_file = tmp_path / "minds_api_url"
-    api_url_file.write_text("http://127.0.0.1:8420")
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
-    monkeypatch.delenv("MINDS_API_KEY", raising=False)
-    with pytest.raises(SharingProxyError, match="MINDS_API_KEY"):
-        enable_sharing("web")
-
-
-def test_disable_sharing_missing_agent_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from imbue.minds_workspace_server.sharing_proxy import disable_sharing
-
-    api_url_file = tmp_path / "minds_api_url"
-    api_url_file.write_text("http://127.0.0.1:8420")
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
-    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
-    monkeypatch.setenv("MINDS_API_KEY", "test-key")
-    with pytest.raises(SharingProxyError, match="MNGR_AGENT_ID"):
-        disable_sharing("web")
-
-
 def test_get_sharing_status_missing_api_url(monkeypatch: pytest.MonkeyPatch) -> None:
     from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 
     monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
     with pytest.raises(SharingProxyError, match="MNGR_AGENT_STATE_DIR"):
         get_sharing_status("web")
+
+
+def test_request_sharing_edit_missing_agent_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
+
+    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
+    monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
+    with pytest.raises(SharingProxyError, match="MNGR_AGENT_ID"):
+        request_sharing_edit("web")

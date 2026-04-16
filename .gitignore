@@ -227,6 +227,9 @@
 # Local Claude settings backup files
 **/.claude/*.bak
 
+# Claude worktress
+**/.claude/worktrees
+
 # Local mngr settings (not committed)
 **/.mngr/settings.local.toml
 
@@ -279,3 +282,4 @@
 
 # ignore demos
 **/recordings
+apps/minds_workspace_server/package-lock.json

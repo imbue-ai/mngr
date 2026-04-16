@@ -1,12 +1,11 @@
 /**
  * Proto-agent log viewer. Opens a WebSocket to stream creation logs
  * from a proto-agent (agent being created via mngr create).
- * On completion, navigates to the chat view for that agent.
+ * On completion, redraws so the parent component can switch to the chat view.
  */
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import { selectAgent } from "../navigation";
 
 interface ProtoAgentLogViewAttrs {
   agentId: string;
@@ -53,14 +52,6 @@ export function ProtoAgentLogView(): m.Component<ProtoAgentLogViewAttrs> {
         done = true;
         success = data.success;
         error = data.error;
-
-        if (success && currentAgentId) {
-          setTimeout(() => {
-            if (currentAgentId) {
-              selectAgent(currentAgentId);
-            }
-          }, 500);
-        }
       }
       m.redraw();
     };
