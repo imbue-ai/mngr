@@ -268,6 +268,17 @@ def _build_mngr_create_command(
         f"workspace={agent_name}",
         "--env",
         f"MINDS_API_KEY={api_key}",
+        # Propagate the minds-scoped mngr identity to the remote host so its
+        # inner mngr uses the same prefix (and host dir name) as the local
+        # one. Without this, a local minds at MNGR_PREFIX=devminds- would
+        # spawn a remote container whose own mngr defaults to mngr-, and
+        # the two would disagree about tmux/session naming.
+        "--pass-host-env",
+        "MNGR_HOST_DIR",
+        "--pass-host-env",
+        "MNGR_PREFIX",
+        "--pass-host-env",
+        "MINDS_ROOT_NAME",
         "--label",
         "user_created=true",
         "--label",

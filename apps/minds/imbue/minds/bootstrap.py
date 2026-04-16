@@ -24,9 +24,9 @@ MINDS_ROOT_NAME_PATTERN: Final[str] = r"[a-z0-9_-]+"
 def resolve_minds_root_name() -> str:
     """Read MINDS_ROOT_NAME from the environment or return the default.
 
-    Validates the value against MINDS_ROOT_NAME_PATTERN and prints an error +
-    exits 1 if invalid. A duplicate of MindsRootName's validation in stdlib
-    form so that this module never has to import pydantic/mngr.
+    Validates the value against MINDS_ROOT_NAME_PATTERN and exits with status
+    1 if invalid. Validation is duplicated here (instead of going through a
+    pydantic primitive) so this module never has to import pydantic/mngr.
     """
     value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, DEFAULT_MINDS_ROOT_NAME)
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):

@@ -1,6 +1,6 @@
-import os
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import PrivateAttr
 
@@ -48,14 +48,14 @@ def test_agent_discovery_handler_callable(tmp_path: Path) -> None:
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_returns_client_with_only_url() -> None:
+def test_build_cloudflare_client_returns_client_with_only_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without auth env vars, client is still built (URL comes from minds config)."""
     for key in (
         "CLOUDFLARE_FORWARDING_USERNAME",
         "CLOUDFLARE_FORWARDING_SECRET",
         "OWNER_EMAIL",
     ):
-        os.environ.pop(key, None)
+        monkeypatch.delenv(key, raising=False)
     forwarding_url = AnyUrl("https://example.com/")
     result = _build_cloudflare_client(forwarding_url)
     assert result is not None
@@ -64,24 +64,16 @@ def test_build_cloudflare_client_returns_client_with_only_url() -> None:
     assert result.owner_email is None
 
 
-def test_build_cloudflare_client_reads_auth_from_env() -> None:
+def test_build_cloudflare_client_reads_auth_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Auth fields come from env vars; URL comes from the parameter."""
-    os.environ["CLOUDFLARE_FORWARDING_USERNAME"] = "user"
-    os.environ["CLOUDFLARE_FORWARDING_SECRET"] = "secret"
-    os.environ["OWNER_EMAIL"] = "owner@example.com"
-    try:
-        forwarding_url = AnyUrl("https://example.com/")
-        result = _build_cloudflare_client(forwarding_url)
-        assert result is not None
-        assert str(result.forwarding_url) == "https://example.com/"
-        assert str(result.username) == "user"
-    finally:
-        for key in (
-            "CLOUDFLARE_FORWARDING_USERNAME",
-            "CLOUDFLARE_FORWARDING_SECRET",
-            "OWNER_EMAIL",
-        ):
-            os.environ.pop(key, None)
+    monkeypatch.setenv("CLOUDFLARE_FORWARDING_USERNAME", "user")
+    monkeypatch.setenv("CLOUDFLARE_FORWARDING_SECRET", "secret")
+    monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")
+    forwarding_url = AnyUrl("https://example.com/")
+    result = _build_cloudflare_client(forwarding_url)
+    assert result is not None
+    assert str(result.forwarding_url) == "https://example.com/"
+    assert str(result.username) == "user"
 
 
 def test_agent_discovery_handler_handles_local_write_error(tmp_path: Path) -> None:

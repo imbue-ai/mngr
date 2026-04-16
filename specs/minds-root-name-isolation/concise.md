@@ -4,7 +4,7 @@
 
 - Introduce a single env var `MINDS_ROOT_NAME` (default `minds`; dev copy exports `devminds`) that drives all per-install paths and prefixes, so an installed minds and a dev minds can coexist without sharing state.
 - `MINDS_ROOT_NAME=<X>` produces: minds data dir `~/.<X>`, `MNGR_HOST_DIR=~/.<X>/mngr`, `MNGR_PREFIX=<X>-`. `MNGR_ROOT_NAME` stays `mngr` so agent template repos keep their project config at `.mngr/settings.toml`.
-- Translation happens in two places: the Electron shell (`backend.js`) for packaged/dev launches, and a new stdlib-only `apply_bootstrap()` called at the top of the `minds` CLI entrypoint for standalone launches. Both mutate the environment before any `imbue.mngr.*` module loads (mngr reads `MNGR_HOST_DIR`/`MNGR_PREFIX` at import time).
+- Translation happens in two places: the Electron shell (`backend.js`) for packaged/dev launches, and a new `apply_bootstrap()` (stdlib + loguru for the invalid-input error path) called at the top of the `minds` CLI entrypoint for standalone launches. Both mutate the environment before any `imbue.mngr.*` module loads (mngr reads `MNGR_HOST_DIR`/`MNGR_PREFIX` at import time).
 - Promote two server URLs (`CLOUDFLARE_FORWARDING_URL`, `SUPERTOKENS_CONNECTION_URI`) from env-var-only into a new `MindsConfig` model loaded from `~/.<MINDS_ROOT_NAME>/config.toml`, with sensible dev-server defaults baked into code. Precedence: env > file > default. Everything else (OAuth creds, API keys, forwarding secret) stays env-var-only.
 - No migration path — existing `~/.minds/` and `~/.mngr/` data is abandoned. Minds is pre-production; simplicity trumps backwards compatibility.
 
@@ -43,7 +43,7 @@
 
 **New files:**
 
-- `apps/minds/imbue/minds/bootstrap.py` — stdlib-only module exposing `apply_bootstrap()`. Reads `MINDS_ROOT_NAME` (default `minds`), regex-validates it (`re.fullmatch(r"[a-z0-9_-]+", ...)`), then sets `MNGR_HOST_DIR=~/.<X>/mngr` and `MNGR_PREFIX=<X>-` in `os.environ`. No third-party imports. Mirrors the shape of `libs/mngr/imbue/mngr/config/host_dir.py`.
+- `apps/minds/imbue/minds/bootstrap.py` — minimal module (stdlib + loguru only; loguru is used for the invalid-input error path and does not transitively import mngr, so the "runs before mngr is imported" guarantee is preserved) exposing `apply_bootstrap()`. Reads `MINDS_ROOT_NAME` (default `minds`), regex-validates it (`re.fullmatch(r"[a-z0-9_-]+", ...)`), then sets `MNGR_HOST_DIR=~/.<X>/mngr` and `MNGR_PREFIX=<X>-` in `os.environ`. Shape mirrors `libs/mngr/imbue/mngr/config/host_dir.py`.
 - `apps/minds/imbue/minds/cli_entry.py` — new home for the click CLI group currently in `main.py` (moved so `main.py` can stay a tiny pre-import shim).
 - `apps/minds/imbue/minds/config/loader.py` — `load_minds_config(data_dir: Path) -> MindsConfig` that reads `data_dir/config.toml` if present, overlays env-var values for each field using the field's pydantic `alias`, and validates.
 - `apps/minds/imbue/minds/bootstrap_test.py` — unit tests for translation, default, validation, invalid-input exit.

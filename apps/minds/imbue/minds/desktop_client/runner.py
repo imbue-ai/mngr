@@ -138,7 +138,6 @@ def start_desktop_client(
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
-    # Initialize SuperTokens if configured
     supertokens_session_store = _init_supertokens(
         data_directory=paths.data_dir,
         connection_uri=str(minds_config.supertokens_connection_uri),

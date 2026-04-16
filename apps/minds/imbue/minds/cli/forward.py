@@ -1,8 +1,9 @@
+import os
+
 import click
 from loguru import logger
 
 from imbue.minds.bootstrap import minds_data_dir_for
-from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
@@ -51,8 +52,8 @@ def forward(ctx: click.Context, host: str, port: int, no_browser: bool) -> None:
     logger.info("  Listening on: http://{}:{}", host, port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", paths.data_dir)
-    logger.info("  MNGR_HOST_DIR: {}", paths.mngr_host_dir)
-    logger.info("  MNGR_PREFIX: {}", mngr_prefix_for(root_name))
+    logger.info("  MNGR_HOST_DIR: {}", os.environ.get("MNGR_HOST_DIR", "<unset>"))
+    logger.info("  MNGR_PREFIX: {}", os.environ.get("MNGR_PREFIX", "<unset>"))
     logger.info("  cloudflare_forwarding_url: {}", minds_config.cloudflare_forwarding_url)
     logger.info("  supertokens_connection_uri: {}", minds_config.supertokens_connection_uri)
     logger.info("")

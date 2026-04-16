@@ -106,6 +106,12 @@ def test_build_mngr_create_command_dev_mode() -> None:
     env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
     assert any(v.startswith("MINDS_API_KEY=") for v in env_values)
     assert len(api_key) > 0
+    # Minds-scoped mngr identity is propagated to the new host so its own mngr
+    # shares the local tmux/session naming.
+    pass_host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
+    assert "MNGR_HOST_DIR" in pass_host_env_values
+    assert "MNGR_PREFIX" in pass_host_env_values
+    assert "MINDS_ROOT_NAME" in pass_host_env_values
 
 
 def test_build_mngr_create_command_local_mode() -> None:
