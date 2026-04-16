@@ -440,6 +440,16 @@ async def _forward_http_request(
     except httpx.ReadError:
         logger.warning("Backend connection lost for {} server {}", agent_id, server_name)
         return Response(status_code=502, content="Backend connection lost")
+    except httpx.RemoteProtocolError:
+        # Raised when the SSH tunnel accepts the connection but closes it without
+        # sending a response, which happens when the SSH channel-open to the
+        # backend port fails (e.g. uvicorn inside the agent container hasn't
+        # finished binding to its port yet). Returning 502 lets the caller show
+        # the auto-retrying loading page for HTML requests.
+        logger.warning(
+            "Backend disconnected without response for {} server {} (likely still starting up)", agent_id, server_name
+        )
+        return Response(status_code=502, content="Backend disconnected without response")
     except httpx.TimeoutException:
         logger.warning("Backend request timed out for {} server {}", agent_id, server_name)
         return Response(status_code=504, content="Backend request timed out")
@@ -488,6 +498,10 @@ async def _forward_http_request_streaming(
             logger.debug("Backend connection lost during streaming for {} server {}", agent_id, server_name)
         except httpx.ReadError:
             logger.debug("Backend read error during streaming for {} server {}", agent_id, server_name)
+        except httpx.RemoteProtocolError:
+            logger.debug(
+                "Backend disconnected without response during streaming for {} server {}", agent_id, server_name
+            )
         except httpx.TimeoutException:
             logger.debug("Backend stream timed out for {} server {}", agent_id, server_name)
 
