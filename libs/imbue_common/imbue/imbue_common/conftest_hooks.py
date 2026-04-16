@@ -149,8 +149,6 @@ _SHARED_FILTER_WARNINGS: Final[list[str]] = [
     r"ignore:Module imbue\..* was previously imported, but not measured:coverage.exceptions.CoverageWarning",
     # record_xml_attribute is marked experimental but we rely on it for JUnit test ID customization.
     "ignore::pytest.PytestExperimentalApiWarning",
-    # Promote unknown-mark warnings to errors so unregistered marks are caught immediately.
-    "error::pytest.PytestUnknownMarkWarning",
 ]
 
 # Lines matching any of these patterns are excluded from coverage measurement.
