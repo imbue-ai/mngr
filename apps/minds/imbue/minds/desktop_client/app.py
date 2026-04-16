@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
+from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -40,16 +41,13 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
@@ -57,22 +55,24 @@ from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
-from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
+from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_agent_servers_page
-from imbue.minds.desktop_client.templates import render_sharing_editor
-from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
-from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
+from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -1324,28 +1324,28 @@ def _handle_workspace_settings(
         else:
             telegram_section = (
                 f'<button class="btn btn-primary" id="tg-btn" '
-                f'onclick="setupTelegram(\'{agent_id}\')">Setup Telegram</button>'
+                f"onclick=\"setupTelegram('{agent_id}')\">Setup Telegram</button>"
             )
             telegram_js = (
-                'async function setupTelegram(agentId) {'
+                "async function setupTelegram(agentId) {"
                 '  var btn = document.getElementById("tg-btn");'
                 '  btn.disabled = true; btn.textContent = "Setting up...";'
-                '  try {'
+                "  try {"
                 '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
                 '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
                 '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
-                '    var interval = setInterval(async function() {'
+                "    var interval = setInterval(async function() {"
                 '      try { var r = await fetch("/api/agents/" + agentId + "/telegram/status");'
-                '        if (!r.ok) return; var d = await r.json();'
+                "        if (!r.ok) return; var d = await r.json();"
                 '        if (d.status === "DONE") { clearInterval(interval);'
                 '          btn.textContent = "Telegram active"; btn.style.color = "#16a34a"; }'
                 '        else if (d.status === "FAILED") { clearInterval(interval);'
                 '          btn.textContent = "Setup failed"; btn.disabled = false; }'
-                '        else { btn.textContent = d.status; }'
-                '      } catch (e) {}'
-                '    }, 2000);'
+                "        else { btn.textContent = d.status; }"
+                "      } catch (e) {}"
+                "    }, 2000);"
                 '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
-                '}'
+                "}"
             )
 
     html = render_workspace_settings(
@@ -1423,8 +1423,7 @@ def _handle_requests_panel(
         agent_id = req.agent_id
         event_id = str(req.event_id)
         cards.append(
-            f'<div onclick="navigateToRequest(\'{event_id}\')" style="display:block;padding:12px;border:1px solid #334155;'
-            f'border-radius:8px;margin:8px;background:#1e293b;cursor:pointer;">'
+            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\')">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{req_type}: {server_name}</div>'
             f'<div style="font-size:11px;color:#64748b;margin-top:4px;">Agent: {agent_id[:16]}...</div>'
             f'<div style="font-size:11px;color:#64748b;">{str(req.timestamp)}</div></div>'
@@ -1432,27 +1431,29 @@ def _handle_requests_panel(
 
     html = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
-        '<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;'
-        'margin:0;padding:0;overflow-y:auto;height:100vh;}'
-        'h2{font-size:15px;color:#e2e8f0;padding:12px;margin:0;border-bottom:1px solid #334155;}'
-        '</style></head>'
-        f'<body>'
-        f'<script>'
-        f'function navigateToRequest(eventId) {{'
+        "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
+        "margin:0;padding:0;overflow-y:auto;height:100vh;}"
+        "h2{font-size:15px;color:#e2e8f0;padding:12px;margin:0;border-bottom:1px solid #334155;}"
+        ".req-card{padding:10px 12px;margin:2px 0;cursor:pointer;border-radius:6px;transition:background 100ms;}"
+        ".req-card:hover{background:rgba(255,255,255,0.06);}"
+        "</style></head>"
+        f"<body>"
+        f"<script>"
+        f"function navigateToRequest(eventId) {{"
         f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
         f'  else window.top.location = "/requests/" + eventId;'
-        f'}}'
-        f'</script>'
-        f'<h2>Requests ({len(pending)})</h2>'
-        f'<div>{"".join(cards) if cards else "<p style=padding:12px;color:#64748b;>No pending requests.</p>"}</div>'
+        f"}}"
+        f"</script>"
+        f"<h2>Requests ({len(pending)})</h2>"
+        f"<div>{''.join(cards) if cards else '<p style=padding:12px;color:#64748b;>No pending requests.</p>'}</div>"
         f'<div style="position:fixed;bottom:0;left:0;right:0;padding:12px;border-top:1px solid #334155;'
         f'background:#0f172a;">'
         f'<label style="font-size:12px;color:#94a3b8;cursor:pointer;">'
         f'<input type="checkbox" {"checked" if auto_open else ""} '
-        f'onchange="fetch(\'/_chrome/requests-auto-open\',{{method:\'POST\',headers:{{\'Content-Type\':'
-        f'\'application/json\'}},body:JSON.stringify({{enabled:this.checked}})}})"> '
-        f'Auto-open on new request</label></div>'
-        '</body></html>'
+        f"onchange=\"fetch('/_chrome/requests-auto-open',{{method:'POST',headers:{{'Content-Type':"
+        f"'application/json'}},body:JSON.stringify({{enabled:this.checked}})}})\"> "
+        f"Auto-open on new request</label></div>"
+        "</body></html>"
     )
     return HTMLResponse(content=html)
 
@@ -1515,7 +1516,9 @@ def _handle_request_page(
     emails = list(dict.fromkeys(emails))
 
     ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
-        req_event.agent_id, request, backend_resolver,
+        req_event.agent_id,
+        request,
+        backend_resolver,
     )
 
     html = render_sharing_editor(
@@ -1546,7 +1549,9 @@ def _handle_sharing_page(
         return Response(status_code=403, content="Not authenticated")
 
     ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
-        agent_id, request, backend_resolver,
+        agent_id,
+        request,
+        backend_resolver,
     )
 
     html = render_sharing_editor(

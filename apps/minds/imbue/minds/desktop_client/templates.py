@@ -55,7 +55,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       padding: 20px 16px; font-size: 14px; color: #334155;
       border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
-    tbody td:last-child { text-align: right; }
+    tbody td:last-child { text-align: right; width: 48px; }
     .ws-name { font-weight: 500; color: #0f172a; }
     .shared-with { color: #94a3b8; }
     .menu-wrapper { position: relative; display: inline-block; }
@@ -562,7 +562,8 @@ def render_agent_servers_page(
 
 _CHROME_TITLEBAR_HEIGHT: Final[int] = 38
 
-_CHROME_TEMPLATE: Final[str] = """<!DOCTYPE html>
+_CHROME_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -577,7 +578,9 @@ body {
 
 #minds-titlebar {
   position: fixed; top: 0; left: 0; right: 0;
-  height: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
+  height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
   background: #1e293b;
   display: flex; align-items: center;
   user-select: none;
@@ -619,38 +622,48 @@ body {
 
 .minds-wc { display: flex; }
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
-.minds-wc button { border-radius: 0; width: 36px; height: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px; }
+.minds-wc button { border-radius: 0; width: 36px; height: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px; }
 .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
 .minds-wc button:last-child:hover { background: rgb(220, 38, 38); color: white; border-radius: 0; }
 
 /* Sidebar (browser mode) */
 #sidebar-panel {
-  position: fixed; left: 0; top: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
-  width: 260px; height: calc(100% - """ + str(_CHROME_TITLEBAR_HEIGHT) + """px);
-  background: #f3f2ef; z-index: 50;
-  box-shadow: 4px 0 12px rgba(0,0,0,0.15);
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 260px; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
+  background: #0f172a; z-index: 50;
+  box-shadow: 4px 0 12px rgba(0,0,0,0.3);
   transform: translateX(-100%);
   transition: transform 200ms ease-in-out;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 0;
 }
 #sidebar-panel.sidebar-visible { transform: translateX(0); }
 
 .sidebar-item {
-  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
 }
-.sidebar-item:hover { background: #edecea; }
+.sidebar-item:hover { background: rgba(255,255,255,0.06); }
 
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
 }
 
 /* Content area (browser mode) */
 #content-frame {
-  position: fixed; left: 0; top: """ + str(_CHROME_TITLEBAR_HEIGHT) + """px;
-  width: 100%; height: calc(100% - """ + str(_CHROME_TITLEBAR_HEIGHT) + """px);
+  position: fixed; left: 0; top: """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px;
+  width: 100%; height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT)
+    + """px);
   border: none;
 }
 </style>
@@ -834,7 +847,7 @@ function renderWorkspaces(workspaces) {
   });
   var html = '';
   keys.forEach(function(key) {
-    html += '<div style="padding:6px 16px 2px;font-size:11px;color:#787774;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
+    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
     groups[key].forEach(function(w) {
       html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
     });
@@ -869,6 +882,7 @@ connectSSE();
 </script>
 </body>
 </html>"""
+)
 
 
 _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
@@ -880,24 +894,30 @@ _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #f3f2ef;
+  background: #0f172a;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 0;
+}
+
+h2 {
+  font-size: 15px; color: #e2e8f0; padding: 12px;
+  margin: 0; border-bottom: 1px solid #334155; font-weight: 500;
 }
 
 .sidebar-item {
-  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
 }
-.sidebar-item:hover { background: #edecea; }
+.sidebar-item:hover { background: rgba(255,255,255,0.06); }
 
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
 }
 </style>
 </head>
 <body>
+<h2>Workspaces</h2>
 <div id="sidebar-workspaces">
   <div class="sidebar-empty">No workspaces</div>
 </div>
@@ -927,7 +947,7 @@ function renderWorkspaces(workspaces) {
   });
   var html = '';
   keys.forEach(function(key) {
-    html += '<div style="padding:6px 16px 2px;font-size:11px;color:#787774;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
+    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">' + key + '</div>';
     groups[key].forEach(function(w) {
       html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
     });
