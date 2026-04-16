@@ -17,6 +17,7 @@ from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
 from imbue.mngr.api.gc import ProviderHosts
 from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
+from imbue.mngr.api.gc import _MIN_HOST_AGE_DAYS
 from imbue.mngr.api.gc import _clean_work_dir
 from imbue.mngr.api.gc import _discover_hosts_for_gc
 from imbue.mngr.api.gc import _gc_single_host_work_dir
@@ -37,6 +38,7 @@ from imbue.mngr.api.gc import gc_work_dirs
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -48,6 +50,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
@@ -1985,3 +1988,267 @@ def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, t
 
     # The directory should have been removed via rm -rf fallback.
     assert not work_dir.exists()
+
+
+# =========================================================================
+# gc_machines: online host minimum age and auth error tests
+# =========================================================================
+
+
+class _RemoteHost(Host):
+    """Host subclass that appears remote (is_local=False) with configurable certified data."""
+
+    mock_certified_data: CertifiedHostData | None = None
+
+    @property
+    def is_local(self) -> bool:
+        return False
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        return []
+
+    def get_certified_data(self) -> CertifiedHostData:
+        if self.mock_certified_data is not None:
+            return self.mock_certified_data
+        return super().get_certified_data()
+
+
+class _RemoteAuthErrorOnDiscoverHost(_RemoteHost):
+    """Remote host where discover_agents raises HostAuthenticationError."""
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        raise HostAuthenticationError("simulated auth failure from test")
+
+
+class _RemoteConnectionErrorOnDiscoverHost(_RemoteHost):
+    """Remote host where discover_agents raises HostConnectionError."""
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        raise HostConnectionError("simulated connection failure from test")
+
+
+class _CertifiedDataAuthErrorHost(_RemoteHost):
+    """Remote host where get_certified_data raises HostAuthenticationError."""
+
+    def get_certified_data(self) -> CertifiedHostData:
+        raise HostAuthenticationError("simulated auth error reading certified data from test")
+
+
+class _DestroyableProvider(MockProviderInstance):
+    """MockProviderInstance that supports destroy_host."""
+
+    destroyed_hosts: list[HostId] = []
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        for h in self.mock_hosts:
+            if h.id == host or h.get_name() == host:
+                return h
+        return super().get_host(host)
+
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.destroyed_hosts.append(host_id)
+
+
+def _make_remote_host(
+    provider: LocalProviderInstance,
+    *,
+    created_days_ago: int = 0,
+    host_cls: type[_RemoteHost] = _RemoteHost,
+) -> _RemoteHost:
+    """Create a _RemoteHost (or subclass) with configurable age."""
+    pyinfra_host = provider._create_local_pyinfra_host()
+    connector = PyinfraConnector(pyinfra_host)
+    host_id = HostId.generate()
+    created_at = datetime.now(timezone.utc) - timedelta(days=created_days_ago)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="remote-test-host",
+        created_at=created_at,
+        updated_at=datetime.now(timezone.utc),
+    )
+    return host_cls(
+        id=host_id,
+        connector=connector,
+        provider_instance=provider,
+        mngr_ctx=provider.mngr_ctx,
+        mock_certified_data=certified_data,
+    )
+
+
+def test_gc_machines_skips_young_online_host_with_no_agents(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips online hosts with no agents that are younger than the minimum age."""
+    host = _make_remote_host(local_provider, created_days_ago=7)
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-remote"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_destroys_old_online_host_with_no_agents(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines destroys online hosts with no agents that exceed the minimum age."""
+    host = _make_remote_host(local_provider, created_days_ago=_MIN_HOST_AGE_DAYS + 1)
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-remote-old"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == [host.id]
+
+
+def test_gc_machines_skips_host_on_auth_error_during_discover(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts that raise HostAuthenticationError during discover_agents.
+
+    Previously, auth failures triggered immediate destruction. This was
+    dangerous because a transient SSH failure could destroy a host with
+    running agents (see ssh-password-auth postmortem).
+    """
+    host = _make_remote_host(
+        local_provider,
+        created_days_ago=_MIN_HOST_AGE_DAYS + 1,
+        host_cls=_RemoteAuthErrorOnDiscoverHost,
+    )
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-auth-skip"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_on_connection_error_during_discover(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts that raise HostConnectionError during discover_agents."""
+    host = _make_remote_host(
+        local_provider,
+        created_days_ago=_MIN_HOST_AGE_DAYS + 1,
+        host_cls=_RemoteConnectionErrorOnDiscoverHost,
+    )
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-conn-skip"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_dry_run_identifies_but_does_not_destroy_old_online_host(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines dry run reports old online hosts but does not actually destroy them."""
+    host = _make_remote_host(local_provider, created_days_ago=_MIN_HOST_AGE_DAYS + 1)
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-dry-run"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_when_certified_data_unreadable(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts where get_certified_data fails (cannot determine age)."""
+    host = _make_remote_host(
+        local_provider,
+        host_cls=_CertifiedDataAuthErrorHost,
+    )
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName("test-cert-error"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []

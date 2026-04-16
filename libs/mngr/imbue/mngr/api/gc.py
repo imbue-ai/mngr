@@ -328,15 +328,37 @@ def _gc_single_host(
             agent_refs = host.discover_agents()
             if len(agent_refs) > 0:
                 return
-            host_to_destroy: HostInterface = host
-        except HostAuthenticationError:
-            # hosts that fail to authenticate should be destroyed--we assume all hosts are reachable
-            logger.warning("Failed to authenticate with host during GC, destroying: {}", host.id)
-            host_to_destroy = host.to_offline_host()
+        except HostAuthenticationError as e:
+            # Transient auth failures (network blip, infrastructure hiccup) must
+            # not trigger destruction -- we cannot verify the host has no agents
+            # or determine its age when we cannot authenticate.
+            logger.warning("Failed to authenticate with host {} during GC, skipping: {}", host.id, e)
+            return
         except HostConnectionError as e:
             # we skip hosts that suddenly appear offline for now--it's hard to tell exactly what happened
             logger.warning("Failed to connect to host {} during gc, skipping: {}", host.id, e)
             return
+
+        # Only destroy hosts that are old enough.  Young hosts may be
+        # temporarily empty (e.g. between agent creation and discovery).
+        try:
+            certified_data = host.get_certified_data()
+            host_age_seconds = (datetime.now(timezone.utc) - certified_data.created_at).total_seconds()
+        except (HostAuthenticationError, HostConnectionError, HostOfflineError) as e:
+            # Cannot determine age -- err on the side of caution.
+            logger.warning("Cannot determine age of host {} during GC, skipping: {}", host.id, e)
+            return
+        min_age_seconds = _MIN_HOST_AGE_DAYS * 86400
+        if host_age_seconds < min_age_seconds:
+            logger.trace(
+                "Skipped GC for host {} (age {:.0f}s < minimum {}s)",
+                host.id,
+                host_age_seconds,
+                min_age_seconds,
+            )
+            return
+
+        host_to_destroy: HostInterface = host
 
         if not dry_run:
             mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy, mngr_ctx=mngr_ctx)
@@ -456,6 +478,15 @@ def gc_volumes(
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
 
+
+_MIN_HOST_AGE_DAYS: Final[int] = 30
+"""Minimum age (in days) before GC will destroy an online host.
+
+Hosts younger than this are never destroyed by GC, even if they have no
+agents.  This protects against transient states (e.g. a host that is
+temporarily empty between agent creation and discovery) and against
+aggressive destruction triggered by momentary SSH failures.
+"""
 
 _LOG_MAX_AGE_DAYS: Final[int] = 30
 
