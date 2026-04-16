@@ -195,44 +195,38 @@ def test_build_unresolved_query() -> None:
 # === _parse_unresolved ===
 
 
-def test_parse_unresolved_has_unresolved() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {"isResolved": True},
-                            {"isResolved": False},
-                        ]
-                    }
-                }
-            }
-        }
+def _make_unresolved_response(
+    threads: list[dict[str, object]] | None = None,
+    pr_comments: list[dict[str, object]] | None = None,
+) -> str:
+    """Build a GraphQL response JSON for _parse_unresolved tests."""
+    pr_data: dict[str, object] = {
+        "reviewThreads": {"nodes": threads or []},
     }
-    assert _parse_unresolved(json.dumps(data)) is True
+    if pr_comments is not None:
+        pr_data["comments"] = {"nodes": pr_comments}
+    return json.dumps({"data": {"repository": {"pullRequest": pr_data}}})
+
+
+def _thread(*, resolved: bool = False, last_author: str | None = None) -> dict[str, object]:
+    """Build a review thread node for _parse_unresolved tests."""
+    node: dict[str, object] = {"isResolved": resolved}
+    if last_author is not None:
+        node["comments"] = {"nodes": [{"author": {"login": last_author}}]}
+    return node
+
+
+def test_parse_unresolved_has_unresolved() -> None:
+    data = _make_unresolved_response(threads=[_thread(resolved=True), _thread(resolved=False)])
+    assert _parse_unresolved(data) is True
 
 
 def test_parse_unresolved_all_resolved() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {"isResolved": True},
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data)) is False
+    assert _parse_unresolved(_make_unresolved_response(threads=[_thread(resolved=True)])) is False
 
 
 def test_parse_unresolved_no_threads() -> None:
-    data = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}
-    assert _parse_unresolved(json.dumps(data)) is False
+    assert _parse_unresolved(_make_unresolved_response()) is False
 
 
 def test_parse_unresolved_invalid_json() -> None:
@@ -240,125 +234,35 @@ def test_parse_unresolved_invalid_json() -> None:
 
 
 def test_parse_unresolved_ignore_user_skips_matching_threads() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": [{"author": {"login": "myuser"}}]},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is False
+    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
+    assert _parse_unresolved(data, ignore_user="myuser") is False
 
 
 def test_parse_unresolved_ignore_user_keeps_other_threads() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": [{"author": {"login": "reviewer"}}]},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is True
+    data = _make_unresolved_response(threads=[_thread(last_author="reviewer")])
+    assert _parse_unresolved(data, ignore_user="myuser") is True
 
 
 def test_parse_unresolved_ignore_user_none_counts_all() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": [{"author": {"login": "myuser"}}]},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user=None) is True
+    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
+    assert _parse_unresolved(data, ignore_user=None) is True
 
 
 def test_parse_unresolved_ignore_user_flags_thread_where_someone_else_responded_last() -> None:
     """I started the thread but someone else responded and I haven't replied yet."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": [{"author": {"login": "reviewer"}}]},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is True
+    data = _make_unresolved_response(threads=[_thread(last_author="reviewer")])
+    assert _parse_unresolved(data, ignore_user="myuser") is True
 
 
 def test_parse_unresolved_ignore_user_skips_thread_where_i_responded_last() -> None:
     """Someone else started the thread but I already replied."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": [{"author": {"login": "myuser"}}]},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is False
+    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
+    assert _parse_unresolved(data, ignore_user="myuser") is False
 
 
 def test_parse_unresolved_ignore_user_empty_comments_counts_as_unresolved() -> None:
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {
-                        "nodes": [
-                            {
-                                "isResolved": False,
-                                "comments": {"nodes": []},
-                            },
-                        ]
-                    }
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is True
+    node: dict[str, object] = {"isResolved": False, "comments": {"nodes": []}}
+    assert _parse_unresolved(_make_unresolved_response(threads=[node]), ignore_user="myuser") is True
 
 
 # --- PR conversation comments ---
@@ -366,62 +270,26 @@ def test_parse_unresolved_ignore_user_empty_comments_counts_as_unresolved() -> N
 
 def test_parse_unresolved_pr_comment_by_other_flags_unresolved() -> None:
     """Last PR conversation comment is by someone else -- needs response."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {"nodes": []},
-                    "comments": {"nodes": [{"author": {"login": "reviewer"}}]},
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is True
+    data = _make_unresolved_response(pr_comments=[{"author": {"login": "reviewer"}}])
+    assert _parse_unresolved(data, ignore_user="myuser") is True
 
 
 def test_parse_unresolved_pr_comment_by_me_not_flagged() -> None:
     """Last PR conversation comment is by me -- I already replied."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {"nodes": []},
-                    "comments": {"nodes": [{"author": {"login": "myuser"}}]},
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is False
+    data = _make_unresolved_response(pr_comments=[{"author": {"login": "myuser"}}])
+    assert _parse_unresolved(data, ignore_user="myuser") is False
 
 
 def test_parse_unresolved_pr_comment_not_checked_without_ignore_user() -> None:
     """Without ignore_user, PR conversation comments are not checked."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {"nodes": []},
-                    "comments": {"nodes": [{"author": {"login": "reviewer"}}]},
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user=None) is False
+    data = _make_unresolved_response(pr_comments=[{"author": {"login": "reviewer"}}])
+    assert _parse_unresolved(data, ignore_user=None) is False
 
 
 def test_parse_unresolved_no_pr_comments_is_clean() -> None:
     """No PR conversation comments and no unresolved threads -- clean."""
-    data = {
-        "data": {
-            "repository": {
-                "pullRequest": {
-                    "reviewThreads": {"nodes": []},
-                    "comments": {"nodes": []},
-                }
-            }
-        }
-    }
-    assert _parse_unresolved(json.dumps(data), ignore_user="myuser") is False
+    data = _make_unresolved_response(pr_comments=[])
+    assert _parse_unresolved(data, ignore_user="myuser") is False
 
 
 # === _fetch_repo_prs ===
@@ -522,9 +390,7 @@ def test_compute_agents_with_cached_repo_path() -> None:
 
 def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
     """When no PR found, CreatePrUrlField should be placed in the 'pr' slot."""
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=True, ci=True, create_pr_url=True, conflicts=False, unresolved=False)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=False, unresolved=False))
     agent = make_agent_details(
         name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
     )
@@ -555,9 +421,7 @@ def test_compute_pr_fetch_error_adds_error() -> None:
 
 def test_compute_with_conflicts_and_unresolved() -> None:
     """Full compute with conflicts and unresolved metadata fetching."""
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=True, ci=True, create_pr_url=False, conflicts=True, unresolved=True)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=True, unresolved=True))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
 
     open_pr_json = _make_open_pr_json(1, "branch-1")
@@ -599,9 +463,7 @@ def test_compute_with_conflicts_and_unresolved() -> None:
 
 
 def test_compute_disabled_pr_and_ci() -> None:
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=False, ci=False, create_pr_url=False, conflicts=False, unresolved=False)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False, conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = make_mngr_ctx_with_cg(cg)
