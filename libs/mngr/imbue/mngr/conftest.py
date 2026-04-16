@@ -40,6 +40,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.testing import TEST_SLEEP_AGENT_TYPE
+from imbue.mngr.utils.testing import TEST_SLEEP_COMMAND
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -252,7 +253,7 @@ def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
         prefix=mngr_test_prefix,
         is_error_reporting_enabled=False,
         agent_types={
-            AgentTypeName(TEST_SLEEP_AGENT_TYPE): AgentTypeConfig(command=CommandString("sleep 99999")),
+            AgentTypeName(TEST_SLEEP_AGENT_TYPE): AgentTypeConfig(command=CommandString(TEST_SLEEP_COMMAND)),
         },
     )
 
