@@ -29,9 +29,9 @@ _generate-dockerignore:
     grep -v 'current\.tar\.gz' .gitignore > .dockerignore
     echo '.git/' >> .dockerignore
     echo '.offload-image-cache' >> .dockerignore
-    echo '.offload-cache-key' >> .dockerignore
-    echo '.offload-acceptance-cache-key' >> .dockerignore
-    echo '.offload-release-cache-key' >> .dockerignore
+    # Glob covers .offload-cache-key and every per-target .offload-<target>-cache-key
+    # file so adding a new test-offload-<target> recipe doesn't require editing here.
+    echo '.offload-*cache-key' >> .dockerignore
 
 # Run tests on Modal via Offload
 test-offload args="":
