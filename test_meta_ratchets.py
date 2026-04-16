@@ -139,6 +139,39 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+def test_no_ruff_lint_errors_repo_wide() -> None:
+    """Ensure all Python files pass ruff lint and format checks repo-wide.
+
+    Runs both ruff check and ruff format --check over the entire repo root.
+    Per-project test_ratchets.py files also run ruff check within each project;
+    this test acts as a CI backstop for the pre-commit hook and additionally
+    covers repo-root and scripts/ files.
+    """
+    fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
+    errors: list[str] = []
+
+    lint = subprocess.run(
+        ["uv", "run", "ruff", "check", "--force-exclude", "--config", "pyproject.toml"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if lint.returncode != 0:
+        errors.append("Lint errors:\n" + lint.stdout)
+
+    fmt = subprocess.run(
+        ["uv", "run", "ruff", "format", "--check", "--force-exclude", "--config", "pyproject.toml"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if fmt.returncode != 0:
+        errors.append("Format errors:\n" + fmt.stdout)
+
+    if errors:
+        raise AssertionError("\n".join(errors) + "\n" + fix_hint)
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling."""
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)

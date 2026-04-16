@@ -1,7 +1,9 @@
+import hashlib
 import os
 import select
 import shlex
 import socket
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -27,6 +29,12 @@ _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
 _SOCKET_POLL_SECONDS: Final[float] = 0.01
 
 _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
+
+# Maximum AF_UNIX socket path length, conservative across macOS and Linux.
+# macOS sun_path is 104 bytes, Linux is 108. Python's socket.bind rejects
+# paths >= sizeof(sun_path) (it wants room for a NUL terminator), so the
+# usable max is 103 on macOS and 107 on Linux. We use 103 to be portable.
+_MAX_AF_UNIX_PATH_LENGTH: Final[int] = 103
 
 
 class RemoteSSHInfo(FrozenModel):
@@ -97,9 +105,17 @@ class SSHTunnelManager(MutableModel):
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
 
     def _get_tmpdir(self) -> Path:
-        """Get or create the secure temporary directory for Unix sockets."""
+        """Get or create the secure temporary directory for Unix sockets.
+
+        On macOS, $TMPDIR is a long per-user path under /var/folders/... that
+        can push AF_UNIX socket paths over the 104-byte sun_path limit. We use
+        /tmp directly on Darwin to keep socket paths short. The directory is
+        chmodded to 0o700 and contains only 0o600 sockets, so sharing /tmp with
+        other users on the machine is safe.
+        """
         if self._tmpdir is None:
-            self._tmpdir = tempfile.TemporaryDirectory(prefix="minds-ssh-")
+            base_dir = "/tmp" if sys.platform == "darwin" else None
+            self._tmpdir = tempfile.TemporaryDirectory(prefix="minds-ssh-", dir=base_dir)
             os.chmod(self._tmpdir.name, 0o700)
         return Path(self._tmpdir.name)
 
@@ -147,7 +163,13 @@ class SSHTunnelManager(MutableModel):
 
             client = self._get_or_create_connection(ssh_info)
             transport = _ssh_connection_transport(client)
-            socket_path = self._get_tmpdir() / f"tunnel-{tunnel_key.replace(':', '-').replace('>', '')}.sock"
+            # Use a short hash of tunnel_key for the filename. Encoding the full
+            # tunnel_key produces paths that can exceed AF_UNIX's 104-byte
+            # sun_path limit on macOS, especially with long hostnames or IPv6
+            # addresses. 12 hex chars (48 bits) is ample to avoid collisions
+            # between tunnels within a single manager instance.
+            tunnel_id = hashlib.blake2b(tunnel_key.encode(), digest_size=6).hexdigest()
+            socket_path = self._get_tmpdir() / f"t-{tunnel_id}.sock"
 
             if socket_path.exists():
                 socket_path.unlink()
