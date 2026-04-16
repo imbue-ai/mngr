@@ -68,8 +68,7 @@ ENV UV_LINK_MODE=copy
 # ---- Docker daemon startup scripts ----
 COPY libs/mngr/imbue/mngr/resources/start-dockerd.sh /start-dockerd.sh
 COPY libs/mngr/imbue/mngr/resources/ensure-dockerd.sh /ensure-dockerd.sh
-COPY libs/mngr/imbue/mngr/resources/run-with-docker.sh /run-with-docker.sh
-RUN chmod +x /start-dockerd.sh /ensure-dockerd.sh /run-with-docker.sh
+RUN chmod +x /start-dockerd.sh /ensure-dockerd.sh
 
 # copy in all of our code:
 COPY . /code/
