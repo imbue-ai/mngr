@@ -1118,7 +1118,7 @@ class Host(BaseHost, OnlineHostInterface):
         if branch is None:
             raise AgentStartError(
                 str(agent.name),
-                f"Work directory {agent.work_dir} does not exist",
+                f"Work directory {agent.work_dir} does not exist and no branch is recorded",
             )
 
         raise AgentStartError(
