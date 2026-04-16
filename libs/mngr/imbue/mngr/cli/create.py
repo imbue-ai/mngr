@@ -646,9 +646,9 @@ def create(ctx: click.Context, **kwargs) -> None:
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
-        # Validate conflicting agent types early so both the headless and normal
-        # paths reject them (the normal path re-checks inside _parse_agent_opts,
-        # but the headless path returns before reaching that code).
+        # Validate conflicting agent types early (before the headless path
+        # returns). This is the single check; _parse_agent_opts uses the
+        # shared _resolve_agent_type_name helper which assumes no conflict.
         if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
             raise UserInputError(
                 f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
@@ -1493,14 +1493,8 @@ def _parse_agent_opts(
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
     # Determine agent type using the shared resolution logic.
+    # Conflicting types are already validated in the create() entry point.
     resolved_agent_args = opts.agent_args
-
-    if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
-        raise UserInputError(
-            f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
-            f"but --type says '{opts.type}'. Use one or the other."
-        )
-
     resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
 
     is_clone = source_agent_state_dir is not None
