@@ -274,9 +274,9 @@ def test_create_modal_snapshot(e2e: E2eSession) -> None:
     )
     expect(result).to_fail()
     combined = result.stdout + result.stderr
-    expect(combined).to_match(
-        r"(?i)snapshot.*not found|no.*snapshot|snapshot.*snap-123abc|snap-123abc|host creation failed"
-    )
+    # Require contextual evidence that the failure is snapshot-related; a bare
+    # "snap-123abc" alternative would match command echoes on any unrelated failure.
+    expect(combined).to_match(r"(?i)snapshot.*not found|no.*snapshot|snapshot.*snap-123abc|host creation failed")
 
 
 @pytest.mark.release
