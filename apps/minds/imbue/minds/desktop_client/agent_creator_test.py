@@ -20,6 +20,7 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AgentName
+from imbue.minds.primitives import AgentType
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -91,6 +92,7 @@ def test_build_mngr_create_command_dev_mode() -> None:
         launch_mode=LaunchMode.DEV,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
     )
     assert "--template" in cmd
     assert "dev" in cmd
@@ -113,6 +115,7 @@ def test_build_mngr_create_command_local_mode() -> None:
         launch_mode=LaunchMode.LOCAL,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
     )
     assert "--template" in cmd
     assert "docker" in cmd
@@ -131,6 +134,7 @@ def test_build_mngr_create_command_lima_mode() -> None:
         launch_mode=LaunchMode.LIMA,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
     )
     assert "--template" in cmd
     assert "lima" in cmd
@@ -149,6 +153,7 @@ def test_build_mngr_create_command_cloud_mode() -> None:
         launch_mode=LaunchMode.CLOUD,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
     )
     assert "--template" in cmd
     assert "vultr" in cmd
@@ -160,6 +165,37 @@ def test_build_mngr_create_command_cloud_mode() -> None:
     assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # CLOUD mode: address includes host name with vultr provider suffix
     assert cmd[2] == "test-agent@test-agent-host.vultr"
+
+
+def test_build_mngr_create_command_hermes_selects_hermes_main_template() -> None:
+    """For a hermes agent, the main template should be hermes_main, not main."""
+    cmd, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        agent_type=AgentType.HERMES,
+    )
+    assert "hermes_main" in cmd
+    # The mode template is shared with claude; only the main template switches.
+    assert "docker" in cmd
+    # "main" appears inside "hermes_main"; check that it never appears as a
+    # standalone template argument.
+    template_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--template"]
+    assert "hermes_main" in template_args
+    assert "main" not in template_args
+
+
+def test_build_mngr_create_command_claude_uses_main_template() -> None:
+    """Sanity check that claude still uses the plain `main` template."""
+    cmd, _ = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
+    )
+    template_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--template"]
+    assert "main" in template_args
+    assert "hermes_main" not in template_args
 
 
 # -- clone_git_repo tests --
@@ -321,6 +357,7 @@ def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:
             workspace_dir=tmp_path,
             agent_name=AgentName("test"),
             agent_id=AgentId(),
+            agent_type=AgentType.CLAUDE,
         )
 
 

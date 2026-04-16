@@ -38,6 +38,7 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AgentName
+from imbue.minds.primitives import AgentType
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -221,20 +222,42 @@ def _make_host_name(agent_name: AgentName) -> str:
     return f"{agent_name}-host"
 
 
+def _main_template_for_agent_type(agent_type: AgentType) -> str:
+    """Return the create-template name for the agent runtime's main template.
+
+    Both templates compose with the mode template (dev/docker/lima/vultr) the
+    same way, but set a different agent type and run a different setup script
+    via ``extra_provision_command``.
+    """
+    match agent_type:
+        case AgentType.CLAUDE:
+            return "main"
+        case AgentType.HERMES:
+            return "hermes_main"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
     agent_id: AgentId,
+    agent_type: AgentType,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
     Returns (command_list, api_key) where api_key is a UUID4 string injected
     as MINDS_API_KEY into the agent's environment via --env.
 
-    DEV mode: --template main --template dev (runs in-place on local provider)
-    LOCAL mode: --template main --template docker (runs in Docker container)
-    LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    The agent type selects between the ``main`` (Claude Code) and
+    ``hermes_main`` templates defined in the workspace repo's
+    ``.mngr/settings.toml``. The mode template (dev/docker/lima/vultr) is
+    agent-agnostic.
+
+    DEV mode: --template <main|hermes_main> --template dev (runs in-place on local provider)
+    LOCAL mode: --template <main|hermes_main> --template docker (runs in Docker container)
+    LIMA mode: --template <main|hermes_main> --template lima (runs in Lima VM)
+    CLOUD mode: --template <main|hermes_main> --template vultr (runs in Docker on a Vultr VPS)
 
     For modes that create a separate host (LOCAL, LIMA, CLOUD), the agent address
     uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
@@ -273,7 +296,7 @@ def _build_mngr_create_command(
         "--label",
         "is_primary=true",
         "--template",
-        "main",
+        _main_template_for_agent_type(agent_type),
     ]
 
     match launch_mode:
@@ -296,6 +319,7 @@ def run_mngr_create(
     workspace_dir: Path,
     agent_name: AgentName,
     agent_id: AgentId,
+    agent_type: AgentType,
     on_output: OutputCallback | None = None,
 ) -> str:
     """Create an mngr agent via ``mngr create``.
@@ -306,7 +330,7 @@ def run_mngr_create(
     Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
-    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id)
+    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id, agent_type)
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -354,6 +378,7 @@ class AgentCreator(MutableModel):
         agent_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
+        agent_type: AgentType = AgentType.CLAUDE,
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -371,7 +396,7 @@ class AgentCreator(MutableModel):
 
         thread = threading.Thread(
             target=self._create_agent_background,
-            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode),
+            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode, agent_type),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
         )
@@ -413,12 +438,19 @@ class AgentCreator(MutableModel):
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
+        agent_type: AgentType,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
         emit_log = make_log_callback(log_queue)
         try:
-            with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
+            with log_span(
+                "Creating agent {} from {} (mode: {}, type: {})",
+                agent_id,
+                repo_source,
+                launch_mode,
+                agent_type,
+            ):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -463,12 +495,17 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.CREATING
 
                 parsed_name = AgentName(agent_name)
-                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
+                log_queue.put(
+                    "[minds] Creating agent '{}' (mode: {}, type: {})...".format(
+                        agent_name, launch_mode.value, agent_type.value
+                    )
+                )
                 api_key = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     agent_id=agent_id,
+                    agent_type=agent_type,
                     on_output=emit_log,
                 )
 

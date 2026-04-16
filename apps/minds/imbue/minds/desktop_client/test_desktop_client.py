@@ -1448,6 +1448,71 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "dev" in response.text
 
 
+def test_create_form_shows_agent_type_dropdown(tmp_path: Path) -> None:
+    """GET /create form includes the agent type dropdown."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert "agent_type" in response.text
+    assert "claude" in response.text
+    assert "hermes" in response.text
+
+
+def test_create_form_submit_passes_agent_type(tmp_path: Path) -> None:
+    """POST /create accepts an agent_type field."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "DEV",
+            "agent_type": "HERMES",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_passes_agent_type(tmp_path: Path) -> None:
+    """POST /api/create-agent accepts an agent_type field."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "DEV",
+            "agent_type": "HERMES",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "agent_id" in data
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_rejects_invalid_agent_type(tmp_path: Path) -> None:
+    """POST /api/create-agent returns 400 for an invalid agent_type."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "agent_name": "my-agent",
+            "launch_mode": "DEV",
+            "agent_type": "NOT_A_REAL_TYPE",
+        },
+    )
+    assert response.status_code == 400
+    assert "Invalid agent_type" in response.json()["error"]
+
+
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     """Unhandled exceptions in routes produce a 500 response with the error message."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
