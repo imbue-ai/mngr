@@ -15,6 +15,7 @@ from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.repo_paths import _parse_github_repo_path
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
@@ -399,17 +400,12 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
     assert "shell_my_cmd" in names
 
 
-def test_plugin_kanpan_data_sources_github_config_as_dict() -> None:
-    # GitHub config as a raw dict (tests the isinstance dict branch in plugin.py)
-    ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
-        get_plugin_config=lambda name, cls: SimpleNamespace(
-            data_sources={"github": {"enabled": True, "pr": True}},
-            shell_commands={},
-            columns={},
-        )
-    )
+def test_plugin_kanpan_data_sources_with_github_config() -> None:
+    config = KanpanPluginConfig(data_sources={"github": GitHubDataSourceConfig(pr=True)})
+    ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
+    assert any(s.name == "github" for s in result)
 
 
 def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:

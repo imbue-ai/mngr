@@ -17,7 +17,6 @@ from imbue.mngr_kanpan.data_sources.labels import LabelsDataSource
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
-from imbue.mngr_kanpan.data_types import DataSourceConfig
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 
@@ -26,11 +25,9 @@ register_plugin_config("kanpan", KanpanPluginConfig)
 
 def _is_source_enabled(config: KanpanPluginConfig, name: str) -> bool:
     """Check if a data source is enabled in the plugin config."""
-    raw = config.data_sources.get(name)
-    if isinstance(raw, dict):
-        return raw.get("enabled", True)
-    if isinstance(raw, DataSourceConfig):
-        return raw.enabled
+    source_config = config.data_sources.get(name)
+    if source_config is not None:
+        return source_config.enabled
     return True
 
 
