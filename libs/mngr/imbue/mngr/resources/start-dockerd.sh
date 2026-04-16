@@ -59,8 +59,8 @@ if [ "$nat_ok" = false ]; then
 fi
 
 # gVisor doesn't support nftables yet (https://github.com/google/gvisor/issues/10510).
-update-alternatives --set iptables /usr/sbin/iptables-legacy
-update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+# The iptables/ip6tables alternatives are pinned to the legacy backend at image
+# build time in Dockerfile.release, so no runtime update-alternatives call is needed here.
 
 # Disable IPv6 in dockerd -- Modal sandbox IPv6 routing to Docker Hub
 # (registry-1.docker.io, auth.docker.io) is unreliable, causing
