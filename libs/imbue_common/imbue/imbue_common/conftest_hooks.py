@@ -621,8 +621,9 @@ def _pytest_configure(config: pytest.Config) -> None:
 
     # Suppress coverage terminal output when redirecting to file
     if coverage_to_file:
-        # Remove term-missing from cov_report options to suppress terminal output
-        # but keep html and xml reports
+        # Remove term-missing from cov_report options to suppress terminal output.
+        # Any non-terminal reports (e.g. xml, html) stay in place so they are still
+        # written to disk.
         cov_report = getattr(config.option, "cov_report", None)
         if cov_report is not None and isinstance(cov_report, dict):
             cov_report.pop("term-missing", None)
