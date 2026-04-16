@@ -115,7 +115,7 @@ test-release:
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
+  PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
 
 # useful for running against a single test, regardless of how it is marked
 test target:
