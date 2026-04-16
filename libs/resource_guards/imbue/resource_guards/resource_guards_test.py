@@ -40,8 +40,14 @@ from imbue.resource_guards.resource_guards import (
     stop_resource_guards,
 )
 
-# Clear inherited guard state so we create fresh wrappers for our resources.
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+# Clear inherited guard state so the child creates fresh wrappers.
+# Must also strip the outer wrapper dir from PATH, otherwise the outer
+# wrapper scripts (still first on PATH) shadow the child's wrappers.
+_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+if _outer_dir:
+    os.environ["PATH"] = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
+    )
 
 register_resource_guard("cat")
 
@@ -741,8 +747,12 @@ from imbue.resource_guards.resource_guards import (
     stop_resource_guards,
 )
 
-# Clear inherited guard state so we create fresh wrappers.
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+# Clear inherited guard state and strip outer wrapper dir from PATH.
+_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+if _outer_dir:
+    os.environ["PATH"] = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
+    )
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "test_sdk: test uses test_sdk")
@@ -852,8 +862,12 @@ import os
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 
-# Clear inherited guard state so we create fresh wrappers for our resources.
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+# Clear inherited guard state and strip outer wrapper dir from PATH.
+_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+if _outer_dir:
+    os.environ["PATH"] = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
+    )
 
 register_resource_guard("cat")
 
@@ -896,7 +910,12 @@ from imbue.resource_guards.resource_guards import (
     stop_resource_guards,
 )
 
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+# Clear inherited guard state and strip outer wrapper dir from PATH.
+_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
+if _outer_dir:
+    os.environ["PATH"] = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
+    )
 
 register_resource_guard("cat")
 
