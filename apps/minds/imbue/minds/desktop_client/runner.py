@@ -293,22 +293,36 @@ def _init_supertokens(
     return session_store
 
 
-def _build_cloudflare_client(forwarding_url: AnyUrl) -> CloudflareForwardingClient:
+def _build_cloudflare_client(forwarding_url: AnyUrl) -> CloudflareForwardingClient | None:
     """Build a CloudflareForwardingClient from minds config + env-var-only auth fields.
 
     The forwarding URL always comes from MindsConfig (with built-in default).
     Basic auth credentials (username, secret, owner_email) stay env-var-only
-    because they are secrets; if unset, Basic Auth is unavailable and callers
-    must use the SuperTokens-enriched client path instead.
+    because they are secrets. If both username and secret are unset the
+    resulting client has no usable auth mode on its own, so we return None
+    instead -- callers (api_v1.get_cf_client_with_auth) already handle the
+    ``None`` case by building a SuperTokens-enriched client from scratch using
+    ``minds_config.cloudflare_forwarding_url``. Returning None also preserves
+    the pre-existing ``app.state.cloudflare_client is None`` check in
+    app.py:_handle_agent_servers_page, which skips unauthenticated calls on
+    the raw client.
     """
     username = os.environ.get("CLOUDFLARE_FORWARDING_USERNAME")
     secret = os.environ.get("CLOUDFLARE_FORWARDING_SECRET")
     owner_email = os.environ.get("OWNER_EMAIL")
 
+    if not (username and secret):
+        logger.info(
+            "Cloudflare Basic Auth not configured "
+            "(CLOUDFLARE_FORWARDING_USERNAME/CLOUDFLARE_FORWARDING_SECRET unset); "
+            "raw Cloudflare client disabled. SuperTokens-enriched client will be used when a user is signed in."
+        )
+        return None
+
     return CloudflareForwardingClient(
         forwarding_url=CloudflareForwardingUrl(str(forwarding_url)),
-        username=CloudflareUsername(username) if username else None,
-        secret=CloudflareSecret(secret) if secret else None,
+        username=CloudflareUsername(username),
+        secret=CloudflareSecret(secret),
         owner_email=OwnerEmail(owner_email) if owner_email else None,
     )
 

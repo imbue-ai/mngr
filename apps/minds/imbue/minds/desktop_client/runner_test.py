@@ -48,8 +48,13 @@ def test_agent_discovery_handler_callable(tmp_path: Path) -> None:
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_returns_client_with_only_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without auth env vars, client is still built (URL comes from minds config)."""
+def test_build_cloudflare_client_returns_none_without_basic_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without CLOUDFLARE_FORWARDING_USERNAME/SECRET, the raw client is None.
+
+    The SuperTokens-enriched client is built from scratch in
+    api_v1.get_cf_client_with_auth using minds_config.cloudflare_forwarding_url,
+    so callers do not need a raw client just to hit Cloudflare via SuperTokens.
+    """
     for key in (
         "CLOUDFLARE_FORWARDING_USERNAME",
         "CLOUDFLARE_FORWARDING_SECRET",
@@ -58,10 +63,17 @@ def test_build_cloudflare_client_returns_client_with_only_url(monkeypatch: pytes
         monkeypatch.delenv(key, raising=False)
     forwarding_url = AnyUrl("https://example.com/")
     result = _build_cloudflare_client(forwarding_url)
-    assert result is not None
-    assert result.username is None
-    assert result.secret is None
-    assert result.owner_email is None
+    assert result is None
+
+
+def test_build_cloudflare_client_returns_none_without_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Username set but secret unset: Basic Auth is still unusable, so no raw client."""
+    monkeypatch.setenv("CLOUDFLARE_FORWARDING_USERNAME", "user")
+    monkeypatch.delenv("CLOUDFLARE_FORWARDING_SECRET", raising=False)
+    monkeypatch.delenv("OWNER_EMAIL", raising=False)
+    forwarding_url = AnyUrl("https://example.com/")
+    result = _build_cloudflare_client(forwarding_url)
+    assert result is None
 
 
 def test_build_cloudflare_client_reads_auth_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
