@@ -151,6 +151,19 @@ T = TypeVar("T")
 
 
 @pure
+def _is_environment_not_found_error(e: ModalProxyNotFoundError) -> bool:
+    """Check if a ModalProxyNotFoundError is an environment-level error.
+
+    Modal uses ModalProxyNotFoundError for both "path doesn't exist on volume"
+    and "environment doesn't exist." The former is expected during normal
+    operations (e.g. listing a directory that hasn't been created yet); the
+    latter indicates the Modal environment is gone and should propagate to
+    retry / error-handling layers rather than being silently swallowed.
+    """
+    return "Environment" in str(e)
+
+
+@pure
 def _is_sandbox_timeout(exc: BaseException) -> bool:
     """Check if an exception (or its cause chain) indicates a Modal sandbox timeout."""
     current: BaseException | None = exc
@@ -610,7 +623,11 @@ class ModalProviderInstance(BaseProviderInstance):
             # Cache the result
             self._host_record_cache_by_id[host_id] = host_record
             return host_record
-        except (ModalProxyNotFoundError, FileNotFoundError):
+        except ModalProxyNotFoundError as e:
+            if _is_environment_not_found_error(e):
+                raise
+            return None
+        except FileNotFoundError:
             return None
 
     def _destroy_agents_on_host(self, host_id: HostId) -> None:
@@ -697,7 +714,11 @@ class ModalProviderInstance(BaseProviderInstance):
                 with log_span("Listing /hosts/ directory on state volume"):
                     try:
                         entries = volume.listdir("/hosts/")
-                    except (ModalProxyNotFoundError, FileNotFoundError):
+                    except ModalProxyNotFoundError as e:
+                        if _is_environment_not_found_error(e):
+                            raise
+                        entries = []
+                    except FileNotFoundError:
                         entries = []
                 logger.debug("Found {} entries in /hosts/ on state volume", len(entries))
 
@@ -734,8 +755,12 @@ class ModalProviderInstance(BaseProviderInstance):
         host_dir = f"/hosts/{host_id}"
         try:
             entries = volume.listdir(host_dir)
-        except (ModalProxyNotFoundError, FileNotFoundError):
+        except ModalProxyNotFoundError as e:
+            if _is_environment_not_found_error(e):
+                raise
             # Host directory doesn't exist yet (no agents persisted for this host)
+            return agent_records
+        except FileNotFoundError:
             return agent_records
 
         for entry in entries:
@@ -745,8 +770,12 @@ class ModalProviderInstance(BaseProviderInstance):
                 agent_path = filename.lstrip("/")
                 try:
                     content = volume.read_file(agent_path)
-                except (ModalProxyNotFoundError, FileNotFoundError):
+                except ModalProxyNotFoundError as e:
+                    if _is_environment_not_found_error(e):
+                        raise
                     # File was deleted between listdir and read (TOCTOU race on distributed volume)
+                    continue
+                except FileNotFoundError:
                     continue
                 try:
                     agent_data = json.loads(content.decode("utf-8"))
