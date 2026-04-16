@@ -16,15 +16,19 @@ dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 type = "pytest"
 paths = ["."]
 command = "uv run pytest"
-run_args = "--no-cov -p no:xdist -o addopts="
+run_args = "--cov --cov-fail-under=0 -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 0
-# Exclude acceptance and release tests
 filters = "-m 'not acceptance and not release'"
+# When flaky tests exist, add a [groups.flaky] section:
+# [groups.flaky]
+# retry_count = 5
+# filters = "-m 'flaky and not acceptance and not release'"
+# and add 'and not flaky' to the groups.all filter above.
 
 [report]
 output_dir = "test-results"
 junit = true
 junit_file = "junit.xml"
-download_globs = [".test_output/**"]
+download_globs = [".test_output/**", ".coverage*"]

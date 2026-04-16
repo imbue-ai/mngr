@@ -846,6 +846,67 @@ def test_http_proxy_without_tunnel_manager_works_for_local_backend(tmp_path: Pat
     assert response.json() == {"status": "ok"}
 
 
+# -- Backend not-yet-ready handling tests --
+
+
+class _DisconnectingTransport(httpx.AsyncBaseTransport):
+    """Transport that always raises RemoteProtocolError, simulating a backend
+    that accepted the TCP connection but hung up before sending any HTTP data.
+
+    This is what httpx surfaces when an SSH tunnel forwards to a port whose
+    server hasn't finished binding yet (e.g. uvicorn still starting up): the
+    SSH channel-open to the backend port fails and the tunnel relay closes
+    the local socket without writing anything.
+    """
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+
+
+def _setup_disconnecting_backend_server(
+    tmp_path: Path,
+) -> tuple[TestClient, FileAuthStore, AgentId]:
+    """Set up a desktop client whose backend always raises RemoteProtocolError."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {str(DEFAULT_SERVER_NAME): "http://test-backend"}},
+    )
+    http_client = httpx.AsyncClient(transport=_DisconnectingTransport(), base_url="http://test-backend")
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=http_client,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+    return client, auth_store, agent_id
+
+
+def test_http_proxy_returns_loading_page_when_backend_disconnects_html(tmp_path: Path) -> None:
+    """When the backend hangs up without sending a response, HTML requests get the loading page."""
+    client, _, agent_id = _setup_disconnecting_backend_server(tmp_path)
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    response = client.get(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        headers={"Accept": "text/html"},
+    )
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    assert "location.reload()" in response.text
+
+
+def test_http_proxy_returns_502_when_backend_disconnects_non_html(tmp_path: Path) -> None:
+    """When the backend hangs up without sending a response, non-HTML requests get a 502."""
+    client, _, agent_id = _setup_disconnecting_backend_server(tmp_path)
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    response = client.get(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
+        headers={"Accept": "application/json"},
+    )
+    assert response.status_code == 502
+
+
 # -- Backend URL with query string tests --
 
 

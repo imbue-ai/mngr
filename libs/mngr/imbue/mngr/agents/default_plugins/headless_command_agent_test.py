@@ -123,6 +123,7 @@ def test_stream_output_yields_raw_text(
     assert "".join(chunks) == "Hello world!\nLine 2\n"
 
 
+@pytest.mark.tmux
 def test_stream_output_raises_when_empty_file(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
@@ -135,6 +136,7 @@ def test_stream_output_raises_when_empty_file(
         list(agent.stream_output())
 
 
+@pytest.mark.tmux
 def test_stream_output_raises_when_stdout_file_missing(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
@@ -142,8 +144,8 @@ def test_stream_output_raises_when_stdout_file_missing(
 ) -> None:
     """stream_output raises when the stdout file is never created (agent exits immediately).
 
-    Creates only stderr.log (empty) to avoid triggering the tmux pane capture
-    fallback, while still exercising the _wait_for_stdout_file -> _raise_no_output_error path.
+    Creates only stderr.log (empty) so the error chain falls through to
+    pane capture (which fails -- no tmux session), then hits "no details available".
     """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     agent_dir = agent._get_agent_dir()
