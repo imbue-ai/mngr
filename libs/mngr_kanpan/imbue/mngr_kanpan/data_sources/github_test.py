@@ -1,10 +1,7 @@
 import json
-from types import SimpleNamespace
-from typing import cast
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
@@ -36,6 +33,7 @@ from imbue.mngr_kanpan.data_sources.github import _pr_priority
 from imbue.mngr_kanpan.data_sources.github import fetch_all_prs
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
+from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 
 
 def _make_internal_pr(
@@ -488,14 +486,10 @@ def test_fetch_repo_prs_error() -> None:
 # === GitHubDataSource.compute ===
 
 
-def _make_mock_mngr_ctx(cg: MagicMock) -> MngrContext:
-    return cast(MngrContext, SimpleNamespace(concurrency_group=cg))
-
-
 def test_compute_no_agents() -> None:
     ds = GitHubDataSource()
     cg = MagicMock()
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(), cached_fields={}, mngr_ctx=ctx)
     assert fields == {}
     assert errors == []
@@ -504,7 +498,7 @@ def test_compute_no_agents() -> None:
 def test_compute_agents_without_repo() -> None:
     ds = GitHubDataSource()
     cg = MagicMock()
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="mngr/test", labels={})
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert fields == {}
@@ -516,7 +510,7 @@ def test_compute_agents_with_cached_repo_path() -> None:
     ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
     # Use a cg that returns a PR for branch-1
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     # Provide repo path via label (simpler than full cached repo_path)
     agent_with_label = make_agent_details(
         name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
@@ -537,7 +531,7 @@ def test_compute_no_pr_for_branch_generates_create_url() -> None:
     )
     # Return empty PR list so no PRs exist for branch
     cg = _make_fetch_cg("[]", "[]")
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name in fields
     assert FIELD_CREATE_PR_URL in fields[agent.name]
@@ -555,7 +549,7 @@ def test_compute_pr_fetch_error_adds_error() -> None:
     fail_proc.read_stderr.return_value = "HTTP 504"
     fail_proc.returncode = 1
     cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert len(errors) > 0
 
@@ -595,7 +589,7 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     # First 2 calls for PR fetching, next 2 for metadata
     cg.run_process_in_background.side_effect = [pr_open_proc, pr_all_proc, conflicts_proc, unresolved_proc]
 
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name in fields
     assert FIELD_PR in fields[agent.name]
@@ -611,7 +605,7 @@ def test_compute_disabled_pr_and_ci() -> None:
     )
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = _make_mock_mngr_ctx(cg)
+    ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     # pr=False means no FIELD_PR; ci=False means no FIELD_CI
     agent_fields = fields.get(agent.name, {})

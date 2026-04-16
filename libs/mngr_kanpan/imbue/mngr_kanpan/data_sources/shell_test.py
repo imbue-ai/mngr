@@ -1,8 +1,4 @@
-from types import SimpleNamespace
-from typing import cast
-
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
@@ -14,6 +10,7 @@ from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_sources.shell import _build_shell_env
 from imbue.mngr_kanpan.testing import make_agent_details
+from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 
 
 def test_build_shell_env_basic() -> None:
@@ -76,20 +73,14 @@ def test_build_shell_env_with_other_field() -> None:
 # === compute ===
 
 
-def _make_real_mngr_ctx(cg: ConcurrencyGroup) -> MngrContext:
-    """Build a minimal mngr_ctx with a real active ConcurrencyGroup."""
-    return cast(MngrContext, SimpleNamespace(concurrency_group=cg))
-
-
-def test_compute_success() -> None:
+def test_compute_success(test_cg: ConcurrencyGroup) -> None:
     ds = ShellCommandDataSource(
         field_key="custom",
         config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo 'output text'"),
     )
     agent = make_agent_details(name="agent-1")
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_real_mngr_ctx(cg)
-        fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name in fields
     field = fields[agent.name]["custom"]
@@ -97,33 +88,31 @@ def test_compute_success() -> None:
     assert field.value == "output text"
 
 
-def test_compute_empty_stdout_not_included() -> None:
+def test_compute_empty_stdout_not_included(test_cg: ConcurrencyGroup) -> None:
     ds = ShellCommandDataSource(
         field_key="custom",
         config=ShellCommandConfig(name="Custom", header="CUSTOM", command="echo"),
     )
     agent = make_agent_details(name="agent-1")
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_real_mngr_ctx(cg)
-        fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
     assert agent.name not in fields
 
 
-def test_compute_nonzero_exit_produces_error() -> None:
+def test_compute_nonzero_exit_produces_error(test_cg: ConcurrencyGroup) -> None:
     ds = ShellCommandDataSource(
         field_key="custom",
         config=ShellCommandConfig(name="Custom", header="CUSTOM", command="exit 1"),
     )
     agent = make_agent_details(name="agent-1")
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_real_mngr_ctx(cg)
-        fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name not in fields
     assert any("Custom" in e and "agent-1" in e for e in errors)
 
 
-def test_compute_timeout_produces_error() -> None:
+def test_compute_timeout_produces_error(test_cg: ConcurrencyGroup) -> None:
     """A command that exceeds the timeout produces an error."""
     ds = ShellCommandDataSource(
         field_key="custom",
@@ -131,7 +120,6 @@ def test_compute_timeout_produces_error() -> None:
         timeout_seconds=0.1,
     )
     agent = make_agent_details(name="agent-1")
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_real_mngr_ctx(cg)
-        fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    ctx = make_mngr_ctx_with_cg(test_cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert any("Custom" in e for e in errors)

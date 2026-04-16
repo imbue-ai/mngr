@@ -1,8 +1,11 @@
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.primitives import AgentId
@@ -11,6 +14,11 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
+from imbue.mngr_kanpan.data_types import AgentBoardEntry
+from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
 
 def make_host_details(provider_name: str = "local") -> HostDetails:
@@ -45,4 +53,54 @@ def make_agent_details(
         host=make_host_details(provider_name),
         labels=labels or {},
         plugin=plugin or {},
+    )
+
+
+def make_mngr_ctx() -> MngrContext:
+    """Create a bare minimal MngrContext for tests that just need the type."""
+    return SimpleNamespace()  # ty: ignore[invalid-return-type]
+
+
+def make_mngr_ctx_with_cg(cg: ConcurrencyGroup) -> MngrContext:
+    """Create a MngrContext with a ConcurrencyGroup attached."""
+    return SimpleNamespace(concurrency_group=cg)  # ty: ignore[invalid-return-type]
+
+
+def make_mngr_ctx_with_config(config: KanpanPluginConfig) -> MngrContext:
+    """Create a MngrContext that returns the given KanpanPluginConfig."""
+    return SimpleNamespace(get_plugin_config=lambda name, cls: config)  # ty: ignore[invalid-return-type]
+
+
+def make_mngr_ctx_with_profile_dir(profile_dir: Path) -> MngrContext:
+    """Create a MngrContext with a profile_dir for field cache tests."""
+    return SimpleNamespace(profile_dir=profile_dir)  # ty: ignore[invalid-return-type]
+
+
+def make_pr_field(
+    number: int = 1,
+    state: PrState = PrState.OPEN,
+    is_draft: bool = False,
+    head_branch: str = "test-branch",
+) -> PrField:
+    """Create a PrField for testing."""
+    return PrField(
+        number=number,
+        title="Test PR",
+        state=state,
+        url=f"https://github.com/org/repo/pull/{number}",
+        head_branch=head_branch,
+        is_draft=is_draft,
+    )
+
+
+def make_board_snapshot(
+    entries: tuple[AgentBoardEntry, ...] = (),
+    errors: tuple[str, ...] = (),
+    fetch_time_seconds: float = 1.5,
+) -> BoardSnapshot:
+    """Create a BoardSnapshot for testing."""
+    return BoardSnapshot(
+        entries=entries,
+        errors=errors,
+        fetch_time_seconds=fetch_time_seconds,
     )

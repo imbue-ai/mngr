@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from typing import cast
 
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
@@ -27,13 +26,14 @@ from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
-from imbue.mngr_kanpan.data_sources.github import PrField
-from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.testing import make_board_snapshot
+from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
+from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
@@ -104,21 +104,6 @@ def _make_mock_loop() -> Any:
     return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker)
 
 
-def _make_pr(
-    number: int = 42,
-    state: PrState = PrState.OPEN,
-    is_draft: bool = False,
-) -> PrField:
-    return PrField(
-        number=number,
-        title="Test PR",
-        state=state,
-        url=f"https://github.com/owner/repo/pull/{number}",
-        head_branch="mngr/test-agent",
-        is_draft=is_draft,
-    )
-
-
 def _make_entry(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
@@ -138,13 +123,6 @@ def _make_entry(
         fields=fields or {},
         cells=cells or {},
     )
-
-
-def _make_snapshot(
-    entries: tuple[AgentBoardEntry, ...] = (),
-    errors: tuple[str, ...] = (),
-) -> BoardSnapshot:
-    return BoardSnapshot(entries=entries, errors=errors, fetch_time_seconds=1.5)
 
 
 def _make_state(
@@ -253,20 +231,20 @@ def test_build_board_widgets_none_snapshot() -> None:
 
 
 def test_build_board_widgets_empty_entries() -> None:
-    snapshot = _make_snapshot(entries=())
+    snapshot = make_board_snapshot(entries=())
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert idx_map == {}
 
 
 def test_build_board_widgets_one_entry() -> None:
     entry = _make_entry(section=BoardSection.STILL_COOKING)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
 
 
 def test_build_board_widgets_errors_displayed() -> None:
-    snapshot = _make_snapshot(entries=(), errors=("Error 1",))
+    snapshot = make_board_snapshot(entries=(), errors=("Error 1",))
     walker, _ = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     texts = [w.text if hasattr(w, "text") else "" for w in walker]
     found_error = any("Error 1" in str(t) for t in texts)
@@ -276,7 +254,7 @@ def test_build_board_widgets_errors_displayed() -> None:
 def test_build_board_widgets_groups_by_section() -> None:
     e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
     e2 = _make_entry(name="b", section=BoardSection.PR_MERGED)
-    snapshot = _make_snapshot(entries=(e1, e2))
+    snapshot = make_board_snapshot(entries=(e1, e2))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 2
 
@@ -346,7 +324,7 @@ def test_restore_footer() -> None:
 
 def test_update_snapshot_mute() -> None:
     entry = _make_entry(is_muted=False)
-    state = _make_state(snapshot=_make_snapshot(entries=(entry,)))
+    state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     _update_snapshot_mute(state, AgentName("test-agent"), True)
     assert state.snapshot is not None
     assert state.snapshot.entries[0].is_muted is True
@@ -354,7 +332,7 @@ def test_update_snapshot_mute() -> None:
 
 def test_prune_orphaned_marks() -> None:
     entry = _make_entry(name="agent-a")
-    state = _make_state(snapshot=_make_snapshot(entries=(entry,)))
+    state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
     _prune_orphaned_marks(state)
     assert AgentName("agent-a") in state.marks
@@ -508,7 +486,7 @@ def test_build_field_color_palette_none_snapshot() -> None:
 
 def test_build_field_color_palette_with_colors() -> None:
     entry = _make_entry(cells={"ci": CellDisplay(text="failing", color="light red")})
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert len(entries) == 2
     assert "field_ci_light_red" in names
@@ -516,7 +494,7 @@ def test_build_field_color_palette_with_colors() -> None:
 
 def test_build_field_color_palette_no_colors() -> None:
     entry = _make_entry(cells={"pr": CellDisplay(text="#42")})
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert entries == []
 
@@ -549,16 +527,19 @@ def test_flatten_markup_to_muted_list() -> None:
 def test_carry_forward_fields_merges() -> None:
     old_entry = _make_entry(
         name="a",
-        fields={"pr": _make_pr(), "commits_ahead": CommitsAheadField(count=3, has_work_dir=True)},
-        cells={"pr": _make_pr().display(), "commits_ahead": CommitsAheadField(count=3, has_work_dir=True).display()},
+        fields={"pr": make_pr_field(), "commits_ahead": CommitsAheadField(count=3, has_work_dir=True)},
+        cells={
+            "pr": make_pr_field().display(),
+            "commits_ahead": CommitsAheadField(count=3, has_work_dir=True).display(),
+        },
     )
     new_entry = _make_entry(
         name="a",
         fields={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True)},
         cells={"commits_ahead": CommitsAheadField(count=5, has_work_dir=True).display()},
     )
-    old_snapshot = _make_snapshot(entries=(old_entry,))
-    new_snapshot = _make_snapshot(entries=(new_entry,))
+    old_snapshot = make_board_snapshot(entries=(old_entry,))
+    new_snapshot = make_board_snapshot(entries=(new_entry,))
     result = _carry_forward_fields(old_snapshot, new_snapshot)
     merged = result.entries[0]
     assert "pr" in merged.fields
@@ -570,8 +551,8 @@ def test_carry_forward_fields_merges() -> None:
 
 def test_carry_forward_fields_new_agent() -> None:
     new_entry = _make_entry(name="new-agent")
-    old_snapshot = _make_snapshot(entries=())
-    new_snapshot = _make_snapshot(entries=(new_entry,))
+    old_snapshot = make_board_snapshot(entries=())
+    new_snapshot = make_board_snapshot(entries=(new_entry,))
     result = _carry_forward_fields(old_snapshot, new_snapshot)
     assert len(result.entries) == 1
     assert result.entries[0].name == AgentName("new-agent")
@@ -667,7 +648,7 @@ def test_compute_board_column_widths_with_entries() -> None:
 
 def test_build_board_widgets_with_marks() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     marks = {AgentName("agent-a"): "d"}
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks=marks)
     assert len(idx_map) == 1
@@ -675,7 +656,7 @@ def test_build_board_widgets_with_marks() -> None:
 
 def test_build_board_widgets_muted_entry() -> None:
     entry = _make_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
 
@@ -684,7 +665,7 @@ def test_build_board_widgets_multiple_sections() -> None:
     e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
     e2 = _make_entry(name="b", section=BoardSection.PR_BEING_REVIEWED)
     e3 = _make_entry(name="c", section=BoardSection.PRS_FAILED)
-    snapshot = _make_snapshot(entries=(e1, e2, e3))
+    snapshot = make_board_snapshot(entries=(e1, e2, e3))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 3
 
@@ -703,7 +684,7 @@ def test_update_row_mark_no_walker() -> None:
 def test_update_row_mark_no_entry_at_index() -> None:
     state = _make_state()
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     state.snapshot = snapshot
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
@@ -723,9 +704,9 @@ def _make_state_with_walker(entries: tuple[AgentBoardEntry, ...]) -> _KanpanStat
         "d": CustomCommand(name="delete", markable="light red"),
         "p": CustomCommand(name="push", markable="yellow"),
     }
-    state = _make_state(snapshot=_make_snapshot(entries=entries), commands=commands)
+    state = _make_state(snapshot=make_board_snapshot(entries=entries), commands=commands)
     state.mark_attr_names = ("mark_d", "mark_p")
-    walker, idx_map = _build_board_widgets(_make_snapshot(entries=entries), _BUILTIN_COLUMN_DEFS)
+    walker, idx_map = _build_board_widgets(make_board_snapshot(entries=entries), _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
     state.index_to_entry = idx_map
     return state
@@ -848,7 +829,7 @@ def test_prune_orphaned_marks_with_orphans() -> None:
     state = _make_state(commands=commands)
     state.steady_footer_text = "  Steady"
     state.marks = {AgentName("gone-agent"): "d"}
-    state.snapshot = _make_snapshot(entries=())
+    state.snapshot = make_board_snapshot(entries=())
     _prune_orphaned_marks(state)
     assert AgentName("gone-agent") not in state.marks
 
@@ -904,7 +885,7 @@ def test_dispatch_command_execute_key_with_marks() -> None:
 
 def test_refresh_display_updates_walker() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     _refresh_display(state)
     assert state.list_walker is not None
@@ -913,7 +894,7 @@ def test_refresh_display_updates_walker() -> None:
 
 def test_refresh_display_restores_focus() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     state.focused_agent_name = AgentName("agent-a")
     _refresh_display(state)
@@ -936,7 +917,7 @@ def test_refresh_display_none_snapshot() -> None:
 def test_load_user_commands_from_custom_command_instance() -> None:
     cmd = CustomCommand(name="my-cmd", command="echo hi")
     config = KanpanPluginConfig(commands={"c": cmd})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx = make_mngr_ctx_with_config(config)
     result = _load_user_commands(ctx)
     assert "c" in result
     assert result["c"].name == "my-cmd"
@@ -944,14 +925,14 @@ def test_load_user_commands_from_custom_command_instance() -> None:
 
 def test_load_user_commands_from_dict() -> None:
     config = KanpanPluginConfig(commands={"c": CustomCommand(name="my-cmd", command="echo hi")})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx = make_mngr_ctx_with_config(config)
     result = _load_user_commands(ctx)
     assert "c" in result
 
 
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx = make_mngr_ctx_with_config(config)
     result = _build_command_map(ctx)
     # "r" is the builtin refresh key; "q" is quit and not a mapped command
     assert "r" in result
@@ -961,7 +942,7 @@ def test_build_command_map_includes_builtins() -> None:
 def test_build_command_map_user_overrides_builtin() -> None:
     custom = CustomCommand(name="my-refresh", command="echo refresh")
     config = KanpanPluginConfig(commands={_BUILTIN_COMMAND_KEY_REFRESH: custom})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx = make_mngr_ctx_with_config(config)
     result = _build_command_map(ctx)
     assert result[_BUILTIN_COMMAND_KEY_REFRESH].name == "my-refresh"
 
@@ -969,7 +950,7 @@ def test_build_command_map_user_overrides_builtin() -> None:
 def test_build_command_map_excludes_disabled() -> None:
     disabled = CustomCommand(name="disabled-cmd", enabled=False)
     config = KanpanPluginConfig(commands={"z": disabled})
-    ctx = cast(MngrContext, SimpleNamespace(get_plugin_config=lambda name, cls: config))
+    ctx = make_mngr_ctx_with_config(config)
     result = _build_command_map(ctx)
     assert "z" not in result
 
@@ -1116,7 +1097,7 @@ def test_get_focused_entry_no_focus() -> None:
 
 def test_update_row_mark_muted_entry() -> None:
     entry = _make_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
-    snapshot = _make_snapshot(entries=(entry,))
+    snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
@@ -1135,9 +1116,9 @@ def test_toggle_mark_push_no_work_dir_shows_message() -> None:
     commands = {
         _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
     }
-    state = _make_state(snapshot=_make_snapshot(entries=(entry,)), commands=commands)
+    state = _make_state(snapshot=make_board_snapshot(entries=(entry,)), commands=commands)
     state.mark_attr_names = ("mark_p",)
-    walker, idx_map = _build_board_widgets(_make_snapshot(entries=(entry,)), _BUILTIN_COLUMN_DEFS)
+    walker, idx_map = _build_board_widgets(make_board_snapshot(entries=(entry,)), _BUILTIN_COLUMN_DEFS)
     state.list_walker = walker
     state.index_to_entry = idx_map
     a_idx = next(k for k, v in idx_map.items() if v.name == AgentName("agent-a"))
@@ -1392,7 +1373,7 @@ def test_build_board_widgets_default_section_order() -> None:
         _make_entry(name="cooking"),
         _make_entry(name="merged", section=BoardSection.PR_MERGED),
     )
-    walker, _ = _build_board_widgets(_make_snapshot(entries=entries), _BUILTIN_COLUMN_DEFS)
+    walker, _ = _build_board_widgets(make_board_snapshot(entries=entries), _BUILTIN_COLUMN_DEFS)
     headings = _extract_section_headings(walker)
     assert len(headings) == 2
     assert "Done" in headings[0]
@@ -1406,7 +1387,7 @@ def test_build_board_widgets_custom_section_order_reverses() -> None:
     )
     reversed_order = (BoardSection.STILL_COOKING, BoardSection.PR_MERGED)
     walker, _ = _build_board_widgets(
-        _make_snapshot(entries=entries),
+        make_board_snapshot(entries=entries),
         _BUILTIN_COLUMN_DEFS,
         section_order=reversed_order,
     )
@@ -1423,7 +1404,7 @@ def test_build_board_widgets_section_order_omits_unlisted() -> None:
     )
     only_merged = (BoardSection.PR_MERGED,)
     walker, index_to_entry = _build_board_widgets(
-        _make_snapshot(entries=entries),
+        make_board_snapshot(entries=entries),
         _BUILTIN_COLUMN_DEFS,
         section_order=only_merged,
     )
