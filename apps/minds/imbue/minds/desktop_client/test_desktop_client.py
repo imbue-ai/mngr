@@ -251,7 +251,7 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
@@ -996,7 +996,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create a Workspace" in response.text
+    assert "Create a Project" in response.text
     assert "git_url" in response.text
 
 
@@ -1027,7 +1027,7 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create a Workspace" in response.text
+    assert "Create a Project" in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -1216,7 +1216,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your workspace" in response.text
+    assert "Creating your project" in response.text
     agent_creator.wait_for_all()
 
 

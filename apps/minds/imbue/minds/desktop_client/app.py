@@ -328,11 +328,11 @@ def _handle_agent_default_redirect(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Redirect to the agent's web server by default."""
+    """Redirect to the agent's system_interface server by default."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/web/"})
+    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/system_interface/"})
 
 
 async def _handle_agent_servers_page(

@@ -30,7 +30,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Workspaces</title>
+  <title>Projects</title>
   <style>
     """
     + _COMMON_STYLES
@@ -191,7 +191,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
     <div style="text-align: center; padding: 48px 0;">
-      <p class="empty-state" style="margin-bottom: 24px;">No workspaces yet</p>
+      <p class="empty-state" style="margin-bottom: 24px;">No projects yet</p>
       <a href="/create" class="create-btn">Create</a>
     </div>
       {% endif %}
@@ -205,7 +205,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Create a Workspace</title>
+  <title>Create a Project</title>
   <style>
     """
     + _COMMON_STYLES
@@ -237,7 +237,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     <div class="page-header">
-      <a href="/">Back to workspace list</a>
+      <a href="/">Back to project list</a>
       <button type="submit" form="create-form" class="submit-btn">Create</button>
     </div>
     <form id="create-form" action="/create" method="post">
@@ -293,7 +293,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Creating your workspace...</title>
+  <title>Creating your project...</title>
   <style>
     """
     + _COMMON_STYLES
@@ -315,7 +315,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Creating your workspace...</h1>
+  <h1>Creating your project...</h1>
   <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
   <div id="logs"></div>
   <script>
@@ -374,7 +374,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Login - Workspaces</title>
+  <title>Login - Projects</title>
   <style>
     """
     + _COMMON_STYLES
@@ -383,7 +383,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Workspaces</h1>
+  <h1>Projects</h1>
   <p class="login-message">
     Please use the login URL printed in the terminal where the server is running.
   </p>
@@ -593,7 +593,7 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     No servers are currently running for this agent.
   </p>
   {% endif %}
-  <div class="back-link"><a href="/">Back to all workspaces</a></div>
+  <div class="back-link"><a href="/">Back to all projects</a></div>
   <script>
   async function toggleGlobal(agentId, serverName, enable) {
     try {
@@ -744,7 +744,7 @@ body {
 <body>
 <div id="minds-titlebar">
   <div class="minds-nav">
-    <button id="sidebar-toggle" title="Workspaces">
+    <button id="sidebar-toggle" title="Projects">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
     </button>
     <button id="home-btn" title="Home">
@@ -777,7 +777,7 @@ body {
 <!-- Sidebar panel (used in browser mode; hidden by default) -->
 <div id="sidebar-panel">
   <div id="sidebar-workspaces">
-    <div class="sidebar-empty">No workspaces</div>
+    <div class="sidebar-empty">No projects</div>
   </div>
 </div>
 
@@ -893,7 +893,7 @@ document.getElementById('user-btn').onclick = function() {
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
     return;
   }
   container.innerHTML = workspaces.map(function(w) {
@@ -930,7 +930,7 @@ _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Workspaces</title>
+<title>Projects</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -954,7 +954,7 @@ body {
 </head>
 <body>
 <div id="sidebar-workspaces">
-  <div class="sidebar-empty">No workspaces</div>
+  <div class="sidebar-empty">No projects</div>
 </div>
 <script>
 var isElectron = !!window.minds;
@@ -966,7 +966,7 @@ function selectWorkspace(agentId) {
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
     return;
   }
   container.innerHTML = workspaces.map(function(w) {
