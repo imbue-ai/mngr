@@ -6,7 +6,6 @@ per-agent API keys (Bearer tokens) with SHA-256 hash lookup.
 """
 
 import json
-import os
 import shlex
 from typing import Annotated
 
@@ -21,6 +20,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.config.data_types import MindsConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
@@ -128,10 +128,10 @@ def get_cf_client_with_auth(request: Request) -> tuple[CloudflareForwardingClien
         # Build a client with SuperTokens Bearer auth
         forwarding_url = cf_client.forwarding_url if cf_client else None
         if forwarding_url is None:
-            forwarding_url_str = os.environ.get("CLOUDFLARE_FORWARDING_URL", "")
-            if not forwarding_url_str:
+            minds_config: MindsConfig | None = request.app.state.minds_config
+            if minds_config is None:
                 return None, _json_error("Cloudflare forwarding URL not configured", 501)
-            forwarding_url = CloudflareForwardingUrl(forwarding_url_str)
+            forwarding_url = CloudflareForwardingUrl(str(minds_config.cloudflare_forwarding_url))
 
         enriched_client = CloudflareForwardingClient(
             forwarding_url=forwarding_url,

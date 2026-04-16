@@ -98,13 +98,15 @@ class AuthTestFixture:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
+        connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+        if not connection_uri:
+            pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
         session_store = _init_supertokens(
             data_directory=self.tmp_dir,
+            connection_uri=connection_uri,
             host=self.host,
             port=self.port,
         )
-        if session_store is None:
-            pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
 
         paths = WorkspacePaths(data_dir=self.tmp_dir)
         auth_store = FileAuthStore(data_directory=paths.auth_dir)

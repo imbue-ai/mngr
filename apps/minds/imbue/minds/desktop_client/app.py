@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.minds.config.data_types import MindsConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -1239,6 +1240,7 @@ def create_desktop_client(
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
+    minds_config: MindsConfig | None = None,
     stream_manager: MngrStreamManager | None = None,
     supertokens_session_store: SuperTokensSessionStore | None = None,
     server_port: int = 0,
@@ -1288,6 +1290,7 @@ def create_desktop_client(
     app.state.supertokens_session_store = supertokens_session_store
     app.state.supertokens_server_port = server_port
     app.state.supertokens_output_format = output_format or OutputFormat.JSONL
+    app.state.minds_config = minds_config
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
