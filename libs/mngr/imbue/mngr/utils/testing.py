@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from io import StringIO
 from pathlib import Path
 from typing import Final
 from typing import IO
@@ -29,8 +30,10 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -38,6 +41,7 @@ from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -51,6 +55,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.polling import wait_for
 
 # Prefix used for test environments
@@ -251,6 +256,65 @@ def assert_home_is_temp_directory() -> None:
         )
 
 
+TEST_SLEEP_AGENT_TYPE: Final[str] = "test_sleep"
+"""Name of the long-running agent type registered by the test environment.
+
+Use in place of the removed ``--command`` flag::
+
+    mngr create my-task --type test_sleep --no-ensure-clean
+
+The agent type is registered by ``setup_mngr_test_environment`` (for
+in-process cli_runner tests) and by the e2e conftest (for subprocess
+invocations of the real ``mngr`` binary). Its command is ``sleep 99999``.
+"""
+
+_TEST_SLEEP_COMMAND: Final[str] = "sleep 99999"
+
+
+def register_test_sleep_agent_type(host_dir: Path) -> None:
+    """Seed a profile under ``host_dir`` that defines the ``test_sleep`` agent type.
+
+    Tests that exercise the CLI need to be able to spin up a long-running
+    placeholder agent. Previously they did this via ``mngr create
+    --command 'sleep 99999'``; with that flag gone, the equivalent is
+    ``mngr create --type test_sleep``. This function writes the minimal
+    profile skeleton (``config.toml`` + ``profiles/<id>/settings.toml``)
+    so the config loader picks up the type without each test having to
+    duplicate the setup.
+    """
+    config_path = host_dir / ROOT_CONFIG_FILENAME
+    if config_path.exists():
+        return
+    profile_id = uuid4().hex
+    profile_dir = host_dir / PROFILES_DIRNAME / profile_id
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(f'profile = "{profile_id}"\n')
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text(f'[agent_types.{TEST_SLEEP_AGENT_TYPE}]\ncommand = "{_TEST_SLEEP_COMMAND}"\n')
+
+
+def register_test_agent_type(host_dir: Path, type_name: str, command: str, parent_type: str | None = None) -> None:
+    """Append a custom agent type to the test profile's ``settings.toml``.
+
+    Use this in tests that need a specific command (e.g. something that
+    echoes a marker before sleeping). The profile skeleton is assumed to
+    exist already (the autouse setup calls ``register_test_sleep_agent_type``
+    which creates it).
+
+    Set ``parent_type`` to inherit from a specific agent class (e.g.
+    ``"headless_command"`` for headless agents).
+    """
+    config_path = host_dir / ROOT_CONFIG_FILENAME
+    profile_id = config_path.read_text().split('"')[1]
+    profile_dir = host_dir / PROFILES_DIRNAME / profile_id
+    settings_path = profile_dir / "settings.toml"
+    existing = settings_path.read_text() if settings_path.exists() else ""
+    toml_block = f"\n[agent_types.{type_name}]\ncommand = {json.dumps(command)}\n"
+    if parent_type is not None:
+        toml_block += f"parent_type = {json.dumps(parent_type)}\n"
+    settings_path.write_text(existing + toml_block)
+
+
 def setup_mngr_test_environment(
     home_dir: Path,
     host_dir: Path,
@@ -273,6 +337,7 @@ def setup_mngr_test_environment(
     monkeypatch.setenv("MNGR_PREFIX", prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
     monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+    register_test_sleep_agent_type(host_dir)
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside the temp home, which
@@ -597,12 +662,14 @@ def create_test_agent_via_cli(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     agent_name: str,
-    agent_cmd: str = "sleep 482917",
 ) -> str:
     """Create a test agent via the CLI and return the session name.
 
     This encapsulates the common pattern of creating a source agent for
     integration tests that need an existing agent (e.g., clone, migrate).
+    The agent runs the ``test_sleep`` agent type registered by
+    ``setup_mngr_test_environment`` (``sleep 99999``), which keeps it alive
+    for the duration of the test.
 
     The caller should wrap this call inside a tmux_session_cleanup context
     manager to ensure the session is cleaned up even if assertions fail.
@@ -614,8 +681,8 @@ def create_test_agent_via_cli(
         [
             "--name",
             agent_name,
-            "--command",
-            agent_cmd,
+            "--type",
+            TEST_SLEEP_AGENT_TYPE,
             "--source",
             str(temp_work_dir),
             "--transfer=none",
@@ -688,6 +755,29 @@ def make_mngr_ctx(
     )
 
 
+def make_ctx_with_plugins(
+    mngr_ctx: MngrContext,
+    plugins: Sequence[object],
+    *,
+    load_backends: bool = False,
+) -> MngrContext:
+    """Create a MngrContext with a fresh plugin manager and the given plugins registered.
+
+    Use this when a test needs to inject custom hookimpl plugins (e.g., to test
+    hook error paths or modify hook behavior) without affecting the shared
+    plugin_manager fixture.
+
+    If load_backends is True, also loads the local provider backend into the PM.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    if load_backends:
+        load_local_backend_only(pm)
+    for plugin in plugins:
+        pm.register(plugin)
+    return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
+
+
 def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
@@ -734,6 +824,22 @@ def make_test_agent_details(
 
 def get_short_random_string() -> str:
     return uuid4().hex[:8]
+
+
+@contextmanager
+def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
+    """Capture loguru output at the given level into a StringIO buffer.
+
+    Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
+    tests that need to verify logged messages should use this context manager
+    instead of checking result.output.
+    """
+    log_output = StringIO()
+    sink_id = logger.add(log_output, level=level, format="{message}")
+    try:
+        yield log_output
+    finally:
+        logger.remove(sink_id)
 
 
 def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

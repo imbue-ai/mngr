@@ -15,7 +15,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     for name in ["agent-a", "agent-b", "agent-c"]:
         expect(
             e2e.run(
-                f"mngr create {name} --command 'sleep 99999' --no-ensure-clean --no-connect",
+                f"mngr create {name} --type test_sleep --no-ensure-clean --no-connect",
                 comment=f"Create {name}",
             )
         ).to_succeed()
@@ -42,7 +42,7 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
     for name in ["agent-x", "agent-y"]:
         expect(
             e2e.run(
-                f"mngr create {name} --command 'sleep 99999' --no-ensure-clean --no-connect",
+                f"mngr create {name} --type test_sleep --no-ensure-clean --no-connect",
                 comment=f"Create {name}",
             )
         ).to_succeed()
@@ -71,7 +71,7 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     for name in ["running-agent", "stopped-agent"]:
         expect(
             e2e.run(
-                f"mngr create {name} --command 'sleep 99999' --no-ensure-clean --no-connect",
+                f"mngr create {name} --type test_sleep --no-ensure-clean --no-connect",
                 comment=f"Create {name}",
             )
         ).to_succeed()

@@ -19,7 +19,7 @@ def test_create_default(e2e: E2eSession) -> None:
     # the defaults are the following: agent=claude, provider=local, project=current dir
     """)
     result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --type test_sleep --no-ensure-clean",
         comment="running mngr create is strictly better than running claude!",
     )
     expect(result).to_succeed()
@@ -42,7 +42,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        "mngr create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --transfer=none --type test_sleep --no-ensure-clean",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
@@ -71,16 +71,16 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     mngr create my-task claude
     mngr c my-task
     """)
-    # Test "mngr create <name>" form (claude is the default type, --command substitutes for the real agent)
+    # Test "mngr create <name>" form (claude is the default type, --type substitutes for the real agent)
     result_full = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --type test_sleep --no-ensure-clean",
         comment="you can use a short form for most commands (like create) as well",
     )
     expect(result_full).to_succeed()
 
     # Test "mngr c <name>" short form (needs a different name since my-task already exists)
     result_short = e2e.run(
-        "mngr c my-other-task --command 'sleep 99999' --no-ensure-clean",
+        "mngr c my-other-task --type test_sleep --no-ensure-clean",
         comment="the above command is the same as these",
     )
     expect(result_short).to_succeed()
@@ -133,7 +133,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     # that command launches claude with the "opus" model instead of the default
     """)
     result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean -- --model opus",
+        "mngr create my-task --type test_sleep --no-ensure-clean -- --model opus",
         comment="you can specify the arguments to the *agent* by using `--` to separate the agent arguments",
     )
     expect(result).to_succeed()
@@ -158,7 +158,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --type test_sleep --no-ensure-clean",
             comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
         )
     ).to_succeed()
@@ -179,7 +179,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
+            "mngr create my-task --no-connect --type test_sleep --no-ensure-clean --format json",
             comment="you can control output format for scripting",
         )
     ).to_succeed()
@@ -201,7 +201,7 @@ def test_create_headless(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --headless",
+            "mngr create my-task --type test_sleep --no-ensure-clean --headless",
             comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
         )
     ).to_succeed()

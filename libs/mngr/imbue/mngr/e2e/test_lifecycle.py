@@ -13,7 +13,7 @@ def test_full_lifecycle(e2e: E2eSession) -> None:
     # Create
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect",
+            "mngr create my-task --type test_sleep --no-ensure-clean --no-connect",
             comment="Create agent for full lifecycle test",
         )
     ).to_succeed()

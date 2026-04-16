@@ -58,6 +58,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
+from imbue.mngr.utils.testing import register_test_agent_type
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -771,31 +772,6 @@ def test_resolve_early_agent_type_returns_none_when_unset(default_create_cli_opt
     assert result is None
 
 
-def test_resolve_early_agent_type_command_implies_generic(default_create_cli_opts: CreateCliOptions) -> None:
-    """--command flag without --type implies 'generic' agent type."""
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
-    )
-
-    result = _resolve_early_agent_type(opts)
-
-    assert result == "generic"
-
-
-def test_resolve_early_agent_type_explicit_type_overrides_command(
-    default_create_cli_opts: CreateCliOptions,
-) -> None:
-    """--type flag takes precedence over --command implying 'generic'."""
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
-        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
-    )
-
-    result = _resolve_early_agent_type(opts)
-
-    assert result == "headless_command"
-
-
 # =============================================================================
 # Tests for _create_headless
 # =============================================================================
@@ -805,50 +781,32 @@ def test_resolve_early_agent_type_explicit_type_overrides_command(
 def test_create_headless_streams_output(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
 ) -> None:
     """Creating a headless_command agent with --foreground should stream output.
 
-    Uses a template to set the command (--command is not allowed on the headless
-    path from the CLI; headless agents get their command from config/templates).
+    Registers a custom headless_command-based agent type with a specific command
+    via settings.toml (since --command is not a CLI flag).
     """
+    register_test_agent_type(temp_host_dir, "headless_command", "echo headless-test-output")
     result = cli_runner.invoke(
         create,
         [
             "--type",
             "headless_command",
             "--foreground",
-            "--setting",
-            "create_templates.headless-echo.command=echo headless-test-output",
-            "--template",
-            "headless-echo",
         ],
         obj=plugin_manager,
         catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
     assert "headless-test-output" in result.output
 
 
 # =============================================================================
 # Tests for -c/--command validation in the early headless detection path
 # =============================================================================
-
-
-def test_create_headless_rejects_command_flag(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """The headless path must reject explicit --command (command comes from templates/config)."""
-    result = cli_runner.invoke(
-        create,
-        ["--type", "headless_command", "--command", "echo should-not-run", "--foreground"],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "--command/-c" in result.output
-    assert "does not support" in result.output
 
 
 def test_create_headless_rejects_incompatible_flags(
@@ -858,7 +816,7 @@ def test_create_headless_rejects_incompatible_flags(
     """Headless agent types should reject flags that don't apply to the headless flow."""
     result = cli_runner.invoke(
         create,
-        ["--type", "headless_command", "-c", "echo hello", "--foreground", "--env", "FOO=bar"],
+        ["--type", "headless_command", "--foreground", "--env", "FOO=bar"],
         obj=plugin_manager,
     )
 
@@ -877,8 +835,6 @@ def test_create_headless_rejects_multiple_incompatible_flags(
         [
             "--type",
             "headless_command",
-            "-c",
-            "echo hello",
             "--foreground",
             "--message",
             "hi",
@@ -922,7 +878,7 @@ def test_create_headless_without_foreground_is_rejected(
     """Headless agent types require --foreground."""
     result = cli_runner.invoke(
         create,
-        ["--type", "headless_command", "-c", "echo hello"],
+        ["--type", "headless_command"],
         obj=plugin_manager,
     )
 
@@ -960,60 +916,6 @@ def test_create_foreground_without_type_is_rejected(
 
     assert result.exit_code != 0
     assert "--foreground" in result.output
-
-
-# =============================================================================
-# Tests for --command validation in _parse_agent_opts
-# =============================================================================
-
-
-def test_parse_agent_opts_command_with_registered_non_command_type_raises(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Using -c with a registered type that doesn't accept commands should raise."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    source_location = HostLocation(host=local_host, path=temp_work_dir)
-    # "claude" is a registered type that does not implement CommandAcceptingAgentMixin
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().type, "claude"),
-        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
-    )
-
-    with pytest.raises(UserInputError, match="does not accept -c/--command"):
-        _parse_agent_opts(
-            opts=opts,
-            address=AgentAddress(),
-            initial_message=None,
-            source_location=source_location,
-            mngr_ctx=temp_mngr_ctx,
-        )
-
-
-def test_parse_agent_opts_command_with_generic_type_allowed(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Using -c with unregistered 'generic' type should be allowed (default fallback)."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    source_location = HostLocation(host=local_host, path=temp_work_dir)
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().command, "echo hello"),
-    )
-
-    result, _ = _parse_agent_opts(
-        opts=opts,
-        address=AgentAddress(),
-        initial_message=None,
-        source_location=source_location,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    assert result.command == CommandString("echo hello")
 
 
 # =============================================================================
@@ -1478,7 +1380,7 @@ def test_create_rejects_update_without_reuse(
     """--update without --reuse should fail with a clear error."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--update", "--command", "true", "--no-connect"],
+        ["my-agent", "--update", "--type", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1498,7 +1400,7 @@ def test_create_rejects_positional_and_name_together(
     """Providing both a positional address and --name should fail."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect"],
+        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1518,7 +1420,7 @@ def test_create_edit_message_error_not_swallowed(
     """
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
+        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect", "--edit-message"],
         obj=plugin_manager,
     )
 
@@ -1539,7 +1441,7 @@ def test_create_accepts_name_flag_alone(
         [
             "--name",
             "@.local",
-            "--command",
+            "--type",
             "true",
             "--no-connect",
             "--transfer=none",
@@ -1570,7 +1472,7 @@ def test_create_provider_flag_sets_provider(
             "my-agent",
             "--provider",
             "local",
-            "--command",
+            "--type",
             "true",
             "--no-connect",
             "--transfer=none",
@@ -1590,7 +1492,7 @@ def test_create_provider_flag_conflicts_with_address_provider(
     """--provider that conflicts with the address provider should abort."""
     result = cli_runner.invoke(
         create,
-        ["my-agent@.modal", "--provider", "docker", "--command", "true", "--no-connect"],
+        ["my-agent@.modal", "--provider", "docker", "--type", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1611,7 +1513,7 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "my-agent@.local",
             "--provider",
             "local",
-            "--command",
+            "--type",
             "true",
             "--no-connect",
             "--transfer=none",

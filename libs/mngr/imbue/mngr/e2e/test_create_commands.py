@@ -13,12 +13,12 @@ from imbue.skitwright.expect import expect
 def test_create_with_custom_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can run *any* literal command instead of a named agent type:
-    mngr create my-task --command python -- my_script.py
+    mngr create my-task --type python -- my_script.py
     # remember that the arguments to the "agent" (or command) come after the `--` separator
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --type test_sleep --no-ensure-clean",
             comment="you can run *any* literal command instead of a named agent type",
         )
     ).to_succeed()
@@ -40,13 +40,13 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-    mngr create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
+    mngr create my-task --type python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
     # Idle timeout requires a remote provider (local provider rejects it).
     # Use Modal to exercise the real idle timeout path.
     result = e2e.run(
-        "mngr create my-task --provider modal --command 'sleep 99999' --no-ensure-clean"
+        "mngr create my-task --provider modal --type test_sleep --no-ensure-clean"
         " --idle-mode run --idle-timeout 60 --no-connect",
         comment="idle timeout requires a remote provider",
         timeout=120.0,
@@ -65,7 +65,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean -w extra=\"sleep 99999\"",
+            'mngr create my-task --type test_sleep --no-ensure-clean -w extra="sleep 99999"',
             comment="you can simply add extra tmux windows that run alongside your agent",
         )
     ).to_succeed()
@@ -91,7 +91,7 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --type test_sleep --no-ensure-clean",
             comment="by default, mngr aborts the create command if the working tree has uncommitted changes",
         )
     ).to_succeed()
@@ -111,7 +111,7 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --connect-command \"echo connected\" --no-connect",
+            'mngr create my-task --type test_sleep --no-ensure-clean --connect-command "echo connected" --no-connect',
             comment="you can use a custom connect command instead of the default",
         )
     ).to_succeed()
@@ -135,7 +135,7 @@ def test_create_with_message(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect --message \"Do the thing\"",
+            'mngr create my-task --type test_sleep --no-ensure-clean --no-connect --message "Do the thing"',
             comment="you can send a message when starting the agent (great for scripting)",
         )
     ).to_succeed()

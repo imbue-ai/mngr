@@ -54,6 +54,7 @@ class VultrProvider(VpsDockerProvider):
     def _get_tagged_vps_ips(self) -> list[str]:
         """Get IPs of Vultr instances tagged with this provider's name."""
         if not self.vultr_client.api_key.get_secret_value():
+            logger.warning("Vultr API key not configured, skipping VPS discovery")
             return []
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
@@ -70,10 +71,19 @@ class VultrProvider(VpsDockerProvider):
         self,
         vps_ip: str,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read all host records and agent data from a single VPS in one SSH command."""
+        """Read all host records and agent data from a single VPS in one SSH command.
+
+        Uses the read-only host store so that discovery never creates the
+        state container. If the container does not exist yet (e.g., the VPS
+        is still being set up by a concurrent ``mngr create``), returns
+        empty results.
+        """
         try:
             docker_ssh = self._make_docker_ssh(vps_ip)
-            host_store = self._get_host_store(docker_ssh)
+            host_store = self._get_existing_host_store(docker_ssh)
+            if host_store is None:
+                logger.debug("State container not ready on VPS {}, skipping", vps_ip)
+                return [], {}
             return host_store.list_all_host_records_with_agents()
         except (VpsConnectionError, ContainerSetupError) as e:
             logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
@@ -129,6 +139,7 @@ class VultrProvider(VpsDockerProvider):
                     return cached_record
 
         if not self.vultr_client.api_key.get_secret_value():
+            logger.warning("Vultr API key not configured, cannot resolve host")
             return None
 
         # Fall back to full discovery
@@ -188,8 +199,8 @@ class VultrProviderBackend(ProviderBackendInterface):
             api_key = config.get_api_key()
         except ValueError:
             # No API key configured -- create with empty key.
-            # The provider will be discoverable but operations will fail
-            # with a clear error message when the API is actually used.
+            # The provider will be discoverable but discovery operations will
+            # return empty results and log a warning when the API is called.
             api_key = ""
         vultr_client = VultrVpsClient(api_key=SecretStr(api_key))
 

@@ -19,13 +19,17 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.plugins import hookspecs
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.testing import TEST_SLEEP_AGENT_TYPE
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
@@ -162,7 +166,14 @@ def temp_profile_dir(temp_host_dir: Path) -> Path:
 @pytest.fixture
 def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
     """Create a MngrConfig with a temporary host directory."""
-    return MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix, is_error_reporting_enabled=False)
+    return MngrConfig(
+        default_host_dir=temp_host_dir,
+        prefix=mngr_test_prefix,
+        is_error_reporting_enabled=False,
+        agent_types={
+            AgentTypeName(TEST_SLEEP_AGENT_TYPE): AgentTypeConfig(command=CommandString("sleep 99999")),
+        },
+    )
 
 
 @pytest.fixture

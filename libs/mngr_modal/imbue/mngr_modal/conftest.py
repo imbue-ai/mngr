@@ -31,6 +31,7 @@ from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_environment
 from imbue.mngr.utils.testing import register_modal_test_volume
+from imbue.mngr.utils.testing import register_test_sleep_agent_type
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_modal_app_names
 from imbue.mngr.utils.testing import worker_modal_environment_names
@@ -250,6 +251,10 @@ def modal_test_session_host_dir(tmp_path_factory: pytest.TempPathFactory) -> Pat
     """Create a session-scoped host directory for Modal tests."""
     host_dir = tmp_path_factory.mktemp("modal_session") / "mngr"
     host_dir.mkdir(parents=True, exist_ok=True)
+    # Register the test_sleep agent type in this session-scoped host dir so that
+    # Modal subprocess tests can use --type test_sleep (the autouse fixture
+    # registers it on temp_host_dir, which is per-test and not shared).
+    register_test_sleep_agent_type(host_dir)
     return host_dir
 
 

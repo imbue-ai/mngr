@@ -19,7 +19,7 @@ from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code CLI is not installed")
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(120)

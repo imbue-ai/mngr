@@ -23,7 +23,7 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --from {source_dir} --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --from {source_dir} --type test_sleep --no-ensure-clean",
             comment="the agent uses the data from its current git repo (if any) or folder, but you can specify a different source",
         )
     ).to_succeed()
@@ -43,7 +43,7 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --project my-project --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --project my-project --type test_sleep --no-ensure-clean",
             comment="by default the agent is tagged with a project label that matches the name of the current git repo (or folder), but you can specify a different project",
         )
     ).to_succeed()
@@ -65,7 +65,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
     echo "print('hello world')" > /tmp/my_random_folder/script.py
-    mngr create my-task --from /tmp/my_random_folder --command python -- script.py
+    mngr create my-task --from /tmp/my_random_folder --type python -- script.py
     """)
     source_dir = tmp_path / "my_random_folder"
     source_dir.mkdir()
@@ -73,7 +73,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
 
     expect(
         e2e.run(
-            f"mngr create my-task --from {source_dir} --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --from {source_dir} --type test_sleep --no-ensure-clean",
             comment="mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder",
         )
     ).to_succeed()
@@ -94,7 +94,7 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --type test_sleep --no-ensure-clean",
             comment="by default, it creates a new git branch for each agent",
         )
     ).to_succeed()
@@ -115,7 +115,7 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --branch ':feature/*' --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --branch ':feature/*' --type test_sleep --no-ensure-clean",
             comment="you can change the pattern (the * is replaced by the agent name)",
         )
     ).to_succeed()
@@ -144,7 +144,7 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --branch '{current_branch}:mngr/*' --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --branch '{current_branch}:mngr/*' --type test_sleep --no-ensure-clean",
             comment="you can also specify a different base branch (instead of the current branch)",
         )
     ).to_succeed()
@@ -163,7 +163,7 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --branch ':feature/my-task' --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --branch ':feature/my-task' --type test_sleep --no-ensure-clean",
             comment="or set the new branch name explicitly",
         )
     ).to_succeed()
@@ -184,7 +184,7 @@ def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --transfer=git-mirror --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --transfer=git-mirror --type test_sleep --no-ensure-clean",
             comment="you can create a git mirror instead of a worktree",
         )
     ).to_succeed()
@@ -211,7 +211,7 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --transfer=git-mirror --branch {current_branch} --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --transfer=git-mirror --branch {current_branch} --type test_sleep --no-ensure-clean",
             comment="you can disable new branch creation entirely by omitting the :NEW part",
         )
     ).to_succeed()
@@ -231,7 +231,7 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --transfer=none --type test_sleep --no-ensure-clean",
             comment="you can run the agent in-place without any transfer",
         )
     ).to_succeed()
@@ -252,14 +252,14 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create other-agent --command 'sleep 99999' --no-ensure-clean",
+            "mngr create other-agent --type test_sleep --no-ensure-clean",
             comment="Create source agent to clone from",
         )
     ).to_succeed()
 
     expect(
         e2e.run(
-            "mngr create my-task --from other-agent --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --from other-agent --type test_sleep --no-ensure-clean",
             comment="you can clone from an existing agent's work directory",
         )
     ).to_succeed()

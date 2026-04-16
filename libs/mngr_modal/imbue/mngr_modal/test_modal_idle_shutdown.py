@@ -169,7 +169,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "generic",
+            "test_sleep",
             "--no-connect",
             "--no-ensure-clean",
             "--source",

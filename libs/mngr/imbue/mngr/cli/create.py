@@ -52,7 +52,6 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.agent_class_registry import get_agent_class
-from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -61,7 +60,6 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import CommandAcceptingAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
@@ -77,13 +75,12 @@ from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -187,30 +184,10 @@ def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
 
     Returns the resolved type name, or None when defaulting to "claude".
     """
-    return _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
-
-
-def _validate_command_accepted(agent_type_name: str, command: str | None) -> None:
-    """Raise UserInputError if -c/--command is used with an agent type that does not accept it.
-
-    Unregistered types (which fall back to the default BaseAgent) are always
-    considered command-accepting, since running arbitrary commands is their
-    primary purpose.
-    """
-    if not command:
-        return
-    if not is_agent_class_registered(agent_type_name):
-        return
-    agent_class = get_agent_class(agent_type_name)
-    if not issubclass(agent_class, CommandAcceptingAgentMixin):
-        raise UserInputError(
-            f"Agent type '{agent_type_name}' does not accept -c/--command. "
-            f"Only command-accepting agent types (like 'generic' or 'headless_command') support -c."
-        )
+    return _resolve_agent_type_name(opts.type, opts.positional_agent_type, None)
 
 
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
-    ("command", "--command/-c"),
     ("source", "--from/--source"),
     ("branch", "--branch"),
     ("transfer", "--transfer"),
@@ -303,9 +280,6 @@ def _create_headless(
     """
     host = _resolve_online_host(opts, address, mngr_ctx)
 
-    # Forward command from templates/config (explicit CLI --command is blocked by
-    # _reject_incompatible_headless_flags, but template-set values pass through).
-    command_override = CommandString(opts.command) if opts.command else None
     agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
 
@@ -314,7 +288,6 @@ def _create_headless(
         mngr_ctx=mngr_ctx,
         agent_type=AgentTypeName(agent_type_name),
         agent_args=opts.agent_args,
-        command=command_override,
         label_options=label_options,
         name=agent_name,
     ) as agent:
@@ -416,12 +389,7 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", help="Which type of agent to run [default: claude, or generic when -c is used]")
-@optgroup.option(
-    "--command",
-    "-c",
-    help="Shell command for the agent to run (default --type: generic)",
-)
+@optgroup.option("--type", help="Which type of agent to run [default: claude]")
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(
@@ -1518,16 +1486,19 @@ def _parse_agent_opts(
     # Parse label options
     label_options = resolve_labels(opts.label)
 
-    # Parse provisioning options
-    provisioning = AgentProvisioningOptions(
-        extra_provision_commands=opts.extra_provision_command,
-        upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
-    )
+    # Parse provisioning options using the shared field map.
+    # getattr with default () because not all map entries have CLI flags
+    # (e.g. create_directory is agent-type-only).
+    prov_kwargs: dict[str, tuple[Any, ...]] = {}
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
+        raw_values: tuple[str, ...] = getattr(opts, config_field, ())
+        if raw_values:
+            prov_kwargs[target_field] = tuple(parser(s) for s in raw_values)
+    provisioning = AgentProvisioningOptions(**prov_kwargs)
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
     # Determine agent type using the shared resolution logic.
-    # --type defaults to "generic" when -c is present (via _resolve_agent_type_name).
     resolved_agent_args = opts.agent_args
 
     if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
@@ -1536,10 +1507,7 @@ def _parse_agent_opts(
             f"but --type says '{opts.type}'. Use one or the other."
         )
 
-    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type, opts.command)
-
-    if resolved_agent_type is not None:
-        _validate_command_accepted(resolved_agent_type, opts.command)
+    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type, None)
 
     is_clone = source_agent_state_dir is not None
 
@@ -1550,7 +1518,6 @@ def _parse_agent_opts(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
         name=parsed_agent_name,
-        command=CommandString(opts.command) if opts.command else None,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
         target_path=target_path,

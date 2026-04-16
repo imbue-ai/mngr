@@ -21,7 +21,7 @@ def _create_modal_agent(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "generic",
+            "test_sleep",
             "--no-connect",
             "--no-ensure-clean",
             "--source",

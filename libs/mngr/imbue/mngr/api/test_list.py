@@ -396,9 +396,7 @@ def test_list_agents_with_agent(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847291"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
 
@@ -420,9 +418,7 @@ def test_list_agents_with_include_filter(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 938274"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -447,9 +443,7 @@ def test_list_agents_with_exclude_filter(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 726485"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -479,9 +473,7 @@ def test_list_agents_with_callbacks(
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 619274"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -952,9 +944,7 @@ def test_list_agents_populates_idle_mode(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 123456"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
 
@@ -978,9 +968,7 @@ def test_list_agents_populates_lock_fields_for_online_host(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847292"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
 
@@ -1011,9 +999,7 @@ def test_list_agents_streaming_with_callback(
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 519283"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -1077,9 +1063,7 @@ def test_list_agents_with_provider_names_filter(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(
-            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 234567"
-        )
+        create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
 
         result = list_agents(mngr_ctx=temp_mngr_ctx, provider_names=("local",), is_streaming=False)
 

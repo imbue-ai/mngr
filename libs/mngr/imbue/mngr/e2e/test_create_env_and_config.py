@@ -22,9 +22,7 @@ def test_create_with_env(e2e: E2eSession) -> None:
     env_value = uuid.uuid4().hex
     expect(
         e2e.run(
-            f"mngr create my-task --env MNGR_TEST_VAR={env_value}"
-            " --command 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 99999'"
-            " --no-ensure-clean",
+            f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type test_env_echo --no-ensure-clean",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
@@ -56,7 +54,7 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "API_KEY=abc123 mngr create my-task --pass-env API_KEY --command 'sleep 99999' --no-ensure-clean",
+            "API_KEY=abc123 mngr create my-task --pass-env API_KEY --type test_sleep --no-ensure-clean",
             comment="it is *strongly encouraged* to use either use --env-file or --pass-env",
         )
     ).to_succeed()
@@ -93,7 +91,7 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
     # The template sets provider=modal which is disabled, so create should fail
     result = e2e.run(
-        "mngr create my-task --template my_modal_template --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --template my_modal_template --type test_sleep --no-ensure-clean",
         comment="templates are defined in your config",
     )
     # Expect failure because the modal provider is disabled in the test environment
@@ -110,7 +108,7 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     mngr create my-task --plugin my-plugin --disable-plugin other-plugin
     """)
     result = e2e.run(
-        "mngr create my-task --plugin my-plugin --disable-plugin other-plugin --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --plugin my-plugin --disable-plugin other-plugin --type test_sleep --no-ensure-clean",
         comment="you can enable or disable specific plugins",
     )
     # The plugin flags should be accepted by the CLI (no "No such option" error).
@@ -134,7 +132,7 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --transfer=none --type test_sleep --no-ensure-clean",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
@@ -208,7 +206,7 @@ def test_create_with_label(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
+            "mngr create my-task --type test_sleep --no-ensure-clean --label team=backend --host-label env=staging",
             comment="you can add labels to organize your agents and tags for host metadata",
         )
     ).to_succeed()

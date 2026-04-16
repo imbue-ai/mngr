@@ -66,7 +66,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         name=None,
         id=None,
         name_style="coolname",
-        command=None,
         extra_window=(),
         source=None,
         target_path=None,
@@ -158,12 +157,9 @@ def _create_and_track_test_agent(
     plugin_manager: pluggy.PluginManager,
     created_sessions: list[str],
     agent_name: str,
-    agent_cmd: str = "sleep 482917",
 ) -> str:
     """Create a test agent via CLI and track its session for cleanup."""
-    session_name = create_test_agent_via_cli(
-        cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, agent_cmd
-    )
+    session_name = create_test_agent_via_cli(cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name)
     created_sessions.append(session_name)
     return session_name
 
@@ -186,8 +182,8 @@ def create_test_agent(
     Supports creating multiple agents per test -- all are cleaned up.
     """
     created_sessions: list[str] = []
-    yield lambda agent_name, agent_cmd="sleep 482917": _create_and_track_test_agent(
-        cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, created_sessions, agent_name, agent_cmd
+    yield lambda agent_name: _create_and_track_test_agent(
+        cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, created_sessions, agent_name
     )
 
     for session_name in created_sessions:

@@ -33,8 +33,8 @@ def test_migrate_clones_and_destroys_source(
             [
                 source_name,
                 target_name,
-                "--command",
-                "sleep 482917",
+                "--type",
+                "test_sleep",
                 "--transfer=none",
                 "--no-connect",
             ],

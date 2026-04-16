@@ -32,14 +32,14 @@ mngr create my-agent claude --idle-timeout 1h      # Override timeout
 
 ## Running a Custom Command
 
-Use `--command` to run a literal command instead of using an agent type:
+Any program on `PATH` can be used as an agent type. When the type name is not a registered agent type (like `claude` or `codex`), mngr runs it directly as the command:
 
 ```bash
-mngr create my-agent --command "sleep 1000"      # Run a simple command
-mngr create my-agent --command "./my-script.sh"  # Run a custom script
+mngr create my-agent python -- -m http.server 8080   # Run python with args
+mngr create my-agent ./my-script.sh                  # Run a custom script
 ```
 
-The `--command` flag implicitly uses the "generic" agent type, which simply runs the provided command without any special handling. This means `--command` and `--type` are mutually exclusive: you either specify an agent type (like `claude` or `codex`), or you provide a literal command to run.
+To run a literal command with spaces, define an agent type in your config with the desired command (see [Agent Types](./agent_types.md)).
 
 See [`mngr create`](../commands/primary/create.md) for all available options.
 

@@ -118,8 +118,8 @@ def test_provision_preserves_existing_env_vars(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 849127",
+                "--type",
+                "test_sleep",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

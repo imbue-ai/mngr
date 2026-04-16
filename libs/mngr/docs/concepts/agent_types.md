@@ -8,13 +8,7 @@ mngr create my-agent codex         # "codex" is the agent type
 mngr create my-agent ./my-script   # any command can be an agent type
 ```
 
-Alternatively, you can use `--command` to run a literal command directly without specifying an agent type:
-
-```bash
-mngr create my-agent --command "sleep 1000"   # run a literal command
-```
-
-Using `--command` implicitly uses the "generic" agent type, which simply runs the provided command. This means `--command` and `--type` are mutually exclusive.
+To run a literal command with spaces or shell metacharacters, define a [custom agent type](#custom-agent-types) with that command.
 
 Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
 

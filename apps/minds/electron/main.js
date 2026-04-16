@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Notification, ipcMain, shell } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, shell } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -9,142 +9,28 @@ const { startBackend, shutdown, getBackendProcess } = require('./backend');
 todesktop.init();
 
 let mainWindow = null;
+let chromeView = null;
+let contentView = null;
+let sidebarView = null;
 let backendBaseUrl = null;
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
-
-// -- Title bar injection --
-// Injected into every backend page via webContents APIs so the custom
-// title bar persists across navigations.
-
-const TITLEBAR_CSS = `
-#minds-titlebar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: ${TITLEBAR_HEIGHT}px;
-  background: #1e293b;
-  display: flex;
-  align-items: center;
-  user-select: none;
-  -webkit-app-region: drag;
-  z-index: 2147483647;
-  border-bottom: 1px solid #334155;
-  padding: 0 4px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
-#minds-titlebar button {
-  -webkit-app-region: no-drag;
-  background: none;
-  border: none;
-  color: #94a3b8;
-  cursor: pointer;
-  width: 32px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  font-size: 14px;
-  line-height: 1;
-}
-#minds-titlebar button:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
-#minds-titlebar button:active { background: rgba(255,255,255,0.12); }
-#minds-titlebar svg {
-  width: 16px; height: 16px; fill: none; stroke: currentColor;
-  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-}
-#minds-titlebar .minds-nav { display: flex; gap: 2px; }
-#minds-titlebar .minds-title {
-  flex: 1; color: #cbd5e1; font-size: 12px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  text-align: center; padding: 0 8px;
-}
-#minds-titlebar .minds-wc { display: flex; }
-#minds-titlebar .minds-wc button { border-radius: 0; width: 36px; height: ${TITLEBAR_HEIGHT}px; }
-#minds-titlebar .minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
-#minds-titlebar .minds-wc #minds-close:hover { background: #dc2626; color: white; }
-:root { --minds-titlebar-height: ${TITLEBAR_HEIGHT}px; }
-body { padding-top: ${TITLEBAR_HEIGHT}px !important; }
-`;
-
-const TITLEBAR_CSS_MAC = `
-#minds-titlebar { padding-left: 72px; }
-#minds-titlebar .minds-wc { display: none; }
-`;
-
-const TITLEBAR_HTML = `
-<div class="minds-nav">
-  <button id="minds-home" title="Home">
-    <svg viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4"/></svg>
-  </button>
-  <button id="minds-back" title="Back">
-    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-  </button>
-  <button id="minds-forward" title="Forward">
-    <svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
-  </button>
-</div>
-<span class="minds-title" id="minds-title">Minds</span>
-<button id="minds-external" title="Open in browser">
-  <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-</button>
-<div class="minds-wc">
-  <button id="minds-min" title="Minimize">
-    <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="6" x2="10" y2="6"/></svg>
-  </button>
-  <button id="minds-max" title="Maximize">
-    <svg viewBox="0 0 12 12" style="width:12px;height:12px"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
-  </button>
-  <button id="minds-close" title="Close">
-    <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
-  </button>
-</div>
-`;
-
-const TITLEBAR_JS = `(function() {
-  if (document.getElementById('minds-titlebar')) return;
-  var bar = document.createElement('div');
-  bar.id = 'minds-titlebar';
-  bar.innerHTML = ${JSON.stringify(TITLEBAR_HTML)};
-  document.body.insertBefore(bar, document.body.firstChild);
-
-  var titleEl = document.getElementById('minds-title');
-  titleEl.textContent = document.title || 'Minds';
-
-  var head = document.querySelector('head');
-  if (head) {
-    new MutationObserver(function() {
-      titleEl.textContent = document.title || 'Minds';
-    }).observe(head, { childList: true, subtree: true, characterData: true });
-  }
-
-  document.getElementById('minds-home').onclick = function() { if (window.minds) window.minds.goHome(); };
-  document.getElementById('minds-back').onclick = function() { history.back(); };
-  document.getElementById('minds-forward').onclick = function() { history.forward(); };
-  document.getElementById('minds-external').onclick = function() {
-    if (window.minds) window.minds.openExternal(location.href);
-  };
-  document.getElementById('minds-min').onclick = function() { if (window.minds) window.minds.minimize(); };
-  document.getElementById('minds-max').onclick = function() { if (window.minds) window.minds.maximize(); };
-  document.getElementById('minds-close').onclick = function() { if (window.minds) window.minds.close(); };
-})();`;
+const SIDEBAR_WIDTH = 260;
 
 // -- Single instance lock --
-const gotLock = app.requestSingleInstanceLock();
+const gotLock = require('electron').app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
+  require('electron').app.quit();
 } else {
-  app.on('second-instance', () => {
+  require('electron').app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
   });
 
-  app.whenReady().then(onReady);
+  require('electron').app.whenReady().then(onReady);
 }
 
 async function onReady() {
@@ -166,11 +52,6 @@ function createWindow() {
     title: 'Minds',
     show: false,
     autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
   };
 
   if (isMac) {
@@ -180,7 +61,29 @@ function createWindow() {
     windowOptions.frame = false;
   }
 
-  mainWindow = new BrowserWindow(windowOptions);
+  mainWindow = new BaseWindow(windowOptions);
+
+  // Create chrome view (title bar) -- loads /_chrome from backend
+  chromeView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  // Create content view -- loads page content (landing page, workspaces, etc.)
+  contentView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  mainWindow.contentView.addChildView(chromeView);
+  mainWindow.contentView.addChildView(contentView);
+
+  updateViewBounds();
 
   mainWindow._maximizedByUs = false;
   mainWindow._boundsBeforeMaximize = null;
@@ -188,64 +91,130 @@ function createWindow() {
   mainWindow.on('unmaximize', () => { mainWindow._maximizedByUs = false; });
 
   mainWindow.once('ready-to-show', () => {
+    console.log('[window] ready-to-show fired');
     mainWindow.show();
   });
 
+  // BaseWindow may not fire ready-to-show since it has no built-in web contents.
+  // Show the window immediately after a short delay as a fallback.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      console.log('[window] Showing window via fallback timeout');
+      mainWindow.show();
+    }
+  }, 500);
+
   mainWindow.on('closed', () => {
     mainWindow = null;
+    chromeView = null;
+    contentView = null;
+    sidebarView = null;
   });
 
-  // Prevent backward navigation to file:// pages (shell.html) once the
-  // backend is running. Without this, hitting Back enough times lands on
-  // the static shell page which has no way to recover.
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url.startsWith('file://') && backendBaseUrl) {
-      event.preventDefault();
+  mainWindow.on('resize', updateViewBounds);
+
+  // Forward content view navigation events to chrome view
+  contentView.webContents.on('page-title-updated', (_event, title) => {
+    if (chromeView && !chromeView.webContents.isDestroyed()) {
+      chromeView.webContents.send('content-title-changed', title);
     }
   });
 
-  // Inject the custom title bar into every backend page.
-  // Skip file:// pages (loading/error screens).
-  mainWindow.webContents.on('dom-ready', () => {
-    const url = mainWindow.webContents.getURL();
-    if (url.startsWith('file://')) {
-      // If the backend is already running and we somehow ended up on
-      // shell.html (e.g. via history navigation that bypassed will-navigate),
-      // redirect to the backend landing page.
-      if (backendBaseUrl) {
-        mainWindow.loadURL(backendBaseUrl + '/');
-      }
-      return;
+  contentView.webContents.on('did-navigate', (_event, url) => {
+    if (chromeView && !chromeView.webContents.isDestroyed()) {
+      chromeView.webContents.send('content-url-changed', url);
     }
+  });
 
-    const css = TITLEBAR_CSS + (isMac ? TITLEBAR_CSS_MAC : '');
-    mainWindow.webContents.insertCSS(css);
-    mainWindow.webContents.executeJavaScript(TITLEBAR_JS).catch((err) => {
-      console.error('Failed to inject title bar JS:', err);
-    });
+  contentView.webContents.on('did-navigate-in-page', (_event, url) => {
+    if (chromeView && !chromeView.webContents.isDestroyed()) {
+      chromeView.webContents.send('content-url-changed', url);
+    }
   });
 }
 
+function updateViewBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const { width, height } = mainWindow.getContentBounds();
+
+  if (chromeView) {
+    chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
+  }
+  if (contentView) {
+    contentView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width, height: height - TITLEBAR_HEIGHT });
+  }
+  if (sidebarView) {
+    sidebarView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width: SIDEBAR_WIDTH, height: height - TITLEBAR_HEIGHT });
+  }
+}
+
+function toggleSidebar() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (sidebarView) {
+    // Remove sidebar
+    mainWindow.contentView.removeChildView(sidebarView);
+    sidebarView.webContents.close();
+    sidebarView = null;
+  } else {
+    // Create and show sidebar
+    sidebarView = new WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    mainWindow.contentView.addChildView(sidebarView);
+    updateViewBounds();
+
+    if (backendBaseUrl) {
+      sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
+    }
+  }
+}
+
 function registerShortcuts() {
-  mainWindow.webContents.on('before-input-event', (event, input) => {
+  chromeView.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     const devTools =
       (isMac && input.meta && input.alt && input.key.toLowerCase() === 'i') ||
       (!isMac && input.control && input.shift && input.key.toLowerCase() === 'c');
     if (devTools) {
       event.preventDefault();
-      mainWindow.webContents.toggleDevTools();
+      contentView.webContents.toggleDevTools();
+    }
+  });
+
+  contentView.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const devTools =
+      (isMac && input.meta && input.alt && input.key.toLowerCase() === 'i') ||
+      (!isMac && input.control && input.shift && input.key.toLowerCase() === 'c');
+    if (devTools) {
+      event.preventDefault();
+      contentView.webContents.toggleDevTools();
     }
   });
 }
 
 async function runStartupSequence() {
-  await mainWindow.loadFile(path.join(__dirname, 'shell.html'));
+  console.log('[startup] Loading shell.html in chrome view...');
+  // During startup, expand chrome view to full window to show loading screen
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const { width, height } = mainWindow.getContentBounds();
+    chromeView.setBounds({ x: 0, y: 0, width, height });
+    // Hide content view during startup
+    contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  }
+  await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
+  console.log('[startup] shell.html loaded');
 
   try {
     await runEnvSetup((status) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('status-update', status);
+      if (chromeView && !chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.send('status-update', status);
       }
     });
   } catch (err) {
@@ -260,14 +229,14 @@ async function runStartupSequence() {
 }
 
 async function startBackendWithRetry() {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('status-update', 'Starting Minds...');
+  if (chromeView && !chromeView.webContents.isDestroyed()) {
+    chromeView.webContents.send('status-update', 'Starting Minds...');
   }
 
   try {
     const { loginUrl, port } = await startBackend((status) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('status-update', status);
+      if (chromeView && !chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.send('status-update', status);
       }
     }, (event) => {
       const agentName = event.agent_name || 'Agent';
@@ -277,12 +246,39 @@ async function startBackendWithRetry() {
         body: event.message,
       });
       notification.show();
+    }, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (event.event === 'auth_success') {
+        // Reload chrome to update auth state
+        if (chromeView && !chromeView.webContents.isDestroyed()) {
+          chromeView.webContents.reload();
+        }
+      } else if (event.event === 'auth_required') {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        const authUrl = `http://127.0.0.1:${port}/auth/login?message=` +
+          encodeURIComponent('You need to sign in to Imbue in order to share');
+        if (contentView && !contentView.webContents.isDestroyed()) {
+          contentView.webContents.loadURL(authUrl);
+        }
+      }
     });
 
     backendBaseUrl = `http://127.0.0.1:${port}`;
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadURL(loginUrl);
+    console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
+    console.log('[startup] Loading content from', loginUrl);
+
+    // Restore normal layout: chrome at top, content below
+    updateViewBounds();
+
+    // Load chrome from backend and content from landing page
+    if (chromeView && !chromeView.webContents.isDestroyed()) {
+      chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    }
+    if (contentView && !contentView.webContents.isDestroyed()) {
+      contentView.webContents.loadURL(loginUrl);
     }
 
     const proc = getBackendProcess();
@@ -305,16 +301,38 @@ async function startBackendWithRetry() {
 function showError(message, details) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  const url = mainWindow.webContents.getURL();
-  if (!url.startsWith('file://')) {
-    mainWindow.loadFile(path.join(__dirname, 'shell.html'));
-    mainWindow.webContents.once('did-finish-load', () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('error-details', { message, details });
-      }
-    });
-  } else {
-    mainWindow.webContents.send('error-details', { message, details });
+  // Remove sidebar and content views on error
+  if (sidebarView) {
+    mainWindow.contentView.removeChildView(sidebarView);
+    sidebarView.webContents.close();
+    sidebarView = null;
+  }
+  if (contentView) {
+    mainWindow.contentView.removeChildView(contentView);
+    contentView.webContents.close();
+    contentView = null;
+  }
+
+  // Expand chrome view to fill the window for the error screen
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const { width, height } = mainWindow.getContentBounds();
+    if (chromeView) {
+      chromeView.setBounds({ x: 0, y: 0, width, height });
+    }
+  }
+
+  if (chromeView && !chromeView.webContents.isDestroyed()) {
+    const url = chromeView.webContents.getURL();
+    if (!url.startsWith('file://')) {
+      chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
+      chromeView.webContents.once('did-finish-load', () => {
+        if (chromeView && !chromeView.webContents.isDestroyed()) {
+          chromeView.webContents.send('error-details', { message, details });
+        }
+      });
+    } else {
+      chromeView.webContents.send('error-details', { message, details });
+    }
   }
 }
 
@@ -333,28 +351,69 @@ function readLastLogLines(lineCount) {
 // -- IPC handlers --
 
 ipcMain.on('go-home', () => {
-  if (mainWindow && !mainWindow.isDestroyed() && backendBaseUrl) {
-    mainWindow.loadURL(backendBaseUrl + '/');
+  if (contentView && !contentView.webContents.isDestroyed() && backendBaseUrl) {
+    contentView.webContents.loadURL(backendBaseUrl + '/');
   }
 });
 
-ipcMain.on('open-external', (_event, url) => {
-  if (typeof url === 'string') {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        shell.openExternal(url);
-      }
-    } catch {
-      // Invalid URL
+ipcMain.on('navigate-content', (_event, url) => {
+  if (contentView && !contentView.webContents.isDestroyed()) {
+    // If the URL is relative, prepend the backend base URL
+    if (url.startsWith('/') && backendBaseUrl) {
+      url = backendBaseUrl + url;
     }
+    contentView.webContents.loadURL(url);
   }
+  // Close sidebar after navigation
+  if (sidebarView && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.contentView.removeChildView(sidebarView);
+    sidebarView.webContents.close();
+    sidebarView = null;
+  }
+});
+
+ipcMain.on('content-go-back', () => {
+  if (contentView && !contentView.webContents.isDestroyed()) {
+    contentView.webContents.goBack();
+  }
+});
+
+ipcMain.on('content-go-forward', () => {
+  if (contentView && !contentView.webContents.isDestroyed()) {
+    contentView.webContents.goForward();
+  }
+});
+
+ipcMain.on('toggle-sidebar', () => {
+  toggleSidebar();
 });
 
 ipcMain.on('retry', async () => {
   await shutdown();
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    await mainWindow.loadFile(path.join(__dirname, 'shell.html'));
+
+  // Recreate content view if it was removed during error
+  if (!contentView && mainWindow && !mainWindow.isDestroyed()) {
+    contentView = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    // chromeView is never removed during the error path, so only add contentView
+    mainWindow.contentView.addChildView(contentView);
+    updateViewBounds();
+  }
+
+  if (chromeView && !chromeView.webContents.isDestroyed()) {
+    // Expand chrome view to full window and hide content view for the loading screen
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const { width, height } = mainWindow.getContentBounds();
+      chromeView.setBounds({ x: 0, y: 0, width, height });
+      if (contentView) {
+        contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
+    }
+    await chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
     startBackendWithRetry();
   }
 });
@@ -396,18 +455,18 @@ ipcMain.on('window-close', () => {
 
 let isShuttingDown = false;
 
-app.on('window-all-closed', async () => {
+require('electron').app.on('window-all-closed', async () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
   if (!isShuttingDown) {
     isShuttingDown = true;
     console.log('[lifecycle] Starting shutdown from window-all-closed...');
     await shutdown();
     console.log('[lifecycle] Shutdown complete, calling app.quit()');
-    app.quit();
+    require('electron').app.quit();
   }
 });
 
-app.on('before-quit', async (event) => {
+require('electron').app.on('before-quit', async (event) => {
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   if (getBackendProcess() && !isShuttingDown) {
     isShuttingDown = true;
@@ -415,6 +474,6 @@ app.on('before-quit', async (event) => {
     console.log('[lifecycle] Starting shutdown from before-quit...');
     await shutdown();
     console.log('[lifecycle] Shutdown complete, calling app.quit()');
-    app.quit();
+    require('electron').app.quit();
   }
 });

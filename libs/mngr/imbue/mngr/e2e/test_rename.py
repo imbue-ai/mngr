@@ -16,7 +16,7 @@ from imbue.skitwright.expect import expect
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --type test_sleep --no-ensure-clean",
             comment="Create agent to be renamed",
         )
     ).to_succeed()

@@ -26,7 +26,7 @@ def test_create_with_template(e2e: E2eSession) -> None:
     # Create an agent using the template
     expect(
         e2e.run(
-            "mngr create my-task --template my_local_template --command 'sleep 99999' --no-ensure-clean --no-connect",
+            "mngr create my-task --template my_local_template --type test_sleep --no-ensure-clean --no-connect",
             comment="Create agent using template",
         )
     ).to_succeed()

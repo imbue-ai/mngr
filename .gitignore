@@ -227,6 +227,9 @@
 # Local Claude settings backup files
 **/.claude/*.bak
 
+# Claude worktress
+**/.claude/worktrees
+
 # Local mngr settings (not committed)
 **/.mngr/settings.local.toml
 
@@ -248,7 +251,6 @@
 
 # Offload caches and local files
 **/.offload/**
-**/.offload-cache-key
 **/test-results
 **/current.tar.gz
 
