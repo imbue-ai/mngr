@@ -29,25 +29,12 @@ from imbue.resource_guards.resource_guards import stop_resource_guards
 # Use ubiquitous coreutils binaries so these tests run on any system.
 _TEST_RESOURCES = ["echo", "cat", "ls"]
 
-# Shared preamble for every pytester conftest we generate: clears the outer
-# process's guard state so the pytester child creates its own wrappers, and
-# strips the outer wrapper dir from PATH so the outer wrappers (still first
-# on PATH) don't shadow the child's.
-_PYTESTER_GUARD_RESET_PREAMBLE = """\
-import os
-
-_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
-if _outer_dir:
-    os.environ["PATH"] = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
-    )
-"""
-
 # Conftest that pytester injects into its temp directory.  It registers the
 # resource guard hooks for "cat" only, which is enough for end-to-end tests.
 # cat is a good choice: `cat /dev/null` succeeds, `cat /nonexistent` fails.
-_PYTESTER_CONFTEST = f"""\
-{_PYTESTER_GUARD_RESET_PREAMBLE}
+# Tests using pytester must request the clean_guard_env fixture so the
+# child subprocess doesn't inherit the outer process's guard wrapper PATH.
+_PYTESTER_CONFTEST = """\
 from imbue.resource_guards.resource_guards import (
     register_resource_guard,
     start_resource_guards,
@@ -101,7 +88,7 @@ def test_generate_wrapper_script_contains_guard_check() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> None:
+def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with @pytest.mark.cat that calls cat should pass."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -116,7 +103,7 @@ def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> No
     result.assert_outcomes(passed=1)
 
 
-def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
+def test_guards_work_with_xdist_workers(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """Guards enforce correctly when xdist distributes tests across workers.
 
     The controller creates wrapper scripts and sets PATH; workers inherit
@@ -141,7 +128,7 @@ def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test without the mark that calls cat should fail."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -155,7 +142,7 @@ def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> N
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test that expects a resource to fail should still be caught by the guard.
 
     This simulates a realistic scenario: a test checks that cat fails on a
@@ -178,7 +165,7 @@ def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pyt
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester) -> None:
+def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with @pytest.mark.cat that never calls cat should fail (superfluous mark)."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -193,7 +180,7 @@ def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester) 
     result.stdout.fnmatch_lines(["*never invoked cat*"])
 
 
-def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester) -> None:
+def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """When a test fails AND a blocked resource was invoked, both should be visible."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -213,7 +200,7 @@ def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester) ->
     )
 
 
-def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with no mark and no resource call should pass."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -763,8 +750,7 @@ def test_enforce_sdk_guard_skips_when_no_phase_set(
 # Conftest for SDK guard pytester tests. Registers a no-op SDK guard, then uses
 # start/stop_resource_guards to initialize the infrastructure. Tests trigger the
 # guard by calling enforce_sdk_guard directly (no real SDK needed).
-_PYTESTER_SDK_CONFTEST = f"""\
-{_PYTESTER_GUARD_RESET_PREAMBLE}
+_PYTESTER_SDK_CONFTEST = """\
 from imbue.resource_guards.resource_guards import (
     register_sdk_guard,
     start_resource_guards,
@@ -784,7 +770,7 @@ def pytest_sessionfinish(session, exitstatus):
 """
 
 
-def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester) -> None:
+def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with the SDK mark that triggers the guard should pass."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
     pytester.makepyfile("""
@@ -799,7 +785,7 @@ def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester) -
     result.assert_outcomes(passed=1)
 
 
-def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester) -> None:
+def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test without the SDK mark that triggers the guard should fail."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
     pytester.makepyfile("""
@@ -815,6 +801,7 @@ def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester) 
 
 def test_sdk_unmarked_test_that_catches_guard_error_still_fails(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test that catches ResourceGuardViolation should still be caught by the guard.
 
@@ -839,6 +826,7 @@ def test_sdk_unmarked_test_that_catches_guard_error_still_fails(
 
 def test_sdk_marked_test_that_never_triggers_guard_fails(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test with the SDK mark that never triggers the guard fails (superfluous mark)."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
@@ -856,6 +844,7 @@ def test_sdk_marked_test_that_never_triggers_guard_fails(
 
 def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test with no SDK mark and no guard trigger should pass."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
@@ -868,55 +857,12 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
 
 
 # ---------------------------------------------------------------------------
-# Auto-registration of marks via conftest_hooks (pytester)
+# Mark auto-registration via register_guarded_resource_markers (pytester)
 # ---------------------------------------------------------------------------
-
-# Conftest that uses register_conftest_hooks for the auto-registration path.
-# Notably, there is NO manual config.addinivalue_line("markers", ...) call --
-# the mark is registered automatically by conftest_hooks._pytest_configure.
-_PYTESTER_AUTO_MARKER_CONFTEST = f"""\
-{_PYTESTER_GUARD_RESET_PREAMBLE}
-from imbue.resource_guards.resource_guards import register_resource_guard
-from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-
-# Pretend to be an xdist worker so register_conftest_hooks skips the global
-# test lock (outer pytest already holds it -> deadlock).
-os.environ["PYTEST_XDIST_WORKER"] = "gw_pytester"
-
-register_resource_guard("cat")
-
-# register_conftest_hooks injects pytest_configure (which auto-registers markers
-# for all resources) and pytest_sessionstart (which calls start_resource_guards).
-register_conftest_hooks(globals())
-"""
-
-
-def test_register_resource_guard_auto_registers_pytest_mark(
-    pytester: pytest.Pytester,
-) -> None:
-    """register_resource_guard() auto-registers the pytest mark via conftest_hooks.
-
-    With --strict-markers, an unregistered mark causes a collection error.
-    This test verifies that calling register_resource_guard("cat") is sufficient
-    to register @pytest.mark.cat without a separate register_marker() call.
-    """
-    pytester.makeconftest(_PYTESTER_AUTO_MARKER_CONFTEST)
-    pytester.makepyfile("""
-        import subprocess
-        import pytest
-
-        @pytest.mark.cat
-        def test_cat_dev_null():
-            subprocess.run(["cat", "/dev/null"], check=True)
-    """)
-    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider", "--strict-markers")
-    result.assert_outcomes(passed=1)
-
 
 # Conftest that mirrors the README example: standalone pytest_configure
 # using register_guarded_resource_markers() (no conftest_hooks).
-_PYTESTER_STANDALONE_CONFTEST = f"""\
-{_PYTESTER_GUARD_RESET_PREAMBLE}
+_PYTESTER_STANDALONE_CONFTEST = """\
 from imbue.resource_guards.resource_guards import (
     register_guarded_resource_markers,
     register_resource_guard,
@@ -939,6 +885,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 def test_standalone_pytest_configure_registers_marks(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """The README pattern (pytest_configure + register_guarded_resource_markers) works.
 
