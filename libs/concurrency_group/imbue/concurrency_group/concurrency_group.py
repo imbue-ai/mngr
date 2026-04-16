@@ -5,6 +5,7 @@ from enum import auto
 from functools import wraps
 from pathlib import Path
 from subprocess import TimeoutExpired
+from threading import Event
 from threading import Lock
 from typing import Any
 from typing import Callable
@@ -111,6 +112,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
 
     _lock: Lock = PrivateAttr(default_factory=Lock)
     _children: list["ConcurrencyGroup"] = PrivateAttr(default_factory=list)
+    _exited_event: Event = PrivateAttr(default_factory=Event)
 
     # Did the concurrency group already exit with an exception?
     _exit_exception: BaseException | None = PrivateAttr(default=None)
@@ -141,6 +143,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             raise
         finally:
             self._state = ConcurrencyGroupState.EXITED
+            self._exited_event.set()
 
     def _exit(self, exc_value: BaseException | None) -> None:
         main_exception: BaseException | None = exc_value if exc_value is not None else None
@@ -176,6 +179,10 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 exceptions.append(main_exception)
                 message = str(main_exception)
 
+        children_timeout_seconds = (
+            self.shutdown_timeout_seconds if self.is_shutting_down() else self.exit_timeout_seconds
+        )
+        self._wait_for_children_to_exit(children_timeout_seconds)
         for child in self._children:
             if child.state not in (ConcurrencyGroupState.EXITED, ConcurrencyGroupState.INSTANTIATED):
                 child_message = f"A child concurrency group did not exit: `{child.name}` (state: {child.state})."
@@ -255,6 +262,21 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
     def _get_remaining_timeout(self, start_time_seconds: float, total_timeout_seconds: float) -> float:
         elapsed_seconds = time.monotonic() - start_time_seconds
         return max(0, total_timeout_seconds - elapsed_seconds)
+
+    def _wait_for_children_to_exit(self, timeout_seconds: float) -> None:
+        # Children may be managed from a different thread than the one exiting this CG, so they
+        # can still be in ACTIVE/EXITING when we reach the state check. Wait for each child's
+        # exited event (set in __exit__'s finally) within a shared deadline.
+        if not self._children:
+            return
+        deadline = time.monotonic() + timeout_seconds
+        for child in self._children:
+            if child.state == ConcurrencyGroupState.INSTANTIATED:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            child._exited_event.wait(timeout=remaining)
 
     def _raise_if_not_active(self) -> None:
         if self._state != ConcurrencyGroupState.ACTIVE:
