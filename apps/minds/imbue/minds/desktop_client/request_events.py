@@ -86,9 +86,7 @@ class SharingRequestEvent(RequestEvent):
     current_status: SharingStatusSnapshot | None = Field(
         default=None, description="Current sharing state for pre-populating the form"
     )
-    suggested_emails: list[str] = Field(
-        default_factory=list, description="Suggested email addresses to share with"
-    )
+    suggested_emails: list[str] = Field(default_factory=list, description="Suggested email addresses to share with")
 
 
 class PermissionsRequestEvent(RequestEvent):
@@ -201,9 +199,7 @@ class RequestInbox(FrozenModel):
             latest_by_key[key] = req
 
         # Filter out responded requests
-        pending = [
-            req for req in latest_by_key.values() if str(req.event_id) not in responded_event_ids
-        ]
+        pending = [req for req in latest_by_key.values() if str(req.event_id) not in responded_event_ids]
 
         # Sort by timestamp descending (most recent first)
         pending.sort(key=lambda r: str(r.timestamp), reverse=True)

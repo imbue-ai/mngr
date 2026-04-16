@@ -2130,14 +2130,16 @@ class Host(BaseHost, OnlineHostInterface):
             events_dir = state_dir / "events"
             servers_events_dir = events_dir / "servers"
             requests_events_dir = events_dir / "requests"
-            self._mkdirs([
-                state_dir,
-                events_dir,
-                servers_events_dir,
-                requests_events_dir,
-                state_dir / "activity",
-                state_dir / "commands",
-            ])
+            self._mkdirs(
+                [
+                    state_dir,
+                    events_dir,
+                    servers_events_dir,
+                    requests_events_dir,
+                    state_dir / "activity",
+                    state_dir / "commands",
+                ]
+            )
 
             # Pre-create empty events.jsonl files so that `mngr events --follow`
             # finds the sources immediately on startup, rather than waiting for a
