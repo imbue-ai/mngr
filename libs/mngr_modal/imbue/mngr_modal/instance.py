@@ -666,12 +666,7 @@ class ModalProviderInstance(BaseProviderInstance):
         logger.debug("Marked host as DESTROYED: {}", host_id)
 
     def _clear_snapshots_from_host_record(self, host_id: HostId) -> None:
-        """Clear all snapshot records from a host record on the state volume.
-
-        This is called during destroy_host to mark the host as DESTROYED
-        (no snapshots, cannot be restarted) while keeping the host record
-        for visibility.
-        """
+        """Clear all snapshot records from a host record on the state volume."""
         host_record = self._read_host_record(host_id, use_cache=False)
         if host_record is None:
             return
