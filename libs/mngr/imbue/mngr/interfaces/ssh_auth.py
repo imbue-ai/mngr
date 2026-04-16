@@ -2,15 +2,38 @@ import shlex
 from abc import ABC
 from abc import abstractmethod
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import ClassVar
 from typing import Literal
 
 import paramiko
+from loguru import logger
+from pydantic import BeforeValidator
 from pydantic import Field
+from pydantic import PlainSerializer
 from pydantic import SecretStr
+from pydantic import SerializationInfo
 
 from imbue.imbue_common.frozen_model import FrozenModel
+
+
+class SSHConnectionError(Exception):
+    """Raised when an SSH connection attempt fails.
+
+    Wraps the underlying error to strip potentially-sensitive content
+    (credentials, host keys) from the error message before it reaches
+    loggers or user-facing output.
+    """
+
+
+class SSHAuthDeserializationError(ValueError):
+    """Raised when SSHAuthMethod deserialization fails.
+
+    Subclasses ValueError so Pydantic catches it in BeforeValidator and
+    converts it to a validation error. Using a custom class avoids ratchet
+    violations for builtin exception raises.
+    """
 
 
 class SSHTransportCommand(FrozenModel):
@@ -107,38 +130,91 @@ class SSHKeyAuth(SSHAuthMethod):
         parts = ["ssh", "-i", shlex.quote(str(self.key_path)), "-p", str(port)]
         if effective_known_hosts is not None:
             parts.extend(
-                ["-o", f"UserKnownHostsFile={shlex.quote(str(effective_known_hosts))}", "-o", "StrictHostKeyChecking=yes"]
+                [
+                    "-o",
+                    f"UserKnownHostsFile={shlex.quote(str(effective_known_hosts))}",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                ]
             )
         else:
             parts.extend(["-o", "StrictHostKeyChecking=yes"])
         return SSHTransportCommand(command=" ".join(parts))
 
     def connect_paramiko(self, client: paramiko.SSHClient, hostname: str, port: int, username: str) -> None:
-        """Connect using key-based auth with strict host key checking."""
+        """Connect using key-based auth with host key checking.
+
+        Uses RejectPolicy when a known_hosts file is available (strict verification).
+        Falls back to AutoAddPolicy with a warning when no known_hosts file exists
+        (e.g. desktop client where server-side known_hosts paths are unreachable).
+        """
         if self.known_hosts_file is not None and self.known_hosts_file.exists():
             client.load_host_keys(str(self.known_hosts_file))
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
         else:
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        client.connect(
-            hostname=hostname,
-            port=port,
-            username=username,
-            key_filename=str(self.key_path),
-            timeout=10.0,
-        )
+            logger.warning(
+                "No known_hosts file available (path={}), using AutoAddPolicy -- host key not verified",
+                self.known_hosts_file,
+            )
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=hostname,
+                port=port,
+                username=username,
+                key_filename=str(self.key_path),
+                timeout=10.0,
+            )
+        except (paramiko.SSHException, OSError) as e:
+            raise SSHConnectionError(
+                f"SSH key auth connection to {username}@{hostname}:{port} failed: {type(e).__name__}"
+            ) from e
 
     def get_display_command(self, user: str, hostname: str, port: int) -> str:
         """Return a display-safe SSH command string."""
         return f"ssh -i {self.key_path} -p {port} {user}@{hostname}"
 
 
+def _deserialize_ssh_auth(v: Any) -> "SSHAuthMethod":
+    """Deserialize SSHAuthMethod from dict using the auth_type discriminator.
+
+    Dispatches to the correct subclass via the runtime registry populated by
+    __init_subclass__. Plugin auth types (e.g. SSHPasswordAuth) are available
+    as soon as their module is imported.
+    """
+    if isinstance(v, SSHAuthMethod):
+        return v
+    if not isinstance(v, dict):
+        msg = f"Expected SSHAuthMethod or dict, got {type(v)}"
+        raise SSHAuthDeserializationError(msg)
+    auth_type = v.get("auth_type")
+    if auth_type is None:
+        raise SSHAuthDeserializationError("Missing auth_type discriminator in SSH auth data")
+    subcls = SSHAuthMethod._registry.get(auth_type)
+    if subcls is None:
+        raise SSHAuthDeserializationError(f"Unknown SSH auth type: {auth_type!r}")
+    return subcls.model_validate(v)
+
+
+def _serialize_ssh_auth(v: "SSHAuthMethod", info: SerializationInfo) -> dict[str, Any]:
+    """Serialize an SSHAuthMethod using the concrete subclass schema.
+
+    Without this, Pydantic serializes using the base class schema (SSHAuthMethod)
+    which only includes auth_type, dropping subclass-specific fields like key_path.
+    """
+    return v.model_dump(mode=info.mode)
+
+
 # Type alias for SSHAuthMethod fields in Pydantic models.
-# Currently only SSHKeyAuth is built in. Plugin packages that add new auth types
-# (e.g. SSHPasswordAuth) should register via __init_subclass__ for runtime dispatch;
-# for Pydantic deserialization, extend this union by redefining SSHAuthField in
-# the plugin package and using it in plugin-specific models.
-SSHAuthField = SSHKeyAuth
+# The BeforeValidator dispatches deserialization to the correct registered subclass
+# via the auth_type discriminator. The PlainSerializer ensures subclass fields are
+# included in serialization output. Plugin packages register new auth types via
+# __init_subclass__ at import time.
+SSHAuthField = Annotated[
+    SSHAuthMethod,
+    BeforeValidator(_deserialize_ssh_auth),
+    PlainSerializer(_serialize_ssh_auth),
+]
 
 
 class SSHConnectionInfo(FrozenModel):

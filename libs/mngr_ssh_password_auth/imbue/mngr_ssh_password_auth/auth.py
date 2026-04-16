@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from imbue.mngr.errors import BinaryNotInstalledError
 from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionError
 from imbue.mngr.interfaces.ssh_auth import SSHTransportCommand
 
 
@@ -28,7 +29,9 @@ class SSHPasswordAuth(SSHAuthMethod):
 
     auth_type: Literal["password"] = "password"
     password: SecretStr = Field(description="SSH password (stored as SecretStr, masked in logs and serialization)")
-    known_hosts_file: Path | None = Field(default=None, description="Path to known_hosts file for host key verification")
+    known_hosts_file: Path | None = Field(
+        default=None, description="Path to known_hosts file for host key verification"
+    )
 
     def configure_pyinfra_host_data(self, host_data: dict[str, Any]) -> None:
         """Populate pyinfra host_data with password-based SSH settings.
@@ -70,25 +73,37 @@ class SSHPasswordAuth(SSHAuthMethod):
         return SSHTransportCommand(command=command, env=env)
 
     def connect_paramiko(self, client: paramiko.SSHClient, hostname: str, port: int, username: str) -> None:
-        """Connect using password auth with strict host key checking.
+        """Connect using password auth with host key checking.
 
-        Disables key-based auth lookups to avoid confusing failures when
-        the user has SSH keys that don't apply to the target host.
+        Uses RejectPolicy when a known_hosts file is available. Falls back to
+        AutoAddPolicy with a warning when no known_hosts file exists.
+        Disables key-based auth lookups to avoid confusing failures.
         """
         if self.known_hosts_file is not None and self.known_hosts_file.exists():
             client.load_host_keys(str(self.known_hosts_file))
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
         else:
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        client.connect(
-            hostname=hostname,
-            port=port,
-            username=username,
-            password=self.password.get_secret_value(),
-            look_for_keys=False,
-            allow_agent=False,
-            timeout=10.0,
-        )
+            from loguru import logger
+
+            logger.warning(
+                "No known_hosts file available (path={}), using AutoAddPolicy -- host key not verified",
+                self.known_hosts_file,
+            )
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=hostname,
+                port=port,
+                username=username,
+                password=self.password.get_secret_value(),
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=10.0,
+            )
+        except (paramiko.SSHException, OSError) as e:
+            raise SSHConnectionError(
+                f"SSH password auth connection to {username}@{hostname}:{port} failed: {type(e).__name__}"
+            ) from e
 
     def get_display_command(self, user: str, hostname: str, port: int) -> str:
         """Return a display-safe SSH command string (no password shown)."""

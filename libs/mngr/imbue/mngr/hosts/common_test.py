@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import cast
 
 from imbue.mngr.api.testing import FakeHost
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -22,6 +21,7 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString

@@ -18,6 +18,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.interfaces.ssh_auth import SSHAuthField
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 
 # === Enums ===
 
@@ -401,8 +402,10 @@ class SSHInfo(FrozenModel):
 
     @property
     def key_path(self) -> Path | None:
-        """Path to SSH private key, if using key-based auth."""
-        return self.auth.key_path
+        """Path to SSH private key, if using key-based auth. None for other auth types."""
+        if isinstance(self.auth, SSHKeyAuth):
+            return self.auth.key_path
+        return None
 
     def model_dump(self, **kwargs: Any) -> dict[str, Any]:
         """Override to include command and key_path for backward compatibility."""

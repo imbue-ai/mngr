@@ -16,7 +16,6 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
-from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -27,6 +26,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName

@@ -7,9 +7,9 @@ from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
 from imbue.minds.desktop_client.runner import _DEFAULT_MNGR_HOST_DIR
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 
 

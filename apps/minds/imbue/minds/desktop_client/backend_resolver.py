@@ -12,9 +12,6 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
-
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.local_process import RunningProcess
@@ -31,6 +28,8 @@ from imbue.mngr.api.discovery_events import HostAuthInfoEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 

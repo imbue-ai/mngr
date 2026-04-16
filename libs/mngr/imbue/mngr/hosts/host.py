@@ -65,9 +65,6 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
-from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
-from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -82,6 +79,10 @@ from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
+from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -224,7 +225,9 @@ class Host(BaseHost, OnlineHostInterface):
     """
 
     connector: PyinfraConnector = Field(frozen=True, description="Pyinfra connector for host operations")
-    ssh_auth: SSHKeyAuth | None = Field(default=None, frozen=True, description="SSH auth method. None for local hosts.")
+    ssh_auth: SSHAuthMethod | None = Field(
+        default=None, frozen=True, description="SSH auth method. None for local hosts."
+    )
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
@@ -1633,7 +1636,9 @@ class Host(BaseHost, OnlineHostInterface):
                     transport = source_conn.auth.build_transport_command(source_conn.port, source_known_hosts)
                     env = {"GIT_SSH_COMMAND": transport.command}
                     env.update(expose_secrets_for_subprocess(transport.env))
-                    remote_url = f"ssh://{source_conn.user}@{source_conn.hostname}:{source_conn.port}{source_path}/.git"
+                    remote_url = (
+                        f"ssh://{source_conn.user}@{source_conn.hostname}:{source_conn.port}{source_path}/.git"
+                    )
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(
                             ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
@@ -1704,8 +1709,8 @@ class Host(BaseHost, OnlineHostInterface):
                         f"_mngr_env=$(mktemp) && "
                         f"trap 'rm -f \"$_mngr_env\"' EXIT && "
                         f"printf '{env_file_content}\\n' > \"$_mngr_env\" && "
-                        f"chmod 600 \"$_mngr_env\" && "
-                        f". \"$_mngr_env\" && "
+                        f'chmod 600 "$_mngr_env" && '
+                        f'. "$_mngr_env" && '
                         f"{git_cmd}"
                     )
                 else:

@@ -10,9 +10,9 @@ from pydantic import SecretStr
 
 from imbue.mngr.errors import BinaryNotInstalledError
 from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionError
 from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr_ssh_password_auth.auth import SSHPasswordAuth
-
 
 # =========================================================================
 # Construction and basic properties
@@ -208,15 +208,14 @@ def test_connect_paramiko_uses_password() -> None:
     )
 
 
-def test_connect_paramiko_uses_reject_policy_without_known_hosts() -> None:
+def test_connect_paramiko_uses_auto_add_policy_without_known_hosts() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
     client = MagicMock()
     auth.connect_paramiko(client, "example.com", 22, "root")
-    import paramiko
 
     client.set_missing_host_key_policy.assert_called_once()
     policy_arg = client.set_missing_host_key_policy.call_args[0][0]
-    assert isinstance(policy_arg, paramiko.RejectPolicy)
+    assert isinstance(policy_arg, paramiko.AutoAddPolicy)
 
 
 def test_connect_paramiko_loads_known_hosts_when_file_exists(tmp_path: Path) -> None:
@@ -226,6 +225,27 @@ def test_connect_paramiko_loads_known_hosts_when_file_exists(tmp_path: Path) -> 
     client = MagicMock()
     auth.connect_paramiko(client, "example.com", 22, "root")
     client.load_host_keys.assert_called_once_with(str(known_hosts))
+
+
+def test_connect_paramiko_uses_reject_policy_with_known_hosts(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("")
+    auth = SSHPasswordAuth(password=SecretStr("secret"), known_hosts_file=known_hosts)
+    client = MagicMock()
+    auth.connect_paramiko(client, "example.com", 22, "root")
+    policy_arg = client.set_missing_host_key_policy.call_args[0][0]
+    assert isinstance(policy_arg, paramiko.RejectPolicy)
+
+
+def test_connect_paramiko_wraps_exception_without_credentials() -> None:
+    auth = SSHPasswordAuth(password=SecretStr("super-secret-password"))
+    client = MagicMock()
+    client.connect.side_effect = paramiko.AuthenticationException(
+        "Authentication failed for password=super-secret-password"
+    )
+    with pytest.raises(SSHConnectionError, match="SSH password auth connection") as exc_info:
+        auth.connect_paramiko(client, "example.com", 22, "root")
+    assert "super-secret-password" not in str(exc_info.value)
 
 
 # =========================================================================
@@ -246,9 +266,7 @@ def test_duplicate_auth_type_raises_type_error() -> None:
             def build_transport_command(self, port: int, known_hosts_file: Path | None) -> SSHTransportCommand:
                 raise NotImplementedError
 
-            def connect_paramiko(
-                self, client: paramiko.SSHClient, hostname: str, port: int, username: str
-            ) -> None:
+            def connect_paramiko(self, client: paramiko.SSHClient, hostname: str, port: int, username: str) -> None:
                 pass
 
             def get_display_command(self, user: str, hostname: str, port: int) -> str:

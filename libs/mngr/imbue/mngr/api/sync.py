@@ -21,11 +21,11 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
-from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
-from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
@@ -36,7 +36,6 @@ from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_ancestor
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
-
 
 # === Error Classes ===
 
@@ -748,7 +747,12 @@ def _remote_git_push_mirror(
     git_url = _build_ssh_git_url(conn, destination_path)
     known_hosts_file = get_ssh_known_hosts_file(host)
     transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": transport.command, "GIT_LFS_SKIP_PUSH": "1", **expose_secrets_for_subprocess(transport.env)}
+    env = {
+        **os.environ,
+        "GIT_SSH_COMMAND": transport.command,
+        "GIT_LFS_SKIP_PUSH": "1",
+        **expose_secrets_for_subprocess(transport.env),
+    }
 
     logger.debug("Performing mirror push to {}", git_url)
 
@@ -828,7 +832,12 @@ def _remote_git_push_branch(
     git_url = _build_ssh_git_url(conn, destination_path)
     known_hosts_file = get_ssh_known_hosts_file(host)
     transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": transport.command, "GIT_LFS_SKIP_PUSH": "1", **expose_secrets_for_subprocess(transport.env)}
+    env = {
+        **os.environ,
+        "GIT_SSH_COMMAND": transport.command,
+        "GIT_LFS_SKIP_PUSH": "1",
+        **expose_secrets_for_subprocess(transport.env),
+    }
 
     logger.debug("Pushing branch {} to {} via SSH", source_branch, git_url)
 
@@ -986,7 +995,11 @@ def _fetch_and_merge(
         # Remote host: fetch via SSH URL
         git_url = _build_ssh_git_url(conn, source_path)
         transport = conn.auth.build_transport_command(conn.port, known_hosts_file)
-        fetch_env = {**os.environ, "GIT_SSH_COMMAND": transport.command, **expose_secrets_for_subprocess(transport.env)}
+        fetch_env = {
+            **os.environ,
+            "GIT_SSH_COMMAND": transport.command,
+            **expose_secrets_for_subprocess(transport.env),
+        }
         logger.debug("Fetching from remote agent repository via SSH: {}", git_url)
         try:
             cg.run_process_to_completion(

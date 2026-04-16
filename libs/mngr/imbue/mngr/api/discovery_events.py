@@ -28,6 +28,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -36,8 +38,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
-from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import SSHInfo
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/discovery")
