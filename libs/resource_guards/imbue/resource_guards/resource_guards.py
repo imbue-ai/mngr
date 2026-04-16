@@ -103,7 +103,7 @@ def register_guarded_resource_markers(
     Call this from pytest_configure to register marks for every resource
     registered via register_resource_guard() or register_sdk_guard().
 
-    Args overlap with existing markers can be skipped via skip_names.
+    Resources that overlap with existing markers can be skipped via skip_names.
     """
     skip = skip_names or set()
     for name in _guarded_resources:
