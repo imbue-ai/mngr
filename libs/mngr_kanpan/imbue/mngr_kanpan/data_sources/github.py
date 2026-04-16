@@ -299,7 +299,6 @@ class GitHubDataSourceConfig(FrozenModel):
 
     pr: bool = Field(default=True, description="Fetch PR number/URL/state/draft")
     ci: bool = Field(default=True, description="Fetch CI check status")
-    create_pr_url: bool = Field(default=True, description="Generate URL to create PR if none exists")
     conflicts: bool = Field(default=True, description="Check merge conflict status via gh pr view")
     unresolved: bool = Field(default=True, description="Check unresolved PR comments via GraphQL")
     unresolved_ignore_user: str | None = Field(
@@ -401,12 +400,14 @@ class GitHubDataSource(FrozenModel):
                 pr = _lookup_pr(pr_by_repo_branch, agent_repo, branch)
                 agent_prs_loaded = repo_pr_loaded.get(agent_repo) is True
 
-                if self.config.pr and pr is not None:
-                    agent_fields[FIELD_PR] = pr
-                if self.config.ci and pr is not None:
-                    agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
-                if self.config.create_pr_url and agent_prs_loaded and pr is None:
-                    agent_fields[FIELD_PR] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
+                if pr is not None:
+                    if self.config.pr:
+                        agent_fields[FIELD_PR] = pr
+                    if self.config.ci:
+                        agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
+                else:
+                    if agent_prs_loaded:
+                        agent_fields[FIELD_PR] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
 
             if agent_fields:
                 fields[agent.name] = agent_fields

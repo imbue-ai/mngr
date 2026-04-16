@@ -522,9 +522,7 @@ def test_compute_agents_with_cached_repo_path() -> None:
 
 def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
     """When no PR found, CreatePrUrlField should be placed in the 'pr' slot."""
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=True, ci=True, create_pr_url=True, conflicts=False, unresolved=False)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=False, unresolved=False))
     agent = make_agent_details(
         name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
     )
@@ -555,9 +553,7 @@ def test_compute_pr_fetch_error_adds_error() -> None:
 
 def test_compute_with_conflicts_and_unresolved() -> None:
     """Full compute with conflicts and unresolved metadata fetching."""
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=True, ci=True, create_pr_url=False, conflicts=True, unresolved=True)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=True, unresolved=True))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
 
     open_pr_json = _make_open_pr_json(1, "branch-1")
@@ -599,9 +595,7 @@ def test_compute_with_conflicts_and_unresolved() -> None:
 
 
 def test_compute_disabled_pr_and_ci() -> None:
-    ds = GitHubDataSource(
-        config=GitHubDataSourceConfig(pr=False, ci=False, create_pr_url=False, conflicts=False, unresolved=False)
-    )
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False, conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     ctx = make_mngr_ctx_with_cg(cg)
