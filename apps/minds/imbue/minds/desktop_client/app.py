@@ -4,6 +4,7 @@ import os
 import queue
 import socket as socket_module
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1605,8 +1606,10 @@ async def _handle_sharing_enable(
             cf_client.add_service(parsed_id, parsed_server, backend_url)
             # Apply auth rules if emails were provided
             if emails:
-                auth_rules = [{"action": "allow", "include": [{"email": {"email": e}} for e in emails]}]
-                cf_client.set_service_auth(parsed_id, server_name, auth_rules)
+                rules: list[dict[str, object]] = [
+                    {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
+                ]
+                cf_client.set_service_auth(parsed_id, str(parsed_server), rules)
 
     # If there's a pending request for this agent/server, mark it as granted
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -1746,6 +1749,20 @@ async def _handle_request_deny(
     return Response(status_code=303, headers={"Location": "/"})
 
 
+def _make_request_event_handler(app: FastAPI) -> Callable[[str, str], None]:
+    """Create a callback that adds incoming request events to the app's inbox."""
+
+    def handler(agent_id_str: str, raw_line: str) -> None:
+        event = parse_request_event(raw_line)
+        if event is not None:
+            current_inbox: RequestInbox | None = app.state.request_inbox
+            if current_inbox is not None:
+                app.state.request_inbox = current_inbox.add_request(event)
+                logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+
+    return handler
+
+
 # -- App factory --
 
 
@@ -1819,16 +1836,7 @@ def create_desktop_client(
 
     # Register callback to process incoming request events from agents
     if isinstance(backend_resolver, MngrCliBackendResolver):
-
-        def _on_request_event(agent_id_str: str, raw_line: str) -> None:
-            event = parse_request_event(raw_line)
-            if event is not None:
-                current_inbox: RequestInbox | None = app.state.request_inbox
-                if current_inbox is not None:
-                    app.state.request_inbox = current_inbox.add_request(event)
-                    logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
-
-        backend_resolver.add_on_request_callback(_on_request_event)
+        backend_resolver.add_on_request_callback(_make_request_event_handler(app))
 
     # Mount the SuperTokens auth routes
     if session_store is not None:
