@@ -158,11 +158,10 @@ All agent fields from the "Available Fields" section can be used in filter expre
   - `host.resource.gpu.model` - GPU model name
   - `host.resource.gpu.memory_gb` - GPU memory in GB
 - `host.ssh` - SSH access details (remote hosts only)
-  - `host.ssh.command` - Full SSH command to connect
   - `host.ssh.host` - SSH hostname
   - `host.ssh.port` - SSH port
   - `host.ssh.user` - SSH username
-  - `host.ssh.key_path` - Path to SSH private key
+  - `host.ssh.auth` - SSH authentication method (type-discriminated)
 - `host.snapshots` - List of available snapshots
 - `host.is_locked` - Whether the host is currently locked for an operation
 - `host.locked_time` - When the host was locked

@@ -246,35 +246,22 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
 def create_pyinfra_host(
     hostname: str,
     port: int,
-    private_key_path: Path | None = None,
-    known_hosts_path: Path | None = None,
+    auth: SSHAuthMethod,
     ssh_user: str = "root",
-    auth: SSHAuthMethod | None = None,
 ) -> PyinfraHost:
     """Create a pyinfra host with SSH connector.
 
     Clears pyinfra's memoized known_hosts cache to ensure fresh reads,
-    since we add new entries dynamically.
-
-    When auth is provided, it populates host_data via configure_pyinfra_host_data().
-    Otherwise falls back to explicit private_key_path and known_hosts_path args.
+    since we add new entries dynamically. The auth method populates
+    host_data via configure_pyinfra_host_data().
     """
-
     get_host_keys.cache.clear()
 
     host_data: dict[str, object] = {
         "ssh_user": ssh_user,
         "ssh_port": port,
     }
-
-    if auth is not None:
-        auth.configure_pyinfra_host_data(host_data)
-    else:
-        assert private_key_path is not None, "Either auth or private_key_path must be provided"
-        host_data["ssh_key"] = str(private_key_path)
-        if known_hosts_path is not None:
-            host_data["ssh_known_hosts_file"] = str(known_hosts_path)
-            host_data["ssh_strict_host_key_checking"] = "yes"
+    auth.configure_pyinfra_host_data(host_data)
 
     names_data = ([(hostname, host_data)], {})
     inventory = Inventory(names_data)

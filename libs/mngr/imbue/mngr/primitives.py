@@ -18,7 +18,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.interfaces.ssh_auth import SSHAuthField
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 
 # === Enums ===
 
@@ -372,8 +371,7 @@ class SSHInfo(FrozenModel):
     """SSH connection information for a remote host.
 
     Used in discovery events and listing output. The auth field carries the
-    full SSHAuthMethod (extensible discriminated union). The display_command
-    is computed on demand via auth.get_display_command().
+    full SSHAuthMethod (extensible discriminated union).
     """
 
     user: str = Field(description="SSH username")
@@ -393,25 +391,6 @@ class SSHInfo(FrozenModel):
         if isinstance(data, dict):
             data.pop("command", None)
             data.pop("key_path", None)
-        return data
-
-    @property
-    def command(self) -> str:
-        """Human-readable SSH command string (no secrets)."""
-        return self.auth.get_display_command(self.user, self.host, self.port)
-
-    @property
-    def key_path(self) -> Path | None:
-        """Path to SSH private key, if using key-based auth. None for other auth types."""
-        if isinstance(self.auth, SSHKeyAuth):
-            return self.auth.key_path
-        return None
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Override to include command and key_path for backward compatibility."""
-        data = super().model_dump(**kwargs)
-        data["command"] = self.command
-        data["key_path"] = str(self.key_path) if self.key_path is not None else None
         return data
 
 

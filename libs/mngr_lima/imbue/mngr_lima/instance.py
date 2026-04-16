@@ -22,7 +22,6 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -31,6 +30,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -236,15 +236,14 @@ class LimaProviderInstance(BaseProviderInstance):
         # Add the host to known_hosts by scanning its key
         self._scan_and_add_host_key(ssh_config.hostname, ssh_config.port)
 
+        ssh_auth = SSHKeyAuth(key_path=ssh_config.identity_file, known_hosts_file=self._known_hosts_path)
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
             port=ssh_config.port,
-            private_key_path=ssh_config.identity_file,
-            known_hosts_path=self._known_hosts_path,
+            auth=ssh_auth,
             ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
-        ssh_auth = SSHKeyAuth(key_path=ssh_config.identity_file, known_hosts_file=self._known_hosts_path)
 
         return Host(
             id=host_id,

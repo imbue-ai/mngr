@@ -34,6 +34,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.ssh.config import SSHHostConfig
+from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 
 # Fixed UUID namespace for generating deterministic host IDs from names
 _SSH_PROVIDER_NAMESPACE: Final[uuid.UUID] = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
@@ -80,14 +81,29 @@ class SSHProviderInstance(BaseProviderInstance):
         uuid_hex = uuid.uuid5(_SSH_PROVIDER_NAMESPACE, f"{self.name}:{host_name}").hex
         return HostId(f"host-{uuid_hex}")
 
-    def _create_pyinfra_host(self, host_config: SSHHostConfig) -> PyinfraHost:
+    def _build_ssh_auth(self, host_config: SSHHostConfig) -> SSHKeyAuth | None:
+        """Build an SSHKeyAuth from host config, if key_file is set."""
+        if host_config.key_file is None:
+            return None
+        return SSHKeyAuth(
+            key_path=host_config.key_file,
+            known_hosts_file=host_config.known_hosts_file,
+        )
+
+    def _create_pyinfra_host(self, host_config: SSHHostConfig, auth: SSHKeyAuth | None) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
+        if auth is not None:
+            return create_pyinfra_host(
+                hostname=host_config.address,
+                port=host_config.port,
+                auth=auth,
+                ssh_user=host_config.user,
+            )
+        # No key file -- build host_data manually (password-only SSH hosts)
         host_data: dict[str, Any] = {
             "ssh_user": host_config.user,
             "ssh_port": host_config.port,
         }
-        if host_config.key_file is not None:
-            host_data["ssh_key"] = str(host_config.key_file)
         if host_config.known_hosts_file is not None:
             get_host_keys.cache.clear()
             host_data["ssh_known_hosts_file"] = str(host_config.known_hosts_file)
@@ -109,15 +125,9 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> Host:
         """Create a Host object for the given configuration."""
         host_id = self._host_id_for_name(host_name)
-        pyinfra_host = self._create_pyinfra_host(host_config)
+        ssh_auth = self._build_ssh_auth(host_config)
+        pyinfra_host = self._create_pyinfra_host(host_config, ssh_auth)
         connector = PyinfraConnector(pyinfra_host)
-
-        ssh_auth: SSHKeyAuth | None = None
-        if host_config.key_file is not None:
-            ssh_auth = SSHKeyAuth(
-                key_path=host_config.key_file,
-                known_hosts_file=host_config.known_hosts_file,
-            )
 
         return Host(
             id=host_id,
@@ -307,7 +317,8 @@ class SSHProviderInstance(BaseProviderInstance):
         # Search for a host with matching ID
         for host_name, host_config in self.hosts.items():
             if self._host_id_for_name(host_name) == host_id:
-                return self._create_pyinfra_host(host_config)
+                auth = self._build_ssh_auth(host_config)
+                return self._create_pyinfra_host(host_config, auth)
 
         raise HostNotFoundError(host_id)
 

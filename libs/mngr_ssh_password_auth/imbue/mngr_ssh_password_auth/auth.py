@@ -5,6 +5,7 @@ from typing import Any
 from typing import Literal
 
 import paramiko
+from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -83,8 +84,6 @@ class SSHPasswordAuth(SSHAuthMethod):
             client.load_host_keys(str(self.known_hosts_file))
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
         else:
-            from loguru import logger
-
             logger.warning(
                 "No known_hosts file available (path={}), using AutoAddPolicy -- host key not verified",
                 self.known_hosts_file,

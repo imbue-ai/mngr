@@ -169,8 +169,8 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
     assert result.user == "root"
     assert result.host == "remote.example.com"
     assert result.port == 2222
-    assert result.key_path == Path("/tmp/key")
-    assert result.command == "ssh -i /tmp/key -p 2222 root@remote.example.com"
+    assert isinstance(result.auth, SSHKeyAuth)
+    assert result.auth.key_path == Path("/tmp/key")
 
 
 def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:
@@ -446,7 +446,8 @@ def test_parse_host_ssh_info_event_round_trips() -> None:
     assert parsed.host_id == host_id
     assert parsed.ssh.host == "remote.example.com"
     assert parsed.ssh.port == 2222
-    assert parsed.ssh.key_path == Path("/tmp/key")
+    assert isinstance(parsed.ssh.auth, SSHKeyAuth)
+    assert parsed.ssh.auth.key_path == Path("/tmp/key")
 
 
 # === resolve_provider_names_for_identifiers Tests ===

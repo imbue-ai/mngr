@@ -257,7 +257,7 @@ def test_duplicate_auth_type_raises_type_error() -> None:
     with pytest.raises(TypeError, match="Duplicate SSHAuthMethod auth_type"):
         from imbue.mngr.interfaces.ssh_auth import SSHTransportCommand
 
-        class DuplicatePasswordAuth(SSHAuthMethod):  # type: ignore[no-redef]
+        class DuplicatePasswordAuth(SSHAuthMethod):
             auth_type: str = "password"
 
             def configure_pyinfra_host_data(self, host_data: dict[str, Any]) -> None:

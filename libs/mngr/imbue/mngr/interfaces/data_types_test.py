@@ -74,8 +74,8 @@ def test_ssh_info_basic_creation() -> None:
     assert ssh_info.user == "root"
     assert ssh_info.host == "example.com"
     assert ssh_info.port == 22
-    assert ssh_info.key_path == Path("/home/user/.ssh/id_rsa")
-    assert ssh_info.command == "ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com"
+    assert isinstance(ssh_info.auth, SSHKeyAuth)
+    assert ssh_info.auth.key_path == Path("/home/user/.ssh/id_rsa")
 
 
 def test_ssh_info_custom_port() -> None:
@@ -101,8 +101,8 @@ def test_ssh_info_serialization() -> None:
     assert data["user"] == "root"
     assert data["host"] == "example.com"
     assert data["port"] == 22
-    assert data["key_path"] == "/home/user/.ssh/id_rsa"
-    assert data["command"] == "ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com"
+    assert data["auth"]["auth_type"] == "key"
+    assert data["auth"]["key_path"] == "/home/user/.ssh/id_rsa"
 
 
 # =============================================================================

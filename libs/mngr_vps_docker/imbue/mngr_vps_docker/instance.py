@@ -31,7 +31,6 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -47,6 +46,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -351,15 +351,13 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # Container sshd port is exposed on the VPS's public IP.
         # We connect directly to vps_ip:container_ssh_port.
+        ssh_auth = SSHKeyAuth(key_path=container_key_path, known_hosts_file=self._container_known_hosts_path())
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,
             port=self.config.container_ssh_port,
-            private_key_path=container_key_path,
-            known_hosts_path=self._container_known_hosts_path(),
+            auth=ssh_auth,
         )
-
         connector = PyinfraConnector(pyinfra_host)
-        ssh_auth = SSHKeyAuth(key_path=container_key_path, known_hosts_file=self._container_known_hosts_path())
         host = Host(
             id=host_id,
             ssh_auth=ssh_auth,
