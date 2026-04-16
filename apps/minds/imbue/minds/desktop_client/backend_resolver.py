@@ -196,14 +196,8 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
             continue
 
         try:
-            # Support both new format (auth object) and legacy format (key_path string)
-            if "auth" in ssh:
-                auth = SSHKeyAuth.model_validate(ssh["auth"])
-            elif "key_path" in ssh:
-                auth = SSHKeyAuth(key_path=Path(ssh["key_path"]))
-            else:
-                logger.warning("SSH info for agent {} has no auth or key_path", agent_id_str)
-                continue
+            auth_cls = SSHAuthMethod._registry.get(ssh.get("auth", {}).get("auth_type", "key"), SSHKeyAuth)
+            auth = auth_cls.model_validate(ssh["auth"])
             ssh_info = RemoteSSHInfo(
                 user=ssh["user"],
                 host=ssh["host"],

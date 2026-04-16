@@ -307,7 +307,7 @@ def test_parse_agents_from_json_extracts_ssh_info() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 12345,
-        "key_path": "/home/user/.mngr/providers/modal/modal_ssh_key",
+        "auth": {"auth_type": "key", "key_path": "/home/user/.mngr/providers/modal/modal_ssh_key"},
     }
     json_str = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
     result = parse_agents_from_json(json_str)
@@ -333,7 +333,7 @@ def test_parse_agents_from_json_handles_mixed_local_and_remote() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 12345,
-        "key_path": "/tmp/key",
+        "auth": {"auth_type": "key", "key_path": "/tmp/key"},
     }
     json_str = _make_agents_json_with_ssh(
         (str(_AGENT_A), None),
@@ -388,7 +388,7 @@ def test_mngr_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 12345,
-        "key_path": "/tmp/test_key",
+        "auth": {"auth_type": "key", "key_path": "/tmp/test_key"},
     }
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
     resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)

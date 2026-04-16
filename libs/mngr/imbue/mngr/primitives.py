@@ -9,7 +9,6 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
-from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -378,20 +377,6 @@ class SSHInfo(FrozenModel):
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
     auth: SSHAuthField = Field(description="SSH authentication method")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_legacy_fields(cls, data: Any) -> Any:
-        """Strip legacy 'command' and 'key_path' fields from deserialization input.
-
-        These fields were present in the old SSHInfo format. During deserialization
-        (e.g. from events.jsonl), they appear as extra fields. Strip them so
-        FrozenModel's extra='forbid' doesn't reject them.
-        """
-        if isinstance(data, dict):
-            data.pop("command", None)
-            data.pop("key_path", None)
-        return data
 
 
 class DiscoveredHost(FrozenModel):
