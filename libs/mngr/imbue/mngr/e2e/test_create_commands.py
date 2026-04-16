@@ -1,4 +1,4 @@
-"""Tests for custom commands and creation options from the tutorial."""
+"""Tests for mngr create agent-type and option combinations from the tutorial."""
 
 import json
 
