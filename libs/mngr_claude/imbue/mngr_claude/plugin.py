@@ -881,6 +881,12 @@ def _write_generated_files(
         for relative, content in generated_files.items():
             dest = config_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # Break any existing symlink so we write a regular file instead
+            # of following the symlink back to the source (e.g. ~/.claude/).
+            # _sync_user_resources creates child-level symlinks for plugins/;
+            # writing through them would corrupt the user's original files.
+            if dest.is_symlink():
+                dest.unlink()
             host.write_text_file(dest, content)
     else:
         local_host = _get_local_host(mngr_ctx)
