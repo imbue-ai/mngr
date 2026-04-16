@@ -150,11 +150,10 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         timeout_exception_group: ConcurrencyExceptionGroup | None = None
         failure_exception_group: ConcurrencyExceptionGroup | None = None
 
+        total_timeout_seconds = self.shutdown_timeout_seconds if self.is_shutting_down() else self.exit_timeout_seconds
+        exit_start_time_seconds = time.monotonic()
         try:
-            if self.is_shutting_down():
-                self._wait_for_all_strands_to_finish_with_timeout(self.shutdown_timeout_seconds)
-            else:
-                self._wait_for_all_strands_to_finish_with_timeout(self.exit_timeout_seconds)
+            self._wait_for_all_strands_to_finish_with_timeout(total_timeout_seconds)
         except ConcurrencyExceptionGroup as exception_group:
             timeout_exception_group = exception_group
 
@@ -179,10 +178,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 exceptions.append(main_exception)
                 message = str(main_exception)
 
-        children_timeout_seconds = (
-            self.shutdown_timeout_seconds if self.is_shutting_down() else self.exit_timeout_seconds
-        )
-        self._wait_for_children_to_exit(children_timeout_seconds)
+        remaining_timeout_seconds = self._get_remaining_timeout(exit_start_time_seconds, total_timeout_seconds)
+        self._wait_for_children_to_exit(remaining_timeout_seconds)
         for child in self._children:
             if child.state not in (ConcurrencyGroupState.EXITED, ConcurrencyGroupState.INSTANTIATED):
                 child_message = f"A child concurrency group did not exit: `{child.name}` (state: {child.state})."
