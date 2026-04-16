@@ -41,6 +41,19 @@ fi
 
 echo 1 > /proc/sys/net/ipv4/ip_forward
 
+# Prefer IPv4 over IPv6 for the daemon's own resolver. Modal sandbox
+# IPv6 routing to Docker Hub (registry-1.docker.io, auth.docker.io) is
+# unreliable -- getaddrinfo can return IPv6 addresses that then fail to
+# connect. Without this, image pulls intermittently fail.
+cat > /etc/gai.conf <<'EOF'
+precedence ::ffff:0:0/96 100
+EOF
+
+# Also try to disable IPv6 at the kernel level as a belt-and-suspenders
+# fallback (may be read-only in gVisor; tolerate failure).
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true
+echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true
+
 # SNAT rules for outbound NAT from Docker containers.
 # Required for container internet access with --iptables=false.
 # Try SNAT first; fall back to MASQUERADE if SNAT is unsupported.
@@ -62,12 +75,21 @@ fi
 # The iptables/ip6tables alternatives are pinned to the legacy backend at image
 # build time in Dockerfile.release, so no runtime update-alternatives call is needed here.
 
+# Override /etc/resolv.conf to use public DNS servers directly. The
+# daemon itself uses the host's resolver for image pulls (the --dns flag
+# only affects containers), and the sandbox's default resolver in gVisor
+# sometimes returns unreachable addresses or fails lookups entirely.
+cat > /etc/resolv.conf <<'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options single-request-reopen
+EOF
+
 # Disable IPv6 in dockerd -- Modal sandbox IPv6 routing to Docker Hub
 # (registry-1.docker.io, auth.docker.io) is unreliable, causing
 # "network is unreachable" errors on image pulls. Force IPv4-only.
-# Use explicit public DNS (1.1.1.1, 8.8.8.8) -- the Docker bridge's default
-# DNS forwarder cannot resolve upstream in gVisor sandboxes, causing
-# "no such host" errors on image pulls.
+# Use explicit public DNS (1.1.1.1, 8.8.8.8) for containers too -- the
+# Docker bridge's default DNS forwarder cannot resolve upstream.
 dockerd --iptables=false --ip6tables=false --ipv6=false --dns=1.1.1.1 --dns=8.8.8.8 &
 
 # Wait for Docker daemon to be ready
