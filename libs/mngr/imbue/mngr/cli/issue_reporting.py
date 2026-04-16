@@ -277,12 +277,14 @@ def write_diagnose_context_file(
 
     Returns the path to the written file.
     """
-    content = json.dumps({
-        "traceback_str": traceback_str,
-        "mngr_version": mngr_version,
-        "error_type": error_type,
-        "error_message": error_message,
-    })
+    content = json.dumps(
+        {
+            "traceback_str": traceback_str,
+            "mngr_version": mngr_version,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+    )
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:12]
     path = Path(f"/tmp/mngr-diagnose-context-{content_hash}.json")
     path.write_text(content)
@@ -386,10 +388,7 @@ def handle_unexpected_error(
         # The diagnostic agent itself crashed -- skip diagnose (would recurse),
         # go straight to GitHub issue reporting.
         logger.info("")
-        logger.info(
-            "The diagnostic agent itself crashed. "
-            "Please report this so we can fix the fixer."
-        )
+        logger.info("The diagnostic agent itself crashed. Please report this so we can fix the fixer.")
         title = build_unexpected_error_issue_title(error)
         body = build_unexpected_error_issue_body(error, tb_str)
         _prompt_and_report_issue(title, body, error_message)

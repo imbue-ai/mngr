@@ -24,7 +24,9 @@ def test_fresh_clone(tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.M
 
     calls: list[list[str]] = []
 
-    def fake_run(self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object) -> FinishedProcess:
+    def fake_run(
+        self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object
+    ) -> FinishedProcess:
         cmd_list = list(cmd)
         calls.append(cmd_list)
         if "clone" in cmd_list:
@@ -48,7 +50,9 @@ def test_existing_clone_pulls(tmp_path: Path, cg: ConcurrencyGroup, monkeypatch:
 
     calls: list[list[str]] = []
 
-    def fake_run(self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object) -> FinishedProcess:
+    def fake_run(
+        self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object
+    ) -> FinishedProcess:
         cmd_list = list(cmd)
         calls.append(cmd_list)
         if "rev-parse" in cmd_list:
@@ -69,7 +73,9 @@ def test_existing_clone_wrong_branch(tmp_path: Path, cg: ConcurrencyGroup, monke
     clone_dir = tmp_path / "mngr-clone"
     clone_dir.mkdir()
 
-    def fake_run(self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object) -> FinishedProcess:
+    def fake_run(
+        self: object, cmd: list[str] | tuple[str, ...], timeout: float = 30.0, **kwargs: object
+    ) -> FinishedProcess:
         cmd_list = list(cmd)
         if "rev-parse" in cmd_list:
             return _finished(stdout="feature-branch\n", command=tuple(cmd_list))
