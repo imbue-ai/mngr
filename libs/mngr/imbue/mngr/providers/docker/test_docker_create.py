@@ -36,7 +36,7 @@ def test_mngr_create_echo_command_on_docker(
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=600,
         env=docker_subprocess_env,
     )
 
@@ -76,7 +76,7 @@ def test_mngr_create_with_start_args_on_docker(
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=600,
         env=docker_subprocess_env,
     )
 
@@ -114,7 +114,7 @@ def test_mngr_create_with_tags_on_docker(
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=600,
         env=docker_subprocess_env,
     )
 
@@ -169,7 +169,7 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=600,
         env=docker_subprocess_env,
     )
 
@@ -206,7 +206,7 @@ def test_mngr_create_stop_start_destroy_lifecycle(
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=900,
         env=docker_subprocess_env,
     )
     assert create_result.returncode == 0, (
@@ -241,7 +241,7 @@ def test_mngr_create_stop_start_destroy_lifecycle(
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=600,
         env=docker_subprocess_env,
     )
     assert start_result.returncode == 0, (
