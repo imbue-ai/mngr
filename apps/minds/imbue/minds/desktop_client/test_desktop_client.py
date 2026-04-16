@@ -10,9 +10,6 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -25,6 +22,9 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
@@ -1536,13 +1536,14 @@ def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_workspace_settings_shows_private_workspace(tmp_path: Path) -> None:
-    """A workspace not associated with any account shows as private."""
+def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None:
+    """A workspace not associated with any account shows the associate prompt."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    response = client.get("/workspace/agent-123/settings")
+    test_agent_id = AgentId()
+    response = client.get(f"/workspace/{test_agent_id}/settings")
     assert response.status_code == 200
-    assert "private" in response.text.lower()
+    assert "associated with an account" in response.text.lower()
 
 
 def test_requests_panel_requires_auth(tmp_path: Path) -> None:

@@ -1463,8 +1463,11 @@ def _handle_requests_panel(
 
 async def _handle_requests_auto_open(
     request: Request,
+    auth_store: AuthStoreDep,
 ) -> Response:
     """Toggle the auto-open setting for the requests panel."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = request.app.state.minds_config
     if minds_config:
         try:
@@ -1589,6 +1592,7 @@ async def _handle_sharing_enable(
     except json.JSONDecodeError:
         emails = []
 
+    sharing_succeeded = False
     cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if cf_client is not None:
         parsed_id = AgentId(agent_id)
@@ -1603,14 +1607,17 @@ async def _handle_sharing_enable(
                     _save_tunnel_token(paths.data_dir, parsed_id, token)
                     inject_tunnel_token_into_agent(parsed_id, token)
             cf_client.add_service(parsed_id, parsed_server, backend_url)
+            sharing_succeeded = True
             # Apply auth rules if emails were provided
             if emails:
-                auth_rules = [{"action": "allow", "include": [{"email": {"email": e}} for e in emails]}]
-                cf_client.set_service_auth(parsed_id, server_name, auth_rules)
+                rules: list[dict[str, object]] = [
+                    {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
+                ]
+                cf_client.set_service_auth(parsed_id, str(parsed_server), rules)
 
-    # If there's a pending request for this agent/server, mark it as granted
+    # If there's a pending request for this agent/server, mark it as granted only if sharing succeeded
     inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is not None:
+    if inbox is not None and sharing_succeeded:
         for req in inbox.get_pending_requests():
             if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.server_name == server_name:
                 paths = request.app.state.api_v1_paths
@@ -1746,6 +1753,21 @@ async def _handle_request_deny(
     return Response(status_code=303, headers={"Location": "/"})
 
 
+_request_event_apps: dict[int, FastAPI] = {}
+
+
+def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
+    """Process an incoming request event and add it to the app's inbox."""
+    event = parse_request_event(raw_line)
+    if event is None:
+        return
+    for app in _request_event_apps.values():
+        current_inbox: RequestInbox | None = app.state.request_inbox
+        if current_inbox is not None:
+            app.state.request_inbox = current_inbox.add_request(event)
+            logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+
+
 # -- App factory --
 
 
@@ -1819,16 +1841,8 @@ def create_desktop_client(
 
     # Register callback to process incoming request events from agents
     if isinstance(backend_resolver, MngrCliBackendResolver):
-
-        def _on_request_event(agent_id_str: str, raw_line: str) -> None:
-            event = parse_request_event(raw_line)
-            if event is not None:
-                current_inbox: RequestInbox | None = app.state.request_inbox
-                if current_inbox is not None:
-                    app.state.request_inbox = current_inbox.add_request(event)
-                    logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
-
-        backend_resolver.add_on_request_callback(_on_request_event)
+        _request_event_apps[id(backend_resolver)] = app
+        backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
     # Mount the SuperTokens auth routes
     if session_store is not None:
