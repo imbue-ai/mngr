@@ -29,25 +29,30 @@ from imbue.resource_guards.resource_guards import stop_resource_guards
 # Use ubiquitous coreutils binaries so these tests run on any system.
 _TEST_RESOURCES = ["echo", "cat", "ls"]
 
-# Conftest that pytester injects into its temp directory.  It registers the
-# resource guard hooks for "cat" only, which is enough for end-to-end tests.
-# cat is a good choice: `cat /dev/null` succeeds, `cat /nonexistent` fails.
-_PYTESTER_CONFTEST = """\
+# Shared preamble for every pytester conftest we generate: clears the outer
+# process's guard state so the pytester child creates its own wrappers, and
+# strips the outer wrapper dir from PATH so the outer wrappers (still first
+# on PATH) don't shadow the child's.
+_PYTESTER_GUARD_RESET_PREAMBLE = """\
 import os
-from imbue.resource_guards.resource_guards import (
-    register_resource_guard,
-    start_resource_guards,
-    stop_resource_guards,
-)
 
-# Clear inherited guard state so the child creates fresh wrappers.
-# Must also strip the outer wrapper dir from PATH, otherwise the outer
-# wrapper scripts (still first on PATH) shadow the child's wrappers.
 _outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
 if _outer_dir:
     os.environ["PATH"] = os.pathsep.join(
         p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
     )
+"""
+
+# Conftest that pytester injects into its temp directory.  It registers the
+# resource guard hooks for "cat" only, which is enough for end-to-end tests.
+# cat is a good choice: `cat /dev/null` succeeds, `cat /nonexistent` fails.
+_PYTESTER_CONFTEST = f"""\
+{_PYTESTER_GUARD_RESET_PREAMBLE}
+from imbue.resource_guards.resource_guards import (
+    register_resource_guard,
+    start_resource_guards,
+    stop_resource_guards,
+)
 
 register_resource_guard("cat")
 
@@ -758,20 +763,13 @@ def test_enforce_sdk_guard_skips_when_no_phase_set(
 # Conftest for SDK guard pytester tests. Registers a no-op SDK guard, then uses
 # start/stop_resource_guards to initialize the infrastructure. Tests trigger the
 # guard by calling enforce_sdk_guard directly (no real SDK needed).
-_PYTESTER_SDK_CONFTEST = """\
-import os
+_PYTESTER_SDK_CONFTEST = f"""\
+{_PYTESTER_GUARD_RESET_PREAMBLE}
 from imbue.resource_guards.resource_guards import (
     register_sdk_guard,
     start_resource_guards,
     stop_resource_guards,
 )
-
-# Clear inherited guard state and strip outer wrapper dir from PATH.
-_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
-if _outer_dir:
-    os.environ["PATH"] = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
-    )
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "test_sdk: test uses test_sdk")
@@ -876,17 +874,10 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
 # Conftest that uses register_conftest_hooks for the auto-registration path.
 # Notably, there is NO manual config.addinivalue_line("markers", ...) call --
 # the mark is registered automatically by conftest_hooks._pytest_configure.
-_PYTESTER_AUTO_MARKER_CONFTEST = """\
-import os
+_PYTESTER_AUTO_MARKER_CONFTEST = f"""\
+{_PYTESTER_GUARD_RESET_PREAMBLE}
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-
-# Clear inherited guard state and strip outer wrapper dir from PATH.
-_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
-if _outer_dir:
-    os.environ["PATH"] = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
-    )
 
 # Pretend to be an xdist worker so register_conftest_hooks skips the global
 # test lock (outer pytest already holds it -> deadlock).
@@ -924,21 +915,14 @@ def test_register_resource_guard_auto_registers_pytest_mark(
 
 # Conftest that mirrors the README example: standalone pytest_configure
 # using register_guarded_resource_markers() (no conftest_hooks).
-_PYTESTER_STANDALONE_CONFTEST = """\
-import os
+_PYTESTER_STANDALONE_CONFTEST = f"""\
+{_PYTESTER_GUARD_RESET_PREAMBLE}
 from imbue.resource_guards.resource_guards import (
     register_guarded_resource_markers,
     register_resource_guard,
     start_resource_guards,
     stop_resource_guards,
 )
-
-# Clear inherited guard state and strip outer wrapper dir from PATH.
-_outer_dir = os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
-if _outer_dir:
-    os.environ["PATH"] = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
-    )
 
 register_resource_guard("cat")
 
