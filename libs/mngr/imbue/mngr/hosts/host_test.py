@@ -2,10 +2,12 @@
 
 import io
 import json
+import shutil
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from subprocess import run as subprocess_run
 from typing import Any
 from typing import IO
 from typing import cast
@@ -658,8 +660,6 @@ def test_ensure_work_dir_exists_reinstates_worktree(
     tmp_path: Path,
 ) -> None:
     """_ensure_work_dir_exists should recreate a missing worktree from source repo label."""
-    from subprocess import run as subprocess_run
-
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
@@ -684,8 +684,6 @@ def test_ensure_work_dir_exists_reinstates_worktree(
         capture_output=True,
     )
     # Remove the worktree directory (simulating prune/deletion)
-    import shutil
-
     shutil.rmtree(worktree_path)
 
     # Create agent state pointing to the missing worktree
