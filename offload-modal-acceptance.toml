@@ -24,12 +24,11 @@ run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 4
-filters = "-m 'acceptance'"
-# When flaky tests exist, add a [groups.flaky] section:
-# [groups.flaky]
-# retry_count = 5
-# filters = "-m 'flaky and acceptance'"
-# and add 'and not flaky' to the groups.all filter above.
+filters = "-m 'acceptance and not flaky'"
+
+[groups.flaky]
+retry_count = 5
+filters = "-m 'flaky and acceptance'"
 
 [report]
 output_dir = "test-results"
