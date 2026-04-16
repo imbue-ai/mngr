@@ -118,7 +118,6 @@ class KanpanDataSource(Protocol):
 FIELD_MUTED = "muted"
 FIELD_PR = "pr"
 FIELD_CI = "ci"
-FIELD_CREATE_PR_URL = "create_pr_url"
 FIELD_REPO_PATH = "repo_path"
 FIELD_COMMITS_AHEAD = "commits_ahead"
 FIELD_CONFLICTS = "conflicts"

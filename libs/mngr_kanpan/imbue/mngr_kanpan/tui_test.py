@@ -42,6 +42,7 @@ from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_REFRESH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_UNMARK
 from imbue.mngr_kanpan.tui import _BatchWorkItem
+from imbue.mngr_kanpan.tui import _ColumnDef
 from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
@@ -266,6 +267,7 @@ def test_build_board_widgets_groups_by_section() -> None:
 
 def test_assemble_column_defs_no_order_no_custom() -> None:
     result = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, [], None)
+    # With no source defs, only builtin columns that appear in DEFAULT_COLUMN_ORDER are included
     assert len(result) == len(_BUILTIN_COLUMN_DEFS)
     assert result[-1].flexible is True
 
@@ -282,6 +284,49 @@ def test_assemble_column_defs_unknown_names_skipped() -> None:
     result = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, [], ["name", "nonexistent"])
     assert len(result) == 1
     assert result[0].name == "name"
+
+
+def test_assemble_column_defs_default_order_appends_extras() -> None:
+    """Extra source columns not in DEFAULT_COLUMN_ORDER are appended at the end."""
+    extra_def = _ColumnDef(
+        name="slack_thread",
+        header="SLACK",
+        text_fn=_FieldCellTextFn(field_key="slack_thread"),
+        markup_fn=_FieldCellMarkupFn(field_key="slack_thread"),
+        flexible=False,
+    )
+    result = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, [extra_def], None)
+    names = [d.name for d in result]
+    # Builtins from DEFAULT_COLUMN_ORDER come first, then extras
+    assert names[0] == "name"
+    assert names[1] == "state"
+    assert "slack_thread" in names
+    assert names[-1] == "slack_thread"
+    assert result[-1].flexible is True
+
+
+def test_assemble_column_defs_default_order_includes_default_columns() -> None:
+    """When source defs include columns from DEFAULT_COLUMN_ORDER, they appear in default order."""
+    pr_def = _ColumnDef(
+        name="pr",
+        header="PR",
+        text_fn=_FieldCellTextFn(field_key="pr"),
+        markup_fn=_FieldCellMarkupFn(field_key="pr"),
+        flexible=False,
+    )
+    ci_def = _ColumnDef(
+        name="ci",
+        header="CI",
+        text_fn=_FieldCellTextFn(field_key="ci"),
+        markup_fn=_FieldCellMarkupFn(field_key="ci"),
+        flexible=False,
+    )
+    result = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, [pr_def, ci_def], None)
+    names = [d.name for d in result]
+    # Should follow DEFAULT_COLUMN_ORDER: name, state, ..., pr, ci, ...
+    pr_idx = names.index("pr")
+    ci_idx = names.index("ci")
+    assert pr_idx < ci_idx
 
 
 # =============================================================================
@@ -445,7 +490,7 @@ class _MockDataSource:
 
     @property
     def columns(self) -> dict[str, str]:
-        return {"mock_field": "MOCK", "empty_header": ""}
+        return {"mock_field": "MOCK", "another_field": "ANOTHER"}
 
     @property
     def field_types(self) -> dict[str, type[FieldValue]]:
@@ -464,7 +509,7 @@ def test_build_data_source_column_defs() -> None:
     defs = _build_data_source_column_defs([_MockDataSource()])
     names = [d.name for d in defs]
     assert "mock_field" in names
-    assert "empty_header" not in names
+    assert "another_field" in names
 
 
 def test_build_data_source_column_defs_deduplicates() -> None:

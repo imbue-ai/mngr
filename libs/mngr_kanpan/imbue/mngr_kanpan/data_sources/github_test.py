@@ -5,7 +5,6 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
-from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
@@ -521,8 +520,8 @@ def test_compute_agents_with_cached_repo_path() -> None:
     assert FIELD_CI in fields[agent_with_label.name]
 
 
-def test_compute_no_pr_for_branch_generates_create_url() -> None:
-    """When pr=True and no PR found, create_pr_url should be set."""
+def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
+    """When no PR found, CreatePrUrlField should be placed in the 'pr' slot."""
     ds = GitHubDataSource(
         config=GitHubDataSourceConfig(pr=True, ci=True, create_pr_url=True, conflicts=False, unresolved=False)
     )
@@ -534,8 +533,8 @@ def test_compute_no_pr_for_branch_generates_create_url() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name in fields
-    assert FIELD_CREATE_PR_URL in fields[agent.name]
-    create_url_field = fields[agent.name][FIELD_CREATE_PR_URL]
+    assert FIELD_PR in fields[agent.name]
+    create_url_field = fields[agent.name][FIELD_PR]
     assert isinstance(create_url_field, CreatePrUrlField)
     assert "no-pr-branch" in create_url_field.url
 

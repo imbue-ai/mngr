@@ -45,7 +45,7 @@ enabled = true
 # Toggle individual fields:
 # pr = true
 # ci = true
-# create_pr_url = true
+# create_pr_url = true  # show +PR link when no PR exists
 # conflicts = true
 # unresolved = true
 ```

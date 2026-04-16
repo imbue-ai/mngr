@@ -20,7 +20,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
-from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
@@ -334,8 +333,6 @@ class GitHubDataSource(FrozenModel):
             cols[FIELD_PR] = "PR"
         if self.config.ci:
             cols[FIELD_CI] = "CI"
-        if self.config.create_pr_url:
-            cols[FIELD_CREATE_PR_URL] = ""
         if self.config.conflicts:
             cols[FIELD_CONFLICTS] = "CONFLICTS"
         if self.config.unresolved:
@@ -349,8 +346,6 @@ class GitHubDataSource(FrozenModel):
             types[FIELD_PR] = PrField
         if self.config.ci:
             types[FIELD_CI] = CiField
-        if self.config.create_pr_url:
-            types[FIELD_CREATE_PR_URL] = CreatePrUrlField
         if self.config.conflicts:
             types[FIELD_CONFLICTS] = ConflictsField
         if self.config.unresolved:
@@ -411,7 +406,7 @@ class GitHubDataSource(FrozenModel):
                 if self.config.ci and pr is not None:
                     agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
                 if self.config.create_pr_url and agent_prs_loaded and pr is None:
-                    agent_fields[FIELD_CREATE_PR_URL] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
+                    agent_fields[FIELD_PR] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
 
             if agent_fields:
                 fields[agent.name] = agent_fields

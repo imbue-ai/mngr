@@ -34,10 +34,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import BoolField
-from imbue.mngr_kanpan.data_source import CellDisplay
-from imbue.mngr_kanpan.data_source import FIELD_CREATE_PR_URL
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
-from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -55,6 +52,18 @@ from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
+
+# Default column order when column_order is not explicitly configured.
+# User-configured label/shell columns are appended after these.
+DEFAULT_COLUMN_ORDER: tuple[str, ...] = (
+    "name",
+    "state",
+    "commits_ahead",
+    "pr",
+    "ci",
+    "conflicts",
+    "unresolved",
+)
 
 SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
@@ -1080,23 +1089,9 @@ def _get_name_cell_markup(
     return f"  {entry.name}"
 
 
-def _resolve_cell(entry: AgentBoardEntry, field_key: str) -> CellDisplay | None:
-    """Resolve the CellDisplay for a field key, with fallbacks.
-
-    For the 'pr' column, falls back to 'create_pr_url' when no PR exists,
-    so the PR column shows '+PR' with a create link when there's no open PR.
-    """
-    cell = entry.cells.get(field_key)
-    if cell is not None:
-        return cell
-    if field_key == FIELD_PR:
-        return entry.cells.get(FIELD_CREATE_PR_URL)
-    return None
-
-
 def _field_cell_text(entry: AgentBoardEntry, field_key: str) -> str:
     """Get plain text for a field-based column cell."""
-    cell = _resolve_cell(entry, field_key)
+    cell = entry.cells.get(field_key)
     if cell is None:
         return ""
     return cell.text
@@ -1104,7 +1099,7 @@ def _field_cell_text(entry: AgentBoardEntry, field_key: str) -> str:
 
 def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Hashable, str]:
     """Build urwid text markup for a field-based column cell."""
-    cell = _resolve_cell(entry, field_key)
+    cell = entry.cells.get(field_key)
     if cell is None:
         return ""
     if cell.color is not None:
@@ -1163,9 +1158,6 @@ def _build_data_source_column_defs(
             if field_key in seen:
                 continue
             seen.add(field_key)
-            # Skip empty headers (infrastructure columns like create_pr_url)
-            if not header:
-                continue
             defs.append(
                 _ColumnDef(
                     name=field_key,
@@ -1186,14 +1178,20 @@ def _assemble_column_defs(
 ) -> list[_ColumnDef]:
     """Assemble the final ordered list of column definitions.
 
-    If column_order is None, default ordering is: builtins + source columns.
-    If column_order is provided, definitions are returned in that order.
+    If column_order is None, uses DEFAULT_COLUMN_ORDER then appends any
+    user-configured columns (label/shell) that are not already in the default list.
+    If column_order is provided, definitions are returned in exactly that order.
     The last column always gets flexible=True.
     """
+    registry: dict[str, _ColumnDef] = {d.name: d for d in builtin_defs + source_defs}
     if column_order is None:
-        result = builtin_defs + source_defs
+        # Start with DEFAULT_COLUMN_ORDER, then append any extra source columns
+        # (e.g. label-backed or shell columns) that aren't in the default list.
+        default_set = set(DEFAULT_COLUMN_ORDER)
+        extra = [d.name for d in source_defs if d.name not in default_set]
+        effective_order = list(DEFAULT_COLUMN_ORDER) + extra
+        result = [registry[name] for name in effective_order if name in registry]
     else:
-        registry: dict[str, _ColumnDef] = {d.name: d for d in builtin_defs + source_defs}
         result = [registry[name] for name in column_order if name in registry]
     if not result:
         return builtin_defs
@@ -1290,8 +1288,8 @@ def _build_agent_row(
 
     cols: list[tuple[int, Text] | Text] = []
     for defn in column_defs:
-        resolved = _resolve_cell(entry, defn.name)
-        cell_url = resolved.url if resolved is not None else None
+        cell = entry.cells.get(defn.name)
+        cell_url = cell.url if cell is not None else None
         if cell_url:
             hyperlink_widget = _HyperlinkText(cell_markup[defn.name])
             hyperlink_widget._hyperlink_url = cell_url

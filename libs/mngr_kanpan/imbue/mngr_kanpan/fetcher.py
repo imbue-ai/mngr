@@ -29,6 +29,7 @@ from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -195,6 +196,9 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
 
     pr = fields.get(FIELD_PR)
     if pr is None:
+        return BoardSection.STILL_COOKING
+    if isinstance(pr, CreatePrUrlField):
+        # CreatePrUrlField in the pr slot means no real PR exists yet
         return BoardSection.STILL_COOKING
     if not isinstance(pr, PrField):
         raise KanpanFieldTypeError(f"Expected PrField for 'pr', got {type(pr).__name__}")
