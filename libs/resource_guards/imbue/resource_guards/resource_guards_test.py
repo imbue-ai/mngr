@@ -915,10 +915,10 @@ def pytest_sessionfinish(session, exitstatus):
 def test_standalone_pytest_configure_registers_marks(
     pytester: pytest.Pytester,
 ) -> None:
-    """The README pattern (pytest_configure + get_guarded_resource_names) works.
+    """The README pattern (pytest_configure + register_guarded_resource_markers) works.
 
     Verifies that external users who don't use conftest_hooks can register
-    marks via their own pytest_configure and get_guarded_resource_names().
+    marks via their own pytest_configure and register_guarded_resource_markers().
     """
     pytester.makeconftest(_PYTESTER_STANDALONE_CONFTEST)
     pytester.makepyfile("""
