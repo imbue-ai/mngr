@@ -23,7 +23,7 @@ mngr provides Docker guards out of the box (in `imbue.mngr.register_guards_docke
 
 ## Setup
 
-In your `conftest.py`, register each resource you want to guard with `register_resource_guard()`, then wire up the three hooks. `register_guarded_resource_markers` registers the pytest marks for all guarded resources in one call.
+In your `conftest.py`, register each resource you want to guard with `register_resource_guard()`, then add `pytest_configure`, `pytest_sessionstart`, and `pytest_sessionfinish` hooks as shown below. `register_guarded_resource_markers` registers the pytest marks for all guarded resources in one call.
 
 ```python
 # conftest.py
