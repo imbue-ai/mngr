@@ -1536,14 +1536,14 @@ def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_workspace_settings_shows_private_workspace(tmp_path: Path) -> None:
-    """A workspace not associated with any account shows as private."""
+def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None:
+    """A workspace not associated with any account shows the associate prompt."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     test_agent_id = AgentId()
     response = client.get(f"/workspace/{test_agent_id}/settings")
     assert response.status_code == 200
-    assert "private" in response.text.lower()
+    assert "associated with an account" in response.text.lower()
 
 
 def test_requests_panel_requires_auth(tmp_path: Path) -> None:

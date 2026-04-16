@@ -1,10 +1,10 @@
 import asyncio
+import functools
 import json
 import os
 import queue
 import socket as socket_module
 from collections.abc import AsyncGenerator
-from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1749,18 +1749,14 @@ async def _handle_request_deny(
     return Response(status_code=303, headers={"Location": "/"})
 
 
-def _make_request_event_handler(app: FastAPI) -> Callable[[str, str], None]:
-    """Create a callback that adds incoming request events to the app's inbox."""
-
-    def handler(agent_id_str: str, raw_line: str) -> None:
-        event = parse_request_event(raw_line)
-        if event is not None:
-            current_inbox: RequestInbox | None = app.state.request_inbox
-            if current_inbox is not None:
-                app.state.request_inbox = current_inbox.add_request(event)
-                logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
-
-    return handler
+def _handle_request_event(app: FastAPI, agent_id_str: str, raw_line: str) -> None:
+    """Process an incoming request event and add it to the app's inbox."""
+    event = parse_request_event(raw_line)
+    if event is not None:
+        current_inbox: RequestInbox | None = app.state.request_inbox
+        if current_inbox is not None:
+            app.state.request_inbox = current_inbox.add_request(event)
+            logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
 
 
 # -- App factory --
@@ -1836,7 +1832,7 @@ def create_desktop_client(
 
     # Register callback to process incoming request events from agents
     if isinstance(backend_resolver, MngrCliBackendResolver):
-        backend_resolver.add_on_request_callback(_make_request_event_handler(app))
+        backend_resolver.add_on_request_callback(functools.partial(_handle_request_event, app))
 
     # Mount the SuperTokens auth routes
     if session_store is not None:
