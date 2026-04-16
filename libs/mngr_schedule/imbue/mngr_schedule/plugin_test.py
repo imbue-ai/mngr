@@ -1,6 +1,5 @@
 """Unit tests for the mngr-schedule plugin registration."""
 
-import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,12 +35,6 @@ def _make_mngr_ctx_with_profile(profile_dir: Path) -> MngrContext:
 
 def test_get_files_for_deploy_returns_empty_dict_when_no_mngr_files(tmp_path: Path) -> None:
     """get_files_for_deploy returns empty dict when no mngr config files exist."""
-    # The shared mngr autouse test fixture populates the fake HOME with
-    # ~/.mngr/config.toml and a profile directory so the CLI can resolve the
-    # test_sleep agent type. This test specifically checks the
-    # "no mngr files" case, so clear anything the fixture created first.
-    shutil.rmtree(Path.home() / ".mngr", ignore_errors=True)
-
     mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
