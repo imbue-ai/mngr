@@ -328,7 +328,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
     @abstractmethod
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Permanently destroy a host and delete its snapshots."""
+        """Permanently destroy a host.
+
+        Snapshot records are preserved for age-gated cleanup by gc_snapshots.
+        """
         ...
 
     @abstractmethod
