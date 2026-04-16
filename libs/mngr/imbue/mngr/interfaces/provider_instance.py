@@ -359,11 +359,6 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Return the minimum age (in seconds) before GC will destroy an online host with no agents."""
         ...
 
-    @abstractmethod
-    def get_min_destroyed_snapshot_age_seconds(self) -> float:
-        """Return the minimum age (in seconds) before GC will delete snapshots from destroyed hosts."""
-        ...
-
     # =========================================================================
     # Discovery Methods
     # =========================================================================

@@ -292,13 +292,10 @@ def _gc_single_host(
         # if so, then we permanently delete the associated data (to prevent data from accumulating)
         if not isinstance(host, OnlineHostInterface):
             seconds_since_stopped = host.get_seconds_since_stopped()
-            # Gate on max of both thresholds so snapshot records survive long
-            # enough for gc_snapshots to find and clean them up.  Only consider
-            # the snapshot age when the provider actually supports snapshots.
-            min_offline_age = provider.get_max_destroyed_host_persisted_seconds()
-            if provider.supports_snapshots:
-                min_offline_age = max(min_offline_age, provider.get_min_destroyed_snapshot_age_seconds())
-            if seconds_since_stopped is not None and seconds_since_stopped > min_offline_age:
+            if (
+                seconds_since_stopped is not None
+                and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
+            ):
                 agent_refs = host.discover_agents()
                 if len(agent_refs) == 0 or host.get_state() in (
                     HostState.FAILED,
@@ -402,7 +399,7 @@ def gc_snapshots(
             logger.trace("Skipped provider {} (does not support snapshots)", provider.name)
             continue
 
-        min_snapshot_age_seconds = provider.get_min_destroyed_snapshot_age_seconds()
+        min_snapshot_age_seconds = provider.get_max_destroyed_host_persisted_seconds()
 
         try:
             for host_ref in host_refs:

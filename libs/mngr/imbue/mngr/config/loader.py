@@ -210,7 +210,6 @@ def load_config(
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
-    config_dict["default_min_destroyed_snapshot_age_seconds"] = config.default_min_destroyed_snapshot_age_seconds
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -661,7 +660,6 @@ def parse_config(
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
-    kwargs["default_min_destroyed_snapshot_age_seconds"] = raw.pop("default_min_destroyed_snapshot_age_seconds", None)
 
     if len(raw) > 0:
         if strict:

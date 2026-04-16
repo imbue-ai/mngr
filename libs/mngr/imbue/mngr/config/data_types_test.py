@@ -990,9 +990,9 @@ def test_provider_instance_config_merge_keeps_base_when_override_is_none() -> No
     assert merged.destroyed_host_persisted_seconds == 3600.0
 
 
-def test_mngr_config_default_destroyed_host_persisted_seconds_is_seven_days(mngr_test_prefix: str) -> None:
+def test_mngr_config_default_destroyed_host_persisted_seconds_is_thirty_days(mngr_test_prefix: str) -> None:
     config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.default_destroyed_host_persisted_seconds == 60.0 * 60.0 * 24.0 * 7.0
+    assert config.default_destroyed_host_persisted_seconds == 60.0 * 60.0 * 24.0 * 30.0
 
 
 def test_mngr_config_merge_overrides_default_destroyed_host_persisted_seconds(mngr_test_prefix: str) -> None:
@@ -1057,51 +1057,6 @@ def test_mngr_config_merge_keeps_base_min_online_host_age_seconds_when_override_
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, default_min_online_host_age_seconds=None)
     merged = base.merge_with(override)
     assert merged.default_min_online_host_age_seconds == 300.0
-
-
-# =============================================================================
-# Tests for min_destroyed_snapshot_age_seconds
-# =============================================================================
-
-
-def test_provider_instance_config_min_destroyed_snapshot_age_seconds_defaults_to_none() -> None:
-    config = ProviderInstanceConfig(backend=ProviderBackendName("test"))
-    assert config.min_destroyed_snapshot_age_seconds is None
-
-
-def test_provider_instance_config_merge_overrides_min_destroyed_snapshot_age_seconds() -> None:
-    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_destroyed_snapshot_age_seconds=86400.0)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_destroyed_snapshot_age_seconds=3600.0)
-    merged = base.merge_with(override)
-    assert merged.min_destroyed_snapshot_age_seconds == 3600.0
-
-
-def test_provider_instance_config_merge_keeps_base_min_destroyed_snapshot_age_seconds_when_override_none() -> None:
-    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_destroyed_snapshot_age_seconds=86400.0)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_destroyed_snapshot_age_seconds=None)
-    merged = base.merge_with(override)
-    assert merged.min_destroyed_snapshot_age_seconds == 86400.0
-
-
-def test_mngr_config_default_min_destroyed_snapshot_age_seconds_is_thirty_days(mngr_test_prefix: str) -> None:
-    config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.default_min_destroyed_snapshot_age_seconds == 60.0 * 60.0 * 24.0 * 30.0
-
-
-def test_mngr_config_merge_overrides_default_min_destroyed_snapshot_age_seconds(mngr_test_prefix: str) -> None:
-    base = MngrConfig(prefix=mngr_test_prefix, default_min_destroyed_snapshot_age_seconds=2592000.0)
-    override = MngrConfig(prefix=mngr_test_prefix, default_min_destroyed_snapshot_age_seconds=86400.0)
-    merged = base.merge_with(override)
-    assert merged.default_min_destroyed_snapshot_age_seconds == 86400.0
-
-
-def test_mngr_config_merge_keeps_base_min_destroyed_snapshot_age_seconds_when_override_none(
-    mngr_test_prefix: str,
-) -> None:
-    base = MngrConfig(prefix=mngr_test_prefix, default_min_destroyed_snapshot_age_seconds=86400.0)
-    override = MngrConfig.model_construct(prefix=mngr_test_prefix, default_min_destroyed_snapshot_age_seconds=None)
-    merged = base.merge_with(override)
-    assert merged.default_min_destroyed_snapshot_age_seconds == 86400.0
 
 
 def test_mngr_config_merge_overrides_connect_command(mngr_test_prefix: str) -> None:

@@ -859,14 +859,14 @@ def test_gc_snapshots_respects_custom_snapshot_age(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """gc_snapshots uses the provider's configured min_destroyed_snapshot_age_seconds.
+    """gc_snapshots uses the provider's configured destroyed_host_persisted_seconds.
 
     With a short age (1 hour), a 2-hour-old snapshot on a DESTROYED host should be deleted.
     """
-    # Configure provider with a 1-hour snapshot retention
+    # Configure provider with a 1-hour retention
     config = MngrConfig(
         prefix=temp_mngr_ctx.config.prefix,
-        default_min_destroyed_snapshot_age_seconds=3600.0,
+        default_destroyed_host_persisted_seconds=3600.0,
     )
     ctx = temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, config),
