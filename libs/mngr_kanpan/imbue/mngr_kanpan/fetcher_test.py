@@ -29,6 +29,7 @@ from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
+from imbue.mngr_kanpan.plugin import _is_source_enabled
 from imbue.mngr_kanpan.plugin import kanpan_data_sources
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx
@@ -332,22 +333,6 @@ def test_collect_data_sources_returns_all_enabled() -> None:
     assert any(s.name == "github" for s in sources)
 
 
-def test_collect_data_sources_excludes_disabled() -> None:
-    source = _MockDataSource("github", {})
-    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
-    ctx = _make_mock_mngr_ctx(config, [source])
-    sources = collect_data_sources(ctx)
-    assert not any(s.name == "github" for s in sources)
-
-
-def test_collect_data_sources_includes_enabled_source() -> None:
-    source = _MockDataSource("git_info", {})
-    config = KanpanPluginConfig(data_sources={"git_info": DataSourceConfig(enabled=True)})
-    ctx = _make_mock_mngr_ctx(config, [source])
-    sources = collect_data_sources(ctx)
-    assert any(s.name == "git_info" for s in sources)
-
-
 def test_collect_data_sources_skips_none_results() -> None:
     hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [None])
     pm = SimpleNamespace(hook=hook)
@@ -359,37 +344,7 @@ def test_collect_data_sources_skips_none_results() -> None:
     assert sources == []
 
 
-def test_collect_data_sources_dict_config_disabled() -> None:
-    """When source_config is a raw dict with enabled=False, source should be excluded."""
-    source = _MockDataSource("github", {})
-    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
-    pm = SimpleNamespace(hook=hook)
-    ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
-        get_plugin_config=lambda name, cls: SimpleNamespace(
-            data_sources={"github": {"enabled": False}},
-        ),
-        pm=pm,
-    )
-    sources = collect_data_sources(ctx)
-    assert not any(s.name == "github" for s in sources)
-
-
-def test_collect_data_sources_dict_config_enabled() -> None:
-    """When source_config is a raw dict with enabled=True, source should be included."""
-    source = _MockDataSource("github", {})
-    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [[source]])
-    pm = SimpleNamespace(hook=hook)
-    ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
-        get_plugin_config=lambda name, cls: SimpleNamespace(
-            data_sources={"github": {"enabled": True}},
-        ),
-        pm=pm,
-    )
-    sources = collect_data_sources(ctx)
-    assert any(s.name == "github" for s in sources)
-
-
-# === plugin.kanpan_data_sources ===
+# === plugin._is_source_enabled / kanpan_data_sources ===
 
 
 def test_plugin_kanpan_data_sources_default() -> None:
@@ -400,6 +355,37 @@ def test_plugin_kanpan_data_sources_default() -> None:
     assert "repo_paths" in names
     assert "git_info" in names
     assert "github" in names
+
+
+def test_is_source_enabled_default() -> None:
+    config = KanpanPluginConfig()
+    assert _is_source_enabled(config, "github") is True
+
+
+def test_is_source_enabled_dict_disabled() -> None:
+    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
+    assert _is_source_enabled(config, "github") is False
+
+
+def test_is_source_enabled_dict_enabled() -> None:
+    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=True)})
+    assert _is_source_enabled(config, "github") is True
+
+
+def test_plugin_excludes_disabled_github() -> None:
+    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
+    ctx = make_mngr_ctx_with_config(config)
+    result = kanpan_data_sources(mngr_ctx=ctx)
+    assert result is not None
+    assert not any(s.name == "github" for s in result)
+
+
+def test_plugin_excludes_disabled_repo_paths() -> None:
+    config = KanpanPluginConfig(data_sources={"repo_paths": DataSourceConfig(enabled=False)})
+    ctx = make_mngr_ctx_with_config(config)
+    result = kanpan_data_sources(mngr_ctx=ctx)
+    assert result is not None
+    assert not any(s.name == "repo_paths" for s in result)
 
 
 def test_plugin_kanpan_data_sources_with_shell_commands() -> None:

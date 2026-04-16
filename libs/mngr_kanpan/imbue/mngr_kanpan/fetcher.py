@@ -35,8 +35,6 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-from imbue.mngr_kanpan.data_types import DataSourceConfig
-from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
 PLUGIN_NAME = "kanpan"
 
@@ -357,32 +355,18 @@ def load_field_cache(
 def collect_data_sources(
     mngr_ctx: MngrContext,
 ) -> list[KanpanDataSource]:
-    """Collect all data sources from plugins and config.
+    """Collect all data sources from plugins.
 
-    Calls pm.hook.kanpan_data_sources() to get plugin-registered sources,
-    then filters by enabled status from config.
+    Plugins are responsible for checking their own enabled status before
+    returning sources (see plugin.py's _is_source_enabled).
     """
-    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-
     raw_results = mngr_ctx.pm.hook.kanpan_data_sources(mngr_ctx=mngr_ctx)
 
-    all_sources: list[KanpanDataSource] = []
+    sources: list[KanpanDataSource] = []
     for result in raw_results:
         if result is None:
             continue
         for source in result:
-            all_sources.append(source)
+            sources.append(source)
 
-    # Filter by enabled status in config
-    enabled_sources: list[KanpanDataSource] = []
-    for source in all_sources:
-        source_config = config.data_sources.get(source.name)
-        if isinstance(source_config, dict):
-            if not source_config.get("enabled", True):
-                continue
-        elif isinstance(source_config, DataSourceConfig):
-            if not source_config.enabled:
-                continue
-        enabled_sources.append(source)
-
-    return enabled_sources
+    return sources
