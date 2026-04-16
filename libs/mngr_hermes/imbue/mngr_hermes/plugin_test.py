@@ -4,6 +4,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -175,6 +177,7 @@ def test_provision_skips_when_hermes_dir_missing(
     assert not hermes_home.exists()
 
 
+@pytest.mark.rsync
 def test_provision_seeds_files_from_hermes_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -211,6 +214,7 @@ def test_provision_seeds_files_from_hermes_dir(
     assert not (hermes_home / ".hermes_history").exists()
 
 
+@pytest.mark.rsync
 def test_provision_handles_partial_hermes_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
