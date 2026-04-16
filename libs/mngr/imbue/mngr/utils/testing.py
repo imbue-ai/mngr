@@ -652,6 +652,7 @@ def create_test_agent_via_cli(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     agent_name: str,
+    command: str | None = None,
 ) -> str:
     """Create a test agent via the CLI and return the session name.
 
@@ -660,11 +661,15 @@ def create_test_agent_via_cli(
     that type. Used by integration tests that just need an existing agent to
     operate on (e.g., clone, migrate, destroy).
 
+    If ``command`` is given, the minted agent type runs that command instead
+    of the default ``sleep <N>``. This is useful for tests that need the
+    agent to emit a marker string, tail a file, etc.
+
     The caller should wrap this call inside a tmux_session_cleanup context
     manager to ensure the session is cleaned up even if assertions fail.
     """
     session_name = f"{mngr_test_prefix}{agent_name}"
-    agent_type = make_test_sleep_agent_type(temp_host_dir)
+    agent_type = make_test_sleep_agent_type(temp_host_dir, command=command)
 
     create_result = cli_runner.invoke(
         create_command,

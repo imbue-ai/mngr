@@ -157,10 +157,17 @@ def _create_and_track_test_agent(
     plugin_manager: pluggy.PluginManager,
     created_sessions: list[str],
     agent_name: str,
+    agent_cmd: str | None = None,
 ) -> str:
     """Create a test agent via CLI and track its session for cleanup."""
     session_name = create_test_agent_via_cli(
-        cli_runner, temp_work_dir, temp_host_dir, mngr_test_prefix, plugin_manager, agent_name
+        cli_runner,
+        temp_work_dir,
+        temp_host_dir,
+        mngr_test_prefix,
+        plugin_manager,
+        agent_name,
+        command=agent_cmd,
     )
     created_sessions.append(session_name)
     return session_name
@@ -179,14 +186,23 @@ def create_test_agent(
     Usage:
         def test_something(create_test_agent):
             session_name = create_test_agent("my-agent")
+            # or with a custom command the agent should run:
+            session_name = create_test_agent("my-agent", "echo MARKER && sleep 99")
             # ... test logic ...
             # cleanup happens automatically on fixture teardown
 
     Supports creating multiple agents per test -- all are cleaned up.
     """
     created_sessions: list[str] = []
-    yield lambda agent_name: _create_and_track_test_agent(
-        cli_runner, temp_work_dir, temp_host_dir, mngr_test_prefix, plugin_manager, created_sessions, agent_name
+    yield lambda agent_name, agent_cmd=None: _create_and_track_test_agent(
+        cli_runner,
+        temp_work_dir,
+        temp_host_dir,
+        mngr_test_prefix,
+        plugin_manager,
+        created_sessions,
+        agent_name,
+        agent_cmd,
     )
 
     for session_name in created_sessions:
