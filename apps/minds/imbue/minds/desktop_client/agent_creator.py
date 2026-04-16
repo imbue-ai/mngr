@@ -268,17 +268,6 @@ def _build_mngr_create_command(
         f"workspace={agent_name}",
         "--env",
         f"MINDS_API_KEY={api_key}",
-        # Propagate the minds-scoped mngr identity to the remote host so its
-        # inner mngr uses the same prefix (and host dir name) as the local
-        # one. Without this, a local minds at MNGR_PREFIX=devminds- would
-        # spawn a remote container whose own mngr defaults to mngr-, and
-        # the two would disagree about tmux/session naming.
-        "--pass-host-env",
-        "MNGR_HOST_DIR",
-        "--pass-host-env",
-        "MNGR_PREFIX",
-        "--pass-host-env",
-        "MINDS_ROOT_NAME",
         "--label",
         "user_created=true",
         "--label",
@@ -289,17 +278,43 @@ def _build_mngr_create_command(
 
     match launch_mode:
         case LaunchMode.DEV:
+            # Local (same-machine) mode: the agent inherits the bootstrap-set
+            # MNGR_HOST_DIR/MNGR_PREFIX via os.environ directly, so no
+            # host-env plumbing is needed.
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "lima"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
     return mngr_command, api_key
+
+
+def _remote_host_env_flags() -> list[str]:
+    """Return the --host-env / --pass-host-env flags for a new remote host.
+
+    Remote containers always store their mngr state under ``/mngr`` (the
+    conventional container-internal path -- this is also what
+    ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
+    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could be
+    ``~/.minds/mngr`` or ``~/.devminds/mngr``). We only propagate
+    ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the local
+    ones, avoiding confusion when the same name has to refer to the "same"
+    thing on both sides.
+    """
+    return [
+        "--host-env",
+        "MNGR_HOST_DIR=/mngr",
+        "--pass-host-env",
+        "MNGR_PREFIX",
+    ]
 
 
 def run_mngr_create(
