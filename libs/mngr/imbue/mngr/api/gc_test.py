@@ -802,7 +802,7 @@ def test_gc_snapshots_deletes_old_destroyed_host_snapshots(
     """gc_snapshots deletes old snapshots from DESTROYED hosts.
 
     When a host is destroyed, its snapshots are kept for recovery until they
-    exceed the minimum destroyed snapshot age.
+    exceed the destroyed_host_persisted_seconds threshold.
     """
     # supports_shutdown_hosts=True makes get_state() return the stop_reason directly,
     # so setting stop_reason=DESTROYED gives us a DESTROYED host on a provider that
