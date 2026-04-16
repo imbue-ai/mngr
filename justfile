@@ -105,7 +105,14 @@ test-offload-release args="":
     trap "rm -rf $tmpdir" EXIT
 
     # Invalidate offload's image cache when build inputs change.
-    CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile.release offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
+    # Include the Docker startup scripts COPY'd into the image so that edits
+    # to those scripts also invalidate the cache.
+    CACHE_KEY=$(cat .offload-base-commit \
+        libs/mngr/imbue/mngr/resources/Dockerfile.release \
+        libs/mngr/imbue/mngr/resources/start-dockerd.sh \
+        libs/mngr/imbue/mngr/resources/ensure-dockerd.sh \
+        libs/mngr/imbue/mngr/resources/run-with-docker.sh \
+        offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
     CACHE_KEY_FILE=".offload-release-cache-key"
     if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
         echo "[test-offload-release] Image cache key matches, reusing cached image."
