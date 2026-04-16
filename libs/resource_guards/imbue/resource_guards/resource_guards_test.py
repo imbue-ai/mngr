@@ -869,6 +869,10 @@ if _outer_dir:
         p for p in os.environ.get("PATH", "").split(os.pathsep) if p != _outer_dir
     )
 
+# Pretend to be an xdist worker so register_conftest_hooks skips the global
+# test lock (outer pytest already holds it -> deadlock).
+os.environ["PYTEST_XDIST_WORKER"] = "gw_pytester"
+
 register_resource_guard("cat")
 
 # register_conftest_hooks injects pytest_configure (which auto-registers markers
