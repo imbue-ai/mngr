@@ -76,11 +76,10 @@ _registered_sdk_guards: list[tuple[str, Callable[[], None], Callable[[], None]]]
 def register_resource_guard(name: str) -> None:
     """Register a binary to be guarded by PATH wrapper scripts.
 
-    Call this from each project's conftest.py before register_conftest_hooks().
     The resource name must correspond to both a binary on PATH and a pytest
     mark name (e.g., register_resource_guard("tmux") guards the tmux binary
-    and enforces @pytest.mark.tmux). The corresponding pytest mark is
-    auto-registered during pytest_configure.
+    and enforces @pytest.mark.tmux). Call register_guarded_resource_markers()
+    from pytest_configure to register the corresponding pytest marks.
 
     Duplicate registrations are ignored.
     """
