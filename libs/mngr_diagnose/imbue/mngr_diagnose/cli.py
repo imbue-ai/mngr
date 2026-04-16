@@ -103,7 +103,7 @@ def diagnose(ctx: click.Context, **kwargs: object) -> None:
 
     logger.info("Launching diagnostic agent...")
 
-    # Build create command args -- pass -y to auto-trust the clone directory
+    # Build create command args
     create_args: list[str] = [
         "--from",
         f":{resolved_clone_dir}",

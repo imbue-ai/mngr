@@ -289,37 +289,46 @@ def write_diagnose_context_file(
     return path
 
 
+def _is_diagnose_command(ctx: click.Context | None) -> bool:
+    """Check if the crashing command is diagnose itself."""
+    if ctx is None:
+        return False
+    return ctx.meta.get("hook_command_name") == "diagnose"
+
+
 def _offer_diagnose(
     context_file_path: Path,
     ctx: click.Context | None,
-) -> None:
+) -> bool:
     """Print the diagnose command and offer to run it.
 
-    If the diagnose plugin is not installed, also prints install instructions.
+    Returns True if the diagnose command was successfully invoked (the user
+    has been handed off to the diagnostic agent), False otherwise.
     """
-    # don't bother with diagnostics when running autonomously
     if os.environ.get("IS_AUTONOMOUS", "0") == "1":
-        return
+        return False
 
     diagnose_cmd = f"mngr diagnose --context-file {context_file_path}"
 
-    # Check if the diagnose plugin is installed
     pm = ctx.obj if ctx is not None else None
     has_diagnose = pm is not None and pm.has_plugin("diagnose")
 
-    logger.info("")
-    logger.info("Launch a diagnostic agent with:")
-    logger.info("  {}", diagnose_cmd)
-
-    if not has_diagnose:
+    if has_diagnose:
         logger.info("")
-        logger.info("(The diagnose plugin is not installed. Install it with:")
+        logger.info("To launch an agent to diagnose this problem, run:")
+        logger.info("  {}", diagnose_cmd)
+    else:
+        logger.info("")
+        logger.info(
+            "To launch an agent to diagnose this problem, install the diagnose plugin"
+            " and then run the diagnose command:"
+        )
         logger.info("  mngr plugin add imbue-mngr-diagnose")
-        logger.info(")")
-        return
+        logger.info("  {}", diagnose_cmd)
+        return False
 
-    if not click.confirm("\nRun diagnostic agent now?", default=False):
-        return
+    if not click.confirm("\nRun diagnostic agent now?", default=True):
+        return False
 
     # Walk up to the root context (the AliasAwareGroup) to find the diagnose command.
     root_ctx = ctx
@@ -327,25 +336,23 @@ def _offer_diagnose(
         root_ctx = root_ctx.parent
     if root_ctx is None:
         logger.warning("Could not find root CLI group to invoke diagnose command")
-        return
+        return False
 
     root_command = root_ctx.command
     if not isinstance(root_command, click.Group):
         logger.warning("Root CLI command is not a group")
-        return
+        return False
 
     diagnose_command = root_command.get_command(root_ctx, "diagnose")
     if diagnose_command is None:
         logger.warning("Diagnose command not found in CLI group")
-        return
+        return False
 
     diagnose_args = ["--context-file", str(context_file_path)]
-    try:
-        diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
-        with diagnose_ctx:
-            diagnose_command.invoke(diagnose_ctx)
-    except Exception as exc:
-        logger.warning("Diagnose command failed: {}", exc)
+    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
+    with diagnose_ctx:
+        diagnose_command.invoke(diagnose_ctx)
+    return True
 
 
 def handle_unexpected_error(
@@ -353,7 +360,14 @@ def handle_unexpected_error(
     is_interactive: bool | None = None,
     ctx: click.Context | None = None,
 ) -> NoReturn:
-    """Handle an unexpected error by showing the traceback and optionally reporting it."""
+    """Handle an unexpected error by showing the traceback and optionally reporting it.
+
+    Two distinct flows depending on context:
+    - Normal command crash: offer `mngr diagnose` to investigate. No GitHub issue fallback
+      unless diagnose itself fails.
+    - Diagnose command crash: skip diagnose (avoid recursion), go straight to GitHub issue
+      reporting with a message acknowledging the irony.
+    """
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
 
     # Show the full traceback
@@ -366,9 +380,22 @@ def handle_unexpected_error(
     if not is_interactive_resolved:
         raise SystemExit(1)
 
-    # Write context file and offer diagnose (best-effort; must not prevent
-    # the traditional GitHub issue reporting below from running)
     error_message = str(error) if str(error) else type(error).__name__
+
+    if _is_diagnose_command(ctx):
+        # The diagnostic agent itself crashed -- skip diagnose (would recurse),
+        # go straight to GitHub issue reporting.
+        logger.info("")
+        logger.info(
+            "The diagnostic agent itself crashed. "
+            "Please report this so we can fix the fixer."
+        )
+        title = build_unexpected_error_issue_title(error)
+        body = build_unexpected_error_issue_body(error, tb_str)
+        _prompt_and_report_issue(title, body, error_message)
+        raise SystemExit(1)
+
+    # Normal command crash: offer diagnose
     try:
         context_path = write_diagnose_context_file(
             traceback_str=tb_str,
@@ -376,13 +403,15 @@ def handle_unexpected_error(
             error_type=type(error).__name__,
             error_message=error_message,
         )
-        _offer_diagnose(context_path, ctx)
-    except Exception as diagnose_exc:
-        logger.debug("Diagnose step failed: {}", diagnose_exc)
+        diagnose_ran = _offer_diagnose(context_path, ctx)
+    except Exception as exc:
+        logger.debug("Diagnose step failed: {}", exc)
+        diagnose_ran = False
 
-    # Also offer the traditional GitHub issue reporting
-    title = build_unexpected_error_issue_title(error)
-    body = build_unexpected_error_issue_body(error, tb_str)
-    _prompt_and_report_issue(title, body, error_message)
+    # Fall back to GitHub issue reporting only if diagnose didn't run
+    if not diagnose_ran:
+        title = build_unexpected_error_issue_title(error)
+        body = build_unexpected_error_issue_body(error, tb_str)
+        _prompt_and_report_issue(title, body, error_message)
 
     raise SystemExit(1)

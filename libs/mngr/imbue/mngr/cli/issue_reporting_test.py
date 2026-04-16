@@ -10,6 +10,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
+from imbue.mngr.cli.issue_reporting import _is_diagnose_command
 from imbue.mngr.cli.issue_reporting import _offer_diagnose
 from imbue.mngr.cli.issue_reporting import build_issue_body
 from imbue.mngr.cli.issue_reporting import build_issue_title
@@ -418,17 +419,28 @@ def test_write_diagnose_context_file_different_inputs() -> None:
 
 
 def test_offer_diagnose_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_offer_diagnose returns immediately when IS_AUTONOMOUS=1."""
+    """_offer_diagnose returns False and produces no output when IS_AUTONOMOUS=1."""
     monkeypatch.setenv("IS_AUTONOMOUS", "1")
     with capture_loguru(level="INFO") as log_output:
-        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+        result = _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    assert result is False
     assert log_output.getvalue() == ""
 
 
 def test_offer_diagnose_shows_install_hint_when_no_plugin() -> None:
-    """_offer_diagnose shows install instructions when ctx is None (no plugin manager)."""
+    """_offer_diagnose shows install + run instructions when plugin is not installed."""
     with capture_loguru(level="INFO") as log_output:
-        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+        result = _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
+    assert result is False
     output = log_output.getvalue()
-    assert "mngr diagnose --context-file" in output
     assert "mngr plugin add imbue-mngr-diagnose" in output
+    assert "mngr diagnose --context-file" in output
+
+
+# =============================================================================
+# Tests for _is_diagnose_command
+# =============================================================================
+
+
+def test_is_diagnose_command_returns_false_for_none() -> None:
+    assert _is_diagnose_command(None) is False
