@@ -69,8 +69,14 @@ class E2eSession(Session):
                 "processes",
             ),
         ]:
-            diag = self.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
-            diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
+            # Best-effort: never let a diagnostic failure mask the primary test
+            # assertion that triggered this call. Record the failure in place
+            # so the caller still sees which diagnostic broke.
+            try:
+                diag = self.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
+                diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
+            except Exception as exc:
+                diag_parts.append(f"\n[{label}] error: {exc!r}")
         return "\n".join(diag_parts)
 
     def write_tutorial_block(self, block: str) -> None:
