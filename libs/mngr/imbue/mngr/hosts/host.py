@@ -1105,10 +1105,9 @@ class Host(BaseHost, OnlineHostInterface):
     def _ensure_work_dir_exists(self, agent: AgentInterface) -> None:
         """Verify the agent's work_dir exists before starting.
 
-        tmux's -c flag silently falls back to $HOME when the directory does not
-        exist, which causes the agent to launch in the wrong place and hang on a
-        trust dialog. This method detects the missing directory early and raises
-        a clear error with a recovery command.
+        tmux's -c flag silently falls back to $HOME when the directory does not exist,
+        which causes the agent to launch in the wrong place. This method detects the
+        missing directory early and raises a clear error with a recovery command.
         """
         check = self.execute_idempotent_command(f"test -d {shlex.quote(str(agent.work_dir))}")
         if check.success:
