@@ -26,6 +26,7 @@ from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
+from imbue.mngr_kanpan.data_types import DataSourceConfig
 
 _BASE_FIELDS = "number,title,state,headRefName,url,isDraft"
 _OPEN_FIELDS = f"{_BASE_FIELDS},statusCheckRollup"
@@ -294,7 +295,7 @@ def _parse_check_status(rollup: list[dict[str, Any]] | None) -> CiStatus:
     return CiStatus.PASSING
 
 
-class GitHubDataSourceConfig(FrozenModel):
+class GitHubDataSourceConfig(DataSourceConfig):
     """Configuration for the GitHub data source."""
 
     pr: bool = Field(default=True, description="Fetch PR number/URL/state/draft")

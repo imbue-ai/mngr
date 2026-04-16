@@ -45,10 +45,9 @@ def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
         GitInfoDataSource(),
     ]
 
-    # GitHub data source reads its own config directly
     github_config_raw = config.data_sources.get("github")
     if isinstance(github_config_raw, dict):
-        github_ds_config = GitHubDataSourceConfig(**{k: v for k, v in github_config_raw.items() if k != "enabled"})
+        github_ds_config = GitHubDataSourceConfig(**github_config_raw)
     else:
         github_ds_config = GitHubDataSourceConfig()
     sources.append(GitHubDataSource(config=github_ds_config))
