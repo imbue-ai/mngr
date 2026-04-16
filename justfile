@@ -30,6 +30,7 @@ _generate-dockerignore:
     echo '.git/' >> .dockerignore
     echo '.offload-image-cache' >> .dockerignore
     echo '.offload-cache-key' >> .dockerignore
+    echo '.offload-acceptance-cache-key' >> .dockerignore
     echo '.offload-release-cache-key' >> .dockerignore
 
 # Run tests on Modal via Offload
@@ -80,6 +81,23 @@ test-offload-acceptance args="":
     BASE_COMMIT=$(cat .offload-base-commit | tr -d '[:space:]')
     tmpdir=$(mktemp -d)
     trap "rm -rf $tmpdir" EXIT
+
+    # Invalidate offload's image cache when build inputs change.
+    # Include the Docker startup scripts COPY'd into the image so that edits
+    # to those scripts also invalidate the cache.
+    CACHE_KEY=$(cat .offload-base-commit \
+        libs/mngr/imbue/mngr/resources/Dockerfile.release \
+        libs/mngr/imbue/mngr/resources/start-dockerd.sh \
+        libs/mngr/imbue/mngr/resources/ensure-dockerd.sh \
+        offload-modal-acceptance.toml | shasum -a 256 | cut -d' ' -f1)
+    CACHE_KEY_FILE=".offload-acceptance-cache-key"
+    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
+        echo "[test-offload-acceptance] Image cache key matches, reusing cached image."
+    else
+        echo "[test-offload-acceptance] Image cache key changed, clearing cached image."
+        rm -f .offload-image-cache
+        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
+    fi
 
     just _generate-dockerignore
 
