@@ -20,14 +20,14 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
     expect(
         e2e.run(
             "mngr create my-task --type test_sleep --no-ensure-clean",
-            comment="you can run *any* literal command instead of a named agent type",
+            comment="any program on PATH can be used as an agent type -- here we use a registered test_sleep type",
         )
     ).to_succeed()
 
-    # Verify the custom command is actually running inside the agent
+    # Verify the agent's configured command (sleep) is actually running inside the agent
     ps_result = e2e.run(
         "mngr exec my-task 'ps aux | grep sleep'",
-        comment="Verify the custom command (sleep) is running",
+        comment="Verify the agent's sleep command is running",
     )
     expect(ps_result).to_succeed()
     expect(ps_result.stdout).to_contain("sleep 99999")
