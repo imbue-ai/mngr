@@ -308,8 +308,7 @@ def test_register_sdk_guard_adds_entry(isolated_guard_state: None) -> None:
 
     assert len(resource_guards._registered_sdk_guards) == 1
     assert resource_guards._registered_sdk_guards[0][0] == "test_sdk"
-    # Guard name is added to _guarded_resources immediately at registration time,
-    # not deferred to create_sdk_resource_guards().
+    # Guard name is in _guarded_resources (added by register_sdk_guard).
     assert "test_sdk" in resource_guards._guarded_resources
 
 

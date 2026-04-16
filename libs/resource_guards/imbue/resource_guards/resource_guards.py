@@ -297,8 +297,8 @@ def register_sdk_guard(
     implementations into the infrastructure. Deduplicates by name so
     multiple conftest files can safely call the registration function.
 
-    The guard name is added to _guarded_resources immediately; the
-    install/cleanup functions are deferred to create_sdk_resource_guards().
+    Adds the guard name to _guarded_resources and defers the install/cleanup
+    functions to create_sdk_resource_guards().
     """
     registered_names = {entry[0] for entry in _registered_sdk_guards}
     if name not in registered_names:
@@ -390,8 +390,7 @@ def create_sdk_resource_guards() -> None:
     """Install all registered SDK guards.
 
     Iterates through guards registered via register_sdk_guard() and calls
-    each install function. Guard names are already in _guarded_resources
-    (added by register_sdk_guard at registration time).
+    each install function.
     """
     for _name, install, _cleanup in _registered_sdk_guards:
         install()
