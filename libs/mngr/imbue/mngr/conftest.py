@@ -22,14 +22,11 @@ from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.consts import PROFILES_DIRNAME
-from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
-from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.instance import create_docker_client
@@ -39,13 +36,12 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.utils.testing import TEST_SLEEP_AGENT_TYPE
-from imbue.mngr.utils.testing import TEST_SLEEP_COMMAND
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
 
@@ -252,10 +248,21 @@ def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
         default_host_dir=temp_host_dir,
         prefix=mngr_test_prefix,
         is_error_reporting_enabled=False,
-        agent_types={
-            AgentTypeName(TEST_SLEEP_AGENT_TYPE): AgentTypeConfig(command=CommandString(TEST_SLEEP_COMMAND)),
-        },
     )
+
+
+@pytest.fixture
+def test_sleep_agent_type(temp_host_dir: Path) -> str:
+    """Mint a one-off long-running placeholder agent type for this test.
+
+    Replaces the removed ``--command`` flag. Each invocation of this fixture
+    mints a fresh ``test_sleep_<uuid>`` type with a unique ``sleep <N>``
+    command, so leaked agents are distinguishable in ``ps`` / tmux. Pass to
+    the CLI as ``--type <value>``. Tests that need multiple placeholder
+    agents with distinct identifiers should call
+    ``make_test_sleep_agent_type(temp_host_dir)`` directly.
+    """
+    return make_test_sleep_agent_type(temp_host_dir)
 
 
 @pytest.fixture

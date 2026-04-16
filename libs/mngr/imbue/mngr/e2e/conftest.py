@@ -21,8 +21,9 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.testing import TEST_SLEEP_COMMAND
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import unique_sleep_command
+from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -34,12 +35,14 @@ class E2eSession(Session):
     """
 
     output_dir: Path
+    settings_local_path: Path
 
     @classmethod
-    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path) -> "E2eSession":
+    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path, settings_local_path: Path) -> "E2eSession":
         """Create an E2eSession with the given output directory."""
         session = cls(env=env, cwd=cwd)
         session.output_dir = output_dir
+        session.settings_local_path = settings_local_path
         return session
 
     def write_tutorial_block(self, block: str) -> None:
@@ -50,6 +53,23 @@ class E2eSession(Session):
         """
         cleaned = textwrap.dedent(block).strip() + "\n"
         (self.output_dir / "tutorial_block.txt").write_text(cleaned)
+
+    def make_sleep_agent_type(self, command: str | None = None) -> str:
+        """Declare a long-running placeholder agent type in settings.local.toml and return its name.
+
+        Replaces the removed ``--command`` flag for e2e (subprocess) tests. Each
+        call mints a unique type name (``test_sleep_<uuid hex>``) and, unless
+        ``command`` is given, a unique ``sleep <N>`` so leaked processes show
+        up with a distinct identifier in ``ps`` output. Pass the returned
+        name to ``mngr`` as ``--type <name>``.
+        """
+        type_name = f"test_sleep_{uuid4().hex}"
+        write_agent_type_to_settings_toml(
+            self.settings_local_path,
+            type_name,
+            command if command is not None else unique_sleep_command(),
+        )
+        return type_name
 
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -371,10 +391,9 @@ def e2e(
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
     #
-    # Register the `test_sleep` agent type so tests can start a long-running
-    # placeholder agent via `--type test_sleep` (replaces the removed
-    # `--command` flag). The command string is shared with the in-process
-    # test fixtures via imbue.mngr.utils.testing.TEST_SLEEP_COMMAND.
+    # Tests that need a long-running placeholder agent (formerly the job of
+    # the removed ``--command`` flag) mint per-test agent types via
+    # ``E2eSession.make_sleep_agent_type``, which appends to this same file.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -382,14 +401,6 @@ def e2e(
         "\n"
         "[commands.start]\n"
         'connect_command = "mngr-e2e-connect"\n'
-        "\n"
-        "[agent_types.test_sleep]\n"
-        f'command = "{TEST_SLEEP_COMMAND}"\n'
-        "\n"
-        # Used by test_create_with_env to verify env var propagation: prints
-        # MNGR_TEST_VAR before sleeping so the value appears in the tmux pane.
-        "[agent_types.test_env_echo]\n"
-        f'command = "echo MNGR_TEST_VAR=$MNGR_TEST_VAR && {TEST_SLEEP_COMMAND}"\n'
     )
 
     # Ensure .claude/settings.local.json is gitignored. Remote providers
@@ -400,7 +411,9 @@ def e2e(
         gitignore_path.write_text(".claude/settings.local.json\n")
         run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
-    session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
+    session = E2eSession.create(
+        env=env, cwd=temp_git_repo, output_dir=test_output_dir, settings_local_path=settings_path
+    )
 
     yield session
 

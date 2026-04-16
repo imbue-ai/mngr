@@ -23,6 +23,7 @@ def test_destroy_single_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test destroying a single agent."""
     agent_name = f"test-destroy-single-{int(time.time())}"
@@ -35,7 +36,7 @@ def test_destroy_single_agent(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -75,6 +76,7 @@ def test_destroy_single_agent_via_session(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test destroying a single agent using the --session option."""
     agent_name = f"test-destroy-session-{int(time.time())}"
@@ -87,7 +89,7 @@ def test_destroy_single_agent_via_session(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -127,6 +129,7 @@ def test_destroy_with_confirmation(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test destroying a stopped agent with confirmation prompt.
 
@@ -143,7 +146,7 @@ def test_destroy_with_confirmation(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -187,6 +190,7 @@ def test_destroy_blocks_running_agent_without_force(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that destroying a running agent without --force is blocked with expected message."""
     agent_name = f"test-destroy-blocked-{int(time.time())}"
@@ -199,7 +203,7 @@ def test_destroy_blocks_running_agent_without_force(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -255,6 +259,7 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that destroy fails if any specified identifier doesn't match an agent.
 
@@ -275,7 +280,7 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -318,6 +323,7 @@ def test_destroy_multiple_agents(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test destroying multiple agents at once."""
     timestamp = int(time.time())
@@ -337,7 +343,7 @@ def test_destroy_multiple_agents(
                     "--name",
                     agent_name,
                     "--type",
-                    "test_sleep",
+                    test_sleep_agent_type,
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
@@ -480,6 +486,7 @@ def test_destroy_remove_created_branch_deletes_branch(
     temp_git_repo: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that --remove-created-branch deletes the git branch after destroying a worktree agent."""
     agent_name = f"test-rm-branch-{int(time.time())}"
@@ -493,7 +500,7 @@ def test_destroy_remove_created_branch_deletes_branch(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
@@ -528,6 +535,7 @@ def test_destroy_without_remove_created_branch_leaves_branch(
     temp_git_repo: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that destroy without --remove-created-branch leaves the git branch intact."""
     agent_name = f"test-keep-branch-{int(time.time())}"
@@ -541,7 +549,7 @@ def test_destroy_without_remove_created_branch_leaves_branch(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
@@ -575,6 +583,7 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that --remove-created-branch is a no-op when agent has no created_branch_name."""
     agent_name = f"test-no-branch-{int(time.time())}"
@@ -587,7 +596,7 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -617,6 +626,7 @@ def test_destroy_via_stdin(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test destroying multiple agents by piping names via stdin ('-')."""
     timestamp = int(time.time())
@@ -636,7 +646,7 @@ def test_destroy_via_stdin(
                     "--name",
                     agent_name,
                     "--type",
-                    "test_sleep",
+                    test_sleep_agent_type,
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",

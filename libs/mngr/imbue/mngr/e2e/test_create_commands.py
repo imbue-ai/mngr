@@ -5,13 +5,16 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
-from imbue.mngr.utils.testing import TEST_SLEEP_COMMAND
 from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_command(e2e: E2eSession) -> None:
+    # Pin the command so we can assert on it later (the factory would otherwise
+    # pick a random sleep value).
+    expected_command = "sleep 123456789"
+    sleep_agent_type = e2e.make_sleep_agent_type(expected_command)
     e2e.write_tutorial_block("""
     # any program on PATH can be used directly as an agent type (falls back to
     # running the program as-is), and arguments to the program go after `--`:
@@ -20,7 +23,7 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="any program on PATH can be used as an agent type -- here we use a registered test_sleep type",
         )
     ).to_succeed()
@@ -31,7 +34,7 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
         comment="Verify the agent's sleep command is running",
     )
     expect(ps_result).to_succeed()
-    expect(ps_result.stdout).to_contain(TEST_SLEEP_COMMAND)
+    expect(ps_result.stdout).to_contain(expected_command)
 
 
 @pytest.mark.release
@@ -39,6 +42,7 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
@@ -48,7 +52,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     # Idle timeout requires a remote provider (local provider rejects it).
     # Use Modal to exercise the real idle timeout path.
     result = e2e.run(
-        "mngr create my-task --provider modal --type test_sleep --no-ensure-clean"
+        f"mngr create my-task --provider modal --type {sleep_agent_type} --no-ensure-clean"
         " --idle-mode run --idle-timeout 60 --no-connect",
         comment="idle timeout requires a remote provider",
         timeout=120.0,
@@ -60,6 +64,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # alternatively, you can simply add extra tmux windows that run alongside your agent:
     mngr create my-task -w server="npm run dev" -w logs="tail -f app.log"
@@ -67,7 +72,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            'mngr create my-task --type test_sleep --no-ensure-clean -w extra="sleep 99999"',
+            f'mngr create my-task --type {sleep_agent_type} --no-ensure-clean -w extra="sleep 99999"',
             comment="you can simply add extra tmux windows that run alongside your agent",
         )
     ).to_succeed()
@@ -82,6 +87,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
     mngr create my-task --no-ensure-clean
@@ -93,7 +99,7 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="by default, mngr aborts the create command if the working tree has uncommitted changes",
         )
     ).to_succeed()
@@ -107,13 +113,14 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_connect_command(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
     mngr create my-task --connect-command "my_script.sh"
     """)
     expect(
         e2e.run(
-            'mngr create my-task --type test_sleep --no-ensure-clean --connect-command "echo connected" --no-connect',
+            f'mngr create my-task --type {sleep_agent_type} --no-ensure-clean --connect-command "echo connected" --no-connect',
             comment="you can use a custom connect command instead of the default",
         )
     ).to_succeed()
@@ -131,13 +138,14 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_message(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # you can send a message when starting the agent (great for scripting):
     mngr create my-task --no-connect --message "Do the thing"
     """)
     expect(
         e2e.run(
-            'mngr create my-task --type test_sleep --no-ensure-clean --no-connect --message "Do the thing"',
+            f'mngr create my-task --type {sleep_agent_type} --no-ensure-clean --no-connect --message "Do the thing"',
             comment="you can send a message when starting the agent (great for scripting)",
         )
     ).to_succeed()

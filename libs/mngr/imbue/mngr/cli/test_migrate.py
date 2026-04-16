@@ -18,6 +18,7 @@ def test_migrate_clones_and_destroys_source(
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that migrate creates a new agent and destroys the source."""
     source_name = f"test-migrate-source-{uuid4().hex}"
@@ -34,7 +35,7 @@ def test_migrate_clones_and_destroys_source(
                 source_name,
                 target_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--transfer=none",
                 "--no-connect",
             ],

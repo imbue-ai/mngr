@@ -106,6 +106,7 @@ def test_provision_preserves_existing_env_vars(
     per_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that provisioning preserves existing environment variables."""
     agent_name = f"test-prov-env-preserve-{get_short_random_string()}"
@@ -119,7 +120,7 @@ def test_provision_preserves_existing_env_vars(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

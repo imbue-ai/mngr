@@ -10,10 +10,11 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_full_lifecycle(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     # Create
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean --no-connect",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --no-connect",
             comment="Create agent for full lifecycle test",
         )
     ).to_succeed()

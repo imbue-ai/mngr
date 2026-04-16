@@ -29,6 +29,7 @@ def _create_modal_agent(
     agent_name: str,
     source_dir: Path,
     env: dict[str, str],
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Create a Modal agent via the CLI subprocess."""
     with log_span("Creating Modal agent for snapshot test", agent_name=agent_name):
@@ -40,7 +41,7 @@ def _create_modal_agent(
                 "create",
                 f"{agent_name}@.modal",
                 "--type",
-                "test_sleep",
+                modal_test_sleep_agent_type,
                 "--no-connect",
                 "--no-ensure-clean",
                 "--source",
@@ -74,6 +75,7 @@ def _destroy_modal_agent(
 def test_snapshot_create_then_list_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test snapshot functionality on a Modal agent
 
@@ -82,7 +84,7 @@ def test_snapshot_create_then_list_on_modal(
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env)
+    _create_modal_agent(agent_name, temp_source_dir, env, modal_test_sleep_agent_type)
     try:
         # Create a snapshot
         with log_span("Creating snapshot for Modal agent", agent_name=agent_name):
@@ -129,6 +131,7 @@ def test_snapshot_create_then_list_on_modal(
 def test_snapshot_destroy_then_list_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test snapshot deletion on a Modal agent.
 
@@ -137,7 +140,7 @@ def test_snapshot_destroy_then_list_on_modal(
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env)
+    _create_modal_agent(agent_name, temp_source_dir, env, modal_test_sleep_agent_type)
     try:
         # Destroy all
         with log_span("Destroying snapshots for Modal agent", agent_name=agent_name):

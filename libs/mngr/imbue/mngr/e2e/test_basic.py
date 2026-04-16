@@ -65,6 +65,7 @@ def test_list_json_with_no_agents(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_named_agent(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
     mngr create my-task
@@ -72,7 +73,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
         )
     ).to_succeed()
@@ -86,6 +87,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_json_output(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
     mngr create my-task --no-connect --format json
@@ -93,7 +95,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --no-connect --type test_sleep --no-ensure-clean --format json",
+            f"mngr create my-task --no-connect --type {sleep_agent_type} --no-ensure-clean --format json",
             comment="you can control output format for scripting",
         )
     ).to_succeed()
@@ -108,6 +110,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
     # if you want to be sure that interactivity is disabled, you can use the --headless flag:
@@ -115,7 +118,7 @@ def test_create_headless(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean --headless",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --headless",
             comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
         )
     ).to_succeed()
@@ -129,9 +132,10 @@ def test_create_headless(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="Create agent to be destroyed",
         )
     ).to_succeed()
@@ -148,9 +152,10 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="Create agent to be renamed",
         )
     ).to_succeed()
@@ -171,13 +176,14 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_label(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:
     mngr create my-task --label team=backend --host-label env=staging
     """)
     expect(
         e2e.run(
-            "mngr create my-task --type test_sleep --no-ensure-clean --label team=backend --host-label env=staging",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --label team=backend --host-label env=staging",
             comment="you can add labels to organize your agents and tags for host metadata",
         )
     ).to_succeed()

@@ -301,6 +301,7 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
 def test_mngr_create_transfers_git_repo_with_untracked_files(
     temp_git_repo: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test that agent creation with git repo source succeeds on Modal.
 
@@ -326,7 +327,7 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "test_sleep",
+            modal_test_sleep_agent_type,
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -350,6 +351,7 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
 def test_mngr_create_transfers_git_repo_with_new_branch(
     temp_git_repo: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test that git transfer creates a new branch on the remote.
 
@@ -366,7 +368,7 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "test_sleep",
+            modal_test_sleep_agent_type,
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -385,7 +387,7 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
-def _get_mngr_default_dockerfile_path() -> Path:
+def _get_mngr_default_dockerfile_path(modal_test_sleep_agent_type) -> Path:
     """Get the path to the mngr default Dockerfile from the resources package."""
     resources_dir = importlib.resources.files(resources)
     dockerfile_resource = resources_dir / "Dockerfile"
@@ -400,6 +402,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
     tmp_path: Path,
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test creating an agent on Modal using the mngr default Dockerfile.
 
@@ -413,7 +416,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
     agent_name = f"test-modal-default-df-{get_short_random_string()}"
     unique_marker = f"default-dockerfile-{get_short_random_string()}"
 
-    dockerfile_path = _get_mngr_default_dockerfile_path()
+    dockerfile_path = _get_mngr_default_dockerfile_path(modal_test_sleep_agent_type)
     assert dockerfile_path.exists(), f"Default Dockerfile not found at {dockerfile_path}"
 
     tar_dir = tmp_path / "tar_output"
@@ -442,7 +445,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal:/code/mngr",
-            "test_sleep",
+            modal_test_sleep_agent_type,
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",

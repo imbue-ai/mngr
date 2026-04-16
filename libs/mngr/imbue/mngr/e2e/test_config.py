@@ -12,6 +12,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_template(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type()
     # Write a template that sets transfer=none (so agent runs in-place)
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
     expect(
@@ -26,7 +27,7 @@ def test_create_with_template(e2e: E2eSession) -> None:
     # Create an agent using the template
     expect(
         e2e.run(
-            "mngr create my-task --template my_local_template --type test_sleep --no-ensure-clean --no-connect",
+            f"mngr create my-task --template my_local_template --type {sleep_agent_type} --no-ensure-clean --no-connect",
             comment="Create agent using template",
         )
     ).to_succeed()

@@ -94,6 +94,7 @@ def test_connect_via_cli_group(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     intercepted_execvp_calls: list[tuple[str, list[str]]],
+    test_sleep_agent_type: str,
 ) -> None:
     """Test calling connect through the main CLI group."""
     agent_name = f"test-connect-cli-{int(time.time())}"
@@ -108,7 +109,7 @@ def test_connect_via_cli_group(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -141,6 +142,7 @@ def test_connect_start_restarts_stopped_agent(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     intercepted_execvp_calls: list[tuple[str, list[str]]],
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that --start (default) automatically restarts a stopped agent via the CLI."""
     agent_name = f"test-connect-start-{int(time.time())}"
@@ -154,7 +156,7 @@ def test_connect_start_restarts_stopped_agent(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -198,6 +200,7 @@ def test_connect_no_start_raises_error_for_stopped_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that --no-start raises UserInputError when agent is stopped."""
     agent_name = f"test-connect-nostart-{int(time.time())}"
@@ -211,7 +214,7 @@ def test_connect_no_start_raises_error_for_stopped_agent(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

@@ -8,7 +8,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import run_mngr_subprocess
 
 
-def _get_agent_info(agent_name: str, env: dict[str, str]) -> dict | None:
+def _get_agent_info(agent_name: str, env: dict[str, str], modal_test_sleep_agent_type) -> dict | None:
     """Get agent info from `mngr list --format json`. Returns None if not found."""
     result = run_mngr_subprocess("list", "--format", "json", env=env, timeout=60)
     assert result.returncode == 0, f"mngr list failed: {result.stderr}\n{result.stdout}"
@@ -25,6 +25,7 @@ def _get_agent_info(agent_name: str, env: dict[str, str]) -> dict | None:
 def test_provision_stopped_modal_agent(
     tmp_path: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Provisioning a stopped Modal agent preserves identity and data.
 
@@ -49,7 +50,7 @@ def test_provision_stopped_modal_agent(
     result = run_mngr_subprocess(
         "create",
         f"{agent_name}@.modal",
-        "test_sleep",
+        modal_test_sleep_agent_type,
         "--no-connect",
         "--no-ensure-clean",
         "--source",
@@ -62,7 +63,7 @@ def test_provision_stopped_modal_agent(
     assert result.returncode == 0, f"Create failed: {result.stderr}\n{result.stdout}"
 
     # Record agent ID before stop
-    agent_info_before = _get_agent_info(agent_name, env)
+    agent_info_before = _get_agent_info(agent_name, env, modal_test_sleep_agent_type)
     assert agent_info_before is not None, f"Agent {agent_name} not found after create"
     agent_id_before = agent_info_before["id"]
 
@@ -85,7 +86,7 @@ def test_provision_stopped_modal_agent(
     assert result.returncode == 0, f"Provision stopped agent failed: {result.stderr}\n{result.stdout}"
 
     # Verify agent identity is preserved
-    agent_info_after = _get_agent_info(agent_name, env)
+    agent_info_after = _get_agent_info(agent_name, env, modal_test_sleep_agent_type)
     assert agent_info_after is not None, f"Agent {agent_name} not found after provision"
     assert agent_info_after["id"] == agent_id_before, (
         f"Agent ID changed: {agent_id_before} -> {agent_info_after['id']}"

@@ -19,22 +19,18 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.config.consts import PROFILES_DIRNAME
-from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.plugins import hookspecs
-from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.utils.testing import TEST_SLEEP_AGENT_TYPE
-from imbue.mngr.utils.testing import TEST_SLEEP_COMMAND
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 
 
@@ -171,10 +167,17 @@ def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
         default_host_dir=temp_host_dir,
         prefix=mngr_test_prefix,
         is_error_reporting_enabled=False,
-        agent_types={
-            AgentTypeName(TEST_SLEEP_AGENT_TYPE): AgentTypeConfig(command=CommandString(TEST_SLEEP_COMMAND)),
-        },
     )
+
+
+@pytest.fixture
+def test_sleep_agent_type(temp_host_dir: Path) -> str:
+    """Mint a one-off long-running placeholder agent type for this test.
+
+    See ``libs/mngr/imbue/mngr/conftest.py`` for the full docstring. Duplicated
+    here so plugins that use ``register_plugin_test_fixtures`` inherit it.
+    """
+    return make_test_sleep_agent_type(temp_host_dir)
 
 
 @pytest.fixture
@@ -216,5 +219,6 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["temp_host_dir"] = temp_host_dir
     namespace["temp_mngr_ctx"] = temp_mngr_ctx
     namespace["temp_profile_dir"] = temp_profile_dir
+    namespace["test_sleep_agent_type"] = test_sleep_agent_type
     namespace["tmp_home_dir"] = tmp_home_dir
     namespace["_isolate_tmux_server"] = _isolate_tmux_server

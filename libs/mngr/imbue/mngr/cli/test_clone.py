@@ -19,6 +19,7 @@ def test_clone_creates_agent_from_source(
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test that clone creates a new agent by delegating to create --from."""
     source_name = f"test-clone-source-{uuid4().hex}"
@@ -35,7 +36,7 @@ def test_clone_creates_agent_from_source(
                 source_name,
                 clone_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--transfer=none",
                 "--no-connect",
             ],

@@ -78,6 +78,7 @@ def test_rename_running_agent_renames_tmux_session(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    test_sleep_agent_type: str,
 ) -> None:
     """Test renaming a running agent also renames the tmux session."""
     agent_name = f"test-rename-running-{uuid4().hex}"
@@ -92,7 +93,7 @@ def test_rename_running_agent_renames_tmux_session(
                 "--name",
                 agent_name,
                 "--type",
-                "test_sleep",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

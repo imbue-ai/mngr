@@ -118,6 +118,7 @@ def _get_host_state(
 def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     tmp_path: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    modal_test_sleep_agent_type: str,
 ) -> None:
     """Test that idle shutdown creates both initial and idle snapshots.
 
@@ -169,7 +170,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "test_sleep",
+            modal_test_sleep_agent_type,
             "--no-connect",
             "--no-ensure-clean",
             "--source",
