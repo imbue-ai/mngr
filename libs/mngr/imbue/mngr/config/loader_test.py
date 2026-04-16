@@ -810,6 +810,8 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "is_error_reporting_enabled": False,
     "is_allowed_in_pytest": True,
     "default_destroyed_host_persisted_seconds": 12345.0,
+    "default_min_online_host_age_seconds": 600.0,
+    "default_min_destroyed_snapshot_age_seconds": 86400.0,
 }
 
 _SAMPLE_TOML = """\
@@ -825,6 +827,8 @@ headless = true
 is_error_reporting_enabled = false
 is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
+default_min_online_host_age_seconds = 600.0
+default_min_destroyed_snapshot_age_seconds = 86400.0
 
 [commands.create]
 name = "test"
