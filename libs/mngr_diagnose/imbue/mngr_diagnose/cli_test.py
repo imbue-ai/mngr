@@ -24,6 +24,7 @@ def _stub_clone_and_capture_create_args(monkeypatch: pytest.MonkeyPatch) -> list
     Returns the (initially empty) list that will be populated with one
     entry per intercepted invocation.
     """
+
     def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
         clone_dir.mkdir(parents=True, exist_ok=True)
 
@@ -57,12 +58,16 @@ def test_diagnose_with_context_file(
 ) -> None:
     """Diagnose reads context file and passes info to create."""
     ctx_path = tmp_path / "ctx.json"
-    ctx_path.write_text(json.dumps({
-        "traceback_str": "Traceback:\n  ValueError",
-        "mngr_version": "0.2.4",
-        "error_type": "ValueError",
-        "error_message": "oops",
-    }))
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "traceback_str": "Traceback:\n  ValueError",
+                "mngr_version": "0.2.4",
+                "error_type": "ValueError",
+                "error_message": "oops",
+            }
+        )
+    )
 
     captured_args = _stub_clone_and_capture_create_args(monkeypatch)
 
