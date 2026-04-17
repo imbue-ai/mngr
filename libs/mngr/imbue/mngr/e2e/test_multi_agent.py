@@ -12,8 +12,11 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_multiple_agents_coexist(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100101")
+    # Pin a distinct sleep value per agent so a leaked `sleep <N>` in `ps`
+    # is grep-able back to the specific agent that spawned it.
+    sleep_per_agent = {"agent-a": "sleep 100116", "agent-b": "sleep 100117", "agent-c": "sleep 100118"}
     for name in ["agent-a", "agent-b", "agent-c"]:
+        sleep_agent_type = e2e.make_sleep_agent_type(sleep_per_agent[name])
         expect(
             e2e.run(
                 f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
