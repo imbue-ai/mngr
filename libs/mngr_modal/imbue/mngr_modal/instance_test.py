@@ -15,7 +15,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
@@ -1773,19 +1772,6 @@ def test_discover_hosts_and_agents_ignores_running_sandbox_without_host_record(
         result = modal_provider.discover_hosts_and_agents(cg=modal_provider.mngr_ctx.concurrency_group)
 
     assert len(result) == 0
-
-
-def test_discover_hosts_and_agents_converts_modal_proxy_error_to_provider_unavailable(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """discover_hosts_and_agents wraps ModalProxyNotFoundError as ProviderUnavailableError."""
-    with patch.object(
-        modal_provider,
-        "_list_running_host_ids",
-        side_effect=ModalProxyNotFoundError("Environment 'mngr-abc123' not found"),
-    ):
-        with pytest.raises(ProviderUnavailableError, match="Environment 'mngr-abc123' not found"):
-            modal_provider.discover_hosts_and_agents(cg=modal_provider.mngr_ctx.concurrency_group)
 
 
 # =============================================================================

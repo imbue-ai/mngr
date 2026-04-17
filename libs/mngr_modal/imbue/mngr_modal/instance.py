@@ -39,7 +39,6 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -109,7 +108,6 @@ from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
-from imbue.modal_proxy.errors import is_environment_not_found_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import ImageInterface
@@ -611,11 +609,7 @@ class ModalProviderInstance(BaseProviderInstance):
             # Cache the result
             self._host_record_cache_by_id[host_id] = host_record
             return host_record
-        except ModalProxyNotFoundError as e:
-            if is_environment_not_found_error(e):
-                raise
-            return None
-        except FileNotFoundError:
+        except (ModalProxyNotFoundError, FileNotFoundError):
             return None
 
     def _destroy_agents_on_host(self, host_id: HostId) -> None:
@@ -702,11 +696,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 with log_span("Listing /hosts/ directory on state volume"):
                     try:
                         entries = volume.listdir("/hosts/")
-                    except ModalProxyNotFoundError as e:
-                        if is_environment_not_found_error(e):
-                            raise
-                        entries = []
-                    except FileNotFoundError:
+                    except (ModalProxyNotFoundError, FileNotFoundError):
                         entries = []
                 logger.debug("Found {} entries in /hosts/ on state volume", len(entries))
 
@@ -743,12 +733,8 @@ class ModalProviderInstance(BaseProviderInstance):
         host_dir = f"/hosts/{host_id}"
         try:
             entries = volume.listdir(host_dir)
-        except ModalProxyNotFoundError as e:
-            if is_environment_not_found_error(e):
-                raise
+        except (ModalProxyNotFoundError, FileNotFoundError):
             # Host directory doesn't exist yet (no agents persisted for this host)
-            return agent_records
-        except FileNotFoundError:
             return agent_records
 
         for entry in entries:
@@ -758,12 +744,8 @@ class ModalProviderInstance(BaseProviderInstance):
                 agent_path = filename.lstrip("/")
                 try:
                     content = volume.read_file(agent_path)
-                except ModalProxyNotFoundError as e:
-                    if is_environment_not_found_error(e):
-                        raise
+                except (ModalProxyNotFoundError, FileNotFoundError):
                     # File was deleted between listdir and read (TOCTOU race on distributed volume)
-                    continue
-                except FileNotFoundError:
                     continue
                 try:
                     agent_data = json.loads(content.decode("utf-8"))
@@ -2388,8 +2370,6 @@ log "=== Shutdown script completed ==="
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
                 raise ModalAuthError() from e
-            except ModalProxyError as e:
-                raise ProviderUnavailableError(self.name, str(e)) from e
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),

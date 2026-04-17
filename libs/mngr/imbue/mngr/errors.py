@@ -167,13 +167,9 @@ class ProviderError(MngrError):
 class ProviderUnavailableError(ProviderError):
     """Provider backend is not reachable (e.g. Docker daemon not running).
 
-    This is a MngrError, so callers that iterate multiple providers decide
-    how to handle it: list_agents respects ErrorBehavior (recording the
-    error in ListResult.errors in CONTINUE mode, re-raising in ABORT mode).
-    The streaming discovery path also catches per-provider discovery
-    failures. Callers that invoke get_all_provider_instances directly
-    without a MngrError handler will abort on the first unavailable
-    provider.
+    Commands that query multiple providers catch this and continue with
+    the providers that *are* available, so a single offline backend does
+    not block the entire operation.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:

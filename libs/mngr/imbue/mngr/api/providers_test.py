@@ -8,18 +8,12 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.config.provider_config_registry import _provider_config_registry
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import UnknownBackendError
-from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
-from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import get_backend
 from imbue.mngr.providers.registry import list_backends
 
@@ -268,86 +262,3 @@ def test_get_all_provider_instances_excludes_disabled_plugins(
 
     provider_names = [str(p.name) for p in providers]
     assert "local" not in provider_names
-
-
-# =============================================================================
-# ProviderUnavailableError propagation from get_all_provider_instances
-# =============================================================================
-
-_UNAVAILABLE_BACKEND_NAME = ProviderBackendName("unavailable-test-backend-xyz")
-
-
-class _UnavailableProviderBackend(ProviderBackendInterface):
-    """Backend whose build_provider_instance always raises ProviderUnavailableError.
-
-    Used to verify that get_all_provider_instances propagates ProviderUnavailableError
-    from a down provider instead of silently skipping (callers at the list_agents
-    layer handle it per-provider via ErrorBehavior).
-    """
-
-    @staticmethod
-    def get_name() -> ProviderBackendName:
-        return _UNAVAILABLE_BACKEND_NAME
-
-    @staticmethod
-    def get_description() -> str:
-        return "Test backend that simulates an unavailable provider"
-
-    @staticmethod
-    def get_config_class() -> type[ProviderInstanceConfig]:
-        return ProviderInstanceConfig
-
-    @staticmethod
-    def get_build_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def get_start_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> ProviderInstanceInterface:
-        raise ProviderUnavailableError(name, "simulated backend unavailable")
-
-
-def test_get_all_provider_instances_propagates_unavailable_configured_provider(
-    temp_mngr_ctx: MngrContext, mngr_test_prefix: str
-) -> None:
-    """get_all_provider_instances propagates ProviderUnavailableError from a configured provider.
-
-    A down provider is a real error and should be surfaced, not silently skipped.
-    """
-    _backend_registry[_UNAVAILABLE_BACKEND_NAME] = _UnavailableProviderBackend
-    _provider_config_registry[_UNAVAILABLE_BACKEND_NAME] = ProviderInstanceConfig
-    unavailable_name = ProviderInstanceName("my-unavailable-provider")
-    config = MngrConfig(
-        default_host_dir=temp_mngr_ctx.config.default_host_dir,
-        prefix=mngr_test_prefix,
-        providers={
-            unavailable_name: ProviderInstanceConfig(backend=_UNAVAILABLE_BACKEND_NAME),
-        },
-    )
-    mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-
-    with pytest.raises(ProviderUnavailableError, match="simulated backend unavailable"):
-        get_all_provider_instances(mngr_ctx)
-
-
-def test_get_all_provider_instances_propagates_unavailable_default_backend(
-    temp_mngr_ctx: MngrContext, mngr_test_prefix: str
-) -> None:
-    """get_all_provider_instances propagates ProviderUnavailableError from a default backend."""
-    _backend_registry[_UNAVAILABLE_BACKEND_NAME] = _UnavailableProviderBackend
-    _provider_config_registry[_UNAVAILABLE_BACKEND_NAME] = ProviderInstanceConfig
-    config = MngrConfig(
-        default_host_dir=temp_mngr_ctx.config.default_host_dir,
-        prefix=mngr_test_prefix,
-    )
-    mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-
-    with pytest.raises(ProviderUnavailableError, match="simulated backend unavailable"):
-        get_all_provider_instances(mngr_ctx)

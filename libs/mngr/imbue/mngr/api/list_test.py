@@ -36,7 +36,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -984,21 +983,6 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
-class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
-    """Provider that raises ProviderUnavailableError from discover_hosts_and_agents.
-
-    Simulates a provider whose backend is unreachable (e.g. Modal environment
-    deleted). Used to verify that batch discovery gracefully skips the provider.
-    """
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        raise ProviderUnavailableError(self.name, "Environment 'mngr-abc123' not found")
-
-
 class _RaisingDetailProviderInstance(MockProviderInstance):
     """Provider that raises MngrError from get_host_and_agent_details.
 
@@ -1170,115 +1154,6 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
 
 
 # =============================================================================
-# ProviderUnavailableError raised during instance build, surfaced by list_agents
-# =============================================================================
-
-_UNAVAILABLE_BUILD_BACKEND_NAME = ProviderBackendName("test-unavailable-build-backend")
-
-
-class _UnavailableBuildProviderBackend(ProviderBackendInterface):
-    """Backend whose build_provider_instance raises ProviderUnavailableError.
-
-    Exercises the get_all_provider_instances code path in list_agents:
-    the error originates during instance building (before any discovery
-    runs), so the outer MngrError catch in list_agents is what handles it.
-    """
-
-    @staticmethod
-    def get_name() -> ProviderBackendName:
-        return _UNAVAILABLE_BUILD_BACKEND_NAME
-
-    @staticmethod
-    def get_description() -> str:
-        return "Test backend that simulates an unavailable provider at build time"
-
-    @staticmethod
-    def get_config_class() -> type[ProviderInstanceConfig]:
-        return ProviderInstanceConfig
-
-    @staticmethod
-    def get_build_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def get_start_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> ProviderInstanceInterface:
-        raise ProviderUnavailableError(name, "simulated build-time unavailable")
-
-
-def test_list_agents_continue_mode_captures_unavailable_provider_during_build(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents CONTINUE mode records a ProviderUnavailableError raised during instance build.
-
-    When a provider's backend raises ProviderUnavailableError during
-    get_all_provider_instances (before any discovery starts), the outer
-    MngrError catch in list_agents records it as an ErrorInfo entry in
-    result.errors, rather than propagating. Because the error is caught
-    at the top level, no other providers are loaded -- result.agents is
-    empty. The on_error callback is invoked with the same ErrorInfo.
-    """
-    _backend_registry[_UNAVAILABLE_BUILD_BACKEND_NAME] = _UnavailableBuildProviderBackend
-    _provider_config_registry[_UNAVAILABLE_BUILD_BACKEND_NAME] = ProviderInstanceConfig
-    failing_config = ProviderInstanceConfig(backend=_UNAVAILABLE_BUILD_BACKEND_NAME)
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("unavailable-at-build"): failing_config},
-        ),
-    )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-    captured_errors: list[ErrorInfo] = []
-    result = list_agents(
-        mngr_ctx=failing_ctx,
-        is_streaming=False,
-        error_behavior=ErrorBehavior.CONTINUE,
-        on_error=lambda e: captured_errors.append(e),
-    )
-
-    assert len(result.errors) == 1
-    assert len(captured_errors) == 1
-    assert captured_errors[0] is result.errors[0]
-    assert "simulated build-time unavailable" in result.errors[0].message
-    assert result.agents == []
-
-
-def test_list_agents_abort_mode_propagates_unavailable_provider_during_build(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """list_agents ABORT mode re-raises a ProviderUnavailableError raised during instance build."""
-    _backend_registry[_UNAVAILABLE_BUILD_BACKEND_NAME] = _UnavailableBuildProviderBackend
-    _provider_config_registry[_UNAVAILABLE_BUILD_BACKEND_NAME] = ProviderInstanceConfig
-    failing_config = ProviderInstanceConfig(backend=_UNAVAILABLE_BUILD_BACKEND_NAME)
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("unavailable-at-build"): failing_config},
-        ),
-    )
-    failing_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-    with pytest.raises(ProviderUnavailableError, match="simulated build-time unavailable"):
-        list_agents(
-            mngr_ctx=failing_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.ABORT,
-        )
-
-
-# =============================================================================
 # Lines 235-237: OSError when writing full discovery snapshot
 # =============================================================================
 
@@ -1421,36 +1296,6 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
 # =============================================================================
 # Lines 348-385: Provider-level MngrError in streaming mode
 # =============================================================================
-
-
-def test_discover_and_emit_details_streaming_skips_unavailable_provider(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_discover_and_emit_details_for_provider records ProviderUnavailableError in CONTINUE mode.
-
-    ProviderUnavailableError is a MngrError, so the existing catch clause handles it.
-    """
-    provider = _UnavailableDiscoveryProviderInstance(
-        name=ProviderInstanceName("unavailable-modal"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = ListResult()
-    lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
-
-    _discover_and_emit_details_for_provider(
-        provider=provider,
-        params=params,
-        result=result,
-        results_lock=lock,
-        cg=temp_mngr_ctx.concurrency_group,
-    )
-
-    assert len(result.errors) == 1
-    assert isinstance(result.errors[0], ProviderErrorInfo)
-    assert result.errors[0].provider_name == ProviderInstanceName("unavailable-modal")
-    assert "not available" in result.errors[0].message
 
 
 def test_discover_and_emit_details_for_provider_continue_mode_records_error(
