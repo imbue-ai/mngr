@@ -239,11 +239,15 @@ def _main_template_for_agent_type(agent_type: AgentType) -> str:
             assert_never(unreachable)
 
 
+WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
     agent_id: AgentId,
     agent_type: AgentType,
+    host_env_file: Path | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
@@ -264,6 +268,10 @@ def _build_mngr_create_command(
     uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
     ``--reuse`` and ``--update`` are passed so re-deploying resets the agent
     on the same host instead of failing.
+
+    When ``host_env_file`` is supplied, its contents are loaded into the host
+    environment via ``--host-env-file`` so secrets from a local ``.env`` reach
+    the agent without being baked into the template.
     """
     match launch_mode:
         case LaunchMode.DEV:
@@ -298,21 +306,52 @@ def _build_mngr_create_command(
         "is_primary=true",
         "--template",
         _main_template_for_agent_type(agent_type),
+        "--message",
+        WELCOME_INITIAL_MESSAGE,
     ]
 
     match launch_mode:
         case LaunchMode.DEV:
+            # Local (same-machine) mode: the agent inherits the bootstrap-set
+            # MNGR_HOST_DIR/MNGR_PREFIX via os.environ directly, so no
+            # host-env plumbing is needed.
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "lima"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
+    if host_env_file is not None:
+        mngr_command.extend(["--host-env-file", str(host_env_file)])
+
     return mngr_command, api_key
+
+
+def _remote_host_env_flags() -> list[str]:
+    """Return the --host-env / --pass-host-env flags for a new remote host.
+
+    Remote containers always store their mngr state under ``/mngr`` (the
+    conventional container-internal path -- this is also what
+    ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
+    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could be
+    ``~/.minds/mngr`` or ``~/.devminds/mngr``). We only propagate
+    ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the local
+    ones, avoiding confusion when the same name has to refer to the "same"
+    thing on both sides.
+    """
+    return [
+        "--host-env",
+        "MNGR_HOST_DIR=/mngr",
+        "--pass-host-env",
+        "MNGR_PREFIX",
+    ]
 
 
 def run_mngr_create(
@@ -322,6 +361,7 @@ def run_mngr_create(
     agent_id: AgentId,
     agent_type: AgentType,
     on_output: OutputCallback | None = None,
+    host_env_file: Path | None = None,
 ) -> str:
     """Create an mngr agent via ``mngr create``.
 
@@ -331,7 +371,9 @@ def run_mngr_create(
     Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
-    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id, agent_type)
+    mngr_command, api_key = _build_mngr_create_command(
+        launch_mode, agent_name, agent_id, agent_type, host_env_file=host_env_file
+    )
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -380,8 +422,14 @@ class AgentCreator(MutableModel):
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
         agent_type: AgentType = AgentType.CLAUDE,
+        include_env_file: bool = False,
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
+
+        When ``include_env_file`` is true and ``repo_source`` resolves to a local
+        directory containing a ``.env`` file, that file is passed to ``mngr create``
+        via ``--host-env-file`` so local secrets reach the new agent's host.
+        The flag is ignored for git URLs (since ``.env`` is gitignored).
 
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
@@ -397,7 +445,16 @@ class AgentCreator(MutableModel):
 
         thread = threading.Thread(
             target=self._create_agent_background,
-            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode, agent_type),
+            args=(
+                agent_id,
+                repo_source,
+                effective_name,
+                effective_branch,
+                log_queue,
+                launch_mode,
+                agent_type,
+                include_env_file,
+            ),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
         )
@@ -440,10 +497,12 @@ class AgentCreator(MutableModel):
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
         agent_type: AgentType,
+        include_env_file: bool,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
         emit_log = make_log_callback(log_queue)
+        host_env_file: Path | None = None
         try:
             with log_span(
                 "Creating agent {} from {} (mode: {}, type: {})",
@@ -456,6 +515,13 @@ class AgentCreator(MutableModel):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
                         raise MngrCommandError(f"Local path does not exist: {resolved_path}")
+                    if include_env_file:
+                        candidate = resolved_path / ".env"
+                        if candidate.is_file():
+                            host_env_file = candidate
+                            log_queue.put(f"[minds] Including .env file: {candidate}")
+                        else:
+                            log_queue.put(f"[minds] No .env file found at {candidate}; skipping --host-env-file")
 
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
@@ -508,6 +574,7 @@ class AgentCreator(MutableModel):
                     agent_id=agent_id,
                     agent_type=agent_type,
                     on_output=emit_log,
+                    host_env_file=host_env_file,
                 )
 
                 # Persist the API key hash

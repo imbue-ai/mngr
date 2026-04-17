@@ -1,2 +1,0 @@
-export OWNER_EMAIL=josh@imbue.com
-export CLOUDFLARE_FORWARDING_URL=https://joshalbrecht--cloudflare-forwarding-fastapi-app.modal.run

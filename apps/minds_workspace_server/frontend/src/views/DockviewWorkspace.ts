@@ -18,13 +18,7 @@ import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
-import {
-  getAgentById,
-  getAgents,
-  getApplications,
-  getProtoAgents,
-  removeAgentLocally,
-} from "../models/AgentManager";
+import { getAgentById, getAgents, getApplications, getProtoAgents, removeAgentLocally } from "../models/AgentManager";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
@@ -59,8 +53,10 @@ function getAccessMode(): AccessMode {
 
 // SVG path constants for tab action icons
 const SVG_CLOSE = '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>';
-const SVG_TRASH = '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
-const SVG_SHARE = '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
+const SVG_TRASH =
+  '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
+const SVG_SHARE =
+  '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
 
 function getApplicationUrl(appName: string, rawUrl: string): string {
   const hostname = window.location.hostname;
@@ -83,7 +79,7 @@ function getApplicationUrl(appName: string, rawUrl: string): string {
   return rawUrl;
 }
 
-function getTerminalUrl(): string {
+export function getTerminalUrl(): string {
   const hostname = window.location.hostname;
 
   // Cloudflare proxy: terminal--agentid--username.domain
@@ -139,7 +135,7 @@ let dockview: DockviewComponent | null = null;
 let dockviewContainer: HTMLElement | null = null;
 const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let layoutChangeDisposable: { dispose: () => void } | null = null;
+let _layoutChangeDisposable: { dispose: () => void } | null = null;
 let initialized = false;
 
 function createMithrilRenderer(
@@ -187,9 +183,19 @@ function createTabActionButton(
   return btn;
 }
 
-function createCustomTab(
-  options: { id: string; name: string },
-): { element: HTMLElement; init: (params: { title: string; api: { close: () => void; onDidTitleChange: (cb: (e: { title: string }) => void) => { dispose: () => void }; isActive: boolean; onDidActiveChange: (cb: (e: { isActive: boolean }) => void) => { dispose: () => void } } }) => void; dispose: () => void } {
+function createCustomTab(options: { id: string; name: string }): {
+  element: HTMLElement;
+  init: (params: {
+    title: string;
+    api: {
+      close: () => void;
+      onDidTitleChange: (cb: (e: { title: string }) => void) => { dispose: () => void };
+      isActive: boolean;
+      onDidActiveChange: (cb: (e: { isActive: boolean }) => void) => { dispose: () => void };
+    };
+  }) => void;
+  dispose: () => void;
+} {
   const element = document.createElement("div");
   element.className = "dv-default-tab dv-custom-tab";
 
@@ -312,8 +318,13 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
 
   // --- Existing items section ---
 
-  // Applications (excluding web, terminal) that don't have open tabs
-  const apps = getApplications().filter((app) => app.name !== "web" && app.name !== "terminal");
+  // Applications that don't have open tabs. Exclude "system_interface"
+  // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
+  // (reachable via the "New terminal" menu item further down). Everything
+  // else, including the default "web" example server, is openable.
+  const apps = getApplications().filter(
+    (app) => app.name !== "system_interface" && app.name !== "terminal",
+  );
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getApplicationUrl(app.name, app.url);
@@ -684,7 +695,7 @@ function initializeDockview(parentElement: HTMLElement): void {
   dockview = dv;
 
   // Listen for layout changes and auto-save
-  layoutChangeDisposable = dv.api.onDidLayoutChange(() => {
+  _layoutChangeDisposable = dv.api.onDidLayoutChange(() => {
     scheduleSave();
   });
 
@@ -754,7 +765,7 @@ export const DockviewWorkspace: m.Component = {
     initializeDockview(wrapper);
   },
 
-  onupdate(vnode: m.VnodeDOM) {
+  onupdate(_vnode: m.VnodeDOM) {
     // Resize the dockview when the container changes
     if (dockview && dockviewContainer) {
       requestAnimationFrame(() => {
@@ -767,66 +778,70 @@ export const DockviewWorkspace: m.Component = {
   },
 
   view() {
-    return m("div", {
-      class: "dockview-workspace",
-      style: "width: 100%; height: 100%;",
-    }, [
-      showNewChatModal
-        ? m(CreateAgentModal, {
-            mode: "chat",
-            onCreated(newAgentId: string, newAgentName: string) {
-              showNewChatModal = false;
-              focusOrCreateChatPanel(newAgentId, newAgentName);
-            },
-            onCancel() {
-              showNewChatModal = false;
-            },
-          })
-        : null,
+    return m(
+      "div",
+      {
+        class: "dockview-workspace",
+        style: "width: 100%; height: 100%;",
+      },
+      [
+        showNewChatModal
+          ? m(CreateAgentModal, {
+              mode: "chat",
+              onCreated(newAgentId: string, newAgentName: string) {
+                showNewChatModal = false;
+                focusOrCreateChatPanel(newAgentId, newAgentName);
+              },
+              onCancel() {
+                showNewChatModal = false;
+              },
+            })
+          : null,
 
-      showNewAgentModal
-        ? m(CreateAgentModal, {
-            mode: "worktree",
-            onCreated(newAgentId: string, newAgentName: string) {
-              showNewAgentModal = false;
-              focusOrCreateChatPanel(newAgentId, newAgentName);
-            },
-            onCancel() {
-              showNewAgentModal = false;
-            },
-          })
-        : null,
+        showNewAgentModal
+          ? m(CreateAgentModal, {
+              mode: "worktree",
+              onCreated(newAgentId: string, newAgentName: string) {
+                showNewAgentModal = false;
+                focusOrCreateChatPanel(newAgentId, newAgentName);
+              },
+              onCancel() {
+                showNewAgentModal = false;
+              },
+            })
+          : null,
 
-      showDestroyDialog && destroyTargetAgentId && destroyTargetAgentName
-        ? m(DestroyConfirmDialog, {
-            agentName: destroyTargetAgentName,
-            onConfirm() {
-              showDestroyDialog = false;
-              const targetId = destroyTargetAgentId!;
-              const panelId = destroyTargetPanelId!;
-              destroyTargetAgentId = null;
-              destroyTargetAgentName = null;
-              destroyTargetPanelId = null;
-              executeDestroy(targetId, panelId);
-            },
-            onCancel() {
-              showDestroyDialog = false;
-              destroyTargetAgentId = null;
-              destroyTargetAgentName = null;
-              destroyTargetPanelId = null;
-            },
-          })
-        : null,
+        showDestroyDialog && destroyTargetAgentId && destroyTargetAgentName
+          ? m(DestroyConfirmDialog, {
+              agentName: destroyTargetAgentName,
+              onConfirm() {
+                showDestroyDialog = false;
+                const targetId = destroyTargetAgentId!;
+                const panelId = destroyTargetPanelId!;
+                destroyTargetAgentId = null;
+                destroyTargetAgentName = null;
+                destroyTargetPanelId = null;
+                executeDestroy(targetId, panelId);
+              },
+              onCancel() {
+                showDestroyDialog = false;
+                destroyTargetAgentId = null;
+                destroyTargetAgentName = null;
+                destroyTargetPanelId = null;
+              },
+            })
+          : null,
 
-      showShareModal && shareServerName
-        ? m(ShareModal, {
-            serverName: shareServerName,
-            onClose() {
-              showShareModal = false;
-              shareServerName = null;
-            },
-          })
-        : null,
-    ]);
+        showShareModal && shareServerName
+          ? m(ShareModal, {
+              serverName: shareServerName,
+              onClose() {
+                showShareModal = false;
+                shareServerName = null;
+              },
+            })
+          : null,
+      ],
+    );
   },
 };

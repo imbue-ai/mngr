@@ -108,6 +108,10 @@ def test_build_mngr_create_command_dev_mode() -> None:
     env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
     assert any(v.startswith("MINDS_API_KEY=") for v in env_values)
     assert len(api_key) > 0
+    # DEV mode runs on localhost: no host-env flags (the agent inherits the
+    # local bootstrap-set env directly).
+    assert "--host-env" not in cmd
+    assert "--pass-host-env" not in cmd
 
 
 def test_build_mngr_create_command_local_mode() -> None:
@@ -127,6 +131,15 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LOCAL mode: address includes host name with docker provider suffix
     assert cmd[2] == "test-agent@test-agent-host.docker"
+    # Remote host: MNGR_HOST_DIR forced to /mngr (container convention),
+    # MNGR_PREFIX forwarded from the local shell for naming consistency.
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    pass_host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
+    assert "MNGR_PREFIX" in pass_host_env_values
+    # We do NOT forward the local MNGR_HOST_DIR -- that's a local filesystem
+    # path that doesn't exist inside the container.
+    assert "MNGR_HOST_DIR" not in pass_host_env_values
 
 
 def test_build_mngr_create_command_lima_mode() -> None:
@@ -146,6 +159,46 @@ def test_build_mngr_create_command_lima_mode() -> None:
     assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LIMA mode: address includes host name with lima provider suffix
     assert cmd[2] == "test-agent@test-agent-host.lima"
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
+
+
+def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
+    )
+    assert "--message" in cmd
+    # The welcome message is sent as the very first user prompt so a /welcome
+    # skill can produce a greeting without any other user interaction.
+    assert cmd[cmd.index("--message") + 1] == "/welcome"
+
+
+def test_build_mngr_create_command_with_host_env_file(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("FOO=bar\n")
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
+        host_env_file=env_path,
+    )
+    assert "--host-env-file" in cmd
+    assert cmd[cmd.index("--host-env-file") + 1] == str(env_path)
+
+
+def test_build_mngr_create_command_omits_host_env_file_by_default() -> None:
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        agent_type=AgentType.CLAUDE,
+    )
+    assert "--host-env-file" not in cmd
 
 
 def test_build_mngr_create_command_cloud_mode() -> None:
@@ -165,6 +218,9 @@ def test_build_mngr_create_command_cloud_mode() -> None:
     assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # CLOUD mode: address includes host name with vultr provider suffix
     assert cmd[2] == "test-agent@test-agent-host.vultr"
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
 
 
 def test_build_mngr_create_command_hermes_selects_hermes_main_template() -> None:

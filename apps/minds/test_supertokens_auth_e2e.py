@@ -99,11 +99,12 @@ class AuthTestFixture:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+        connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+        if not connection_uri:
             pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
 
         _init_supertokens(
-            data_directory=self.tmp_dir,
+            connection_uri=connection_uri,
             host=self.host,
             port=self.port,
         )

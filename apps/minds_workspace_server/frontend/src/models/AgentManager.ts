@@ -29,7 +29,13 @@ export interface ProtoAgent {
 type WsEvent =
   | { type: "agents_updated"; agents: AgentState[] }
   | { type: "applications_updated"; applications: ApplicationEntry[] }
-  | { type: "proto_agent_created"; agent_id: string; name: string; creation_type: string; parent_agent_id: string | null }
+  | {
+      type: "proto_agent_created";
+      agent_id: string;
+      name: string;
+      creation_type: string;
+      parent_agent_id: string | null;
+    }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null };
 
 let agents: AgentState[] = [];
