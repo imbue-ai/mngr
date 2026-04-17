@@ -37,10 +37,10 @@ from imbue.mngr.utils.logging import LoggingConfig
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
-# 30 days in seconds -- controls how long destroyed host records (and their
-# snapshots) are kept before permanent deletion.  This is long enough for
-# recovery via `mngr create --snapshot`.
-_DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 30.0
+# 7 days in seconds -- controls how long destroyed host records (and their
+# snapshots) are kept before permanent deletion, giving users a recovery
+# window via `mngr create --snapshot`.
+_DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 7.0
 
 # 10 minutes -- minimum age before GC will destroy an online host with no agents.
 # Short because we only need to protect against transient empty states (e.g. between

@@ -990,9 +990,9 @@ def test_provider_instance_config_merge_keeps_base_when_override_is_none() -> No
     assert merged.destroyed_host_persisted_seconds == 3600.0
 
 
-def test_mngr_config_default_destroyed_host_persisted_seconds_is_thirty_days(mngr_test_prefix: str) -> None:
+def test_mngr_config_default_destroyed_host_persisted_seconds_is_seven_days(mngr_test_prefix: str) -> None:
     config = MngrConfig(prefix=mngr_test_prefix)
-    assert config.default_destroyed_host_persisted_seconds == 60.0 * 60.0 * 24.0 * 30.0
+    assert config.default_destroyed_host_persisted_seconds == 60.0 * 60.0 * 24.0 * 7.0
 
 
 def test_mngr_config_merge_overrides_default_destroyed_host_persisted_seconds(mngr_test_prefix: str) -> None:
