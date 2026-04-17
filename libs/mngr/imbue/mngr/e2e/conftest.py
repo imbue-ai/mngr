@@ -22,8 +22,7 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import unique_sleep_command
-from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
+from imbue.mngr.utils.testing import make_test_sleep_agent_type_at
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -63,13 +62,7 @@ class E2eSession(Session):
         up with a distinct identifier in ``ps`` output. Pass the returned
         name to ``mngr`` as ``--type <name>``.
         """
-        type_name = f"test_sleep_{uuid4().hex}"
-        write_agent_type_to_settings_toml(
-            self.settings_local_path,
-            type_name,
-            command if command is not None else unique_sleep_command(),
-        )
-        return type_name
+        return make_test_sleep_agent_type_at(self.settings_local_path, command=command)
 
 
 _E2E_DIR = Path(__file__).resolve().parent

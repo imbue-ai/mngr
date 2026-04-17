@@ -282,6 +282,26 @@ def unique_sleep_command() -> str:
     return f"sleep {random.randint(10_000_000, 99_999_999)}"
 
 
+def make_test_sleep_agent_type_at(settings_path: Path, command: str | None = None) -> str:
+    """Declare a long-running placeholder agent type in ``settings_path`` and return its name.
+
+    Shared by the per-test profile factory (``make_test_sleep_agent_type``)
+    and the e2e session helper (``E2eSession.make_sleep_agent_type``) so that
+    the ``test_sleep_<uuid hex>`` name scheme and default ``sleep <N>`` command
+    live in exactly one place. Callers that write to a pre-bootstrapped
+    settings file (e.g. the e2e ``settings.local.toml``) go through this
+    function directly; callers that just have a host dir should use
+    ``make_test_sleep_agent_type`` instead.
+    """
+    type_name = f"test_sleep_{uuid4().hex}"
+    write_agent_type_to_settings_toml(
+        settings_path,
+        type_name,
+        command if command is not None else unique_sleep_command(),
+    )
+    return type_name
+
+
 def make_test_sleep_agent_type(host_dir: Path, command: str | None = None) -> str:
     """Declare a long-running placeholder agent type in ``host_dir``'s profile and return its name.
 
@@ -295,14 +315,8 @@ def make_test_sleep_agent_type(host_dir: Path, command: str | None = None) -> st
     callers do not have to bootstrap a profile first. Pass the returned name
     to the CLI as ``--type <name>``.
     """
-    type_name = f"test_sleep_{uuid4().hex}"
     profile_dir = get_or_create_profile_dir(host_dir)
-    write_agent_type_to_settings_toml(
-        profile_dir / "settings.toml",
-        type_name,
-        command if command is not None else unique_sleep_command(),
-    )
-    return type_name
+    return make_test_sleep_agent_type_at(profile_dir / "settings.toml", command=command)
 
 
 def setup_mngr_test_environment(
