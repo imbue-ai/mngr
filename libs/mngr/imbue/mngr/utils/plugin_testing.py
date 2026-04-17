@@ -162,11 +162,7 @@ def temp_profile_dir(temp_host_dir: Path) -> Path:
 @pytest.fixture
 def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
     """Create a MngrConfig with a temporary host directory."""
-    return MngrConfig(
-        default_host_dir=temp_host_dir,
-        prefix=mngr_test_prefix,
-        is_error_reporting_enabled=False,
-    )
+    return MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix, is_error_reporting_enabled=False)
 
 
 @pytest.fixture

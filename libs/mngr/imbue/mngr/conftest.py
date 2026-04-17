@@ -243,11 +243,7 @@ def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
 
     Use this fixture when calling API functions that need a config.
     """
-    return MngrConfig(
-        default_host_dir=temp_host_dir,
-        prefix=mngr_test_prefix,
-        is_error_reporting_enabled=False,
-    )
+    return MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix, is_error_reporting_enabled=False)
 
 
 @pytest.fixture
