@@ -402,7 +402,7 @@ def render_create_form(
     git_url: str = "",
     agent_name: str = "",
     branch: str = "",
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode = LaunchMode.LIMA,
 ) -> str:
     """Render the agent creation form page.
 

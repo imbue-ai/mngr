@@ -115,15 +115,19 @@ def clone_git_repo(
     on_output: OutputCallback | None = None,
     *,
     is_shallow: bool = False,
+    branch: str | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
     When is_shallow is True, clones with --depth 1 to skip history.
+    When branch is specified, clones that specific branch.
     Raises GitCloneError if the clone fails.
     """
     logger.debug("Cloning {} to {}", git_url, clone_dir)
     command = ["git", "clone"]
+    if branch:
+        command.extend(["--branch", branch])
     if is_shallow:
         command.extend(["--depth", "1"])
     command.extend([str(git_url), str(clone_dir)])
@@ -508,10 +512,12 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
-                    clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True)
+                    clone_git_repo(
+                        GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True, branch=branch,
+                    )
                     workspace_dir = clone_target
 
-                if branch:
+                if branch and _is_local_path(repo_source):
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(workspace_dir, GitBranch(branch), on_output=emit_log)
 

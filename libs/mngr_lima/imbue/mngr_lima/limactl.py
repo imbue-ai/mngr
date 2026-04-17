@@ -147,12 +147,34 @@ def host_name_from_instance_name(instance_name: str, prefix: str) -> HostName | 
     return HostName(name)
 
 
+def _normalize_start_args(start_args: tuple[str, ...]) -> list[str]:
+    """Normalize start args for limactl.
+
+    limactl expects --memory and --disk as plain numbers (GiB), but users and
+    templates may pass human-readable values like ``--memory=4GiB`` or
+    ``--disk=100GiB``.  Strip the unit suffix so limactl can parse them.
+    """
+    result: list[str] = []
+    for arg in start_args:
+        for flag in ("--memory=", "--disk="):
+            if arg.startswith(flag):
+                value = arg[len(flag):]
+                for suffix in ("TiB", "tib", "TB", "tb", "GiB", "gib", "GB", "gb", "MiB", "mib", "MB", "mb"):
+                    if value.endswith(suffix):
+                        value = value[: -len(suffix)]
+                        break
+                arg = f"{flag}{value}"
+                break
+        result.append(arg)
+    return result
+
+
 def limactl_start_new(
     cg: ConcurrencyGroup,
     instance_name: str,
     yaml_path: Path,
     start_args: tuple[str, ...] = (),
-    timeout: float = 600.0,
+    timeout: float = 1800.0,
     on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Create and start a new Lima instance from a YAML config file.
@@ -160,7 +182,8 @@ def limactl_start_new(
     Runs: limactl start --name=<instance_name> <yaml_path> [start_args...]
     Output is streamed via on_output (defaults to BUILD-level logging).
     """
-    cmd = ["limactl", "--log-level=info", "start", f"--name={instance_name}", str(yaml_path)] + list(start_args)
+    normalized_args = _normalize_start_args(start_args)
+    cmd = ["limactl", "--log-level=info", "start", f"--name={instance_name}", str(yaml_path)] + normalized_args
     effective_callback = on_output or _SerialLogTailerCallback(cg=cg)
     try:
         with log_span("Running limactl start for new instance: {}", instance_name):

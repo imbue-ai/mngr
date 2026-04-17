@@ -6,7 +6,11 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
-todesktop.init();
+todesktop.init({
+  updateReadyAction: {
+    showInstallAndRestartPrompt: 'always',
+  },
+});
 
 let mainWindow = null;
 let chromeView = null;

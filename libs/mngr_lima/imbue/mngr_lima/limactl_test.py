@@ -2,6 +2,7 @@ from pathlib import Path
 
 from imbue.mngr.primitives import HostName
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import _normalize_start_args
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
@@ -51,3 +52,33 @@ def test_lima_ssh_config() -> None:
     assert config.port == 60022
     assert config.user == "josh"
     assert config.identity_file == Path("/home/josh/.lima/_config/user")
+
+
+def test_normalize_start_args_strips_gib_suffix() -> None:
+    result = _normalize_start_args(("--cpus=2", "--memory=4GiB", "--disk=20GiB"))
+    assert result == ["--cpus=2", "--memory=4", "--disk=20"]
+
+
+def test_normalize_start_args_strips_mib_suffix() -> None:
+    result = _normalize_start_args(("--memory=512MiB",))
+    assert result == ["--memory=512"]
+
+
+def test_normalize_start_args_strips_tib_suffix() -> None:
+    result = _normalize_start_args(("--disk=1TiB",))
+    assert result == ["--disk=1"]
+
+
+def test_normalize_start_args_strips_lowercase_gb() -> None:
+    result = _normalize_start_args(("--memory=4gb", "--disk=100GB"))
+    assert result == ["--memory=4", "--disk=100"]
+
+
+def test_normalize_start_args_preserves_plain_numbers() -> None:
+    result = _normalize_start_args(("--memory=4", "--disk=20"))
+    assert result == ["--memory=4", "--disk=20"]
+
+
+def test_normalize_start_args_preserves_unrelated_flags() -> None:
+    result = _normalize_start_args(("--cpus=2", "--vm-type=vz"))
+    assert result == ["--cpus=2", "--vm-type=vz"]
