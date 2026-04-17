@@ -246,10 +246,6 @@ function createBundle() {
   // so we can still reach the child webContents. BaseWindow does not guarantee
   // destruction of child WebContentsView render processes on its own; leaking
   // them across create/close cycles eventually starves new ones of resources.
-  // Run cleanup on `close` (before views are detached) rather than `closed`
-  // so we can still reach the child webContents. BaseWindow does not guarantee
-  // destruction of child WebContentsView render processes on its own; leaking
-  // them across create/close cycles eventually starves new ones of resources.
   win.on('close', () => {
     const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
     for (const view of views) {
@@ -275,39 +271,54 @@ function createBundle() {
     primeViewWithCachedChromeState(chromeView.webContents);
   });
 
-  // Forward content view nav events to the bundle's chrome view and update state
+  wireContentViewEvents(bundle, contentView);
+  registerShortcutsFor(bundle, chromeView.webContents);
+  registerShortcutsFor(bundle, contentView.webContents);
+
+  // Show the window once chrome has painted (avoids flashing a bare BaseWindow
+  // for the half-second before the WebContentsView renders). Fall back to a
+  // longer timer in case the chrome load never completes.
+  chromeView.webContents.once('did-finish-load', () => {
+    if (!win.isDestroyed() && !win.isVisible()) win.show();
+  });
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed() && !win.isVisible()) win.show();
+  });
+  setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) win.show();
+  }, 3000);
+
+  return bundle;
+}
+
+function wireContentViewEvents(bundle, contentView) {
+  // Forward content view nav events to the bundle's chrome view and update state.
+  // Called from both createBundle and prepareAllWindowsForRetry (which rebuilds
+  // the contentView that showErrorInAllWindows tore down).
   contentView.webContents.on('page-title-updated', (_e, title) => {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-title-changed', title);
     }
   });
 
-  const onContentNavigate = (url, reason) => {
+  const onContentNavigate = (url) => {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
     }
     const newAgentId = parseWorkspaceId(url);
-    const changed = bundle.currentWorkspaceId !== newAgentId;
-    if (changed) {
+    if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
       sendCurrentWorkspaceToBundleSidebar(bundle);
     }
-    console.log(
-      '[content-nav] reason=' + reason +
-      ' url=' + url +
-      ' parsedWs=' + (newAgentId || '-') +
-      ' changed=' + changed +
-      ' bundleWs=' + (bundle.currentWorkspaceId || '-'),
-    );
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url, 'did-navigate'));
-  contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url, 'did-navigate-in-page'));
+  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
   // path that can drive the content view to a /forwarding/X/ URL (landing-page
@@ -337,24 +348,6 @@ function createBundle() {
       .executeJavaScript('window.onbeforeunload = null;')
       .catch(() => {});
   });
-
-  registerShortcutsFor(bundle, chromeView.webContents);
-  registerShortcutsFor(bundle, contentView.webContents);
-
-  // Show the window once chrome has painted (avoids flashing a bare BaseWindow
-  // for the half-second before the WebContentsView renders). Fall back to a
-  // longer timer in case the chrome load never completes.
-  chromeView.webContents.once('did-finish-load', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  }, 3000);
-
-  return bundle;
 }
 
 function registerShortcutsFor(bundle, wc) {
@@ -505,6 +498,18 @@ function openNewWindow(url) {
   const bundle = createBundle();
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
+  // Stamp the intended workspace synchronously so subsequent
+  // findBundleForWorkspace lookups see this window as occupying the workspace
+  // BEFORE its content view has fired did-navigate. Otherwise a second
+  // openOrFocusWorkspace / landing-click / notification-click arriving during
+  // the load window wouldn't see the pending bundle and would spawn a duplicate.
+  const intendedAgentId = parseWorkspaceId(url);
+  if (intendedAgentId) {
+    bundle.currentWorkspaceId = intendedAgentId;
+    bundle.currentContentUrl = url;
+    bundle.preErrorUrl = url;
+    updateOsTitle(bundle);
+  }
   if (bundle.chromeView && backendBaseUrl) {
     bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
   }
@@ -571,37 +576,7 @@ function prepareAllWindowsForRetry() {
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
-
-      contentView.webContents.on('page-title-updated', (_e, title) => {
-        if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-          bundle.chromeView.webContents.send('content-title-changed', title);
-        }
-      });
-      const onContentNavigate = (url) => {
-        if (!bundle.isErrorState) {
-          bundle.currentContentUrl = url;
-          bundle.preErrorUrl = url;
-        }
-        const newAgentId = parseWorkspaceId(url);
-        if (bundle.currentWorkspaceId !== newAgentId) {
-          bundle.currentWorkspaceId = newAgentId;
-          sendCurrentWorkspaceToBundleSidebar(bundle);
-        }
-        updateOsTitle(bundle);
-        if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-          bundle.chromeView.webContents.send('content-url-changed', url);
-        }
-      };
-      contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
-      contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
-      contentView.webContents.on('will-navigate', (event, url) => {
-        const targetAgentId = parseWorkspaceId(url);
-        if (!targetAgentId) return;
-        const existing = findBundleForWorkspace(targetAgentId);
-        if (!existing || existing === bundle) return;
-        event.preventDefault();
-        focusBundle(existing);
-      });
+      wireContentViewEvents(bundle, contentView);
     }
 
     bundle.isLoadingState = true;
