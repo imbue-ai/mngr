@@ -205,5 +205,12 @@ def test_should_retry_volume_op_does_not_retry_path_not_found() -> None:
     assert _should_retry_volume_op(modal.exception.NotFoundError("File '/hosts/foo.json' not found")) is False
 
 
+def test_should_retry_volume_op_does_not_retry_path_containing_environment_substring() -> None:
+    # Regression test: a path-level not-found whose path happens to contain the substring
+    # "Environment" must not be misclassified as an environment-not-found error.
+    err = modal.exception.NotFoundError("File '/Environment/foo.json' not found")
+    assert _should_retry_volume_op(err) is False
+
+
 def test_should_retry_volume_op_does_not_retry_auth_error() -> None:
     assert _should_retry_volume_op(modal.exception.AuthError("bad token")) is False

@@ -1,3 +1,8 @@
+import re
+
+_ENVIRONMENT_NOT_FOUND_RE = re.compile(r"^\s*Environment\b", re.IGNORECASE)
+
+
 def is_environment_not_found_error(e: Exception) -> bool:
     """Check if a not-found exception indicates the Modal environment itself is gone.
 
@@ -5,13 +10,11 @@ def is_environment_not_found_error(e: Exception) -> bool:
     (expected during normal operations, e.g. listing a directory that hasn't been
     created yet) and "environment doesn't exist" (indicates the Modal environment
     is gone and should propagate to retry / error-handling layers). This helper
-    distinguishes by checking the exception message.
-
-    Works on both raw modal.exception.NotFoundError (pre-translation) and
-    ModalProxyNotFoundError (post-translation), since _translate_modal_error
-    copies the message via str(e).
+    distinguishes by matching messages of the form "Environment '<name>' not found"
+    at the start of the exception message, so a path such as "/Environment/foo.json"
+    in a path-level not-found is not misclassified as an environment error.
     """
-    return "Environment" in str(e)
+    return _ENVIRONMENT_NOT_FOUND_RE.match(str(e)) is not None
 
 
 class ModalProxyError(Exception):
