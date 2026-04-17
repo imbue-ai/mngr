@@ -219,6 +219,7 @@ function createBundle() {
     sidebarVisible: false,
     requestsPanelView: null,
     requestsPanelVisible: false,
+    requestsPanelReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
     preErrorUrl: null,
@@ -255,6 +256,10 @@ function createBundle() {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
+    if (bundle.requestsPanelReloadTimer) {
+      clearTimeout(bundle.requestsPanelReloadTimer);
+      bundle.requestsPanelReloadTimer = null;
+    }
     const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
     for (const view of views) {
       if (!view) continue;
@@ -466,7 +471,12 @@ function openRequestsPanel(bundle) {
     bundle.window.contentView.addChildView(bundle.requestsPanelView);
     bundle.requestsPanelView.setVisible(true);
     // The panel's HTML is rendered server-side and doesn't subscribe to SSE,
-    // so its cards go stale while hidden. Refresh on show.
+    // so its cards go stale while hidden. Refresh on show, and cancel any
+    // debounced SSE-driven reload that was pending so we don't double-load.
+    if (bundle.requestsPanelReloadTimer) {
+      clearTimeout(bundle.requestsPanelReloadTimer);
+      bundle.requestsPanelReloadTimer = null;
+    }
     if (!bundle.requestsPanelView.webContents.isDestroyed()) {
       bundle.requestsPanelView.webContents.reload();
     }
@@ -481,6 +491,27 @@ function closeRequestsPanel(bundle) {
   bundle.requestsPanelView.setVisible(false);
   bundle.requestsPanelVisible = false;
   updateBundleBounds(bundle);
+}
+
+// Coalesce rapid SSE-triggered reloads. A burst of request_count events
+// (e.g. count 1 -> 2 -> 3 within a few ms) would otherwise restart the
+// panel load multiple times in flight, potentially preventing it from
+// ever settling on a rendered state, and multiplying backend HTTP load
+// by (open windows) x (events).
+const REQUESTS_PANEL_RELOAD_DEBOUNCE_MS = 50;
+function scheduleRequestsPanelReload(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
+  if (bundle.requestsPanelReloadTimer) {
+    clearTimeout(bundle.requestsPanelReloadTimer);
+  }
+  bundle.requestsPanelReloadTimer = setTimeout(() => {
+    bundle.requestsPanelReloadTimer = null;
+    if (bundle.window.isDestroyed()) return;
+    if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
+    if (bundle.requestsPanelView.webContents.isDestroyed()) return;
+    bundle.requestsPanelView.webContents.reload();
+  }, REQUESTS_PANEL_RELOAD_DEBOUNCE_MS);
 }
 
 function toggleRequestsPanel(bundle) {
@@ -717,12 +748,10 @@ function handleChromeSSEEvent(evt) {
   } else if (evt.type === 'request_count') {
     latestChromeState.requestCount = evt.count || 0;
     // Requests panel HTML is static at load time. Refresh any visible panels
-    // so their cards reflect the new pending list.
+    // so their cards reflect the new pending list. Debounced per-bundle so
+    // a burst of count changes coalesces into one reload per panel.
     for (const b of bundles) {
-      if (b.window.isDestroyed()) continue;
-      if (!b.requestsPanelView || !b.requestsPanelVisible) continue;
-      if (b.requestsPanelView.webContents.isDestroyed()) continue;
-      b.requestsPanelView.webContents.reload();
+      scheduleRequestsPanelReload(b);
     }
   }
   broadcastChromeEvent(evt);
