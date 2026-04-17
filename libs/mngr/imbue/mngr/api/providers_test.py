@@ -271,7 +271,7 @@ def test_get_all_provider_instances_excludes_disabled_plugins(
 
 
 # =============================================================================
-# ProviderUnavailableError handling in get_all_provider_instances
+# ProviderUnavailableError propagation from get_all_provider_instances
 # =============================================================================
 
 _UNAVAILABLE_BACKEND_NAME = ProviderBackendName("unavailable-test-backend-xyz")
@@ -280,8 +280,9 @@ _UNAVAILABLE_BACKEND_NAME = ProviderBackendName("unavailable-test-backend-xyz")
 class _UnavailableProviderBackend(ProviderBackendInterface):
     """Backend whose build_provider_instance always raises ProviderUnavailableError.
 
-    Used to verify that get_all_provider_instances silently skips providers
-    that become unavailable during instantiation (e.g. Modal environment deleted).
+    Used to verify that get_all_provider_instances propagates ProviderUnavailableError
+    from a down provider instead of silently skipping (callers at the list_agents
+    layer handle it per-provider via ErrorBehavior).
     """
 
     @staticmethod
@@ -313,14 +314,12 @@ class _UnavailableProviderBackend(ProviderBackendInterface):
         raise ProviderUnavailableError(name, "simulated backend unavailable")
 
 
-def test_get_all_provider_instances_skips_unavailable_configured_provider(
+def test_get_all_provider_instances_propagates_unavailable_configured_provider(
     temp_mngr_ctx: MngrContext, mngr_test_prefix: str
 ) -> None:
-    """get_all_provider_instances skips a configured provider that raises ProviderUnavailableError.
+    """get_all_provider_instances propagates ProviderUnavailableError from a configured provider.
 
-    When a configured provider's build_provider_instance raises ProviderUnavailableError
-    (e.g. because the Modal environment has been deleted), the provider is skipped and
-    the remaining providers are still returned.
+    A down provider is a real error and should be surfaced, not silently skipped.
     """
     _backend_registry[_UNAVAILABLE_BACKEND_NAME] = _UnavailableProviderBackend
     _provider_config_registry[_UNAVAILABLE_BACKEND_NAME] = ProviderInstanceConfig
@@ -334,21 +333,14 @@ def test_get_all_provider_instances_skips_unavailable_configured_provider(
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
 
-    providers = get_all_provider_instances(mngr_ctx)
-
-    provider_names = [p.name for p in providers]
-    assert unavailable_name not in provider_names
-    assert LOCAL_PROVIDER_NAME in provider_names
+    with pytest.raises(ProviderUnavailableError, match="simulated backend unavailable"):
+        get_all_provider_instances(mngr_ctx)
 
 
-def test_get_all_provider_instances_skips_unavailable_default_backend(
+def test_get_all_provider_instances_propagates_unavailable_default_backend(
     temp_mngr_ctx: MngrContext, mngr_test_prefix: str
 ) -> None:
-    """get_all_provider_instances skips a default backend that raises ProviderUnavailableError.
-
-    When a backend's build_provider_instance raises ProviderUnavailableError during
-    default-instance creation, the backend is skipped and other backends are still returned.
-    """
+    """get_all_provider_instances propagates ProviderUnavailableError from a default backend."""
     _backend_registry[_UNAVAILABLE_BACKEND_NAME] = _UnavailableProviderBackend
     _provider_config_registry[_UNAVAILABLE_BACKEND_NAME] = ProviderInstanceConfig
     config = MngrConfig(
@@ -357,8 +349,5 @@ def test_get_all_provider_instances_skips_unavailable_default_backend(
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
 
-    providers = get_all_provider_instances(mngr_ctx)
-
-    provider_names = [p.name for p in providers]
-    assert ProviderInstanceName(str(_UNAVAILABLE_BACKEND_NAME)) not in provider_names
-    assert LOCAL_PROVIDER_NAME in provider_names
+    with pytest.raises(ProviderUnavailableError, match="simulated backend unavailable"):
+        get_all_provider_instances(mngr_ctx)

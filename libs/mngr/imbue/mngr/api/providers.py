@@ -4,7 +4,6 @@ from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -147,10 +146,7 @@ def get_all_provider_instances(
         if not _is_backend_enabled(str(provider_config.backend), mngr_ctx):
             logger.trace("Skipped provider {} (backend {} not in enabled_backends)", name, provider_config.backend)
             continue
-        try:
-            providers.append(get_provider_instance(name, mngr_ctx))
-        except ProviderUnavailableError as e:
-            logger.warning("Skipped unavailable provider {}: {}", name, e)
+        providers.append(get_provider_instance(name, mngr_ctx))
 
     # Then, add default instances for backends not already configured (unless disabled)
     for backend_name in list_backends():
@@ -165,10 +161,7 @@ def get_all_provider_instances(
             continue
         if backend_name not in seen_names:
             provider_name = ProviderInstanceName(backend_name)
-            try:
-                providers.append(get_provider_instance(provider_name, mngr_ctx))
-            except ProviderUnavailableError as e:
-                logger.warning("Skipped unavailable provider {}: {}", provider_name, e)
+            providers.append(get_provider_instance(provider_name, mngr_ctx))
             seen_names.add(backend_name)
 
     if reset_caches:
