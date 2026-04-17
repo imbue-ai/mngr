@@ -6,10 +6,28 @@ from types import SimpleNamespace
 from typing import cast
 
 import click
+import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.plugin import get_files_for_deploy
 from imbue.mngr_schedule.plugin import register_cli_commands
+
+
+@pytest.fixture
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Override HOME for a test that relies on ``Path.home()`` pointing at
+    an empty directory.
+
+    The autouse ``setup_test_mngr_env`` fixture (in plugin_testing.py) sets
+    HOME to ``tmp_path`` and writes ``~/.mngr/config.toml`` into it via
+    ``register_test_sleep_agent_type``. Tests that assert on the contents
+    of ``~/.mngr`` therefore need their own clean HOME, not the one the
+    autouse fixture shares with ``host_dir``.
+    """
+    home = tmp_path / "isolated_home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
 
 
 def test_register_cli_commands_returns_schedule_command() -> None:
@@ -33,7 +51,7 @@ def _make_mngr_ctx_with_profile(profile_dir: Path) -> MngrContext:
     return cast(MngrContext, SimpleNamespace(profile_dir=profile_dir))
 
 
-def test_get_files_for_deploy_returns_empty_dict_when_no_mngr_files(tmp_path: Path) -> None:
+def test_get_files_for_deploy_returns_empty_dict_when_no_mngr_files(tmp_path: Path, isolated_home: Path) -> None:
     """get_files_for_deploy returns empty dict when no mngr config files exist."""
     mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
     repo_root = tmp_path / "repo"
@@ -46,9 +64,9 @@ def test_get_files_for_deploy_returns_empty_dict_when_no_mngr_files(tmp_path: Pa
     assert result == {}
 
 
-def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path) -> None:
+def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path, isolated_home: Path) -> None:
     """get_files_for_deploy includes ~/.mngr/config.toml when it exists."""
-    mngr_dir = Path.home() / ".mngr"
+    mngr_dir = isolated_home / ".mngr"
     mngr_dir.mkdir(parents=True, exist_ok=True)
     config_file = mngr_dir / "config.toml"
     config_file.write_text("[test]\nkey = 'value'\n")
@@ -64,9 +82,9 @@ def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path) -> None:
     assert result[Path("~/.mngr/config.toml")] == config_file
 
 
-def test_get_files_for_deploy_includes_top_level_profile_files(tmp_path: Path) -> None:
+def test_get_files_for_deploy_includes_top_level_profile_files(tmp_path: Path, isolated_home: Path) -> None:
     """get_files_for_deploy includes top-level files from the profile directory."""
-    profile_dir = Path.home() / ".mngr" / "profiles" / "test-profile"
+    profile_dir = isolated_home / ".mngr" / "profiles" / "test-profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     settings_file = profile_dir / "settings.toml"
     settings_file.write_text("[test]\nvalue = 1\n")
@@ -86,9 +104,9 @@ def test_get_files_for_deploy_includes_top_level_profile_files(tmp_path: Path) -
     assert result[Path("~/.mngr/profiles/test-profile/user_id")] == user_id_file
 
 
-def test_get_files_for_deploy_excludes_provider_subdirectories(tmp_path: Path) -> None:
+def test_get_files_for_deploy_excludes_provider_subdirectories(tmp_path: Path, isolated_home: Path) -> None:
     """get_files_for_deploy does not include files from provider subdirectories."""
-    profile_dir = Path.home() / ".mngr" / "profiles" / "test-profile"
+    profile_dir = isolated_home / ".mngr" / "profiles" / "test-profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     # Create a top-level file that should be included
     (profile_dir / "settings.toml").write_text("[settings]")
@@ -110,9 +128,9 @@ def test_get_files_for_deploy_excludes_provider_subdirectories(tmp_path: Path) -
     assert not any("providers" in str(k) for k in result)
 
 
-def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(tmp_path: Path) -> None:
+def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(tmp_path: Path, isolated_home: Path) -> None:
     """get_files_for_deploy returns empty dict when include_user_settings is False."""
-    mngr_dir = Path.home() / ".mngr"
+    mngr_dir = isolated_home / ".mngr"
     mngr_dir.mkdir(parents=True, exist_ok=True)
     config_file = mngr_dir / "config.toml"
     config_file.write_text("[test]\nkey = 'value'\n")
