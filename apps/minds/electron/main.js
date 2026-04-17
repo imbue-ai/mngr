@@ -492,6 +492,28 @@ function sendCurrentWorkspaceToBundleSidebar(bundle) {
 
 // -- Window opening / focusing --
 
+function loadUrlIntoBundleContentView(bundle, url) {
+  // Stamp the intended workspace synchronously so subsequent
+  // findBundleForWorkspace lookups see this bundle as occupying the workspace
+  // BEFORE its content view has fired did-navigate. Otherwise a second
+  // openOrFocusWorkspace / landing-click / notification-click arriving during
+  // the load window wouldn't see the pending bundle and would spawn a duplicate.
+  // Applies to every content-view loadURL aimed at a workspace URL, including
+  // session restore into the initial bundle.
+  if (!bundle) return;
+  const intendedAgentId = parseWorkspaceId(url);
+  if (intendedAgentId) {
+    bundle.currentWorkspaceId = intendedAgentId;
+    bundle.currentContentUrl = url;
+    bundle.preErrorUrl = url;
+    updateOsTitle(bundle);
+    sendCurrentWorkspaceToBundleSidebar(bundle);
+  }
+  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
+    bundle.contentView.webContents.loadURL(url);
+  }
+}
+
 function openOrFocusWorkspace(agentId, url) {
   const existing = findBundleForWorkspace(agentId);
   if (existing) {
@@ -506,24 +528,10 @@ function openNewWindow(url) {
   const bundle = createBundle();
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
-  // Stamp the intended workspace synchronously so subsequent
-  // findBundleForWorkspace lookups see this window as occupying the workspace
-  // BEFORE its content view has fired did-navigate. Otherwise a second
-  // openOrFocusWorkspace / landing-click / notification-click arriving during
-  // the load window wouldn't see the pending bundle and would spawn a duplicate.
-  const intendedAgentId = parseWorkspaceId(url);
-  if (intendedAgentId) {
-    bundle.currentWorkspaceId = intendedAgentId;
-    bundle.currentContentUrl = url;
-    bundle.preErrorUrl = url;
-    updateOsTitle(bundle);
-  }
   if (bundle.chromeView && backendBaseUrl) {
     bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
   }
-  if (bundle.contentView && url) {
-    bundle.contentView.webContents.loadURL(url);
-  }
+  loadUrlIntoBundleContentView(bundle, url);
   return bundle;
 }
 
@@ -1081,9 +1089,7 @@ async function startBackendWithRetry() {
         }
       } else {
         const [first, ...rest] = restorable;
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(toAbsoluteUrl(first.url));
-        }
+        loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         for (const entry of rest) {
           openNewWindow(toAbsoluteUrl(entry.url));
         }
