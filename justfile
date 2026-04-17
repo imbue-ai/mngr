@@ -100,9 +100,14 @@ test-unit:
 test-integration:
   uv run pytest {{_parallel}} --cov-report=html --cov-fail-under=80
 
-# can run without coverage to make things slightly faster when checking locally
-test-quick:
-  uv run pytest {{_parallel}} --no-cov --cov-fail-under=0
+# Examples:
+#   just test-quick
+#   just test-quick libs/mngr
+#   just test-quick libs/mngr/.../foo_test.py::test_bar
+#   just test-quick -m 'not tmux and not modal'
+# Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
+test-quick *args="":
+  uv run pytest {{_parallel}} --no-cov {{args}}
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
