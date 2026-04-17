@@ -209,6 +209,14 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("update", "--update/--no-update"),
     ("worktree_base_folder", "--worktree-base-folder"),
     ("start_on_boot", "--start-on-boot/--no-start-on-boot"),
+    # Agent identity/metadata flags that are consumed on the non-headless
+    # path (via _parse_agent_opts / auto-labels) but not applied by
+    # _create_headless. Rejecting them surfaces the mismatch instead of
+    # silently dropping the user's value.
+    ("id", "--id"),
+    ("label", "--label"),
+    ("project", "--project"),
+    ("host_label", "--host-label"),
 )
 
 

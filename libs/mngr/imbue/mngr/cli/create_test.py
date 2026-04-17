@@ -861,6 +861,36 @@ def test_create_headless_rejects_conflicting_positional_and_type_flag(
     assert "Conflicting agent types" in result.output
 
 
+@pytest.mark.parametrize(
+    "flag_args,expected_in_error",
+    [
+        (["--id", "abc123"], "--id"),
+        (["--label", "key=value"], "--label"),
+        (["--project", "myproj"], "--project"),
+        (["--host-label", "env=prod"], "--host-label"),
+    ],
+)
+def test_create_headless_rejects_agent_metadata_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    flag_args: list[str],
+    expected_in_error: str,
+) -> None:
+    """Agent identity/metadata flags (--id, --label, --project, --host-label) are
+    consumed on the non-headless path but not by _create_headless. They must be
+    rejected rather than silently dropped.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "--foreground", *flag_args],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert expected_in_error in result.output
+    assert "does not support" in result.output
+
+
 # =============================================================================
 # Tests for --foreground flag
 # =============================================================================
