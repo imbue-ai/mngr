@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -379,12 +380,12 @@ def test_create_pyinfra_host_configures_all_ssh_data(tmp_path: Path) -> None:
     """create_pyinfra_host should set hostname, port, key path, known_hosts, and default user."""
     private_key_path, _ = save_ssh_keypair(tmp_path)
     known_hosts_path = tmp_path / "known_hosts"
+    auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=known_hosts_path)
 
     host = create_pyinfra_host(
         hostname="myhost.example.com",
         port=2222,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
+        auth=auth,
     )
 
     assert isinstance(host, PyinfraHost)
@@ -398,13 +399,12 @@ def test_create_pyinfra_host_configures_all_ssh_data(tmp_path: Path) -> None:
 def test_create_pyinfra_host_uses_custom_ssh_user(tmp_path: Path) -> None:
     """create_pyinfra_host should pass through a custom ssh_user."""
     private_key_path, _ = save_ssh_keypair(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
+    auth = SSHKeyAuth(key_path=private_key_path)
 
     host = create_pyinfra_host(
         hostname="127.0.0.1",
         port=22,
-        private_key_path=private_key_path,
-        known_hosts_path=known_hosts_path,
+        auth=auth,
         ssh_user="ubuntu",
     )
 

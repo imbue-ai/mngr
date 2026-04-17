@@ -42,6 +42,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -426,9 +427,9 @@ class DockerProviderInstance(BaseProviderInstance):
         """Wait for sshd to be ready to accept connections."""
         wait_for_sshd(hostname, port, timeout_seconds)
 
-    def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
+    def _create_pyinfra_host(self, hostname: str, port: int, auth: SSHKeyAuth) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
-        return create_pyinfra_host(hostname, port, private_key_path, self._known_hosts_path)
+        return create_pyinfra_host(hostname, port, auth)
 
     # =========================================================================
     # Container Setup and Host Creation Helpers
@@ -474,7 +475,8 @@ class DockerProviderInstance(BaseProviderInstance):
         with log_span("Waiting for sshd to be ready..."):
             self._wait_for_sshd(ssh_host, ssh_port)
 
-        pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
+        ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+        pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, ssh_auth)
         connector = PyinfraConnector(pyinfra_host)
 
         host_record = HostRecord(
@@ -489,6 +491,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host = Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -794,15 +797,13 @@ kill -TERM 1
         )
 
         private_key_path, _ = self._get_ssh_keypair()
-        pyinfra_host = self._create_pyinfra_host(
-            host_record.ssh_host,
-            host_record.ssh_port,
-            private_key_path,
-        )
+        ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+        pyinfra_host = self._create_pyinfra_host(host_record.ssh_host, host_record.ssh_port, ssh_auth)
         connector = PyinfraConnector(pyinfra_host)
 
         return Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -1659,11 +1660,8 @@ kill -TERM 1
         )
 
         private_key_path, _ = self._get_ssh_keypair()
-        return self._create_pyinfra_host(
-            host_record.ssh_host,
-            host_record.ssh_port,
-            private_key_path,
-        )
+        auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+        return self._create_pyinfra_host(host_record.ssh_host, host_record.ssh_port, auth)
 
     # =========================================================================
     # Agent Data Persistence

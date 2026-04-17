@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 
 
@@ -787,7 +788,7 @@ _TEST_SSH_INFO: RemoteSSHInfo = RemoteSSHInfo(
     user="root",
     host="remote.example.com",
     port=22,
-    key_path=Path("/tmp/fake_key"),
+    auth=SSHKeyAuth(key_path=Path("/tmp/fake_key")),
 )
 
 

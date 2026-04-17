@@ -10,6 +10,7 @@ from imbue.minds.desktop_client.runner import _build_cloudflare_client
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 
 
@@ -140,7 +141,7 @@ def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
         user="root",
         host="192.168.1.100",
         port=22,
-        key_path=tmp_path / "key",
+        auth=SSHKeyAuth(key_path=tmp_path / "key"),
     )
     handler = AgentDiscoveryHandler(
         tunnel_manager=fake_manager,
@@ -168,7 +169,7 @@ def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Pat
         user="root",
         host="192.168.1.100",
         port=22,
-        key_path=tmp_path / "key",
+        auth=SSHKeyAuth(key_path=tmp_path / "key"),
     )
     handler = AgentDiscoveryHandler(
         tunnel_manager=fake_manager,

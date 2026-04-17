@@ -46,6 +46,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -350,16 +351,16 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # Container sshd port is exposed on the VPS's public IP.
         # We connect directly to vps_ip:container_ssh_port.
+        ssh_auth = SSHKeyAuth(key_path=container_key_path, known_hosts_file=self._container_known_hosts_path())
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,
             port=self.config.container_ssh_port,
-            private_key_path=container_key_path,
-            known_hosts_path=self._container_known_hosts_path(),
+            auth=ssh_auth,
         )
-
         connector = PyinfraConnector(pyinfra_host)
         host = Host(
             id=host_id,
+            ssh_auth=ssh_auth,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -1345,15 +1346,13 @@ class VpsDockerProvider(BaseProviderInstance):
     ) -> HostDetails:
         """Construct HostDetails from cached host record and SSH-collected data."""
         ssh_info: SSHInfo | None = None
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
 
         boot_time = timestamp_to_datetime(raw.get("btime"))

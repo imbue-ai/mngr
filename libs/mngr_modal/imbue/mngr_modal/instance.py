@@ -63,6 +63,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -992,9 +993,9 @@ class ModalProviderInstance(BaseProviderInstance):
         """Wait for sshd to be ready to accept connections."""
         wait_for_sshd(hostname, port, timeout_seconds)
 
-    def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
+    def _create_pyinfra_host(self, hostname: str, port: int, auth: SSHKeyAuth) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
-        return create_pyinfra_host(hostname, port, private_key_path, self._known_hosts_path)
+        return create_pyinfra_host(hostname, port, auth)
 
     def _create_host_data_records_in_modal(
         self,
@@ -1114,7 +1115,8 @@ class ModalProviderInstance(BaseProviderInstance):
 
             with log_span("Executing post-ssh operations"):
                 # Create pyinfra host and connector
-                pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
+                ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+                pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, ssh_auth)
                 connector = PyinfraConnector(pyinfra_host)
 
                 # for latency reasons, we set this afterwards:
@@ -1123,6 +1125,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 # Create the Host object with callback for future certified data updates
                 host = Host(
                     id=host_id,
+                    ssh_auth=ssh_auth,
                     connector=connector,
                     provider_instance=self,
                     mngr_ctx=self.mngr_ctx,
@@ -1597,15 +1600,13 @@ log "=== Shutdown script completed ==="
 
             with trace_span("Creating pyinfra {}", host_id, _is_trace_span_enabled=False):
                 private_key_path, _ = self._get_ssh_keypair()
-                pyinfra_host = self._create_pyinfra_host(
-                    host_record.ssh_host,
-                    host_record.ssh_port,
-                    private_key_path,
-                )
+                ssh_auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+                pyinfra_host = self._create_pyinfra_host(host_record.ssh_host, host_record.ssh_port, ssh_auth)
                 connector = PyinfraConnector(pyinfra_host)
 
             return Host(
                 id=host_id,
+                ssh_auth=ssh_auth,
                 connector=connector,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
@@ -2546,15 +2547,13 @@ log "=== Shutdown script completed ==="
         """Construct HostDetails from cached host record and SSH-collected data."""
         # SSH info from host connector (local data, no SSH needed)
         ssh_info: SSHInfo | None = None
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
 
         # Boot time and uptime from SSH-collected data
@@ -3146,11 +3145,8 @@ log "=== Shutdown script completed ==="
         )
 
         private_key_path, _ = self._get_ssh_keypair()
-        return self._create_pyinfra_host(
-            host_record.ssh_host,
-            host_record.ssh_port,
-            private_key_path,
-        )
+        auth = SSHKeyAuth(key_path=private_key_path, known_hosts_file=self._known_hosts_path)
+        return self._create_pyinfra_host(host_record.ssh_host, host_record.ssh_port, auth)
 
     # =========================================================================
     # Lifecycle Methods

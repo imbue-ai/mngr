@@ -23,6 +23,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -574,8 +575,7 @@ def test_agent_details_to_cel_context_with_host_ssh() -> None:
         user="root",
         host="example.com",
         port=22,
-        key_path=Path("/keys/id_rsa"),
-        command="ssh -i /keys/id_rsa -p 22 root@example.com",
+        auth=SSHKeyAuth(key_path=Path("/keys/id_rsa")),
     )
     host_details = HostDetails(
         id=HostId.generate(),

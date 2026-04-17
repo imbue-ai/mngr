@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -371,10 +372,10 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> SSHConnectionInfo | None:
         """Get SSH connection info for this host if it's remote.
 
-        Returns (user, hostname, port, private_key_path) if remote, None if local.
+        Returns SSHConnectionInfo if remote, None if local.
         """
         ...
 
