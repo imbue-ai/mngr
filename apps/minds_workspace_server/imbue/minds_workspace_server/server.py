@@ -45,10 +45,8 @@ from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
-from imbue.minds_workspace_server.sharing_proxy import disable_sharing
-from imbue.minds_workspace_server.sharing_proxy import enable_sharing
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
-from imbue.minds_workspace_server.sharing_proxy import update_sharing_auth
+from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 logger = _loguru_logger
@@ -505,13 +503,13 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
 
 
 async def _create_chat_agent(request: Request) -> JSONResponse:
-    """Create a new chat agent in the same work directory."""
+    """Create a new chat agent in the primary agent's work directory."""
     agent_manager: AgentManager = request.app.state.agent_manager
     body = await request.json()
 
     try:
         create_request = CreateChatRequest(**body)
-        agent_id = agent_manager.create_chat_agent(create_request.name, create_request.parent_agent_id)
+        agent_id = agent_manager.create_chat_agent(create_request.name)
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
@@ -635,50 +633,16 @@ async def _get_sharing_status_endpoint(server_name: str) -> JSONResponse:
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
-async def _enable_sharing_endpoint(server_name: str, request: Request) -> JSONResponse:
-    """Enable Cloudflare forwarding for a server, optionally with auth rules."""
-    auth_rules = None
+async def _request_sharing_edit_endpoint(server_name: str) -> JSONResponse:
+    """Create a sharing request event for editing sharing settings.
+
+    Writes a request event to requests/events.jsonl so the desktop client
+    can handle the actual sharing changes. Returns success immediately.
+    """
     try:
-        body = await request.json()
-        auth_rules = body.get("auth_rules")
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    try:
-        status = await run_in_threadpool(enable_sharing, server_name, auth_rules)
-        return JSONResponse(content=status.model_dump())
-    except SharingProxyError as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
-
-
-async def _update_sharing_auth_endpoint(server_name: str, request: Request) -> JSONResponse:
-    """Update the auth policy for an already-enabled shared server."""
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        error = ErrorResponse(detail="Invalid JSON in request body")
-        return JSONResponse(content=error.model_dump(), status_code=400)
-
-    auth_rules = body.get("auth_rules")
-    if auth_rules is None:
-        error = ErrorResponse(detail="auth_rules field is required")
-        return JSONResponse(content=error.model_dump(), status_code=400)
-
-    try:
-        status = await run_in_threadpool(update_sharing_auth, server_name, auth_rules)
-        return JSONResponse(content=status.model_dump())
-    except SharingProxyError as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=502)
-
-
-async def _disable_sharing_endpoint(server_name: str) -> JSONResponse:
-    """Disable Cloudflare forwarding for a server."""
-    try:
-        status = await run_in_threadpool(disable_sharing, server_name)
-        return JSONResponse(content=status.model_dump())
-    except SharingProxyError as e:
+        await run_in_threadpool(request_sharing_edit, server_name, True)
+        return JSONResponse(content={"ok": True, "message": "Sharing request sent"})
+    except (SharingProxyError, RuntimeError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=502)
 
@@ -719,9 +683,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/sharing/{server_name}", _get_sharing_status_endpoint, methods=["GET"])
-    application.add_api_route("/api/sharing/{server_name}", _enable_sharing_endpoint, methods=["PUT"])
-    application.add_api_route("/api/sharing/{server_name}", _disable_sharing_endpoint, methods=["DELETE"])
-    application.add_api_route("/api/sharing/{server_name}/auth", _update_sharing_auth_endpoint, methods=["PUT"])
+    application.add_api_route("/api/sharing/{server_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )

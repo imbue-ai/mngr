@@ -384,10 +384,15 @@ def gc_snapshots(
 ) -> None:
     """Garbage collect old snapshots from destroyed hosts.
 
-    Only deletes snapshots from hosts that are in DESTROYED state, and only
-    after the snapshot exceeds the provider's ``destroyed_host_persisted_seconds``
-    threshold (default 30 days).  Younger snapshots are preserved so users can
-    recover via ``mngr create --snapshot``.
+    Only deletes snapshots from hosts that were in DESTROYED state at
+    discovery time, and only after the snapshot exceeds the provider's
+    ``destroyed_host_persisted_seconds`` threshold (default 30 days).
+    Younger snapshots are preserved so users can recover via
+    ``mngr create --snapshot``.
+
+    Uses the host_state from the pre-computed discovery results rather than
+    calling get_host(), because gc_machines may have already destroyed the
+    host (and its record) earlier in the same GC run.
 
     Snapshots on RUNNING, PAUSED, and STOPPED hosts are never deleted:
     - PAUSED/STOPPED hosts need their snapshots for resumption
@@ -404,13 +409,11 @@ def gc_snapshots(
         try:
             for host_ref in host_refs:
                 try:
-                    host = provider.get_host(host_ref.host_id)
-                    host_state = host.get_state()
-                    if host_state != HostState.DESTROYED:
+                    if host_ref.host_state != HostState.DESTROYED:
                         logger.trace(
                             "Skipped snapshot GC for host {} (state: {})",
                             host_ref.host_id,
-                            host_state,
+                            host_ref.host_state,
                         )
                         continue
 

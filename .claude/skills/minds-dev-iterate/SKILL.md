@@ -91,7 +91,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
-  setsid bash -c "cd apps/minds && npm start" >> /tmp/minds-electron.log 2>&1 &
+  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 )
 ```
 
