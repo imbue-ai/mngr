@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Final
 from typing import cast
 
@@ -78,7 +77,6 @@ def create(
     mngr_ctx: MngrContext,
     create_work_dir: bool = True,
     created_branch_name: str | None = None,
-    source_repo_path: Path | None = None,
 ) -> CreateAgentResult:
     """Create and run an agent.
 
@@ -141,7 +139,6 @@ def create(
                 work_dir_result = host.create_agent_work_dir(source_location.host, source_location.path, agent_options)
                 work_dir_path = work_dir_result.path
                 created_branch_name = work_dir_result.created_branch_name
-                source_repo_path = work_dir_result.source_repo_path
             with log_span("Calling on_after_initial_file_copy hooks"):
                 mngr_ctx.pm.hook.on_after_initial_file_copy(
                     agent_options=agent_options, host=host, work_dir_path=work_dir_path
@@ -156,12 +153,7 @@ def create(
 
         # Create the agent state (registers the agent with the host)
         with log_span("Creating agent state in work directory {}", work_dir_path):
-            agent = host.create_agent_state(
-                work_dir_path,
-                agent_options,
-                created_branch_name=created_branch_name,
-                source_repo_path=source_repo_path,
-            )
+            agent = host.create_agent_state(work_dir_path, agent_options, created_branch_name=created_branch_name)
 
         # Run provisioning for the agent (hooks, dependency installation, etc.)
         with log_span("Calling on_before_provisioning hooks"):
