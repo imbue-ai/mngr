@@ -402,14 +402,20 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 ) -> None:
     """Test creating an agent on Modal using the mngr default Dockerfile.
 
-    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile
-    builds successfully on Modal and that ``mngr create`` can launch an agent on
-    the resulting image (the agent itself just sleeps; this test does not verify
-    which tools end up in the image).
+    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile:
+    1. Builds successfully on Modal
+    2. Has the expected tools installed (uv, claude code)
+    3. Can run agents properly
 
     This test is marked as release since it takes longer due to the image build.
     """
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100111")
+    # The agent-type command runs the tool-existence checks before sleeping, so
+    # if the Dockerfile is missing uv or claude the agent exits non-zero and the
+    # `result.returncode == 0` assertion below catches it. The trailing sleep
+    # keeps the agent alive long enough for mngr create to report success.
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(
+        modal_subprocess_env.host_dir, "which uv && which claude && sleep 100111"
+    )
     agent_name = f"test-modal-default-df-{get_short_random_string()}"
 
     dockerfile_path = _get_mngr_default_dockerfile_path()
