@@ -109,6 +109,7 @@ from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import is_environment_not_found_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import ImageInterface
@@ -148,19 +149,6 @@ _MODAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("c8f1a2b3-d4e5-6789-abc
 
 P = ParamSpec("P")
 T = TypeVar("T")
-
-
-@pure
-def _is_environment_not_found_error(e: ModalProxyNotFoundError) -> bool:
-    """Check if a ModalProxyNotFoundError is an environment-level error.
-
-    Modal uses ModalProxyNotFoundError for both "path doesn't exist on volume"
-    and "environment doesn't exist." The former is expected during normal
-    operations (e.g. listing a directory that hasn't been created yet); the
-    latter indicates the Modal environment is gone and should propagate to
-    retry / error-handling layers rather than being silently swallowed.
-    """
-    return "Environment" in str(e)
 
 
 @pure
@@ -624,7 +612,7 @@ class ModalProviderInstance(BaseProviderInstance):
             self._host_record_cache_by_id[host_id] = host_record
             return host_record
         except ModalProxyNotFoundError as e:
-            if _is_environment_not_found_error(e):
+            if is_environment_not_found_error(e):
                 raise
             return None
         except FileNotFoundError:
@@ -715,7 +703,7 @@ class ModalProviderInstance(BaseProviderInstance):
                     try:
                         entries = volume.listdir("/hosts/")
                     except ModalProxyNotFoundError as e:
-                        if _is_environment_not_found_error(e):
+                        if is_environment_not_found_error(e):
                             raise
                         entries = []
                     except FileNotFoundError:
@@ -756,7 +744,7 @@ class ModalProviderInstance(BaseProviderInstance):
         try:
             entries = volume.listdir(host_dir)
         except ModalProxyNotFoundError as e:
-            if _is_environment_not_found_error(e):
+            if is_environment_not_found_error(e):
                 raise
             # Host directory doesn't exist yet (no agents persisted for this host)
             return agent_records
@@ -771,7 +759,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 try:
                     content = volume.read_file(agent_path)
                 except ModalProxyNotFoundError as e:
-                    if _is_environment_not_found_error(e):
+                    if is_environment_not_found_error(e):
                         raise
                     # File was deleted between listdir and read (TOCTOU race on distributed volume)
                     continue
@@ -2371,39 +2359,6 @@ log "=== Shutdown script completed ==="
             logger.debug("Found {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
             return running_host_ids
 
-    def _fetch_discovery_data(
-        self, cg: ConcurrencyGroup
-    ) -> tuple[set[HostId], list[HostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Run the parallel fetch of sandbox IDs and host/agent records."""
-        with log_span("Parallel fetch: sandbox IDs + host/agent records"):
-            with ConcurrencyGroupExecutor(
-                parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
-            ) as executor:
-                running_ids_future = executor.submit(self._list_running_host_ids, cg)
-                host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
-
-            running_host_ids = running_ids_future.result()
-            all_host_records, agent_data_by_host_id = host_and_agent_future.result()
-        return running_host_ids, all_host_records, agent_data_by_host_id
-
-    def _fetch_discovery_data_with_not_found_retry(
-        self, cg: ConcurrencyGroup
-    ) -> tuple[set[HostId], list[HostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Fetch discovery data, retrying once on ModalProxyNotFoundError.
-
-        A transient network issue (e.g. bad wifi) can cause Modal's API to
-        return a spurious not-found error for the environment, app, or volume.
-        One retry is usually enough for the request to succeed on a better
-        connection.  Other ModalProxyError subtypes (auth, rate-limit, etc.)
-        are NOT retried here -- they propagate immediately.
-        """
-        try:
-            return self._fetch_discovery_data(cg)
-        except ModalProxyNotFoundError as e:
-            logger.warning("Modal discovery got not-found error, retrying once: {}", e)
-            self._full_sandbox_list_cache = None
-            return self._fetch_discovery_data(cg)
-
     @handle_modal_auth_error
     def discover_hosts_and_agents(
         self,
@@ -2422,9 +2377,15 @@ log "=== Shutdown script completed ==="
         """
         with log_span("Modal discover_hosts_and_agents for provider={}", self.name):
             try:
-                running_host_ids, all_host_records, agent_data_by_host_id = (
-                    self._fetch_discovery_data_with_not_found_retry(cg)
-                )
+                with log_span("Parallel fetch: sandbox IDs + host/agent records"):
+                    with ConcurrencyGroupExecutor(
+                        parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
+                    ) as executor:
+                        running_ids_future = executor.submit(self._list_running_host_ids, cg)
+                        host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
+
+                    running_host_ids = running_ids_future.result()
+                    all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
                 raise ModalAuthError() from e
             except ModalProxyError as e:

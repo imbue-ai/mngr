@@ -16,6 +16,7 @@ from imbue.modal_proxy.direct import DirectApp
 from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
+from imbue.modal_proxy.direct import _should_retry_volume_op
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
 from imbue.modal_proxy.direct import _translate_modal_cli_not_found
@@ -183,3 +184,26 @@ def test_translate_resource_exhausted_to_rate_limit_error() -> None:
     result = _translate_modal_error(modal_err)
     assert isinstance(result, ModalProxyRateLimitError)
     assert "rate limit" in str(result)
+
+
+# --- Volume retry predicate tests ---
+
+
+def test_should_retry_volume_op_retries_internal_error() -> None:
+    assert _should_retry_volume_op(modal.exception.InternalError("server error")) is True
+
+
+def test_should_retry_volume_op_retries_resource_exhausted() -> None:
+    assert _should_retry_volume_op(modal.exception.ResourceExhaustedError("rate limit")) is True
+
+
+def test_should_retry_volume_op_retries_environment_not_found() -> None:
+    assert _should_retry_volume_op(modal.exception.NotFoundError("Environment 'mngr-abc123' not found")) is True
+
+
+def test_should_retry_volume_op_does_not_retry_path_not_found() -> None:
+    assert _should_retry_volume_op(modal.exception.NotFoundError("File '/hosts/foo.json' not found")) is False
+
+
+def test_should_retry_volume_op_does_not_retry_auth_error() -> None:
+    assert _should_retry_volume_op(modal.exception.AuthError("bad token")) is False

@@ -1778,38 +1778,14 @@ def test_discover_hosts_and_agents_ignores_running_sandbox_without_host_record(
 def test_discover_hosts_and_agents_converts_modal_proxy_error_to_provider_unavailable(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """discover_hosts_and_agents wraps ModalProxyNotFoundError as ProviderUnavailableError.
-
-    ModalProxyNotFoundError is retried once before conversion, so the mock
-    must raise on both attempts.
-    """
+    """discover_hosts_and_agents wraps ModalProxyNotFoundError as ProviderUnavailableError."""
     with patch.object(
         modal_provider,
-        "_fetch_discovery_data",
+        "_list_running_host_ids",
         side_effect=ModalProxyNotFoundError("Environment 'mngr-abc123' not found"),
     ):
         with pytest.raises(ProviderUnavailableError, match="Environment 'mngr-abc123' not found"):
             modal_provider.discover_hosts_and_agents(cg=modal_provider.mngr_ctx.concurrency_group)
-
-
-def test_discover_hosts_and_agents_retries_once_on_not_found_error(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """discover_hosts_and_agents retries once when ModalProxyNotFoundError is transient.
-
-    First call raises ModalProxyNotFoundError (e.g. bad wifi), second call succeeds.
-    """
-    empty_result: tuple[set[HostId], list[Any], dict[HostId, list[dict[str, Any]]]] = (set(), [], {})
-    with patch.object(
-        modal_provider,
-        "_fetch_discovery_data",
-        side_effect=[
-            ModalProxyNotFoundError("Environment 'mngr-abc123' not found"),
-            empty_result,
-        ],
-    ):
-        result = modal_provider.discover_hosts_and_agents(cg=modal_provider.mngr_ctx.concurrency_group)
-    assert result == {}
 
 
 # =============================================================================
