@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.runner import _init_supertokens
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 
@@ -69,8 +70,7 @@ def _poll_for_email(
                 return msg
         threading.Event().wait(interval)
     pytest.fail(
-        f"No email with subject containing {subject_contains!r} "
-        f"arrived at {username}@restmail.net within {timeout}s"
+        f"No email with subject containing {subject_contains!r} arrived at {username}@restmail.net within {timeout}s"
     )
 
 
@@ -99,26 +99,28 @@ class AuthTestFixture:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        session_store = _init_supertokens(
+        if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+            pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
+
+        _init_supertokens(
             data_directory=self.tmp_dir,
             host=self.host,
             port=self.port,
         )
-        if session_store is None:
-            pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
 
         paths = WorkspacePaths(data_dir=self.tmp_dir)
         auth_store = FileAuthStore(data_directory=paths.auth_dir)
         code = OneTimeCode("test-code-auth-e2e")
         auth_store.add_one_time_code(code=code)
 
+        session_store = MultiAccountSessionStore(data_dir=self.tmp_dir)
         backend_resolver = MngrCliBackendResolver()
 
         app = create_desktop_client(
             auth_store=auth_store,
             backend_resolver=backend_resolver,
             http_client=None,
-            supertokens_session_store=session_store,
+            session_store=session_store,
             server_port=self.port,
             output_format=OutputFormat.JSONL,
         )

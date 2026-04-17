@@ -63,7 +63,7 @@ def test_broadcast_applications_updated() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
 
-    apps = {"agent-1": [{"name": "web", "url": "http://localhost:8000"}]}
+    apps = [{"name": "web", "url": "http://localhost:8000"}]
     broadcaster.broadcast_applications_updated(apps)
 
     msg = json.loads(_get_message(q))

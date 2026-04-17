@@ -29,15 +29,14 @@ from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.supertokens_auth import SuperTokensSessionStore
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
-from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServerName
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
-from imbue.minds.utils.output import emit_event
 from imbue.mngr.primitives import AgentId
 
 
@@ -100,51 +99,48 @@ def _json_error(message: str, status_code: int) -> Response:
     return _json_response({"error": message}, status_code=status_code)
 
 
-def get_cf_client_with_auth(request: Request) -> tuple[CloudflareForwardingClient | None, Response | None]:
-    """Get a cloudflare client enriched with SuperTokens auth if available.
+def get_cf_client_with_auth(
+    request: Request, agent_id: AgentId | None = None
+) -> tuple[CloudflareForwardingClient | None, Response | None]:
+    """Get a cloudflare client enriched with auth for a specific workspace's account.
+
+    Looks up the account associated with the workspace (via agent_id) and
+    uses that account's tokens for Bearer auth. Falls back to Basic Auth
+    if no account is associated or no session store is configured.
 
     Returns (client, None) on success, or (None, error_response) if auth is required but missing.
-    When SuperTokens is configured and the user is signed in, the client uses Bearer auth.
-    Otherwise falls back to the original Basic Auth client.
     """
     cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
-    session_store: SuperTokensSessionStore | None = request.app.state.supertokens_session_store
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
 
     if cf_client is None and session_store is None:
         return None, _json_error("Cloudflare forwarding not configured", 501)
 
-    # If SuperTokens is configured, require a valid session
-    if session_store is not None:
-        user_info = session_store.get_user_info()
-        access_token = session_store.get_access_token()
-        if user_info is None or access_token is None:
-            output_format: OutputFormat = request.app.state.supertokens_output_format
-            emit_event("auth_required", {"message": "Sign in required for sharing"}, output_format)
-            return None, _json_response(
-                {"error": "Not signed in to Imbue", "auth_required": True},
-                status_code=401,
-            )
+    # Look up the account associated with this workspace
+    if session_store is not None and agent_id is not None:
+        account = session_store.get_account_for_workspace(str(agent_id))
+        if account is not None:
+            access_token = session_store.get_access_token(str(account.user_id))
+            if access_token is not None:
+                forwarding_url = cf_client.forwarding_url if cf_client else None
+                if forwarding_url is None:
+                    forwarding_url_str = os.environ.get("CLOUDFLARE_FORWARDING_URL", "")
+                    if not forwarding_url_str:
+                        return None, _json_error("Cloudflare forwarding URL not configured", 501)
+                    forwarding_url = CloudflareForwardingUrl(forwarding_url_str)
 
-        # Build a client with SuperTokens Bearer auth
-        forwarding_url = cf_client.forwarding_url if cf_client else None
-        if forwarding_url is None:
-            forwarding_url_str = os.environ.get("CLOUDFLARE_FORWARDING_URL", "")
-            if not forwarding_url_str:
-                return None, _json_error("Cloudflare forwarding URL not configured", 501)
-            forwarding_url = CloudflareForwardingUrl(forwarding_url_str)
+                enriched_client = CloudflareForwardingClient(
+                    forwarding_url=forwarding_url,
+                    username=cf_client.username if cf_client else None,
+                    secret=cf_client.secret if cf_client else None,
+                    owner_email=cf_client.owner_email if cf_client else None,
+                    supertokens_token=access_token,
+                    supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
+                    supertokens_email=account.email,
+                )
+                return enriched_client, None
 
-        enriched_client = CloudflareForwardingClient(
-            forwarding_url=forwarding_url,
-            username=cf_client.username if cf_client else None,
-            secret=cf_client.secret if cf_client else None,
-            owner_email=cf_client.owner_email if cf_client else None,
-            supertokens_token=access_token,
-            supertokens_user_id_prefix=str(user_info.user_id_prefix),
-            supertokens_email=user_info.email,
-        )
-        return enriched_client, None
-
-    # No SuperTokens, use the original client (Basic Auth)
+    # No per-workspace account, use the original client (Basic Auth)
     if cf_client is None:
         return None, _json_error("Cloudflare forwarding not configured", 501)
     return cf_client, None
@@ -176,7 +172,7 @@ def _handle_cloudflare_status(
     _caller_agent_id: CallerAgentIdDep,
 ) -> Response:
     """Get Cloudflare forwarding status for a server."""
-    cf_client, error_response = get_cf_client_with_auth(request)
+    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if error_response is not None:
         return error_response
     assert cf_client is not None
@@ -217,7 +213,7 @@ def _handle_cloudflare_enable(
     body: _CloudflareEnableBody | None = None,
 ) -> Response:
     """Enable Cloudflare forwarding for a server."""
-    cf_client, error_response = get_cf_client_with_auth(request)
+    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if error_response is not None:
         return error_response
     assert cf_client is not None
@@ -263,7 +259,7 @@ def _handle_cloudflare_disable(
     _caller_agent_id: CallerAgentIdDep,
 ) -> Response:
     """Disable Cloudflare forwarding for a server."""
-    cf_client, error_response = get_cf_client_with_auth(request)
+    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if error_response is not None:
         return error_response
     assert cf_client is not None

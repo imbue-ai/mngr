@@ -2,10 +2,8 @@ from inline_snapshot import snapshot
 
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
-from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
 from imbue.minds.desktop_client.proxy import generate_service_worker_js
 from imbue.minds.desktop_client.proxy import generate_websocket_shim_js
-from imbue.minds.desktop_client.proxy import is_electron_client
 from imbue.minds.desktop_client.proxy import rewrite_absolute_paths_in_html
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
@@ -16,58 +14,6 @@ _TEST_AGENT: AgentId = AgentId("agent-00000000000000000000000000000001")
 _TEST_AGENT_2: AgentId = AgentId("agent-00000000000000000000000000000002")
 _TEST_SERVER: ServerName = ServerName("web")
 _TEST_SERVER_2: ServerName = ServerName("api")
-
-
-def test_is_electron_client_detects_electron_user_agent() -> None:
-    assert is_electron_client("Mozilla/5.0 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36") is True
-
-
-def test_is_electron_client_rejects_regular_browser() -> None:
-    assert is_electron_client("Mozilla/5.0 Firefox/130.0") is False
-
-
-def test_is_electron_client_rejects_empty_string() -> None:
-    assert is_electron_client("") is False
-
-
-def test_generate_browser_info_bar_html_contains_info() -> None:
-    html = generate_browser_info_bar_html(
-        agent_id=_TEST_AGENT,
-        server_name=_TEST_SERVER,
-        agent_display_name="my-agent",
-        host_id="remote-host-1",
-    )
-    assert "info-bar" in html
-    assert "my-agent" in html
-    assert "remote-host-1" in html
-    assert str(_TEST_SERVER) in html
-    assert "?_embed=1" in html
-    assert "content-frame" in html
-
-
-def test_generate_browser_info_bar_html_preserves_path() -> None:
-    html = generate_browser_info_bar_html(
-        agent_id=_TEST_AGENT,
-        server_name=_TEST_SERVER,
-        agent_display_name="my-agent",
-        host_id="remote-host-1",
-        path="some/deep/path",
-    )
-    expected_src = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/some/deep/path?_embed=1"
-    assert expected_src in html
-
-
-def test_generate_browser_info_bar_html_preserves_query_string() -> None:
-    html = generate_browser_info_bar_html(
-        agent_id=_TEST_AGENT,
-        server_name=_TEST_SERVER,
-        agent_display_name="my-agent",
-        host_id="remote-host-1",
-        path="some/path",
-        query_string="foo=bar&baz=1",
-    )
-    expected_src = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/some/path?foo=bar&amp;baz=1&amp;_embed=1"
-    assert expected_src in html
 
 
 def test_generate_bootstrap_html_contains_service_worker_registration() -> None:
@@ -92,6 +38,11 @@ def test_generate_service_worker_js_contains_prefix() -> None:
 def test_generate_service_worker_js_rewrites_fetch_urls() -> None:
     js = generate_service_worker_js(_TEST_AGENT_2, _TEST_SERVER_2)
     assert "url.pathname = PREFIX + url.pathname" in js
+
+
+def test_generate_service_worker_js_does_not_exclude_auth_routes() -> None:
+    js = generate_service_worker_js(_TEST_AGENT, _TEST_SERVER)
+    assert "/auth/" not in js
 
 
 def test_generate_websocket_shim_js_contains_prefix() -> None:

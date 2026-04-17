@@ -105,6 +105,9 @@ select = [
     "E",
     "F",
     "B",
+    "I",
+    "UP006",
+    "UP007",
 #    "T",
 #    "SIM",
 ]
@@ -169,6 +172,14 @@ omit = [
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",
     # don't bother with anything in scripts
     "scripts/*",
+]
+
+[tool.coverage.paths]
+# Map sandbox paths back to local paths so coverage data collected on
+# offload Modal sandboxes (rooted at /code/mngr/) can be combined locally.
+source = [
+    ".",
+    "/code/mngr/",
 ]
 
 [tool.importlinter]

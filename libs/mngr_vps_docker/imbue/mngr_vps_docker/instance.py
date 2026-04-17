@@ -395,7 +395,9 @@ class VpsDockerProvider(BaseProviderInstance):
             docker_ssh = self._make_docker_ssh(vps_ip)
             host_store = self._get_existing_host_store(docker_ssh)
             if host_store is None:
-                logger.warning("State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id)
+                logger.warning(
+                    "State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id
+                )
                 return
             existing = host_store.read_host_record(host_id)
             if existing is not None:
@@ -1544,7 +1546,9 @@ class VpsDockerProvider(BaseProviderInstance):
 
         host_store = self._get_existing_host_store(docker_ssh)
         if host_store is None:
-            raise ContainerSetupError(f"State container not found on VPS {docker_ssh.vps_ip} -- cannot save snapshot record")
+            raise ContainerSetupError(
+                f"State container not found on VPS {docker_ssh.vps_ip} -- cannot save snapshot record"
+            )
         host_store.write_host_record(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
@@ -1613,7 +1617,9 @@ class VpsDockerProvider(BaseProviderInstance):
             docker_ssh = self._make_docker_ssh(host_record.vps_ip)
             host_store = self._get_existing_host_store(docker_ssh)
             if host_store is None:
-                raise ContainerSetupError(f"State container not found on VPS {host_record.vps_ip} -- cannot rename host")
+                raise ContainerSetupError(
+                    f"State container not found on VPS {host_record.vps_ip} -- cannot rename host"
+                )
             host_store.write_host_record(updated_record)
 
         return self.get_host(host_id)
