@@ -11,8 +11,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_command(e2e: E2eSession) -> None:
-    # Pin the command so we can assert on it later (the factory would otherwise
-    # pick a random sleep value).
+    # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
     sleep_agent_type = e2e.make_sleep_agent_type(expected_command)
     e2e.write_tutorial_block("""
