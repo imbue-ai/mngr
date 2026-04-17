@@ -1481,13 +1481,13 @@ def _handle_requests_panel(
         f"<body>"
         f"<script>"
         f"function navigateToRequest(eventId, agentId) {{"
-        f'  if (window.minds && window.minds.navigateToRequest) {{'
-        f'    window.minds.navigateToRequest(agentId, eventId);'
-        f'  }} else if (window.minds) {{'
+        f"  if (window.minds && window.minds.navigateToRequest) {{"
+        f"    window.minds.navigateToRequest(agentId, eventId);"
+        f"  }} else if (window.minds) {{"
         f'    window.minds.navigateContent("/requests/" + eventId);'
-        f'  }} else {{'
+        f"  }} else {{"
         f'    window.top.location = "/requests/" + eventId;'
-        f'  }}'
+        f"  }}"
         f"}}"
         f"</script>"
         f"<h2>Requests ({len(pending)})</h2>"
