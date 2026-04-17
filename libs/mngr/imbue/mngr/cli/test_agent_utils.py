@@ -32,7 +32,7 @@ def test_select_agent_interactively_with_host_returns_selected_agent(
 ) -> None:
     """With a real agent, returns the (AgentInterface, OnlineHostInterface) tuple."""
     agent_name = f"test-select-agent-{int(time.time())}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 564738")
 
     # Monkeypatch only the TUI -- return the first agent from the list.
     monkeypatch.setattr(
@@ -57,7 +57,7 @@ def test_select_agent_interactively_with_host_returns_none_when_user_quits(
 ) -> None:
     """With a real agent present, returns None when the TUI returns None (user quit)."""
     agent_name = f"test-select-quit-{int(time.time())}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 564739")
 
     monkeypatch.setattr(
         "imbue.mngr.cli.agent_utils.select_agent_interactively",
@@ -83,7 +83,7 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     raises UserInputError.
     """
     agent_name = f"test-find-stopped-{int(time.time())}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 564740")
 
     # Stop the agent
     stop_result = cli_runner.invoke(stop, [agent_name], obj=plugin_manager, catch_exceptions=False)
@@ -119,7 +119,7 @@ def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
     (the default), a stopped agent causes UserInputError.
     """
     agent_name = f"test-find-stopped-err-{int(time.time())}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 564741")
 
     # Stop the agent
     stop_result = cli_runner.invoke(stop, [agent_name], obj=plugin_manager, catch_exceptions=False)

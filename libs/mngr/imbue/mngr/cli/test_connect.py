@@ -73,7 +73,7 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
 ) -> None:
     """Test the full connect CLI path: argument parsing -> agent resolution -> tmux attach."""
     agent_name = f"test-connect-cli-tmux-{int(time.time())}"
-    session_name = create_test_agent(agent_name)
+    session_name = create_test_agent(agent_name, "sleep 493827")
 
     result = cli_runner.invoke(
         connect,
@@ -266,8 +266,8 @@ def test_connect_cli_non_interactive_selects_most_recent_agent(
     """
     agent_name_old = f"test-connect-old-{int(time.time())}"
     agent_name_new = f"test-connect-new-{int(time.time())}"
-    create_test_agent(agent_name_old)
-    session_new = create_test_agent(agent_name_new)
+    create_test_agent(agent_name_old, "sleep 192837")
+    session_new = create_test_agent(agent_name_new, "sleep 283746")
 
     cli_runner.invoke(
         connect,
