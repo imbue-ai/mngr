@@ -573,65 +573,6 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
 
 
 # =============================================================================
-# Tests for _clear_snapshots_from_host_record
-# =============================================================================
-
-
-def test_clear_snapshots_from_host_record_clears_snapshots(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """_clear_snapshots_from_host_record should clear snapshots and write updated record."""
-    host_id = HostId.generate()
-    snapshot = _make_snapshot_record("initial")
-    host_record = _make_host_record(host_id, snapshots=[snapshot])
-
-    written_records: list[HostRecord] = []
-
-    def capture_write(record: HostRecord) -> None:
-        written_records.append(record)
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=host_record),
-        patch.object(modal_provider, "_write_host_record", side_effect=capture_write),
-    ):
-        modal_provider._clear_snapshots_from_host_record(host_id)
-
-    assert len(written_records) == 1
-    assert written_records[0].certified_host_data.snapshots == []
-
-
-def test_clear_snapshots_from_host_record_no_op_when_no_snapshots(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """_clear_snapshots_from_host_record should not write when there are no snapshots."""
-    host_id = HostId.generate()
-    host_record = _make_host_record(host_id, snapshots=[])
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=host_record),
-        patch.object(modal_provider, "_write_host_record") as mock_write,
-    ):
-        modal_provider._clear_snapshots_from_host_record(host_id)
-
-    mock_write.assert_not_called()
-
-
-def test_clear_snapshots_from_host_record_no_op_when_no_record(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """_clear_snapshots_from_host_record should not write when host record doesn't exist."""
-    host_id = HostId.generate()
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=None),
-        patch.object(modal_provider, "_write_host_record") as mock_write,
-    ):
-        modal_provider._clear_snapshots_from_host_record(host_id)
-
-    mock_write.assert_not_called()
-
-
-# =============================================================================
 # Build args parsing tests (no network required)
 # =============================================================================
 

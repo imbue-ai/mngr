@@ -203,39 +203,6 @@ def test_save_failed_host_record(testing_provider: ModalProviderInstance) -> Non
     assert record.ssh_host is None
 
 
-def test_clear_snapshots_from_host_record(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    snapshots = [
-        make_snapshot("snap-1", "s1"),
-        make_snapshot("snap-2", "s2"),
-    ]
-    record = make_host_record(host_id=host_id, snapshots=snapshots)
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_snapshots(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    record = make_host_record(host_id=host_id, snapshots=[])
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_record(testing_provider: ModalProviderInstance) -> None:
-    # Should not raise
-    testing_provider._clear_snapshots_from_host_record(HostId.generate())
-
-
 # ---------------------------------------------------------------------------
 # Agent Persistence Tests
 # ---------------------------------------------------------------------------

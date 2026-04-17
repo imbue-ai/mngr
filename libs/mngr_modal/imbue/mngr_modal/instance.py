@@ -665,26 +665,6 @@ class ModalProviderInstance(BaseProviderInstance):
         )
         logger.debug("Marked host as DESTROYED: {}", host_id)
 
-    def _clear_snapshots_from_host_record(self, host_id: HostId) -> None:
-        """Clear all snapshot records from a host record on the state volume."""
-        host_record = self._read_host_record(host_id, use_cache=False)
-        if host_record is None:
-            return
-
-        if not host_record.certified_host_data.snapshots:
-            return
-
-        updated_certified_data = host_record.certified_host_data.model_copy_update(
-            to_update(host_record.certified_host_data.field_ref().snapshots, []),
-            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        self._write_host_record(
-            host_record.model_copy_update(
-                to_update(host_record.field_ref().certified_host_data, updated_certified_data),
-            )
-        )
-        logger.debug("Cleared snapshots from host record: {}", host_id)
-
     def _list_all_host_records(self, cg: ConcurrencyGroup) -> list[HostRecord]:
         """List all host records stored on the state volume.
 
