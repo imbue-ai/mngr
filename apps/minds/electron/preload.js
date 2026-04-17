@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('minds', {
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
 
+  // Requests panel
+  toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
+  openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
+
   // Actions
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),

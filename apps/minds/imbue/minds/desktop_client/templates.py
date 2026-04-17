@@ -55,7 +55,8 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       padding: 20px 16px; font-size: 14px; color: #334155;
       border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
-    tbody td:last-child { text-align: right; }
+    tbody td:last-child { width: 48px; }
+    tbody td:last-child .menu-btn { float: right; }
     .ws-name { font-weight: 500; color: #0f172a; }
     .shared-with { color: #94a3b8; }
     .menu-wrapper { position: relative; display: inline-block; }
@@ -101,88 +102,15 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
-            <div class="menu-wrapper">
-              <button class="menu-btn" onclick="event.stopPropagation(); toggleMenu('{{ agent_id }}')"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-              <div class="menu-dropdown" id="menu-{{ agent_id }}">
-                {% if telegram_enabled %}
-                  {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
-                <span class="menu-item" style="color: #16a34a; cursor: default;">Telegram active</span>
-                  {% else %}
-                <button class="menu-item" id="tg-btn-{{ agent_id }}"
-                        onclick="event.stopPropagation(); setupTelegram('{{ agent_id }}')">Setup Telegram</button>
-                  {% endif %}
-                {% endif %}
-                <button class="menu-item destructive"
-                        onclick="event.stopPropagation(); alert('Not implemented')">Delete</button>
-              </div>
-            </div>
+            <button class="menu-btn" onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'" title="Settings">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    <script>
-    function toggleMenu(agentId) {
-      document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
-        if (el.id !== 'menu-' + agentId) el.classList.remove('open');
-      });
-      document.getElementById('menu-' + agentId).classList.toggle('open');
-    }
-    document.addEventListener('click', function(e) {
-      if (!e.target.closest('.menu-wrapper')) {
-        document.querySelectorAll('.menu-dropdown.open').forEach(function(el) {
-          el.classList.remove('open');
-        });
-      }
-    });
-    async function setupTelegram(agentId) {
-      var btn = document.getElementById('tg-btn-' + agentId);
-      btn.disabled = true;
-      btn.textContent = 'Setting up...';
-      try {
-        var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
-        if (!resp.ok) {
-          var data = await resp.json();
-          alert('Failed: ' + (data.error || resp.statusText));
-          btn.disabled = false;
-          btn.textContent = 'Setup Telegram';
-          return;
-        }
-        pollTelegramStatus(agentId, btn);
-      } catch (e) {
-        alert('Failed: ' + e.message);
-        btn.disabled = false;
-        btn.textContent = 'Setup Telegram';
-      }
-    }
-    function pollTelegramStatus(agentId, btn) {
-      var interval = setInterval(async function() {
-        try {
-          var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
-          if (!resp.ok) return;
-          var data = await resp.json();
-          btn.textContent = formatStatus(data.status);
-          if (data.status === 'DONE') {
-            clearInterval(interval);
-            btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
-            btn.disabled = false;
-            btn.style.color = '#16a34a';
-            btn.style.cursor = 'default';
-          } else if (data.status === 'FAILED') {
-            clearInterval(interval);
-            btn.textContent = 'Setup failed';
-            btn.disabled = false;
-            alert('Telegram setup failed: ' + (data.error || 'unknown error'));
-          }
-        } catch (e) {}
-      }, 2000);
-    }
-    function formatStatus(s) {
-      return {'CHECKING_CREDENTIALS':'Checking credentials...','WAITING_FOR_LOGIN':'Waiting for login...',
-        'CREATING_BOT':'Creating bot...','INJECTING_CREDENTIALS':'Injecting credentials...',
-        'DONE':'Done','FAILED':'Failed'}[s] || s;
-    }
-    </script>
+    <script></script>
     {% else %}
       {% if is_discovering %}
     <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">
@@ -709,24 +637,24 @@ body {
   width: 260px; height: calc(100% - """
     + str(_CHROME_TITLEBAR_HEIGHT)
     + """px);
-  background: #f3f2ef; z-index: 50;
-  box-shadow: 4px 0 12px rgba(0,0,0,0.15);
+  background: #0f172a; z-index: 50;
+  box-shadow: 4px 0 12px rgba(0,0,0,0.3);
   transform: translateX(-100%);
   transition: transform 200ms ease-in-out;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 0;
 }
 #sidebar-panel.sidebar-visible { transform: translateX(0); }
 
 .sidebar-item {
-  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
 }
-.sidebar-item:hover { background: #edecea; }
+.sidebar-item:hover { background: rgba(255,255,255,0.06); }
 
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
 }
 
 /* Content area (browser mode) */
@@ -759,8 +687,12 @@ body {
   </div>
   <span class="minds-title" id="page-title">Minds</span>
   <div class="minds-user-area">
-    <button id="user-btn" class="minds-user-btn" title="Account">Login</button>
+    <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>
+  <button id="requests-toggle" title="Requests" style="position:relative;">
+    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    <span id="requests-badge" style="display:none;position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#ef4444;"></span>
+  </button>
   <div class="minds-wc">
     <button id="min-btn" title="Minimize">
       <svg viewBox="0 0 12 12" style="width:12px;height:12px"><line x1="2" y1="6" x2="10" y2="6"/></svg>
@@ -874,19 +806,24 @@ function updateAuthUI(data) {
   var btn = document.getElementById('user-btn');
   if (data.signedIn) {
     signedIn = true;
-    btn.textContent = data.displayName || data.email || 'Account';
-    btn.title = data.email || 'Account';
+    btn.textContent = 'Manage account(s)';
+    btn.title = data.email || 'Manage accounts';
   } else {
     signedIn = false;
-    btn.textContent = 'Login';
+    btn.textContent = 'Log in';
     btn.title = 'Sign in to your account';
   }
 }
 refreshAuthStatus();
 
 document.getElementById('user-btn').onclick = function() {
-  if (signedIn) navigateContent('/auth/settings');
+  if (signedIn) navigateContent('/accounts');
   else navigateContent('/auth/login');
+};
+
+// -- Requests panel toggle --
+document.getElementById('requests-toggle').onclick = function() {
+  if (isElectron) window.minds.toggleRequestsPanel();
 };
 
 // -- SSE for workspace list (browser mode sidebar) --
@@ -896,10 +833,33 @@ function renderWorkspaces(workspaces) {
     container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
     return;
   }
-  container.innerHTML = workspaces.map(function(w) {
-    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
-      (w.name || w.id) + '</div>';
-  }).join('');
+  // Group by account
+  var groups = {};
+  workspaces.forEach(function(w) {
+    var key = w.account || 'Private';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(w);
+  });
+  // Render with Private first, then alphabetical
+  var keys = Object.keys(groups).sort(function(a, b) {
+    if (a === 'Private') return -1;
+    if (b === 'Private') return 1;
+    return a.localeCompare(b);
+  });
+  var html = '';
+  keys.forEach(function(key) {
+    var label = key === 'Private' ? 'PRIVATE' : key;
+    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
+    groups[key].forEach(function(w) {
+      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+    });
+  });
+  container.innerHTML = html;
+}
+
+function updateRequestsBadge(count) {
+  var badge = document.getElementById('requests-badge');
+  if (badge) badge.style.display = count > 0 ? 'block' : 'none';
 }
 
 var evtSource = null;
@@ -911,6 +871,7 @@ function connectSSE() {
       var data = JSON.parse(event.data);
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
+      if (data.type === 'request_count') updateRequestsBadge(data.count);
     } catch(e) {}
   };
   evtSource.onerror = function() {
@@ -935,24 +896,30 @@ _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #f3f2ef;
+  background: #0f172a;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 0;
+}
+
+h2 {
+  font-size: 15px; color: #e2e8f0; padding: 12px;
+  margin: 0; border-bottom: 1px solid #334155; font-weight: 500;
 }
 
 .sidebar-item {
-  padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #37352f; border-radius: 6px; margin: 2px 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
 }
-.sidebar-item:hover { background: #edecea; }
+.sidebar-item:hover { background: rgba(255,255,255,0.06); }
 
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #787774; text-align: center;
+  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
 }
 </style>
 </head>
 <body>
+<h2>Workspaces</h2>
 <div id="sidebar-workspaces">
   <div class="sidebar-empty">No workspaces</div>
 </div>
@@ -969,10 +936,26 @@ function renderWorkspaces(workspaces) {
     container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
     return;
   }
-  container.innerHTML = workspaces.map(function(w) {
-    return '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' +
-      (w.name || w.id) + '</div>';
-  }).join('');
+  var groups = {};
+  workspaces.forEach(function(w) {
+    var key = w.account || 'Private';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(w);
+  });
+  var keys = Object.keys(groups).sort(function(a, b) {
+    if (a === 'Private') return -1;
+    if (b === 'Private') return 1;
+    return a.localeCompare(b);
+  });
+  var html = '';
+  keys.forEach(function(key) {
+    var label = key === 'Private' ? 'PRIVATE' : key;
+    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
+    groups[key].forEach(function(w) {
+      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+    });
+  });
+  container.innerHTML = html;
 }
 
 var evtSource = null;
@@ -1029,3 +1012,558 @@ def render_sidebar_page() -> str:
     """
     template = _JINJA_ENV.from_string(_SIDEBAR_TEMPLATE)
     return template.render()
+
+
+# -- Page styles shared across settings, sharing, and accounts pages --
+
+_PAGE_STYLES: Final[str] = """
+    body { background: #f8fafc; padding: 0; font-size: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; }
+    .page { max-width: 640px; margin: 0 auto; padding: 48px 24px; }
+    h1 { font-size: 20px; color: #0f172a; margin-bottom: 4px; }
+    h2 { font-size: 15px; color: #64748b; margin: 28px 0 10px; padding-top: 20px;
+      border-top: 1px solid #e2e8f0; font-weight: 500; }
+    p { color: #334155; margin: 6px 0; font-size: 14px; line-height: 1.5; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .subtitle { color: #94a3b8; font-size: 12px; margin-bottom: 20px; }
+    .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 6px;
+      cursor: pointer; font-size: 13px; font-weight: 500; font-family: inherit; }
+    .btn-primary { background: #1e293b; color: white; }
+    .btn-primary:hover { background: #334155; }
+    .btn-success { background: #065f46; color: #d1fae5; }
+    .btn-success:hover { background: #047857; }
+    .btn-danger { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .btn-danger:hover { background: #fee2e2; }
+    .btn-secondary { background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .select-input { padding: 8px 12px; border-radius: 6px; background: white;
+      color: #0f172a; border: 1px solid #cbd5e1; font-size: 13px; font-family: inherit; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 8px 0; }
+    .warning { color: #92400e; font-size: 13px; background: #fffbeb; border: 1px solid #fde68a;
+      border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+    .input-row { display: flex; gap: 8px; margin: 8px 0; }
+    .text-input { flex: 1; padding: 8px 12px; border-radius: 6px; border: 1px solid #cbd5e1;
+      font-size: 13px; font-family: inherit; }
+    .email-tag { display: inline-flex; align-items: center; gap: 4px; background: #f1f5f9;
+      border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px 8px; margin: 2px; font-size: 13px; }
+    .email-tag button { background: none; border: none; cursor: pointer; color: #94a3b8;
+      font-size: 16px; line-height: 1; padding: 0 2px; }
+    .email-tag button:hover { color: #dc2626; }
+    .url-box { display: flex; gap: 8px; align-items: center; background: #f8fafc;
+      border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+    .url-box input { flex: 1; background: none; border: none; font-size: 13px; color: #0f172a;
+      font-family: monospace; outline: none; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-enabled { background: #22c55e; }
+    .status-disabled { background: #94a3b8; }
+    .loading { color: #94a3b8; padding: 16px 0; }
+    .error { color: #dc2626; margin: 8px 0; }
+    .actions { display: flex; gap: 8px; margin-top: 20px; }
+"""
+
+
+_ASSOCIATE_SNIPPET: Final[str] = """
+    <div class="card" style="margin:12px 0;">
+      <p style="font-weight:500;margin-bottom:8px;">This workspace needs to be associated with an account before sharing can be configured.</p>
+      {% if accounts %}
+      <form method="POST" action="/workspace/{{ agent_id }}/associate" style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <select name="user_id" class="select-input">
+          {% for acct in accounts %}
+          <option value="{{ acct.user_id }}">{{ acct.email }}</option>
+          {% endfor %}
+        </select>
+        {% if redirect_url %}<input type="hidden" name="redirect" value="{{ redirect_url }}">{% endif %}
+        <button type="submit" class="btn btn-primary">Associate</button>
+      </form>
+      {% else %}
+      <p style="margin-top:8px;"><a href="/auth/login">Sign in or create an account</a> to enable sharing.</p>
+      {% endif %}
+    </div>
+"""
+
+
+_SHARING_EDITOR_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>{{ title }}</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+    .acl-row { display:flex; align-items:center; justify-content:space-between;
+      padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; margin:4px 0; }
+    .acl-existing { background:white; }
+    .acl-added { background:#f0fdf4; border-color:#bbf7d0; }
+    .acl-removed { background:#fef2f2; border-color:#fecaca; text-decoration:line-through; }
+    .acl-prefix { font-weight:600; margin-right:6px; font-size:14px; }
+    .acl-prefix-add { color:#16a34a; }
+    .acl-prefix-remove { color:#dc2626; }
+    .acl-x { background:none; border:none; cursor:pointer; color:#94a3b8;
+      font-size:18px; line-height:1; padding:0 4px; }
+    .acl-x:hover { color:#64748b; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ server_name }}</code>
+      in <a href="/forwarding/{{ agent_id }}/" style="font-size:20px;">{{ ws_name or agent_id }}</a>
+      {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
+
+    {% if not has_account %}
+    """
+    + _ASSOCIATE_SNIPPET
+    + """
+    {% if is_request %}
+    <form method="POST" action="/requests/{{ request_id }}/deny" style="margin-top:8px;">
+      <button type="submit" class="btn btn-danger">Deny request</button>
+    </form>
+    {% endif %}
+    {% else %}
+
+    <div id="sharing-editor">
+      <div class="loading" id="loading-state">Loading...</div>
+    </div>
+
+    <div id="editor-content" style="display:none;">
+      <div id="url-section" style="display:none;margin-bottom:16px;">
+        <p style="font-weight:500;margin-bottom:4px;">Shared URL</p>
+        <div class="url-box">
+          <input type="text" id="share-url" readonly onclick="this.select()">
+          <button class="btn btn-secondary" onclick="copyUrl()" id="copy-btn">Copy</button>
+        </div>
+      </div>
+
+      <h2 style="border-top:none;padding-top:0;margin-top:0;">Access List</h2>
+      <div id="email-list"></div>
+      <div class="input-row">
+        <input type="email" class="text-input" id="new-email" placeholder="Add email address"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();addEmail();}">
+        <button class="btn btn-secondary" onclick="addEmail()">Add</button>
+      </div>
+
+      <div class="actions" id="action-buttons" style="justify-content:space-between;">
+        {% if is_request %}
+        <button class="btn btn-danger" id="deny-btn" onclick="submitDeny()">Deny</button>
+        {% else %}
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="window.location='/workspace/{{ agent_id }}/settings'">Cancel</button>
+          <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
+            Disable Sharing
+          </button>
+        </div>
+        {% endif %}
+        <button class="btn btn-success" id="action-btn" onclick="submitUpdate()">
+          Update
+        </button>
+      </div>
+      <div id="submit-spinner" style="display:none;padding:16px 0;">
+        <span style="color:#94a3b8;">Saving changes...</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  var proposedEmails = {{ initial_emails | tojson }};
+  var serverName = {{ server_name | tojson }};
+  var agentId = {{ agent_id | tojson }};
+  var isRequest = {{ is_request | tojson }};
+  var requestId = {{ request_id | tojson }};
+  var wsName = {{ (ws_name or agent_id) | tojson }};
+  var accountEmail = {{ (account_email or '') | tojson }};
+
+  function setHeading(isEnabled) {
+    var h = document.getElementById('page-heading');
+    if (!h) return;
+    var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serverName + '</code>';
+    var ws = '<a href="/forwarding/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
+    var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
+    if (isEnabled) {
+      h.innerHTML = code + ' shared in ' + ws + acct;
+    } else {
+      h.innerHTML = 'Share ' + code + ' in ' + ws + acct + '?';
+    }
+  }
+
+  // Three-state ACL: existing (already on server), added (proposed new), removed (proposed removal)
+  var existing = [];  // emails currently on the server
+  var added = [];     // emails to add
+  var removed = [];   // emails to remove from existing
+
+  function renderACL() {
+    var container = document.getElementById('email-list');
+    var rows = [];
+
+    // Existing emails (not removed)
+    existing.forEach(function(e) {
+      if (removed.indexOf(e) >= 0) return;
+      rows.push(
+        '<div class="acl-row acl-existing">' +
+        '<span style="font-size:13px;color:#334155;">' + e + '</span>' +
+        '<button class="acl-x" onclick="markRemoved(\\'' + e + '\\')">&times;</button></div>'
+      );
+    });
+
+    // Added emails
+    added.forEach(function(e) {
+      rows.push(
+        '<div class="acl-row acl-added">' +
+        '<span><span class="acl-prefix acl-prefix-add">+</span>' +
+        '<span style="font-size:13px;color:#334155;">' + e + '</span></span>' +
+        '<button class="acl-x" onclick="unmarkAdded(\\'' + e + '\\')">&times;</button></div>'
+      );
+    });
+
+    // Removed emails
+    removed.forEach(function(e) {
+      rows.push(
+        '<div class="acl-row acl-removed">' +
+        '<span><span class="acl-prefix acl-prefix-remove">&minus;</span>' +
+        '<span style="font-size:13px;color:#94a3b8;">' + e + '</span></span>' +
+        '<button class="acl-x" onclick="unmarkRemoved(\\'' + e + '\\')">&times;</button></div>'
+      );
+    });
+
+    if (rows.length === 0) {
+      container.innerHTML = '<p style="color:#94a3b8;font-size:13px;">No one in the access list</p>';
+    } else {
+      container.innerHTML = rows.join('');
+    }
+  }
+
+  function addEmail() {
+    var input = document.getElementById('new-email');
+    var email = input.value.trim();
+    if (!email) return;
+    // If it's in removed, just un-remove it (restore to existing)
+    if (removed.indexOf(email) >= 0) {
+      removed = removed.filter(function(e) { return e !== email; });
+    } else if (existing.indexOf(email) < 0 && added.indexOf(email) < 0) {
+      added.push(email);
+    }
+    input.value = '';
+    renderACL();
+  }
+
+  function markRemoved(email) {
+    if (removed.indexOf(email) < 0) removed.push(email);
+    renderACL();
+  }
+
+  function unmarkAdded(email) {
+    added = added.filter(function(e) { return e !== email; });
+    renderACL();
+  }
+
+  function unmarkRemoved(email) {
+    removed = removed.filter(function(e) { return e !== email; });
+    renderACL();
+  }
+
+  function getFinalEmails() {
+    var result = existing.filter(function(e) { return removed.indexOf(e) < 0; });
+    return result.concat(added);
+  }
+
+  function setSubmitting(submitting) {
+    document.getElementById('action-buttons').style.display = submitting ? 'none' : 'flex';
+    document.getElementById('submit-spinner').style.display = submitting ? 'block' : 'none';
+    var inputs = document.querySelectorAll('input, button, select');
+    inputs.forEach(function(el) { el.disabled = submitting; });
+    var editor = document.getElementById('editor-content');
+    editor.style.opacity = submitting ? '0.5' : '1';
+    editor.style.pointerEvents = submitting ? 'none' : 'auto';
+  }
+
+  function submitUpdate() {
+    setSubmitting(true);
+    var form = new FormData();
+    form.append('emails', JSON.stringify(getFinalEmails()));
+    fetch('/sharing/' + agentId + '/' + serverName + '/enable', { method: 'POST', body: form })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+      .catch(function(err) { alert('Failed: ' + err.message); setSubmitting(false); });
+  }
+
+  function submitDisable() {
+    setSubmitting(true);
+    fetch('/sharing/' + agentId + '/' + serverName + '/disable', { method: 'POST' })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+      .catch(function(err) { alert('Failed: ' + err.message); setSubmitting(false); });
+  }
+
+  function submitDeny() {
+    setSubmitting(true);
+    fetch('/requests/' + requestId + '/deny', { method: 'POST' })
+      .then(function(r) { window.location.href = '/'; })
+      .catch(function(err) { alert('Failed: ' + err.message); setSubmitting(false); });
+  }
+
+  function copyUrl() {
+    var input = document.getElementById('share-url');
+    navigator.clipboard.writeText(input.value);
+    var btn = document.getElementById('copy-btn');
+    btn.textContent = 'Copied';
+    setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+  }
+
+  // Load current sharing status, then compute the diff
+  fetch('/api/sharing-status/' + agentId + '/' + serverName)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      document.getElementById('loading-state').style.display = 'none';
+      document.getElementById('editor-content').style.display = 'block';
+
+      // Extract emails from auth_rules
+      var serverEmails = [];
+      if (data.auth_rules) {
+        data.auth_rules.forEach(function(rule) {
+          (rule.include || []).forEach(function(inc) {
+            if (inc.email && inc.email.email && serverEmails.indexOf(inc.email.email) < 0) {
+              serverEmails.push(inc.email.email);
+            }
+          });
+        });
+      }
+
+      if (data.enabled) {
+        // Sharing is already on: server emails are "existing"
+        existing = serverEmails;
+        document.getElementById('action-btn').textContent = 'Update';
+        setHeading(true);
+        if (data.url) {
+          document.getElementById('url-section').style.display = 'block';
+          document.getElementById('share-url').value = data.url;
+        }
+        var disableBtn = document.getElementById('disable-btn');
+        if (disableBtn) disableBtn.style.display = 'inline-block';
+      } else {
+        // Not yet enabled: default tunnel permissions + proposed are all "added"
+        serverEmails.forEach(function(e) {
+          if (added.indexOf(e) < 0) added.push(e);
+        });
+        document.getElementById('action-btn').textContent = 'Share';
+        setHeading(false);
+      }
+
+      // Proposed emails that aren't already existing or added go to added
+      proposedEmails.forEach(function(e) {
+        if (existing.indexOf(e) < 0 && added.indexOf(e) < 0) {
+          added.push(e);
+        }
+      });
+
+      renderACL();
+    })
+    .catch(function(err) {
+      document.getElementById('loading-state').innerHTML =
+        '<p class="error">Failed to load sharing status: ' + err.message + '</p>';
+      document.getElementById('editor-content').style.display = 'block';
+      // Fall back: treat all proposed as added
+      added = proposedEmails.slice();
+      renderACL();
+    });
+  </script>
+    {% endif %}
+</body>
+</html>"""
+)
+
+
+@pure
+def render_sharing_editor(
+    agent_id: str,
+    server_name: str,
+    title: str,
+    initial_emails: list[str] | None = None,
+    is_request: bool = False,
+    request_id: str = "",
+    has_account: bool = True,
+    accounts: Sequence[object] | None = None,
+    redirect_url: str = "",
+    ws_name: str = "",
+    account_email: str = "",
+) -> str:
+    """Render the sharing editor page used for both request approval and direct editing."""
+    template = _JINJA_ENV.from_string(_SHARING_EDITOR_TEMPLATE)
+    return template.render(
+        title=title,
+        agent_id=agent_id,
+        server_name=server_name,
+        initial_emails=initial_emails or [],
+        is_request=is_request,
+        request_id=request_id,
+        has_account=has_account,
+        accounts=accounts or [],
+        redirect_url=redirect_url,
+        ws_name=ws_name,
+        account_email=account_email,
+    )
+
+
+_WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Settings: {{ ws_name }}</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>{{ ws_name }}</h1>
+    <p class="subtitle">{{ agent_id }}</p>
+
+    <h2>Account</h2>
+    <div id="account-section">
+    {% if current_account %}
+    <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+    <p class="warning">Disassociating will remove all sharing (tunnels) for this workspace.
+      You will need to set up sharing again after re-associating.</p>
+    <button class="btn btn-danger" id="disassociate-btn" onclick="submitDisassociate()">Disassociate</button>
+    <span id="disassociate-spinner" style="display:none;color:#94a3b8;margin-left:8px;">Disassociating...</span>
+    {% else %}
+    """
+    + _ASSOCIATE_SNIPPET
+    + """
+    {% endif %}
+    </div>
+
+    <h2>Sharing</h2>
+    {% for server in servers %}
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-weight:500;">{{ server }}</span>
+      <a href="/sharing/{{ agent_id }}/{{ server }}" class="btn btn-secondary">Manage sharing</a>
+    </div>
+    {% else %}
+    <p style="color:#94a3b8;">No servers discovered for this workspace.</p>
+    {% endfor %}
+
+    {% if telegram_section %}
+    <h2>Telegram</h2>
+    {{ telegram_section | safe }}
+    {% endif %}
+
+    <h2>Danger Zone</h2>
+    <p style="color:#94a3b8;font-size:13px;margin-bottom:8px;">
+      Permanently delete this workspace and all its data.</p>
+    <button class="btn btn-danger" onclick="alert('Not implemented')">Delete workspace</button>
+
+    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
+  </div>
+
+  <script>
+  function submitDisassociate() {
+    var btn = document.getElementById('disassociate-btn');
+    var spinner = document.getElementById('disassociate-spinner');
+    btn.disabled = true;
+    spinner.style.display = 'inline';
+    var section = document.getElementById('account-section');
+    section.style.opacity = '0.5';
+    section.style.pointerEvents = 'none';
+    fetch('/workspace/{{ agent_id }}/disassociate', { method: 'POST' })
+      .then(function() { window.location.reload(); })
+      .catch(function(err) {
+        alert('Failed: ' + err.message);
+        btn.disabled = false;
+        spinner.style.display = 'none';
+        section.style.opacity = '1';
+        section.style.pointerEvents = 'auto';
+      });
+  }
+  {% if telegram_js %}
+  {{ telegram_js | safe }}
+  {% endif %}
+  </script>
+</body>
+</html>"""
+)
+
+
+@pure
+def render_workspace_settings(
+    agent_id: str,
+    ws_name: str,
+    current_account: object | None,
+    accounts: Sequence[object],
+    servers: Sequence[str],
+    telegram_section: str = "",
+    telegram_js: str = "",
+) -> str:
+    """Render the workspace settings page."""
+    template = _JINJA_ENV.from_string(_WORKSPACE_SETTINGS_TEMPLATE)
+    return template.render(
+        agent_id=agent_id,
+        ws_name=ws_name,
+        current_account=current_account,
+        accounts=accounts,
+        servers=servers,
+        telegram_section=telegram_section,
+        telegram_js=telegram_js,
+    )
+
+
+_ACCOUNTS_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Manage Accounts</title>
+  <style>"""
+    + _PAGE_STYLES
+    + """
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>Manage Accounts</h1>
+
+    {% if accounts %}
+    {% for acct in accounts %}
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-weight:500;color:#0f172a;">{{ acct.email }}</div>
+        <div style="font-size:12px;color:#94a3b8;">{{ acct.workspace_ids | length }} workspace(s)
+          {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        {% if acct.user_id | string != default_account_id %}
+        <form method="POST" action="/accounts/set-default">
+          <input type="hidden" name="user_id" value="{{ acct.user_id }}">
+          <button type="submit" class="btn btn-secondary">Set default</button>
+        </form>
+        {% else %}
+        <span class="btn btn-secondary" style="cursor:default;opacity:0.6;">Default</span>
+        {% endif %}
+        <form method="POST" action="/accounts/{{ acct.user_id }}/logout">
+          <button type="submit" class="btn btn-danger">Log out</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p style="color:#94a3b8;">No accounts logged in.</p>
+    {% endif %}
+
+    <div style="margin-top:16px;">
+      <a href="/auth/login" class="btn btn-primary">Add account</a>
+    </div>
+    <div style="margin-top:16px;"><a href="/">&larr; Back to workspaces</a></div>
+  </div>
+</body>
+</html>"""
+)
+
+
+@pure
+def render_accounts_page(
+    accounts: Sequence[object],
+    default_account_id: str | None = None,
+) -> str:
+    """Render the manage accounts page."""
+    template = _JINJA_ENV.from_string(_ACCOUNTS_PAGE_TEMPLATE)
+    return template.render(
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )

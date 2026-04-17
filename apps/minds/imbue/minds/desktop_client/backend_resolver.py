@@ -31,6 +31,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 
 SERVERS_EVENT_SOURCE_NAME: Final[str] = "servers"
+REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 
 
 class AgentDisplayInfo(FrozenModel):
@@ -282,6 +283,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _initial_discovery_done: bool = PrivateAttr(default=False)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
+    _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or server data changes.
@@ -387,6 +389,32 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def has_completed_initial_discovery(self) -> bool:
         with self._lock:
             return self._initial_discovery_done
+
+    def add_on_request_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a request event arrives.
+
+        The callback receives (agent_id_str, raw_json_line).
+        """
+        with self._lock:
+            self._on_request_callbacks.append(callback)
+
+    def remove_on_request_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Unregister a request event callback."""
+        with self._lock:
+            try:
+                self._on_request_callbacks.remove(callback)
+            except ValueError:
+                pass
+
+    def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
+        """Invoke all registered request event callbacks."""
+        with self._lock:
+            callbacks = list(self._on_request_callbacks)
+        for callback in callbacks:
+            try:
+                callback(agent_id_str, raw_line)
+            except (OSError, RuntimeError) as e:
+                logger.warning("Request event callback failed: {}", e)
 
 
 # -- MngrStreamManager --
@@ -716,7 +744,13 @@ class MngrStreamManager(MutableModel):
                 self._start_events_stream(AgentId(aid_str))
 
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
-        """Handle a line of output from mngr events --follow for a specific agent."""
+        """Handle a line of output from mngr events --follow for a specific agent.
+
+        Differentiates between server events and request events by checking
+        the ``source`` field in the event envelope. Server events are handled
+        by updating the resolver's server map. Request events are forwarded
+        to registered request callbacks.
+        """
         if not is_stdout:
             stripped = line.strip()
             if stripped:
@@ -728,6 +762,10 @@ class MngrStreamManager(MutableModel):
         aid_str = str(agent_id)
         try:
             raw = json.loads(stripped)
+            source = raw.get("source", "")
+            if source == REQUESTS_EVENT_SOURCE_NAME:
+                self.resolver._fire_on_request(aid_str, stripped)
+                return
             record = parse_server_log_record(raw)
             servers = self._events_servers.get(aid_str)
             if servers is None:
@@ -738,10 +776,10 @@ class MngrStreamManager(MutableModel):
                 servers[str(record.server)] = record.url
             self.resolver.update_servers(agent_id, dict(servers))
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
+            logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> servers --follow for a single workspace agent."""
+        """Start mngr events <agent-id> servers requests --follow for a workspace agent."""
         if self._cg.is_shutting_down():
             logger.debug("Skipping events stream for {} -- shutting down", agent_id)
             return
@@ -752,7 +790,15 @@ class MngrStreamManager(MutableModel):
         logger.info("Starting events stream for agent {}", aid_str)
         try:
             process = self._cg.run_process_in_background(
-                command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
+                command=[
+                    self.mngr_binary,
+                    "events",
+                    aid_str,
+                    SERVERS_EVENT_SOURCE_NAME,
+                    REQUESTS_EVENT_SOURCE_NAME,
+                    "--follow",
+                    "--quiet",
+                ],
                 on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
                 cwd=Path.home(),
             )
