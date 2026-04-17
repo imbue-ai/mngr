@@ -44,6 +44,7 @@ class ScheduleRemoveCliOptions(CommonCliOptions):
     """Options for the schedule remove subcommand."""
 
     names: tuple[str, ...]
+    provider: str
     force: bool
 
 
@@ -58,4 +59,4 @@ class ScheduleRunCliOptions(CommonCliOptions):
     """Options for the schedule run subcommand."""
 
     name: str
-    local: bool
+    provider: str

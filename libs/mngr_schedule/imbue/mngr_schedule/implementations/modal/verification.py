@@ -60,6 +60,51 @@ def build_modal_run_command(cron_runner_path: Path, modal_env_name: str) -> list
 _AGENT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"Starting agent\s+(\S+)")
 
 
+def _capture_agent_output(agent_name: str) -> None:
+    """Capture and log the tmux screen and transcript for an agent.
+
+    Runs both ``mngr capture --full`` (tmux scrollback) and
+    ``mngr transcript`` (structured message history). Both are
+    best-effort: failures are logged as warnings. This should be called
+    before destroying the agent so the sandbox is still alive.
+    """
+    # Capture tmux scrollback (works for all agent types)
+    logger.info("Capturing tmux scrollback for agent '{}'", agent_name)
+    with ConcurrencyGroup(name="mngr-capture") as cg:
+        capture_result = cg.run_process_to_completion(
+            ["uv", "run", "mngr", "capture", agent_name, "--full"],
+            is_checked_after=False,
+            timeout=60.0,
+        )
+    if capture_result.returncode == 0:
+        logger.info("Tmux scrollback for agent '{}':\n{}", agent_name, capture_result.stdout)
+    else:
+        logger.warning(
+            "Could not capture tmux scrollback for '{}' (exit {}): {}",
+            agent_name,
+            capture_result.returncode,
+            capture_result.stderr,
+        )
+
+    # Capture structured transcript (may not be available for all agent types)
+    logger.info("Capturing transcript for agent '{}'", agent_name)
+    with ConcurrencyGroup(name="mngr-transcript") as cg:
+        transcript_result = cg.run_process_to_completion(
+            ["uv", "run", "mngr", "transcript", agent_name, "--format", "human"],
+            is_checked_after=False,
+            timeout=60.0,
+        )
+    if transcript_result.returncode == 0:
+        logger.info("Transcript for agent '{}':\n{}", agent_name, transcript_result.stdout)
+    else:
+        logger.warning(
+            "Could not capture transcript for '{}' (exit {}): {}",
+            agent_name,
+            transcript_result.returncode,
+            transcript_result.stderr,
+        )
+
+
 def _destroy_agent(agent_name: str) -> None:
     """Destroy an agent by name (no-op if it doesn't exist, since --force is used)."""
     logger.info("Destroying verification agent '{}'", agent_name)
@@ -194,10 +239,16 @@ def verify_schedule_deployment(
     mngr_ctx: MngrContext,
     process_timeout_seconds: float = VERIFICATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Verify deployment by invoking the deployed function and waiting for it to exit.
+    """Verify deployment by running the cron function once and waiting for it to exit.
+
+    Note: this uses `modal run` which re-evaluates the local cron_runner.py
+    source file (not the already-deployed function). This means it tests the
+    deploy-time code and environment, not the exact deployed artifact. To
+    invoke the deployed function directly, use `mngr schedule run` (which
+    calls modal.Function.from_name().remote()).
 
     After modal deploy, this function:
-    1. Runs `modal run` to invoke the deployed cron function once
+    1. Runs `modal run` to execute the cron function from local source
     2. Streams output and monitors for errors
     3. Waits for the process to exit
     4. If is_finish_initial_run is False, destroys the agent after it starts
@@ -240,6 +291,7 @@ def verify_schedule_deployment(
 
         if error_event.is_set():
             if extracted_agent_name is not None:
+                _capture_agent_output(extracted_agent_name)
                 _destroy_agent(extracted_agent_name)
             error_detail = "\n".join(error_lines) if error_lines else "See output above"
             raise ScheduleDeployError(
@@ -248,6 +300,7 @@ def verify_schedule_deployment(
 
         if exit_code != 0:
             if extracted_agent_name is not None:
+                _capture_agent_output(extracted_agent_name)
                 _destroy_agent(extracted_agent_name)
             raise ScheduleDeployError(
                 f"Deployment verification of schedule '{trigger_name}' failed "
@@ -260,6 +313,7 @@ def verify_schedule_deployment(
             if extracted_agent_name is not None:
                 agent = _resolve_agent(extracted_agent_name, mngr_ctx)
                 _wait_for_agent_to_finish(agent)
+                _capture_agent_output(extracted_agent_name)
             else:
                 logger.warning(
                     "Could not extract agent name from output -- cannot wait for agent to finish. "
@@ -267,6 +321,7 @@ def verify_schedule_deployment(
                 )
         else:
             if extracted_agent_name is not None:
+                _capture_agent_output(extracted_agent_name)
                 _destroy_agent(extracted_agent_name)
             else:
                 logger.warning(
@@ -282,6 +337,7 @@ def verify_schedule_deployment(
         log_thread.join(timeout=5.0)
         extracted_agent_name = agent_name_holder[0] if agent_name_holder else None
         if extracted_agent_name is not None:
+            _capture_agent_output(extracted_agent_name)
             _destroy_agent(extracted_agent_name)
         raise ScheduleDeployError(
             f"Deployment verification of schedule '{trigger_name}' timed out after "
