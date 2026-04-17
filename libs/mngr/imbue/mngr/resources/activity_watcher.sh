@@ -332,10 +332,17 @@ main() {
             fi
         fi
 
+        # Read activity sources early -- needed by both the session check and
+        # the idle-timeout check below.
+        local activity_sources
+        activity_sources=$(get_activity_sources)
+
         # Check if all agent tmux sessions have exited.
         # If the prefix is configured and no sessions with that prefix exist,
         # the host should be stopped (not just paused) since all agents are gone.
-        if ! has_running_agent_sessions; then
+        # Skip this check when activity sources are empty (DISABLED idle mode),
+        # since that means the host should never be automatically shut down.
+        if [ -n "$activity_sources" ] && ! has_running_agent_sessions; then
             log "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
             if [ -x "$SHUTDOWN_SCRIPT" ]; then
                 log "Calling shutdown script with STOPPED (no agents running): $SHUTDOWN_SCRIPT"
@@ -361,9 +368,7 @@ main() {
             continue
         fi
 
-        # Check if activity sources are configured (DISABLED mode has empty array)
-        local activity_sources
-        activity_sources=$(get_activity_sources)
+        # Skip idle timeout check when no activity sources (DISABLED mode)
         if [ -z "$activity_sources" ]; then
             sleep "$CHECK_INTERVAL"
             continue

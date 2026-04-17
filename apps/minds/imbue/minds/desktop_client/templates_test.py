@@ -3,10 +3,12 @@ import pytest
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -141,3 +143,31 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
 def test_render_login_page_shows_prompt() -> None:
     html = render_login_page()
     assert "login URL" in html.lower() or "Login" in html
+
+
+def test_render_chrome_page_contains_titlebar() -> None:
+    html = render_chrome_page()
+    assert "minds-titlebar" in html
+    assert "sidebar-toggle" in html
+    assert "home-btn" in html
+    assert "back-btn" in html
+    assert "content-frame" in html
+
+
+def test_render_chrome_page_hides_window_controls_on_mac() -> None:
+    """On macOS, the .minds-wc section is hidden (native traffic lights used instead)."""
+    html = render_chrome_page(is_mac=True)
+    assert "display: none" in html
+
+
+def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
+    html = render_chrome_page(is_mac=False)
+    assert "min-btn" in html
+    assert "max-btn" in html
+    assert "close-btn" in html
+
+
+def test_render_sidebar_page_contains_workspace_list() -> None:
+    html = render_sidebar_page()
+    assert "sidebar-workspaces" in html
+    assert "EventSource" in html

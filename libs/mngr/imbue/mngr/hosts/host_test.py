@@ -42,7 +42,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import UploadFileSpec
@@ -1030,9 +1029,13 @@ class _FakeSSHClient:
 
     def __init__(self, transport_return: object = None) -> None:
         self._transport = transport_return
+        self.close_call_count = 0
 
     def get_transport(self) -> object:
         return self._transport
+
+    def close(self) -> None:
+        self.close_call_count += 1
 
 
 class _FakeSSHConnector:
@@ -1686,6 +1689,51 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
 
 
 # =========================================================================
+# Tests for disconnect / _close_paramiko_client
+# =========================================================================
+
+
+def test_disconnect_closes_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must call close() on the underlying paramiko SSH client.
+
+    pyinfra's disconnect() only clears its SFTP cache and sets connected=False.
+    It does not close the paramiko SSHClient, which would leak the TCP socket.
+    """
+    ssh_client = _FakeSSHClient(transport_return=_FakeTransport())
+    fake = _FakeHostWithSSH(ssh_client=ssh_client)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    host.disconnect()
+
+    assert ssh_client.close_call_count == 1
+
+
+def test_disconnect_is_safe_without_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must not raise when the pyinfra host has no SSH client."""
+    fake = _FakeHostWithSSH(ssh_client=None)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    # Should not raise
+    host.disconnect()
+
+
+# =========================================================================
 # Tests for _format_env_file
 # =========================================================================
 
@@ -2215,32 +2263,6 @@ def test_host_provision_agent_with_extra_provision_commands(
 
     assert marker_file.exists()
     assert "provisioned" in marker_file.read_text()
-
-
-def test_host_provision_agent_with_append_to_file(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """provision_agent should append text to files."""
-    host = local_host
-    target_file = temp_work_dir / "bashrc"
-    target_file.write_text("existing content\n")
-
-    options = CreateAgentOptions(
-        name=AgentName("append-provision-agent"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended line\n"),),
-        ),
-    )
-
-    agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
-
-    assert target_file.read_text() == "existing content\nappended line\n"
 
 
 def test_host_provision_agent_with_create_directories(
@@ -2827,16 +2849,6 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     )
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.environment.env_files == (Path("/etc/agent.env"), Path("/etc/cli.env"))
-
-
-def test_merge_agent_type_provisioning_prepends_append_to_files() -> None:
-    """Agent type append_to_file specs should be parsed and prepended."""
-    agent_config = AgentTypeConfig(append_to_file=("/etc/config:extra_line\n",))
-    options = CreateAgentOptions()
-    result = _merge_agent_type_provisioning(agent_config, options)
-    assert len(result.provisioning.append_to_files) == 1
-    assert result.provisioning.append_to_files[0].remote_path == Path("/etc/config")
-    assert result.provisioning.append_to_files[0].text == "extra_line\n"
 
 
 def test_merge_agent_type_provisioning_prepends_create_directories() -> None:

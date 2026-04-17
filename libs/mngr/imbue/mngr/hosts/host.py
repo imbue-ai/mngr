@@ -27,6 +27,7 @@ from paramiko import SFTPClient
 from paramiko import SSHException
 from paramiko import Transport
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
@@ -72,15 +73,12 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
-from imbue.mngr.interfaces.host import AgentEnvironmentOptions
-from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -112,55 +110,34 @@ def _merge_agent_type_provisioning(
 
     Returns the original options unchanged if the agent config has no provisioning fields.
     """
-    if not (
-        agent_config.extra_provision_command
-        or agent_config.upload_file
-        or agent_config.append_to_file
-        or agent_config.prepend_to_file
-        or agent_config.create_directory
-        or agent_config.env
-        or agent_config.env_file
-    ):
-        return options
+    prov_updates: list[tuple[str, Any]] = []
+    for config_field, target_field, parser in PROVISIONING_FIELD_MAP:
+        raw_values: tuple[str, ...] = getattr(agent_config, config_field)
+        if raw_values:
+            existing: tuple[Any, ...] = getattr(options.provisioning, target_field)
+            prov_updates.append((target_field, tuple(parser(s) for s in raw_values) + existing))
 
-    # Parse and prepend provisioning options
-    new_provisioning = options.provisioning
-    if (
-        agent_config.extra_provision_command
-        or agent_config.upload_file
-        or agent_config.append_to_file
-        or agent_config.prepend_to_file
-        or agent_config.create_directory
-    ):
-        new_provisioning = AgentProvisioningOptions(
-            extra_provision_commands=tuple(agent_config.extra_provision_command)
-            + options.provisioning.extra_provision_commands,
-            upload_files=tuple(UploadFileSpec.from_string(s) for s in agent_config.upload_file)
-            + options.provisioning.upload_files,
-            append_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.append_to_file)
-            + options.provisioning.append_to_files,
-            prepend_to_files=tuple(FileModificationSpec.from_string(s) for s in agent_config.prepend_to_file)
-            + options.provisioning.prepend_to_files,
-            create_directories=tuple(Path(s) for s in agent_config.create_directory)
-            + options.provisioning.create_directories,
-        )
+    env_vars = tuple(EnvVar.from_string(s) for s in agent_config.env) if agent_config.env else ()
+    env_files = tuple(Path(s) for s in agent_config.env_file) if agent_config.env_file else ()
 
-    # Parse and prepend environment options
-    new_environment = options.environment
-    if agent_config.env or agent_config.env_file:
-        new_environment = AgentEnvironmentOptions(
-            env_vars=tuple(EnvVar.from_string(s) for s in agent_config.env) + options.environment.env_vars,
-            env_files=tuple(Path(s) for s in agent_config.env_file) + options.environment.env_files,
-        )
-
-    if new_provisioning is options.provisioning and new_environment is options.environment:
+    if not prov_updates and not env_vars and not env_files:
         return options
 
     updates: list[tuple[str, Any]] = []
-    if new_provisioning is not options.provisioning:
-        updates.append(("provisioning", new_provisioning))
-    if new_environment is not options.environment:
-        updates.append(("environment", new_environment))
+    if prov_updates:
+        updates.append(
+            (
+                "provisioning",
+                options.provisioning.model_copy_update(*prov_updates),
+            )
+        )
+    env_updates: list[tuple[str, Any]] = []
+    if env_vars:
+        env_updates.append(("env_vars", env_vars + options.environment.env_vars))
+    if env_files:
+        env_updates.append(("env_files", env_files + options.environment.env_files))
+    if env_updates:
+        updates.append(("environment", options.environment.model_copy_update(*env_updates)))
     return options.model_copy_update(*updates)
 
 
@@ -250,6 +227,10 @@ class Host(BaseHost, OnlineHostInterface):
     )
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="The mngr context")
 
+    # Set to True by disconnect() and model_copy_update() to prevent __del__
+    # from closing the paramiko client (which may be shared with a copy).
+    _explicitly_disconnected: bool = PrivateAttr(default=False)
+
     @property
     def is_local(self) -> bool:
         """Check if this host uses the local connector."""
@@ -280,16 +261,66 @@ class Host(BaseHost, OnlineHostInterface):
             else:
                 raise HostConnectionError(f"Failed to connect to host: {e}") from e
 
+    def _close_paramiko_client(self) -> None:
+        """Close the paramiko SSH client if one exists.
+
+        pyinfra's disconnect() only clears its SFTP cache and sets
+        connected=False. It does NOT close the underlying paramiko SSHClient.
+        When connect() is called again, pyinfra creates a new SSHClient
+        without closing the old one, leaking the TCP socket (and a
+        server-side sshd-session process). This method explicitly closes
+        the client to prevent that leak.
+
+        Safe to call on local connectors (no paramiko client) and on
+        already-closed clients.
+        """
+        try:
+            client = self.connector.host.connector.client  # ty: ignore[unresolved-attribute]
+        except AttributeError:
+            return
+        if client is not None:
+            try:
+                client.close()
+            except (OSError, SSHException):
+                pass
+
     def disconnect(self) -> None:
         """Disconnect the pyinfra host if connected.
 
-        This should be called before destroying or stopping a host to cleanly
-        close the SSH connection. Failure to disconnect can lead to stale
-        socket state causing "Socket is closed" errors in subsequent operations.
+        Closes the paramiko SSH client first (which pyinfra's disconnect
+        neglects to do), then calls pyinfra's disconnect to clear its
+        internal state.
         """
+        self._close_paramiko_client()
         if self.connector.host.connected:
             self.connector.host.disconnect()
             logger.trace("Disconnected pyinfra host {}", self.id)
+        self._explicitly_disconnected = True
+
+    def model_copy_update(self, *updates: Any) -> "Host":
+        """Create a copy of this Host with updated fields.
+
+        The copy shares the same pyinfra connector (and thus the same SSH
+        client). Mark ourselves so __del__ does not close the shared client
+        when this original is garbage collected.
+        """
+        result = super().model_copy_update(*updates)
+        self._explicitly_disconnected = True
+        return result
+
+    def __del__(self) -> None:
+        """Best-effort cleanup of the paramiko SSH client on garbage collection.
+
+        Only acts if disconnect() was never called explicitly and this Host
+        was never copied via model_copy_update (the copy shares the connector,
+        so closing the client here would kill the copy's connection).
+        """
+        if self._explicitly_disconnected:
+            return
+        try:
+            self._close_paramiko_client()
+        except (OSError, SSHException, AttributeError, TypeError):
+            logger.debug("Failed to close paramiko client during Host.__del__ for {}", self.id)
 
     @contextmanager
     def _notify_on_connection_error(self) -> Iterator[None]:
@@ -2292,16 +2323,15 @@ class Host(BaseHost, OnlineHostInterface):
         Call agent.provision() (agent-type-specific provisioning)
         Create directories (so paths exist for uploads)
         Upload files (files exist before modifications)
-        Append text to files
-        Prepend text to files
         Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
-        # Merge agent type provisioning fields into options before any other logic
+        # Merge agent type provisioning fields into options before any other logic.
+        # Use resolve_agent_type to get the parent-merged config so that
+        # provisioning fields defined on a parent type are inherited by children.
         if options.agent_type is not None:
-            agent_config = mngr_ctx.config.agent_types.get(options.agent_type)
-            if agent_config is not None:
-                options = _merge_agent_type_provisioning(agent_config, options)
+            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+            options = _merge_agent_type_provisioning(resolved.agent_config, options)
 
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
@@ -2341,8 +2371,6 @@ class Host(BaseHost, OnlineHostInterface):
                 agent_name=str(agent.name),
                 dirs=len(provisioning.create_directories),
                 uploads=len(provisioning.upload_files),
-                appends=len(provisioning.append_to_files),
-                prepends=len(provisioning.prepend_to_files),
                 extra_cmds=len(provisioning.extra_provision_commands),
             ):
                 # Create directories
@@ -2356,16 +2384,6 @@ class Host(BaseHost, OnlineHostInterface):
                     local_content = upload_spec.local_path.read_bytes()
                     self.write_file(upload_spec.remote_path, local_content)
                     logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
-
-                # Append text to files
-                for append_spec in provisioning.append_to_files:
-                    self._append_to_file(append_spec.remote_path, append_spec.text)
-                    logger.trace("Appended to file: {}", append_spec.remote_path)
-
-                # Prepend text to files
-                for prepend_spec in provisioning.prepend_to_files:
-                    self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
-                    logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2438,22 +2456,6 @@ class Host(BaseHost, OnlineHostInterface):
             local_content = transfer.local_path.read_bytes()
             self.write_file(remote_path, local_content)
             logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
-
-    def _append_to_file(self, path: Path, text: str) -> None:
-        """Append text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, existing_content + text)
-
-    def _prepend_to_file(self, path: Path, text: str) -> None:
-        """Prepend text to a file, creating it if it doesn't exist."""
-        try:
-            existing_content = self.read_text_file(path)
-        except FileNotFoundError:
-            existing_content = ""
-        self.write_text_file(path, text + existing_content)
 
     def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
         """Rename an agent and return the updated agent object.

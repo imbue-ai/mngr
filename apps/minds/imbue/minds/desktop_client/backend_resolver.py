@@ -281,17 +281,58 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _servers_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
+
+    def add_on_change_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked whenever agent or server data changes.
+
+        Callbacks are invoked synchronously from the thread that made the change
+        (typically a MngrStreamManager background thread). Keep callbacks fast
+        and non-blocking -- they should just signal an event, not do real work.
+
+        Call remove_on_change_callback() with the same callable to unregister it.
+        """
+        with self._lock:
+            self._on_change_callbacks.append(callback)
+
+    def remove_on_change_callback(self, callback: Callable[[], None]) -> None:
+        """Unregister a previously registered change callback.
+
+        Safe to call even if the callback is not currently registered (no-op).
+        """
+        with self._lock:
+            try:
+                self._on_change_callbacks.remove(callback)
+            except ValueError:
+                pass
+
+    def _fire_on_change(self) -> None:
+        """Invoke all registered change callbacks.
+
+        Takes a snapshot of the callbacks list under the lock, then calls each
+        callback outside the lock to avoid holding the lock during potentially
+        blocking operations.
+        """
+        with self._lock:
+            callbacks = list(self._on_change_callbacks)
+        for callback in callbacks:
+            try:
+                callback()
+            except (OSError, RuntimeError) as e:
+                logger.warning("Resolver change callback failed: {}", e)
 
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe."""
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
+        self._fire_on_change()
 
     def update_servers(self, agent_id: AgentId, servers: dict[str, str]) -> None:
         """Replace the known servers for a single agent. Thread-safe."""
         with self._lock:
             self._servers_by_agent[str(agent_id)] = servers
+        self._fire_on_change()
 
     def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
         with self._lock:
@@ -483,6 +524,14 @@ class MngrStreamManager(MutableModel):
             agent_ids.append(agent.agent_id)
             agent_host_map[str(agent.agent_id)] = str(agent.host_id)
 
+        workspace_names = [str(a.agent_name) for a in event.agents if self._is_workspace_agent(a)]
+        logger.debug(
+            "Processing DISCOVERY_FULL: {} agents total, {} workspace agents: {}",
+            len(event.agents),
+            len(workspace_names),
+            workspace_names,
+        )
+
         with self._lock:
             self._agent_host_map = agent_host_map
 
@@ -523,6 +572,13 @@ class MngrStreamManager(MutableModel):
         """Incrementally add or update a single agent in the resolver."""
         agent = event.agent
         aid_str = str(agent.agent_id)
+        is_workspace = self._is_workspace_agent(agent)
+        logger.debug(
+            "AGENT_DISCOVERED: {} (workspace={}, labels={})",
+            agent.agent_name,
+            is_workspace,
+            list(agent.labels.keys()),
+        )
 
         with self._lock:
             self._agent_host_map[aid_str] = str(agent.host_id)

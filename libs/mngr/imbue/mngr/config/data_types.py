@@ -151,8 +151,6 @@ AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
         "cli_args",
         "extra_provision_command",
         "upload_file",
-        "append_to_file",
-        "prepend_to_file",
         "create_directory",
         "env",
         "env_file",
@@ -192,14 +190,6 @@ class AgentTypeConfig(FrozenModel):
         default=(),
         description="LOCAL:REMOTE file upload specs",
     )
-    append_to_file: tuple[str, ...] = Field(
-        default=(),
-        description="REMOTE:TEXT append specs",
-    )
-    prepend_to_file: tuple[str, ...] = Field(
-        default=(),
-        description="REMOTE:TEXT prepend specs",
-    )
     create_directory: tuple[str, ...] = Field(
         default=(),
         description="Directories to create on the remote",
@@ -230,7 +220,7 @@ class AgentTypeConfig(FrozenModel):
         auto_dismiss_dialogs) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
-        Tuples (cli_args, extra_provision_command, env, and other AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
+        Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
         Lists (permissions): concatenate if explicitly set
         """
         # Allow override to be the same class or a base class of self (e.g., when

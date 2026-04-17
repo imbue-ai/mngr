@@ -6,6 +6,8 @@ A host is considered "idle" if there has been no "activity" for a configured tim
 
 In addition to idle timeout, hosts are automatically **stopped** (not just paused) when all agent tmux sessions have exited. This is detected by checking for tmux sessions matching the configured prefix (stored as `tmux_session_prefix` in `data.json`). When no matching sessions remain and a grace period has elapsed, the host shuts down with `stop_reason=STOPPED`. This ensures hosts are promptly cleaned up when all agents finish their work.
 
+Both the idle timeout and the session-exit shutdown are skipped when idle mode is `disabled` (i.e., when `activity_sources` is empty). This means `--idle-mode disabled` fully prevents any automatic host shutdown, which is useful for persistent hosts that should always remain running.
+
 What counts as "activity" is highly configurable. Run `mngr limit --help` [future] to see the available flags.
 
 Any of the following can be considered activity:

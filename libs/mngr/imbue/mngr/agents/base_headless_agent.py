@@ -132,8 +132,10 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         """Raise MngrError collecting all available error detail.
 
         Checks stderr, then subclass-specific extra sources, then falls
-        back to tmux pane capture if neither redirect file exists (the
-        shell never ran).
+        back to tmux pane capture as a last resort. The pane capture is
+        always attempted when no other details are found, regardless of
+        whether redirect files exist -- shell redirects create empty files
+        even when the process fails immediately.
         """
         parts: list[str] = []
 
@@ -144,12 +146,9 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         parts.extend(self._get_extra_error_sources())
 
         if not parts:
-            is_stderr_present = self._file_exists_on_host(self._get_stderr_path())
-            is_stdout_present = self._file_exists_on_host(self._get_stdout_path())
-            if not is_stderr_present and not is_stdout_present:
-                pane_error = self._get_pane_error_message()
-                if pane_error:
-                    parts.append(pane_error)
+            pane_error = self._get_pane_error_message()
+            if pane_error:
+                parts.append(f"[tmux pane]\n{pane_error}")
 
         subject = self._no_output_error_subject
         if parts:
