@@ -40,9 +40,7 @@ export function CreateAgentModal(): m.Component<CreateAgentModalAttrs> {
 
     try {
       const url =
-        attrs.mode === "worktree"
-          ? apiUrl("/api/agents/create-worktree")
-          : apiUrl("/api/agents/create-chat");
+        attrs.mode === "worktree" ? apiUrl("/api/agents/create-worktree") : apiUrl("/api/agents/create-chat");
 
       const body: Record<string, string> =
         attrs.mode === "worktree"
@@ -72,50 +70,66 @@ export function CreateAgentModal(): m.Component<CreateAgentModalAttrs> {
       const attrs = vnode.attrs;
       const title = attrs.mode === "worktree" ? "Create Worktree Agent" : "Create Chat Agent";
 
-      return m("div.custom-url-dialog-overlay", {
-        onclick(e: MouseEvent) {
-          if ((e.target as HTMLElement).classList.contains("custom-url-dialog-overlay")) {
-            attrs.onCancel();
-          }
-        },
-      }, [
-        m("div.custom-url-dialog", {
+      return m(
+        "div.custom-url-dialog-overlay",
+        {
           onclick(e: MouseEvent) {
-            e.stopPropagation();
+            if ((e.target as HTMLElement).classList.contains("custom-url-dialog-overlay")) {
+              attrs.onCancel();
+            }
           },
-        }, [
-          m("h3.custom-url-dialog-title", title),
-          m("label.custom-url-dialog-label", "Agent Name"),
-          m("input.custom-url-dialog-input", {
-            type: "text",
-            value: name,
-            placeholder: "agent-name",
-            autofocus: true,
-            oninput(e: InputEvent) {
-              name = (e.target as HTMLInputElement).value;
+        },
+        [
+          m(
+            "div.custom-url-dialog",
+            {
+              onclick(e: MouseEvent) {
+                e.stopPropagation();
+              },
             },
-            onkeydown(e: KeyboardEvent) {
-              if (e.key === "Enter") {
-                submit(attrs);
-              }
-              if (e.key === "Escape") {
-                attrs.onCancel();
-              }
-            },
-          }),
-          error ? m("p", { style: "color: red; font-size: 0.85em; margin-top: 4px;" }, error) : null,
-          m("div.custom-url-dialog-actions", [
-            m("button.custom-url-dialog-cancel", {
-              onclick: attrs.onCancel,
-              disabled: loading,
-            }, "Cancel"),
-            m("button.custom-url-dialog-open", {
-              onclick: () => submit(attrs),
-              disabled: loading || !name.trim(),
-            }, loading ? "Creating..." : "Create"),
-          ]),
-        ]),
-      ]);
+            [
+              m("h3.custom-url-dialog-title", title),
+              m("label.custom-url-dialog-label", "Agent Name"),
+              m("input.custom-url-dialog-input", {
+                type: "text",
+                value: name,
+                placeholder: "agent-name",
+                autofocus: true,
+                oninput(e: InputEvent) {
+                  name = (e.target as HTMLInputElement).value;
+                },
+                onkeydown(e: KeyboardEvent) {
+                  if (e.key === "Enter") {
+                    submit(attrs);
+                  }
+                  if (e.key === "Escape") {
+                    attrs.onCancel();
+                  }
+                },
+              }),
+              error ? m("p", { style: "color: red; font-size: 0.85em; margin-top: 4px;" }, error) : null,
+              m("div.custom-url-dialog-actions", [
+                m(
+                  "button.custom-url-dialog-cancel",
+                  {
+                    onclick: attrs.onCancel,
+                    disabled: loading,
+                  },
+                  "Cancel",
+                ),
+                m(
+                  "button.custom-url-dialog-open",
+                  {
+                    onclick: () => submit(attrs),
+                    disabled: loading || !name.trim(),
+                  },
+                  loading ? "Creating..." : "Create",
+                ),
+              ]),
+            ],
+          ),
+        ],
+      );
     },
   };
 }
