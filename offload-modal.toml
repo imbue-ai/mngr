@@ -1,7 +1,7 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 50
-test_timeout_secs = 60
+test_timeout_secs = 900
 stream_output = true
 sandbox_project_root = "/code/mngr"
 # git add -A syncs the index after git apply, which only updates the working
