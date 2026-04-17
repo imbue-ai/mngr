@@ -25,6 +25,12 @@ contextBridge.exposeInMainWorld('minds', {
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
   },
+  onWindowTitleChange: (callback) => {
+    ipcRenderer.on('window-title-changed', (_event, title) => callback(title));
+  },
+  onChromeEvent: (callback) => {
+    ipcRenderer.on('chrome-event', (_event, data) => callback(data));
+  },
 
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
@@ -32,6 +38,15 @@ contextBridge.exposeInMainWorld('minds', {
   // Requests panel
   toggleRequestsPanel: () => ipcRenderer.send('toggle-requests-panel'),
   openRequestsPanel: () => ipcRenderer.send('open-requests-panel'),
+
+  // Multi-window workspace actions
+  openWorkspaceInNewWindow: (agentId) =>
+    ipcRenderer.send('open-workspace-in-new-window', agentId),
+  showWorkspaceContextMenu: (agentId, x, y) =>
+    ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
+  onCurrentWorkspaceChanged: (callback) => {
+    ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
+  },
 
   // Actions
   retry: () => ipcRenderer.send('retry'),
