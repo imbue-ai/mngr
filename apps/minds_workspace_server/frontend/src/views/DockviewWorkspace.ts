@@ -318,8 +318,13 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
 
   // --- Existing items section ---
 
-  // Applications (excluding web, terminal) that don't have open tabs
-  const apps = getApplications().filter((app) => app.name !== "web" && app.name !== "terminal");
+  // Applications that don't have open tabs. Exclude "system_interface"
+  // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
+  // (reachable via the "New terminal" menu item further down). Everything
+  // else, including the default "web" example server, is openable.
+  const apps = getApplications().filter(
+    (app) => app.name !== "system_interface" && app.name !== "terminal",
+  );
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getApplicationUrl(app.name, app.url);
