@@ -1,7 +1,7 @@
 # offload configuration for running mngr acceptance tests on Modal
 [offload]
 max_parallel = 200
-test_timeout_secs = 900
+test_timeout_secs = 120
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
@@ -11,7 +11,7 @@ sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A 
 
 [provider]
 type = "modal"
-dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile.release"
+dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 
 [provider.experimental_options]
 enable_docker = true
@@ -24,11 +24,14 @@ run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 4
-filters = "-m 'acceptance and not flaky'"
-
-[groups.flaky]
-retry_count = 5
-filters = "-m 'flaky and acceptance'"
+# Exclude docker/docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
+# Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
+filters = "-m 'acceptance and not docker and not docker_sdk'"
+# When flaky tests exist, add a [groups.flaky] section:
+# [groups.flaky]
+# retry_count = 5
+# filters = "-m 'flaky and acceptance and not docker and not docker_sdk'"
+# and add 'and not flaky' to the groups.all filter above.
 
 [report]
 output_dir = "test-results"
