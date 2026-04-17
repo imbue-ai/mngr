@@ -465,6 +465,11 @@ function openRequestsPanel(bundle) {
     bundle.window.contentView.removeChildView(bundle.requestsPanelView);
     bundle.window.contentView.addChildView(bundle.requestsPanelView);
     bundle.requestsPanelView.setVisible(true);
+    // The panel's HTML is rendered server-side and doesn't subscribe to SSE,
+    // so its cards go stale while hidden. Refresh on show.
+    if (!bundle.requestsPanelView.webContents.isDestroyed()) {
+      bundle.requestsPanelView.webContents.reload();
+    }
   }
   bundle.requestsPanelVisible = true;
   updateBundleBounds(bundle);
@@ -711,6 +716,14 @@ function handleChromeSSEEvent(evt) {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'request_count') {
     latestChromeState.requestCount = evt.count || 0;
+    // Requests panel HTML is static at load time. Refresh any visible panels
+    // so their cards reflect the new pending list.
+    for (const b of bundles) {
+      if (b.window.isDestroyed()) continue;
+      if (!b.requestsPanelView || !b.requestsPanelVisible) continue;
+      if (b.requestsPanelView.webContents.isDestroyed()) continue;
+      b.requestsPanelView.webContents.reload();
+    }
   }
   broadcastChromeEvent(evt);
 }
@@ -1231,6 +1244,29 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   // context-menu "Open in new window" item; close it now that the action is done.
   const bundle = getBundleFromEvent(event);
   if (bundle) closeSidebar(bundle);
+});
+
+ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
+  if (!eventId) return;
+  const url = toAbsoluteUrl('/requests/' + eventId);
+  const sender = getBundleFromEvent(event);
+  // Route to the workspace's window when one is open so the request page
+  // lives alongside the workspace it's about, rather than wherever the user
+  // happened to click the request card from.
+  if (agentId) {
+    const existing = findBundleForWorkspace(agentId);
+    if (existing) {
+      focusBundle(existing);
+      if (existing.contentView && !existing.contentView.webContents.isDestroyed()) {
+        existing.contentView.webContents.loadURL(url);
+      }
+      return;
+    }
+  }
+  // Fallback: no window for this workspace -- open the request in the sender.
+  if (sender && sender.contentView && !sender.contentView.webContents.isDestroyed()) {
+    sender.contentView.webContents.loadURL(url);
+  }
 });
 
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
