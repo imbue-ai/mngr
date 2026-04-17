@@ -21,6 +21,7 @@ from imbue.mngr_hermes.plugin import HermesAgentConfig
 from imbue.mngr_hermes.plugin import _HERMES_HOME_DIR_NAME
 from imbue.mngr_hermes.plugin import _HERMES_HOME_SEED_DIRS
 from imbue.mngr_hermes.plugin import _HERMES_HOME_SEED_FILES
+from imbue.mngr_hermes.plugin import _HERMES_TUI_READY_INDICATOR
 from imbue.mngr_hermes.plugin import _get_user_hermes_dir
 from imbue.mngr_hermes.plugin import register_agent_type
 
@@ -138,6 +139,20 @@ def test_register_agent_type_returns_correct_tuple() -> None:
 # =============================================================================
 # modify_env_vars Tests
 # =============================================================================
+
+
+def test_get_tui_ready_indicator_returns_prompt_character(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """get_tui_ready_indicator should return the hermes prompt character.
+
+    This is what base_agent.wait_for_ready_signal polls for before sending the
+    initial message; without it, /welcome races with prompt_toolkit's handler
+    installation and the Enter key is lost.
+    """
+    agent, _host = _make_hermes_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    assert agent.get_tui_ready_indicator() == _HERMES_TUI_READY_INDICATOR
 
 
 def test_modify_env_vars_injects_hermes_home(
