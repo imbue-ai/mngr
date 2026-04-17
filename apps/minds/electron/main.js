@@ -247,6 +247,14 @@ function createBundle() {
   // destruction of child WebContentsView render processes on its own; leaking
   // them across create/close cycles eventually starves new ones of resources.
   win.on('close', () => {
+    // Snapshot session state on every manual window close: by the time
+    // `before-quit` fires on the `window-all-closed` path, every bundle has
+    // already been removed from `bundles` by its `closed` handler, so saving
+    // there would clobber the file with `[]`. Skip when we're tearing down as
+    // part of a `cmd+Q` / crash quit -- `before-quit` already saved the full
+    // set and we must not overwrite it with a progressively shrinking snapshot
+    // as the teardown closes each window.
+    if (!isShuttingDown) saveSessionState();
     const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
     for (const view of views) {
       if (!view) continue;
@@ -1297,8 +1305,12 @@ app.on('window-all-closed', async () => {
 
 app.on('before-quit', async (event) => {
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
-  // Capture session state for every open window before teardown.
-  saveSessionState();
+  // Capture session state for every open window before teardown. Only save
+  // when bundles is non-empty: on the `window-all-closed` -> `app.quit()`
+  // path, every bundle has already been removed from the Set by its `closed`
+  // handler (and the per-window `close` handler already wrote the last
+  // non-empty snapshot), so saving here would just clobber it with `[]`.
+  if (bundles.size > 0) saveSessionState();
   if (getBackendProcess() && !isShuttingDown) {
     isShuttingDown = true;
     event.preventDefault();
