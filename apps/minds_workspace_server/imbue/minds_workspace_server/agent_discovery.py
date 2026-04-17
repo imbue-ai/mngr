@@ -17,6 +17,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr.utils.env_utils import parse_env_file
 
 logger = _loguru_logger
@@ -40,13 +41,20 @@ def resolve_root_agent_type(agent_type: str, config: MngrConfig) -> str:
 
     A type like ``hermes_main`` (with ``parent_type = "hermes"``) resolves to
     ``hermes``. Types with no parent (or not defined in the config) resolve to
-    themselves. Stops at any cycle defensively.
+    themselves. Strings that can't be cast to ``AgentTypeName`` (e.g. the
+    empty-string sentinel ``agent_manager`` writes when a discovery event
+    carries no ``type``) can't possibly match a config entry, so they also
+    resolve to themselves. Stops at any cycle defensively.
     """
     current = agent_type
     seen: set[str] = set()
     while current not in seen:
         seen.add(current)
-        type_config = config.agent_types.get(AgentTypeName(current))
+        try:
+            type_key = AgentTypeName(current)
+        except InvalidName:
+            return current
+        type_config = config.agent_types.get(type_key)
         if type_config is None or type_config.parent_type is None:
             return current
         current = str(type_config.parent_type)
