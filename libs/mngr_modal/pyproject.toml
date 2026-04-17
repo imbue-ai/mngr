@@ -53,7 +53,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 75
+# No CI coverage gate: root pyproject omits all mngr_modal source files
+# because this plugin requires Modal infrastructure to test.
 omit = [
   "*_test.py",
   "test_*.py",

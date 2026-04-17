@@ -46,7 +46,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 40
+# No CI coverage gate: this plugin requires Docker infrastructure
+# to test and is not measured in the offload test suite.
 omit = [
   "*_test.py",
   "test_*.py",

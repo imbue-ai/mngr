@@ -52,7 +52,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 99  # TEMP: verify per-pkg CI gate fires. Revert after check.
+fail_under = 35
 omit = [
   "*_test.py",
   "test_*.py",

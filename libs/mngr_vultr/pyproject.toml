@@ -52,7 +52,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 60
+# No CI coverage gate: this plugin requires Vultr infrastructure
+# to test and is not measured in the offload test suite.
 omit = [
   "*_test.py",
   "test_*.py",
