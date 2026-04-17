@@ -107,6 +107,7 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
             id="a1",
             name="agent-one",
             state="RUNNING",
+            agent_type="claude",
             labels={"user_created": "true"},
             work_dir="/tmp/work",
         )
@@ -140,6 +141,7 @@ def test_resolve_agent_work_dir_from_tracked_agent(agent_manager: AgentManager) 
             id="other-agent",
             name="other",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir="/tmp/other-work",
         )
@@ -159,7 +161,7 @@ def test_create_chat_agent_broadcasts_proto_created(
     """The proto_agent_created broadcast fires before the creation thread runs."""
     q = broadcaster.register()
 
-    agent_id = agent_manager.create_chat_agent("test-chat")
+    agent_id = agent_manager.create_chat_agent("test-chat", agent_type="claude")
     agent_manager.stop()
 
     assert isinstance(agent_id, str)
@@ -185,11 +187,12 @@ def test_create_worktree_agent_broadcasts_proto_created(
             id="parent-id",
             name="parent",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=str(git_work_dir),
         )
 
-    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
+    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id", agent_type="claude")
     agent_manager.stop()
 
     assert isinstance(agent_id, str)
@@ -209,11 +212,12 @@ def test_get_log_queue_for_proto_agent(agent_manager: AgentManager, git_work_dir
             id="parent-id",
             name="parent",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=str(git_work_dir),
         )
 
-    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id")
+    agent_id = agent_manager.create_worktree_agent("test-worktree", "parent-id", agent_type="claude")
     log_q = agent_manager.get_log_queue(agent_id)
     assert log_q is not None
 
@@ -303,6 +307,7 @@ def test_on_applications_changed(
             id="app-agent",
             name="app-agent",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=str(tmp_path),
         )
@@ -338,7 +343,7 @@ def test_handle_discovery_event_ignores_unknown_types(agent_manager: AgentManage
 def test_create_worktree_raises_for_unknown_agent(agent_manager: AgentManager) -> None:
     """Creating a worktree for an unknown agent raises."""
     with pytest.raises(AgentCreationError, match="Cannot determine work directory"):
-        agent_manager.create_worktree_agent("test", "nonexistent")
+        agent_manager.create_worktree_agent("test", "nonexistent", agent_type="claude")
 
 
 def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
@@ -417,7 +422,7 @@ def test_run_creation_logs_header_and_completion(agent_manager: AgentManager, tm
     done_event = threading.Event()
 
     def run_and_signal() -> None:
-        agent_manager._run_creation("test-id", "test-agent", cmd, tmp_path, log_q, {})
+        agent_manager._run_creation("test-id", "test-agent", cmd, tmp_path, log_q, {}, "claude")
         done_event.set()
 
     t = threading.Thread(target=run_and_signal, daemon=True)
@@ -558,6 +563,7 @@ def test_handle_agent_destroyed_removes_agent(agent_manager: AgentManager, broad
             id=str(test_agent_id),
             name="to-destroy",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=None,
         )
@@ -583,6 +589,7 @@ def test_handle_discovery_event_dispatches_agent_destroyed(
             id=str(test_agent_id),
             name="to-destroy",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=None,
         )
@@ -607,6 +614,7 @@ def test_handle_host_destroyed_removes_all_agents(
                 id=str(aid),
                 name=f"agent-{str(aid)[:8]}",
                 state="RUNNING",
+                agent_type="claude",
                 labels={},
                 work_dir=None,
             )
@@ -632,6 +640,7 @@ def test_handle_discovery_event_dispatches_host_destroyed(
             id=str(agent_id),
             name="host-agent",
             state="RUNNING",
+            agent_type="claude",
             labels={},
             work_dir=None,
         )

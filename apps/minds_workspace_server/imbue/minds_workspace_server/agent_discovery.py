@@ -12,9 +12,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.env_utils import parse_env_file
 
 logger = _loguru_logger
@@ -26,10 +28,29 @@ class AgentInfo(FrozenModel):
     id: str = Field(description="The agent's unique identifier")
     name: str = Field(description="The agent's human-readable name")
     state: str = Field(description="The agent's lifecycle state (e.g. RUNNING, STOPPED)")
+    agent_type: str = Field(description="Agent type (e.g. claude, hermes)")
     agent_state_dir: Path = Field(description="Path to the agent's state directory on the local host")
     claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
     work_dir: str | None = Field(default=None, description="Agent working directory path")
+
+
+def resolve_root_agent_type(agent_type: str, config: MngrConfig) -> str:
+    """Walk ``parent_type`` in ``config.agent_types`` to find the root type.
+
+    A type like ``hermes_main`` (with ``parent_type = "hermes"``) resolves to
+    ``hermes``. Types with no parent (or not defined in the config) resolve to
+    themselves. Stops at any cycle defensively.
+    """
+    current = agent_type
+    seen: set[str] = set()
+    while current not in seen:
+        seen.add(current)
+        type_config = config.agent_types.get(AgentTypeName(current))
+        if type_config is None or type_config.parent_type is None:
+            return current
+        current = str(type_config.parent_type)
+    return current
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
@@ -105,6 +126,7 @@ def discover_agents(
                 id=agent_id,
                 name=agent_name,
                 state=state,
+                agent_type=resolve_root_agent_type(str(agent_details.type), mngr_ctx.config),
                 agent_state_dir=agent_state_dir,
                 claude_config_dir=claude_config_dir,
                 labels=dict(agent_details.labels),

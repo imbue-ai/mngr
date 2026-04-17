@@ -23,14 +23,17 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import resolve_root_agent_type
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
+from imbue.minds_workspace_server.hermes_session_watcher import HermesSessionWatcher
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentListItem
 from imbue.minds_workspace_server.models import AgentListResponse
@@ -48,6 +51,9 @@ from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.loader import load_config
+from imbue.mngr.main import get_or_create_plugin_manager
 
 logger = _loguru_logger
 
@@ -66,6 +72,10 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
     application.state.watchers = {}
+    # mngr config is loaded lazily on first use; keeping load_config out of
+    # the startup path avoids the ``is_allowed_in_pytest`` guard firing for
+    # tests that don't need real agent-type resolution.
+    application.state.mngr_config = None
 
     broadcaster = WebSocketBroadcaster()
     agent_manager = AgentManager.build(broadcaster)
@@ -103,16 +113,24 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         signal.signal(signal.SIGINT, original_sigint_handler)
 
 
+SessionWatcher = AgentSessionWatcher | HermesSessionWatcher
+
+
 def _stop_all_watchers(application: FastAPI) -> None:
-    watchers: dict[str, AgentSessionWatcher] = getattr(application.state, "watchers", {})
+    watchers: dict[str, SessionWatcher] = getattr(application.state, "watchers", {})
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
 
 
-def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
-    """Get an existing watcher for an agent, or create one."""
-    watchers: dict[str, AgentSessionWatcher] = request.app.state.watchers
+def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> SessionWatcher:
+    """Get an existing watcher for an agent, or create one.
+
+    Hermes stores sessions in SQLite, claude in per-session JSONL files. The
+    two watcher classes implement the same public interface so callers don't
+    need to branch.
+    """
+    watchers: dict[str, SessionWatcher] = request.app.state.watchers
     event_queues: AgentEventQueues = request.app.state.event_queues
 
     if agent_info.id in watchers:
@@ -122,12 +140,20 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         for event in events:
             event_queues.broadcast(agent_id, event)
 
-    watcher = AgentSessionWatcher(
-        agent_id=agent_info.id,
-        agent_state_dir=agent_info.agent_state_dir,
-        claude_config_dir=agent_info.claude_config_dir,
-        on_events=on_events,
-    )
+    watcher: SessionWatcher
+    if agent_info.agent_type == "hermes":
+        watcher = HermesSessionWatcher(
+            agent_id=agent_info.id,
+            agent_state_dir=agent_info.agent_state_dir,
+            on_events=on_events,
+        )
+    else:
+        watcher = AgentSessionWatcher(
+            agent_id=agent_info.id,
+            agent_state_dir=agent_info.agent_state_dir,
+            claude_config_dir=agent_info.claude_config_dir,
+            on_events=on_events,
+        )
     watchers[agent_info.id] = watcher
     watcher.start()
     return watcher
@@ -208,12 +234,35 @@ def _get_host_dir() -> Path:
     return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
 
 
+def _get_mngr_config(request: Request) -> MngrConfig:
+    """Return the cached mngr config, loading it on first request.
+
+    Loaded lazily so test setups that never hit ``_find_agent`` don't trip
+    the ``is_allowed_in_pytest`` guard inside ``load_config``.
+    """
+    mngr_config: MngrConfig | None = request.app.state.mngr_config
+    if mngr_config is not None:
+        return mngr_config
+    config_cg = ConcurrencyGroup(name="minds-workspace-server-config")
+    config_cg.__enter__()
+    try:
+        mngr_config = load_config(get_or_create_plugin_manager(), config_cg, is_interactive=False).config
+    finally:
+        config_cg.__exit__(None, None, None)
+    request.app.state.mngr_config = mngr_config
+    return mngr_config
+
+
 def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     """Find a specific agent by ID.
 
     Uses the AgentManager's already-loaded state instead of running a full
     mngr discovery on every request.  Falls back to the agent state directory
     for claude_config_dir resolution.
+
+    Resolves ``agent_type`` through any ``parent_type`` chain (e.g.
+    ``hermes_main`` -> ``hermes``) so watcher selection downstream can match
+    on the root type.
     """
     agent_manager: AgentManager = request.app.state.agent_manager
     agent_state = agent_manager.get_agent_by_id(agent_id)
@@ -224,10 +273,13 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     agent_state_dir = host_dir / "agents" / agent_id
     claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
+    resolved_agent_type = resolve_root_agent_type(agent_state.agent_type, _get_mngr_config(request))
+
     return AgentInfo(
         id=agent_state.id,
         name=agent_state.name,
         state=agent_state.state,
+        agent_type=resolved_agent_type,
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
         labels=agent_state.labels,
@@ -492,7 +544,7 @@ async def _create_worktree_agent(request: Request) -> JSONResponse:
         create_request = CreateWorktreeRequest(**body)
         agent_name = create_request.name
         selected_agent_id = create_request.selected_agent_id or agent_manager.get_own_agent_id()
-        agent_id = agent_manager.create_worktree_agent(agent_name, selected_agent_id)
+        agent_id = agent_manager.create_worktree_agent(agent_name, selected_agent_id, agent_type="claude")
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,
@@ -509,7 +561,7 @@ async def _create_chat_agent(request: Request) -> JSONResponse:
 
     try:
         create_request = CreateChatRequest(**body)
-        agent_id = agent_manager.create_chat_agent(create_request.name)
+        agent_id = agent_manager.create_chat_agent(create_request.name, agent_type="claude")
         return JSONResponse(
             content=CreateAgentResponse(agent_id=agent_id).model_dump(),
             status_code=201,

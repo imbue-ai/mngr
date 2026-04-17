@@ -47,6 +47,7 @@ class AgentStateItem(FrozenModel):
     id: str = Field(description="The agent's unique identifier")
     name: str = Field(description="The agent's human-readable name")
     state: str = Field(description="The agent's lifecycle state")
+    agent_type: str = Field(description="Agent type (e.g. claude, hermes)")
     labels: dict[str, str] = Field(description="Agent labels (e.g., user_created, chat_parent_id)")
     work_dir: str | None = Field(description="The agent's working directory path")
 

@@ -65,6 +65,7 @@ def test_list_agents_endpoint(client: TestClient) -> None:
                 id="agent-123",
                 name="test-agent",
                 state="RUNNING",
+                agent_type="claude",
                 agent_state_dir=Path("/tmp/test"),
                 claude_config_dir=Path("/tmp/.claude"),
             )
@@ -139,6 +140,7 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
     )
@@ -160,6 +162,7 @@ def test_send_message_success(client: TestClient) -> None:
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=Path("/tmp/test"),
         claude_config_dir=Path("/tmp/.claude"),
     )
@@ -190,6 +193,7 @@ def test_get_layout_returns_404_when_no_layout_saved(client: TestClient, tmp_pat
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=Path("/tmp/.claude"),
     )
@@ -210,6 +214,7 @@ def test_save_and_get_layout(client: TestClient, tmp_path: Path) -> None:
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=Path("/tmp/.claude"),
     )
@@ -232,6 +237,7 @@ def test_save_layout_creates_directory(client: TestClient, tmp_path: Path) -> No
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=Path("/tmp/.claude"),
     )
@@ -250,6 +256,7 @@ def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path) ->
         id="agent-123",
         name="test-agent",
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=Path("/tmp/.claude"),
     )
