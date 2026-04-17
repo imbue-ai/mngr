@@ -5,7 +5,7 @@ test_timeout_secs = 60
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
+sandbox_init_cmd = "uv sync --all-packages"
 
 [provider]
 type = "modal"
@@ -24,6 +24,9 @@ run_args = "--no-cov -p no:xdist -o addopts="
 retry_count = 4
 # Exclude release tests from the acceptance suite. Exclude docker tests because Modal support for Docker is in ALPHA state.
 filters = "-m'not release and not docker'"
+
+[checkpoint]
+build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile", "uv.lock"]
 
 [report]
 output_dir = "test-results"

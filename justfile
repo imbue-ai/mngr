@@ -25,38 +25,8 @@ run target:
 test-offload args="":
     #!/bin/bash
     set -ueo pipefail
-    BASE_COMMIT=$(cat .offload-base-commit | tr -d '[:space:]')
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
-
-    # Invalidate offload's image cache when build inputs change.
-    # Offload only caches by image ID and doesn't track Dockerfile or base commit changes.
-    CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile offload-modal.toml | shasum -a 256 | cut -d' ' -f1)
-    CACHE_KEY_FILE=".offload-cache-key"
-    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
-        echo "[test-offload] Image cache key matches, reusing cached image."
-    else
-        echo "[test-offload] Image cache key changed, clearing cached image."
-        rm -f .offload-image-cache
-        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
-    fi
-
-    # Generate .dockerignore from .gitignore: remove the current.tar.gz line
-    # (needed in the Docker build context) and add .git/ (not in .gitignore).
-    grep -v 'current\.tar\.gz' .gitignore > .dockerignore
-    echo '.git/' >> .dockerignore
-
-    ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
-    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
-    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -f .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    ./scripts/generate_patch_for_offload.sh $BASE_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
-    cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
-    offload -c offload-modal.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" || [[ $? -eq 2 ]]
+    # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
+    offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -69,21 +39,8 @@ test-offload args="":
 test-offload-acceptance args="":
     #!/bin/bash
     set -ueo pipefail
-    HEAD_COMMIT=$(git rev-parse HEAD)
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
-
-    ./scripts/make_tar_of_repo.sh $HEAD_COMMIT $tmpdir
-    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
-    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    ./scripts/generate_patch_for_offload.sh $HEAD_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
-    cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
-    offload -c offload-modal-acceptance.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
+    # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
+    offload -c offload-modal-acceptance.toml {{args}} run --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
 
 test-unit:
   uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
