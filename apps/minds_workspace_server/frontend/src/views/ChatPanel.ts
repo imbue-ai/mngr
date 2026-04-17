@@ -268,9 +268,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       return renderBuildLog(agentId);
     }
 
-    // Agent finished creating -- disconnect log WebSocket if it was open
+    // Agent finished creating -- disconnect log WebSocket and force reload
     if (logAgentId === agentId) {
       disconnectLogWs();
+      currentAgentId = null;
     }
 
     ensureAgentLoaded(agentId);
