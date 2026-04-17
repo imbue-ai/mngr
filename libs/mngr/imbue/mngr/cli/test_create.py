@@ -631,7 +631,7 @@ def test_edit_message_empty_content_does_not_send(
 
     # Mint an agent type that emits the marker and then waits on stdin so we
     # can confirm the agent is ready before checking editor behavior.
-    marker_type = make_test_sleep_agent_type(temp_host_dir, command=f"echo '{marker_text}' && cat")
+    marker_type = make_test_sleep_agent_type(temp_host_dir, f"echo '{marker_text}' && cat")
 
     # Create a script that clears the file (simulating user saving empty file)
     editor_script = tmp_path / "test_editor.sh"

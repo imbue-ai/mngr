@@ -669,7 +669,7 @@ def create_test_agent_via_cli(
     manager to ensure the session is cleaned up even if assertions fail.
     """
     session_name = f"{mngr_test_prefix}{agent_name}"
-    agent_type = make_test_sleep_agent_type(temp_host_dir, command=command)
+    agent_type = make_test_sleep_agent_type(temp_host_dir, command)
 
     create_result = cli_runner.invoke(
         create_command,
