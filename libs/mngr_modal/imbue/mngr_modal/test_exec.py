@@ -62,10 +62,9 @@ def _exec_on_agent(
 def test_exec_echo_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
-    modal_test_session_host_dir: Path,
 ) -> None:
     """Test executing a simple command on a Modal agent."""
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_test_session_host_dir, "sleep 100105")
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100105")
     agent_name = f"test-exec-echo-{get_short_random_string()}"
     _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, modal_test_sleep_agent_type)
 
@@ -81,10 +80,9 @@ def test_exec_echo_on_modal(
 def test_exec_cwd_override_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
-    modal_test_session_host_dir: Path,
 ) -> None:
     """Test that --cwd overrides the working directory on a Modal agent."""
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_test_session_host_dir, "sleep 100106")
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100106")
     agent_name = f"test-exec-cwd-{get_short_random_string()}"
     _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, modal_test_sleep_agent_type)
 
@@ -100,10 +98,9 @@ def test_exec_cwd_override_on_modal(
 def test_exec_failure_propagates_exit_code_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
-    modal_test_session_host_dir: Path,
 ) -> None:
     """Test that a failing command returns exit code 1 on a Modal agent."""
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_test_session_host_dir, "sleep 100107")
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100107")
     agent_name = f"test-exec-fail-{get_short_random_string()}"
     _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, modal_test_sleep_agent_type)
 
@@ -118,10 +115,9 @@ def test_exec_failure_propagates_exit_code_on_modal(
 def test_exec_json_output_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
-    modal_test_session_host_dir: Path,
 ) -> None:
     """Test JSON output format when executing on a Modal agent."""
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_test_session_host_dir, "sleep 100108")
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100108")
     agent_name = f"test-exec-json-{get_short_random_string()}"
     _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, modal_test_sleep_agent_type)
 

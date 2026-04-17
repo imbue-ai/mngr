@@ -119,7 +119,6 @@ def _get_host_state(
 def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     tmp_path: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
-    modal_test_session_host_dir: Path,
 ) -> None:
     """Test that idle shutdown creates both initial and idle snapshots.
 
@@ -132,7 +131,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
        - Idle snapshot (created during shutdown)
     """
     # Use a unique agent name for this test
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_test_session_host_dir, "sleep 100112")
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100112")
     agent_name = f"test-idle-snap-{get_short_random_string()}"
 
     source_dir = tmp_path / "source"
