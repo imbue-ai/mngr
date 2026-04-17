@@ -19,11 +19,36 @@ import {
   type TranscriptEvent,
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
-import { getProtoAgents } from "../models/AgentManager";
+import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
+
+function getAgentTerminalUrl(agentId: string): string {
+  const baseUrl = getTerminalUrl();
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  // The ttyd dispatch script is invoked as `bash -c "$SCRIPT" <args...>` where
+  // the first trailing arg becomes $0 (not $1). The dispatch reads KEY="$1",
+  // so we prepend a dummy "_" to land the real key in $1. That matches the
+  // pattern used by the existing workdir deep-link in DockviewWorkspace.ts.
+  // Passing the agent name as $2 lets agent.sh attach to that agent's tmux
+  // session ("${MNGR_PREFIX}<name>") rather than the primary agent's. If the
+  // agent isn't in the local cache yet, fall back to no name arg and let
+  // agent.sh attach to the ambient session.
+  const agent = getAgentById(agentId);
+  const args = agent?.name
+    ? `arg=_&arg=agent&arg=${encodeURIComponent(agent.name)}`
+    : "arg=_&arg=agent";
+  return `${baseUrl}${separator}${args}`;
+}
+
+function openAgentTerminalTab(agentId: string): void {
+  const agent = getAgentById(agentId);
+  const title = agent?.name ? `${agent.name} terminal` : "agent terminal";
+  openIframeTabForAgent(agentId, getAgentTerminalUrl(agentId), title);
+}
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
@@ -145,21 +170,24 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     }
 
     return m("div", { style: "display: flex; flex-direction: column; height: 100%; padding: 16px;" }, [
-      m("div", { style: "font-weight: 600; margin-bottom: 8px; font-size: 0.9em; color: #666;" },
-        logDone
-          ? (logSuccess ? "Agent created successfully" : "Agent creation failed")
-          : "Creating agent..."
+      m(
+        "div",
+        { style: "font-weight: 600; margin-bottom: 8px; font-size: 0.9em; color: #666;" },
+        logDone ? (logSuccess ? "Agent created successfully" : "Agent creation failed") : "Creating agent...",
       ),
       logError ? m("div", { style: "color: red; margin-bottom: 8px; font-size: 0.85em;" }, logError) : null,
-      m("div", {
-        style: "flex: 1; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8em; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all;",
-        onupdate(vnode: m.VnodeDOM) {
-          const el = vnode.dom as HTMLElement;
-          el.scrollTop = el.scrollHeight;
+      m(
+        "div",
+        {
+          style:
+            "flex: 1; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8em; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all;",
+          onupdate(vnode: m.VnodeDOM) {
+            const el = vnode.dom as HTMLElement;
+            el.scrollTop = el.scrollHeight;
+          },
         },
-      }, logLines.map((line, i) =>
-        m("div", { key: i, style: "line-height: 1.5;" }, line),
-      )),
+        logLines.map((line, i) => m("div", { key: i, style: "line-height: 1.5;" }, line)),
+      ),
     ]);
   }
 
@@ -285,9 +313,14 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
         screenLoading
           ? m("p", { class: "text-text-secondary" }, "Loading terminal output...")
           : screenContent
-            ? m("pre", {
-                class: "text-sm bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto w-full max-h-96 font-mono whitespace-pre",
-              }, screenContent)
+            ? m(
+                "pre",
+                {
+                  class:
+                    "text-sm bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto w-full max-h-96 font-mono whitespace-pre",
+                },
+                screenContent,
+              )
             : screenError
               ? m("p", { class: "text-text-secondary text-sm" }, `Could not capture terminal: ${screenError}`)
               : null,
@@ -332,7 +365,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const messageNodes: m.Vnode[] = [];
     for (const event of events) {
       if (event.type === "user_message") {
-        messageNodes.push(renderUserMessage(event));
+        const userNode = renderUserMessage(event);
+        if (userNode !== null) {
+          messageNodes.push(userNode);
+        }
       } else if (event.type === "assistant_message") {
         messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
       }
@@ -371,10 +407,22 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           isSlotClaimed("conversation-content") ? null : renderMessages(agentId),
         ),
         // Only show message input when not in proto-agent mode
-        isProtoAgent(agentId) ? null : m("footer", { class: "app-footer" }, [
-          m(EmptySlot, { name: "conversation-before-input" }),
-          m(MessageInput, { agentId }),
-        ]),
+        isProtoAgent(agentId)
+          ? null
+          : m("footer", { class: "app-footer" }, [
+              m(EmptySlot, { name: "conversation-before-input" }),
+              m(MessageInput, { agentId }),
+              m("div", { class: "chat-agent-terminal-link" }, [
+                m(
+                  "button",
+                  {
+                    type: "button",
+                    onclick: () => openAgentTerminalTab(agentId),
+                  },
+                  "Open agent terminal",
+                ),
+              ]),
+            ]),
       ]);
     },
   };

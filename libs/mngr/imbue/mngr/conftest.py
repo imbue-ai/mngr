@@ -39,6 +39,8 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.register_guards_docker import register_docker_cli_guard
+from imbue.mngr.register_guards_docker import register_docker_sdk_guard
 from imbue.mngr.utils.testing import TEST_SLEEP_AGENT_TYPE
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
@@ -47,6 +49,16 @@ from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
+from imbue.resource_guards.resource_guards import register_resource_guard
+
+# Register resource guards so that projects inheriting this conftest via
+# pytest_plugins (e.g. mngr_claude) get guards registered at import time.
+register_resource_guard("tmux")
+register_resource_guard("rsync")
+register_resource_guard("unison")
+register_resource_guard("modal")
+register_docker_cli_guard()
+register_docker_sdk_guard()
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards

@@ -103,12 +103,9 @@ function renderEmailList(emails: string[]): m.Vnode {
   }
   return m("div.share-modal-emails", [
     m("p", { style: "font-size: 13px; color: #666; margin-bottom: 4px;" }, "Shared with:"),
-    m("ul.share-modal-email-list",
-      emails.map((email) =>
-        m("li.share-modal-email-item", { key: email }, [
-          m("span", email),
-        ]),
-      ),
+    m(
+      "ul.share-modal-email-list",
+      emails.map((email) => m("li.share-modal-email-item", { key: email }, [m("span", email)])),
     ),
   ]);
 }
@@ -127,66 +124,99 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
     const isEnabled = modalStatus?.enabled ?? false;
     const title = isEnabled ? `${serverName} sharing` : `${serverName} sharing`;
 
-    const close = () => { resetModalState(); onClose(); };
+    const close = () => {
+      resetModalState();
+      onClose();
+    };
 
-    return m("div.share-modal-overlay", { onclick: (e: Event) => { if (e.target === e.currentTarget) close(); } }, [
-      m("div.share-modal", [
-        m("div.share-modal-header", [
-          m("h3.share-modal-title", title),
-          m("button.share-modal-close-x", { onclick: close, title: "Close" }, "x"),
-        ]),
+    return m(
+      "div.share-modal-overlay",
+      {
+        onclick: (e: Event) => {
+          if (e.target === e.currentTarget) close();
+        },
+      },
+      [
+        m("div.share-modal", [
+          m("div.share-modal-header", [
+            m("h3.share-modal-title", title),
+            m("button.share-modal-close-x", { onclick: close, title: "Close" }, "x"),
+          ]),
 
-        modalRequestSent
-          ? m("p", { style: "padding: 16px; color: #22c55e; text-align: center;" },
-              "Sharing request sent -- check the Minds app inbox")
-          : modalLoading
-            ? m("p.share-modal-loading", "Loading...")
-            : modalError
-              ? m("div", [
-                  m("p.share-modal-error", modalError),
-                  m("button.share-modal-btn.share-modal-btn-secondary", {
-                    onclick: () => fetchStatus(serverName),
-                  }, "Retry"),
-                ])
-              : isEnabled
+          modalRequestSent
+            ? m(
+                "p",
+                { style: "padding: 16px; color: #22c55e; text-align: center;" },
+                "Sharing request sent -- check the Minds app inbox",
+              )
+            : modalLoading
+              ? m("p.share-modal-loading", "Loading...")
+              : modalError
                 ? m("div", [
-                    m("div.share-modal-url-row", [
-                      m("input.share-modal-url-input", {
-                        type: "text",
-                        readonly: true,
-                        value: modalStatus?.url ?? "(URL not available)",
-                        onclick: (e: Event) => (e.target as HTMLInputElement).select(),
-                      }),
-                      m("button.share-modal-btn.share-modal-btn-secondary", {
-                        onclick: () => {
-                          if (modalStatus?.url) {
-                            navigator.clipboard.writeText(modalStatus.url);
-                            modalCopied = true;
-                            setTimeout(() => { modalCopied = false; m.redraw(); }, 2000);
-                          }
-                        },
-                      }, modalCopied ? "Copied" : "Copy"),
-                    ]),
-                    renderEmailList(emails),
-                    m("div.share-modal-footer", [
-                      m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
-                      m("button.share-modal-btn.share-modal-btn", {
-                        disabled: modalRequestInProgress,
-                        onclick: () => requestEdit(serverName, onClose),
-                      }, modalRequestInProgress ? "Sending..." : "Edit sharing"),
-                    ]),
+                    m("p.share-modal-error", modalError),
+                    m(
+                      "button.share-modal-btn.share-modal-btn-secondary",
+                      {
+                        onclick: () => fetchStatus(serverName),
+                      },
+                      "Retry",
+                    ),
                   ])
-                : m("div", [
-                    m("p", { style: "padding: 8px 0; color: #666;" }, "Sharing is not enabled for this server."),
-                    m("div.share-modal-footer", [
-                      m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
-                      m("button.share-modal-btn.share-modal-btn", {
-                        disabled: modalRequestInProgress,
-                        onclick: () => requestEdit(serverName, onClose),
-                      }, modalRequestInProgress ? "Sending..." : "Enable sharing"),
+                : isEnabled
+                  ? m("div", [
+                      m("div.share-modal-url-row", [
+                        m("input.share-modal-url-input", {
+                          type: "text",
+                          readonly: true,
+                          value: modalStatus?.url ?? "(URL not available)",
+                          onclick: (e: Event) => (e.target as HTMLInputElement).select(),
+                        }),
+                        m(
+                          "button.share-modal-btn.share-modal-btn-secondary",
+                          {
+                            onclick: () => {
+                              if (modalStatus?.url) {
+                                navigator.clipboard.writeText(modalStatus.url);
+                                modalCopied = true;
+                                setTimeout(() => {
+                                  modalCopied = false;
+                                  m.redraw();
+                                }, 2000);
+                              }
+                            },
+                          },
+                          modalCopied ? "Copied" : "Copy",
+                        ),
+                      ]),
+                      renderEmailList(emails),
+                      m("div.share-modal-footer", [
+                        m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
+                        m(
+                          "button.share-modal-btn.share-modal-btn",
+                          {
+                            disabled: modalRequestInProgress,
+                            onclick: () => requestEdit(serverName, onClose),
+                          },
+                          modalRequestInProgress ? "Sending..." : "Edit sharing",
+                        ),
+                      ]),
+                    ])
+                  : m("div", [
+                      m("p", { style: "padding: 8px 0; color: #666;" }, "Sharing is not enabled for this server."),
+                      m("div.share-modal-footer", [
+                        m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
+                        m(
+                          "button.share-modal-btn.share-modal-btn",
+                          {
+                            disabled: modalRequestInProgress,
+                            onclick: () => requestEdit(serverName, onClose),
+                          },
+                          modalRequestInProgress ? "Sending..." : "Enable sharing",
+                        ),
+                      ]),
                     ]),
-                  ]),
-      ]),
-    ]);
+        ]),
+      ],
+    );
   },
 };

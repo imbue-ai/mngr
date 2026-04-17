@@ -341,11 +341,11 @@ def _handle_agent_default_redirect(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Redirect to the agent's web server by default."""
+    """Redirect to the agent's system_interface server by default."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/web/"})
+    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/system_interface/"})
 
 
 async def _handle_agent_servers_page(
@@ -854,6 +854,8 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     git_url = str(form.get("git_url", "")).strip()
     agent_name = str(form.get("agent_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
+    # HTML checkboxes submit their value only when checked; absence means unchecked.
+    include_env_file = form.get("include_env_file") is not None
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -862,7 +864,13 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
         return HTMLResponse(content=html, status_code=400)
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+    agent_id = agent_creator.start_creation(
+        git_url,
+        agent_name=agent_name,
+        branch=branch,
+        launch_mode=launch_mode,
+        include_env_file=include_env_file,
+    )
     return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
 
 
@@ -903,6 +911,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     git_url = str(body.get("git_url", "")).strip()
     agent_name = str(body.get("agent_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
+    include_env_file = bool(body.get("include_env_file", False))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -918,7 +927,13 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+    agent_id = agent_creator.start_creation(
+        git_url,
+        agent_name=agent_name,
+        branch=branch,
+        launch_mode=launch_mode,
+        include_env_file=include_env_file,
+    )
     return Response(
         content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
         media_type="application/json",
@@ -1795,9 +1810,9 @@ def create_desktop_client(
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
+    minds_config: MindsConfig | None = None,
     stream_manager: MngrStreamManager | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    minds_config: MindsConfig | None = None,
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,

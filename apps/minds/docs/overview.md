@@ -55,7 +55,7 @@ The `global` flag indicates whether the agent wants Cloudflare forwarding enable
 
 ## Cloudflare tunnel integration
 
-When the desktop client has Cloudflare credentials configured (env vars `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`):
+The Cloudflare forwarding URL comes from `MindsConfig.cloudflare_forwarding_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `CLOUDFLARE_FORWARDING_URL` environment variable (env overrides file), with a dev-deployed default baked in. Auth credentials (`CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`) remain environment-variable-only. When the desktop client has these credentials configured:
 
 1. A tunnel is created automatically after each agent is created
 2. The tunnel token is injected into the agent's `runtime/secrets`

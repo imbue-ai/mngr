@@ -1102,6 +1102,31 @@ class Host(BaseHost, OnlineHostInterface):
         certified_data = self.get_certified_data()
         return str(work_dir) in certified_data.generated_work_dirs
 
+    def _ensure_work_dir_exists(self, agent: AgentInterface) -> None:
+        """Verify the agent's work_dir exists before starting.
+
+        tmux's -c flag silently falls back to $HOME when the directory does not exist,
+        which causes the agent to launch in the wrong place. This method detects the
+        missing directory early and raises a clear error with a recovery command.
+        """
+        check = self.execute_idempotent_command(f"test -d {shlex.quote(str(agent.work_dir))}")
+        if check.success:
+            return
+
+        branch = agent.get_created_branch_name()
+        if branch is None:
+            raise AgentStartError(
+                str(agent.name),
+                f"Work directory {agent.work_dir} does not exist and no branch is recorded",
+            )
+
+        raise AgentStartError(
+            str(agent.name),
+            f"Work directory {agent.work_dir} does not exist."
+            f" To recreate it, run:\n"
+            f"  git worktree add {shlex.quote(str(agent.work_dir))} {shlex.quote(branch)}",
+        )
+
     def set_plugin_data(self, plugin_name: str, data: dict[str, Any]) -> None:
         """Set certified plugin data in data.json."""
         certified_data = self.get_certified_data()
@@ -2654,6 +2679,8 @@ class Host(BaseHost, OnlineHostInterface):
                 agent = self._get_agent_by_id(agent_id)
                 if agent is None:
                     raise AgentNotFoundOnHostError(agent_id, self.id)
+
+                self._ensure_work_dir_exists(agent)
 
                 command = self._get_agent_command(agent)
                 additional_commands = self._get_agent_additional_commands(agent)

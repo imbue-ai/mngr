@@ -19,6 +19,8 @@ from imbue.resource_guards.resource_guards import create_sdk_resource_guards
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.resource_guards.resource_guards import generate_stub_wrapper_script
 from imbue.resource_guards.resource_guards import generate_wrapper_script
+from imbue.resource_guards.resource_guards import get_guarded_resource_names
+from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.resource_guards.resource_guards import register_sdk_guard
 from imbue.resource_guards.resource_guards import start_resource_guards
@@ -30,16 +32,14 @@ _TEST_RESOURCES = ["echo", "cat", "ls"]
 # Conftest that pytester injects into its temp directory.  It registers the
 # resource guard hooks for "cat" only, which is enough for end-to-end tests.
 # cat is a good choice: `cat /dev/null` succeeds, `cat /nonexistent` fails.
+# Tests using pytester must request the clean_guard_env fixture so the
+# child subprocess doesn't inherit the outer process's guard wrapper PATH.
 _PYTESTER_CONFTEST = """\
-import os
 from imbue.resource_guards.resource_guards import (
     register_resource_guard,
     start_resource_guards,
     stop_resource_guards,
 )
-
-# Clear inherited guard state so we create fresh wrappers for our resources.
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
 
 register_resource_guard("cat")
 
@@ -88,7 +88,7 @@ def test_generate_wrapper_script_contains_guard_check() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> None:
+def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with @pytest.mark.cat that calls cat should pass."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -103,7 +103,7 @@ def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> No
     result.assert_outcomes(passed=1)
 
 
-def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
+def test_guards_work_with_xdist_workers(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """Guards enforce correctly when xdist distributes tests across workers.
 
     The controller creates wrapper scripts and sets PATH; workers inherit
@@ -128,7 +128,7 @@ def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test without the mark that calls cat should fail."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -142,7 +142,7 @@ def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> N
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test that expects a resource to fail should still be caught by the guard.
 
     This simulates a realistic scenario: a test checks that cat fails on a
@@ -165,7 +165,7 @@ def test_unmarked_test_that_handles_guard_error_still_fails(pytester: pytest.Pyt
     result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
-def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester) -> None:
+def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with @pytest.mark.cat that never calls cat should fail (superfluous mark)."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -180,7 +180,7 @@ def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester) 
     result.stdout.fnmatch_lines(["*never invoked cat*"])
 
 
-def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester) -> None:
+def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """When a test fails AND a blocked resource was invoked, both should be visible."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -200,7 +200,7 @@ def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester) ->
     )
 
 
-def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytester) -> None:
+def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with no mark and no resource call should pass."""
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -306,6 +306,8 @@ def test_register_sdk_guard_adds_entry(isolated_guard_state: None) -> None:
 
     assert len(resource_guards._registered_sdk_guards) == 1
     assert resource_guards._registered_sdk_guards[0][0] == "test_sdk"
+    # Guard name is in _guarded_resources (added by register_sdk_guard).
+    assert "test_sdk" in resource_guards._guarded_resources
 
 
 def test_register_sdk_guard_deduplicates(isolated_guard_state: None) -> None:
@@ -315,14 +317,13 @@ def test_register_sdk_guard_deduplicates(isolated_guard_state: None) -> None:
     assert len(resource_guards._registered_sdk_guards) == 1
 
 
-def test_create_sdk_resource_guards_installs_and_populates(
+def test_create_sdk_resource_guards_calls_install(
     isolated_guard_state: None,
 ) -> None:
     install_called = []
     register_sdk_guard("test_sdk", lambda: install_called.append(1), lambda: None)
     create_sdk_resource_guards()
 
-    assert "test_sdk" in resource_guards._guarded_resources
     assert install_called == [1]
 
 
@@ -334,6 +335,65 @@ def test_cleanup_sdk_resource_guards_calls_cleanup(
     cleanup_sdk_resource_guards()
 
     assert cleanup_called == [1]
+
+
+def test_get_guarded_resource_names_returns_binary_and_sdk_guards(
+    isolated_guard_state: None,
+) -> None:
+    """get_guarded_resource_names() returns names from both registration paths."""
+    register_resource_guard("binary_guard")
+    register_sdk_guard("sdk_guard", lambda: None, lambda: None)
+
+    names = get_guarded_resource_names()
+    assert "binary_guard" in names
+    assert "sdk_guard" in names
+
+
+def test_sdk_only_guard_does_not_create_binary_wrapper(
+    isolated_guard_state: None,
+) -> None:
+    """SDK-only guard names must not produce PATH wrapper scripts.
+
+    Binary wrappers are only meaningful for names registered via
+    register_resource_guard(). Creating a wrapper for an SDK-only guard
+    would silently shadow any binary with the same name on PATH.
+    """
+    register_sdk_guard("sdk_only", lambda: None, lambda: None)
+    create_resource_guard_wrappers()
+
+    wrapper_dir = resource_guards._guard_wrapper_dir
+    assert wrapper_dir is not None
+    assert not (Path(wrapper_dir) / "sdk_only").exists()
+
+    cleanup_resource_guard_wrappers()
+
+
+def test_register_guarded_resource_markers(
+    isolated_guard_state: None,
+    pytestconfig: pytest.Config,
+) -> None:
+    """register_guarded_resource_markers registers marks on the config."""
+    register_resource_guard("test_res_a")
+    register_resource_guard("test_res_b")
+
+    register_guarded_resource_markers(pytestconfig, skip_names={"test_res_a"})
+
+    marker_names = {m.split(":")[0] for m in pytestconfig.getini("markers")}
+    assert "test_res_b" in marker_names
+    assert "test_res_a" not in marker_names
+
+
+def test_register_guarded_resource_markers_no_skip(
+    isolated_guard_state: None,
+    pytestconfig: pytest.Config,
+) -> None:
+    """register_guarded_resource_markers with no skip_names registers all."""
+    register_resource_guard("test_all")
+
+    register_guarded_resource_markers(pytestconfig)
+
+    marker_names = {m.split(":")[0] for m in pytestconfig.getini("markers")}
+    assert "test_all" in marker_names
 
 
 def test_custom_sdk_guard_end_to_end(
@@ -691,15 +751,11 @@ def test_enforce_sdk_guard_skips_when_no_phase_set(
 # start/stop_resource_guards to initialize the infrastructure. Tests trigger the
 # guard by calling enforce_sdk_guard directly (no real SDK needed).
 _PYTESTER_SDK_CONFTEST = """\
-import os
 from imbue.resource_guards.resource_guards import (
     register_sdk_guard,
     start_resource_guards,
     stop_resource_guards,
 )
-
-# Clear inherited guard state so we create fresh wrappers.
-os.environ.pop("_PYTEST_GUARD_WRAPPER_DIR", None)
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "test_sdk: test uses test_sdk")
@@ -714,7 +770,7 @@ def pytest_sessionfinish(session, exitstatus):
 """
 
 
-def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester) -> None:
+def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test with the SDK mark that triggers the guard should pass."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
     pytester.makepyfile("""
@@ -729,7 +785,7 @@ def test_sdk_marked_test_that_triggers_guard_passes(pytester: pytest.Pytester) -
     result.assert_outcomes(passed=1)
 
 
-def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester) -> None:
+def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
     """A test without the SDK mark that triggers the guard should fail."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
     pytester.makepyfile("""
@@ -745,6 +801,7 @@ def test_sdk_unmarked_test_that_triggers_guard_fails(pytester: pytest.Pytester) 
 
 def test_sdk_unmarked_test_that_catches_guard_error_still_fails(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test that catches ResourceGuardViolation should still be caught by the guard.
 
@@ -769,6 +826,7 @@ def test_sdk_unmarked_test_that_catches_guard_error_still_fails(
 
 def test_sdk_marked_test_that_never_triggers_guard_fails(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test with the SDK mark that never triggers the guard fails (superfluous mark)."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
@@ -786,6 +844,7 @@ def test_sdk_marked_test_that_never_triggers_guard_fails(
 
 def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
     pytester: pytest.Pytester,
+    clean_guard_env: None,
 ) -> None:
     """A test with no SDK mark and no guard trigger should pass."""
     pytester.makeconftest(_PYTESTER_SDK_CONFTEST)
@@ -794,4 +853,53 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
             assert 1 + 1 == 2
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+# ---------------------------------------------------------------------------
+# Mark auto-registration via register_guarded_resource_markers (pytester)
+# ---------------------------------------------------------------------------
+
+# Conftest that mirrors the README example: standalone pytest_configure
+# using register_guarded_resource_markers() (no conftest_hooks).
+_PYTESTER_STANDALONE_CONFTEST = """\
+from imbue.resource_guards.resource_guards import (
+    register_guarded_resource_markers,
+    register_resource_guard,
+    start_resource_guards,
+    stop_resource_guards,
+)
+
+register_resource_guard("cat")
+
+def pytest_configure(config):
+    register_guarded_resource_markers(config)
+
+def pytest_sessionstart(session):
+    start_resource_guards(session)
+
+def pytest_sessionfinish(session, exitstatus):
+    stop_resource_guards()
+"""
+
+
+def test_standalone_pytest_configure_registers_marks(
+    pytester: pytest.Pytester,
+    clean_guard_env: None,
+) -> None:
+    """The README pattern (pytest_configure + register_guarded_resource_markers) works.
+
+    Verifies that external users who don't use conftest_hooks can register
+    marks via their own pytest_configure and register_guarded_resource_markers().
+    """
+    pytester.makeconftest(_PYTESTER_STANDALONE_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        @pytest.mark.cat
+        def test_cat_dev_null():
+            subprocess.run(["cat", "/dev/null"], check=True)
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider", "--strict-markers")
     result.assert_outcomes(passed=1)
