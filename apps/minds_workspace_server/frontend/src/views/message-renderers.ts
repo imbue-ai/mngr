@@ -20,9 +20,24 @@ export function isCollapsibleUserMessage(content: string): { label: string } | n
 }
 
 export function isHiddenUserMessage(content: string): boolean {
-  // The /welcome bootstrap message is injected by the minds desktop client as
-  // the agent's initial prompt. Hiding it keeps the first visible turn clean.
-  return content.trim() === "/welcome";
+  // The minds desktop client seeds every new agent with "/welcome" as its
+  // initial message so the welcome skill can produce a friendly greeting.
+  // Claude Code expands that invocation into TWO transcript events:
+  //   1. the invocation itself, whose content wraps "/welcome" in
+  //      <command-name>.../</command-name> (plus a <command-message>...),
+  //   2. the skill expansion, which starts with
+  //      "Base directory for this skill: .../skills/welcome/..." and
+  //      carries the SKILL.md body.
+  // Hide both so the first visible turn is just the assistant's greeting.
+  // Restricted to the welcome skill specifically -- any OTHER slash
+  // command the user later runs still renders normally.
+  if (content.includes("<command-name>/welcome</command-name>")) {
+    return true;
+  }
+  if (content.startsWith("Base directory for this skill:") && /skills\/welcome(\/|\b)/.test(content)) {
+    return true;
+  }
+  return false;
 }
 
 export function StableUserMessage(): m.Component<{ event: TranscriptEvent }> {

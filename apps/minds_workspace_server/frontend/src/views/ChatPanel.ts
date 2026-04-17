@@ -24,18 +24,30 @@ import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
-import { getTerminalUrl } from "./DockviewWorkspace";
+import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 
 function getAgentTerminalUrl(agentId: string): string {
   const baseUrl = getTerminalUrl();
   const separator = baseUrl.includes("?") ? "&" : "?";
-  // Pass the agent name so ttyd's agent.sh attaches to that agent's tmux
-  // session rather than the primary agent's (which is where ttyd runs).
-  // Fall back to no name arg if the agent isn't in the local cache yet; the
-  // script then attaches to the current session.
+  // The ttyd dispatch script is invoked as `bash -c "$SCRIPT" <args...>` where
+  // the first trailing arg becomes $0 (not $1). The dispatch reads KEY="$1",
+  // so we prepend a dummy "_" to land the real key in $1. That matches the
+  // pattern used by the existing workdir deep-link in DockviewWorkspace.ts.
+  // Passing the agent name as $2 lets agent.sh attach to that agent's tmux
+  // session ("${MNGR_PREFIX}<name>") rather than the primary agent's. If the
+  // agent isn't in the local cache yet, fall back to no name arg and let
+  // agent.sh attach to the ambient session.
   const agent = getAgentById(agentId);
-  const args = agent?.name ? `arg=agent&arg=${encodeURIComponent(agent.name)}` : "arg=agent";
+  const args = agent?.name
+    ? `arg=_&arg=agent&arg=${encodeURIComponent(agent.name)}`
+    : "arg=_&arg=agent";
   return `${baseUrl}${separator}${args}`;
+}
+
+function openAgentTerminalTab(agentId: string): void {
+  const agent = getAgentById(agentId);
+  const title = agent?.name ? `${agent.name} terminal` : "agent terminal";
+  openIframeTabForAgent(agentId, getAgentTerminalUrl(agentId), title);
 }
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
@@ -402,11 +414,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
               m(MessageInput, { agentId }),
               m("div", { class: "chat-agent-terminal-link" }, [
                 m(
-                  "a",
+                  "button",
                   {
-                    href: getAgentTerminalUrl(agentId),
-                    target: "_blank",
-                    rel: "noopener noreferrer",
+                    type: "button",
+                    onclick: () => openAgentTerminalTab(agentId),
                   },
                   "Open agent terminal",
                 ),
