@@ -1629,11 +1629,26 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     """A pending request renders a card whose onclick calls navigateToRequest
     with both event_id and agent_id, and the inline script prefers the
     window.minds.navigateToRequest bridge when available."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
+    # Build the app inline so we can seed the inbox before creating the
+    # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
     event = create_sharing_request_event(agent_id=agent_id, server_name="web")
-    client.app.state.request_inbox = client.app.state.request_inbox.add_request(event)
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    request_inbox = RequestInbox().add_request(event)
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=request_inbox,
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+    client = TestClient(app)
+    _authenticate_client(client, auth_store)
 
     response = client.get("/_chrome/requests-panel")
     assert response.status_code == 200
