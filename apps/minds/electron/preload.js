@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld('minds', {
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),
+  navigateToRequest: (agentId, eventId) =>
+    ipcRenderer.send('navigate-to-request', agentId, eventId),
   showWorkspaceContextMenu: (agentId, x, y) =>
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
   onCurrentWorkspaceChanged: (callback) => {

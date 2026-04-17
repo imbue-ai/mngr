@@ -1456,7 +1456,7 @@ def _handle_requests_panel(
             ws_name = info.agent_name if info else req.agent_id[:16]
         event_id = str(req.event_id)
         cards.append(
-            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\')">'
+            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\', \'{req.agent_id}\')">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
             f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{server_name}</div></div>'
         )
@@ -1471,9 +1471,14 @@ def _handle_requests_panel(
         "</style></head>"
         f"<body>"
         f"<script>"
-        f"function navigateToRequest(eventId) {{"
-        f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
-        f'  else window.top.location = "/requests/" + eventId;'
+        f"function navigateToRequest(eventId, agentId) {{"
+        f'  if (window.minds && window.minds.navigateToRequest) {{'
+        f'    window.minds.navigateToRequest(agentId, eventId);'
+        f'  }} else if (window.minds) {{'
+        f'    window.minds.navigateContent("/requests/" + eventId);'
+        f'  }} else {{'
+        f'    window.top.location = "/requests/" + eventId;'
+        f'  }}'
         f"}}"
         f"</script>"
         f"<h2>Requests ({len(pending)})</h2>"
