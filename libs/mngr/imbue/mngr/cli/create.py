@@ -282,7 +282,14 @@ def _create_headless(
     """
     host = _resolve_online_host(opts, address, mngr_ctx)
 
-    agent_name = AgentName(address.agent_name) if address.agent_name else AgentName("create")
+    # Mirror _parse_agent_opts: honour an explicit name from the address,
+    # otherwise auto-generate a unique name using --name-style (default
+    # coolname). Using a hardcoded fallback like "create" would cause
+    # collisions across concurrent or tightly-serial headless invocations.
+    if address.agent_name is not None:
+        agent_name = address.agent_name
+    else:
+        agent_name = generate_agent_name(AgentNameStyle(opts.name_style.upper()))
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
 
     with headless_agent_output(
