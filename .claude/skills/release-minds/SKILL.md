@@ -18,7 +18,8 @@ The user keeps a "production" clone of mngr at `~/project/minds_prod` and a cons
 2. `~/project/forever-claude-template` exists and has `origin` pointing at `git@github.com:imbue-ai/forever-claude-template.git` and a remote (typically `mngr`) that points at the mngr repo.
 3. Both checkouts have clean working trees (`git status --porcelain` empty). Do not start a release on top of uncommitted work -- surface the dirty state to the user and stop.
 4. The current branch in `~/project/minds_prod` is `$1`. If not, ask the user before switching -- they may have intended a different checkout. Never force-switch.
-5. The user has network access to push (the skill assumes SSH keys are configured; if a push fails with auth, surface the real error rather than retrying).
+5. `~/project/forever-claude-template` is currently on `main` (`git branch --show-current` == `main`) and `main` is up to date with `origin/main` (`git fetch origin main && git status -sb` shows no "behind"). Each release must be cut from a fresh `main` so the release branch captures only the vendor sync, not stray unmerged work from a previous branch. If the checkout is on another branch or has local/unpushed commits on `main`, stop and ask the user before switching or resetting.
+6. The user has network access to push (the skill assumes SSH keys are configured; if a push fails with auth, surface the real error rather than retrying).
 
 ## Steps
 
@@ -34,13 +35,27 @@ If the branch already exists on the remote at the same SHA, this is a no-op and 
 
 Record `HEAD` SHA: `git rev-parse HEAD`. Use the full SHA in the commit message below; use the short SHA in conversational references.
 
-### 2. Create/switch to the matching branch in forever-claude-template
+### 2. Create the matching branch in forever-claude-template from `main`
 
-In `~/project/forever-claude-template`:
+In `~/project/forever-claude-template` (which precondition 5 has already verified is sitting on an up-to-date `main`):
 
-- If a local branch `$1` already exists, `git checkout $1`.
-- Else if `origin/$1` exists, `git checkout -b $1 origin/$1`.
-- Else `git checkout -b $1` (branching from whatever is checked out -- usually `main`; confirm with the user if the current branch is unexpected).
+```bash
+git checkout -b "$1"
+```
+
+If a local branch `$1` already exists, **stop** and ask the user -- either this release was already started (in which case we should not silently re-run) or the branch name collides with unrelated work. Do not `-B` or delete the existing branch.
+
+If `origin/$1` exists but there is no local branch, also stop and ask -- the upstream is authoritative and you should not clobber it without confirmation.
+
+### 2b. Restore the forever-claude-template checkout to `main` when done
+
+After step 5 (the push), check the user back out to `main` so the local checkout is ready for the next release or other work:
+
+```bash
+cd ~/project/forever-claude-template && git checkout main
+```
+
+The release branch remains on `origin` and as a local branch; only the working tree switches back.
 
 ### 3. Replace `vendor/mngr/` contents with the mngr HEAD
 
