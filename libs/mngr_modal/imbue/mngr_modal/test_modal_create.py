@@ -414,7 +414,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
     # `result.returncode == 0` assertion below catches it. The trailing sleep
     # keeps the agent alive long enough for mngr create to report success.
     modal_test_sleep_agent_type = make_test_sleep_agent_type(
-        modal_subprocess_env.host_dir, "which uv && which claude && sleep 100111"
+        modal_subprocess_env.host_dir, "which uv && which claude && sleep 30"
     )
     agent_name = f"test-modal-default-df-{get_short_random_string()}"
 
