@@ -189,28 +189,30 @@ def test_translate_resource_exhausted_to_rate_limit_error() -> None:
 # --- Volume retry predicate tests ---
 
 
-def test_should_retry_volume_op_retries_internal_error() -> None:
-    assert _should_retry_volume_op(modal.exception.InternalError("server error")) is True
-
-
-def test_should_retry_volume_op_retries_resource_exhausted() -> None:
-    assert _should_retry_volume_op(modal.exception.ResourceExhaustedError("rate limit")) is True
-
-
-def test_should_retry_volume_op_retries_environment_not_found() -> None:
-    assert _should_retry_volume_op(modal.exception.NotFoundError("Environment 'mngr-abc123' not found")) is True
-
-
-def test_should_retry_volume_op_does_not_retry_path_not_found() -> None:
-    assert _should_retry_volume_op(modal.exception.NotFoundError("File '/hosts/foo.json' not found")) is False
-
-
-def test_should_retry_volume_op_does_not_retry_path_containing_environment_substring() -> None:
-    # Regression test: a path-level not-found whose path happens to contain the substring
-    # "Environment" must not be misclassified as an environment-not-found error.
-    err = modal.exception.NotFoundError("File '/Environment/foo.json' not found")
-    assert _should_retry_volume_op(err) is False
-
-
-def test_should_retry_volume_op_does_not_retry_auth_error() -> None:
-    assert _should_retry_volume_op(modal.exception.AuthError("bad token")) is False
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        pytest.param(modal.exception.InternalError("server error"), True, id="internal_error"),
+        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), True, id="resource_exhausted"),
+        pytest.param(
+            modal.exception.NotFoundError("Environment 'mngr-abc123' not found"),
+            True,
+            id="environment_not_found",
+        ),
+        pytest.param(
+            modal.exception.NotFoundError("File '/hosts/foo.json' not found"),
+            False,
+            id="path_not_found",
+        ),
+        # Regression: a path-level not-found whose path contains the substring "Environment"
+        # must not be misclassified as an environment-not-found error.
+        pytest.param(
+            modal.exception.NotFoundError("File '/Environment/foo.json' not found"),
+            False,
+            id="path_containing_environment_substring",
+        ),
+        pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
+    ],
+)
+def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
+    assert _should_retry_volume_op(exc) is expected
