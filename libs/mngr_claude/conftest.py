@@ -9,13 +9,9 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 
 suppress_warnings()
-
-register_marker("modal: marks tests that connect to the Modal cloud service")
-
 register_conftest_hooks(globals())
 
 # Inherit fixtures from mngr's conftest (base test infrastructure) and

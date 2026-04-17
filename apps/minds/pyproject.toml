@@ -24,6 +24,7 @@ dependencies = [
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
+    "supertokens-python>=0.27.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
@@ -31,7 +32,7 @@ license-files = [
 ]
 
 [project.scripts]
-minds = "imbue.minds.main:cli"
+minds = "imbue.minds.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -81,11 +82,13 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
-  # External service interaction modules -- tested via acceptance tests.
+  # External service interaction modules -- tested via acceptance/release tests.
   # Pure functions within these modules are tested in the corresponding *_test.py files.
   "*/telegram/credential_extractor.py",
   "*/telegram/bot_creator.py",
   "*/telegram/injector.py",
+  # SuperTokens routes require a live Core connection -- tested via release test.
+  "*/desktop_client/supertokens_routes.py",
 ]
 
 [tool.inline-snapshot]

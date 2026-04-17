@@ -39,7 +39,7 @@ def test_get_agents_initially_empty(agent_manager: AgentManager) -> None:
 
 def test_get_applications_initially_empty(agent_manager: AgentManager) -> None:
     apps = agent_manager.get_applications()
-    assert apps == {}
+    assert apps == []
 
 
 def test_get_proto_agents_initially_empty(agent_manager: AgentManager) -> None:
@@ -60,32 +60,31 @@ url = "http://localhost:7681"
     toml_file = tmp_path / "applications.toml"
     toml_file.write_text(toml_content)
 
-    agent_manager._read_applications("test-agent", toml_file)
+    agent_manager._read_applications(toml_file)
 
     apps = agent_manager.get_applications()
-    assert "test-agent" in apps
-    assert len(apps["test-agent"]) == 2
-    assert apps["test-agent"][0].name == "web"
-    assert apps["test-agent"][0].url == "http://localhost:8000"
-    assert apps["test-agent"][1].name == "terminal"
-    assert apps["test-agent"][1].url == "http://localhost:7681"
+    assert len(apps) == 2
+    assert apps[0].name == "web"
+    assert apps[0].url == "http://localhost:8000"
+    assert apps[1].name == "terminal"
+    assert apps[1].url == "http://localhost:7681"
 
 
 def test_read_applications_handles_missing_file(agent_manager: AgentManager, tmp_path: Path) -> None:
     toml_file = tmp_path / "nonexistent.toml"
-    agent_manager._read_applications("test-agent", toml_file)
+    agent_manager._read_applications(toml_file)
 
     apps = agent_manager.get_applications()
-    assert apps.get("test-agent") == []
+    assert apps == []
 
 
 def test_read_applications_handles_empty_file(agent_manager: AgentManager, tmp_path: Path) -> None:
     toml_file = tmp_path / "empty.toml"
     toml_file.write_text("")
-    agent_manager._read_applications("test-agent", toml_file)
+    agent_manager._read_applications(toml_file)
 
     apps = agent_manager.get_applications()
-    assert apps.get("test-agent") == []
+    assert apps == []
 
 
 def test_read_applications_ignores_entries_without_name(agent_manager: AgentManager, tmp_path: Path) -> None:
@@ -96,10 +95,10 @@ url = "http://localhost:8000"
     toml_file = tmp_path / "applications.toml"
     toml_file.write_text(toml_content)
 
-    agent_manager._read_applications("test-agent", toml_file)
+    agent_manager._read_applications(toml_file)
 
     apps = agent_manager.get_applications()
-    assert apps.get("test-agent") == []
+    assert apps == []
 
 
 def test_get_agents_serialized(agent_manager: AgentManager) -> None:
@@ -121,12 +120,12 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
 
 def test_get_applications_serialized(agent_manager: AgentManager) -> None:
     with agent_manager._lock:
-        agent_manager._applications["a1"] = [
+        agent_manager._applications = [
             ApplicationEntry(name="web", url="http://localhost:8000"),
         ]
 
     serialized = agent_manager.get_applications_serialized()
-    assert serialized == {"a1": [{"name": "web", "url": "http://localhost:8000"}]}
+    assert serialized == [{"name": "web", "url": "http://localhost:8000"}]
 
 
 def test_resolve_agent_work_dir_from_own_env(agent_manager: AgentManager) -> None:
@@ -160,16 +159,7 @@ def test_create_chat_agent_broadcasts_proto_created(
     """The proto_agent_created broadcast fires before the creation thread runs."""
     q = broadcaster.register()
 
-    with agent_manager._lock:
-        agent_manager._agents["parent-id"] = AgentStateItem(
-            id="parent-id",
-            name="parent",
-            state="RUNNING",
-            labels={},
-            work_dir="/tmp/test-work",
-        )
-
-    agent_id = agent_manager.create_chat_agent("test-chat", "parent-id")
+    agent_id = agent_manager.create_chat_agent("test-chat")
     agent_manager.stop()
 
     assert isinstance(agent_id, str)
@@ -181,12 +171,7 @@ def test_create_chat_agent_broadcasts_proto_created(
     assert proto_msg["type"] == "proto_agent_created"
     assert proto_msg["agent_id"] == agent_id
     assert proto_msg["creation_type"] == "chat"
-    assert proto_msg["parent_agent_id"] == "parent-id"
-
-
-def test_create_chat_agent_raises_for_unknown_parent(agent_manager: AgentManager) -> None:
-    with pytest.raises(AgentCreationError, match="Cannot determine work directory"):
-        agent_manager.create_chat_agent("test-chat", "nonexistent-parent")
+    assert proto_msg["parent_agent_id"] is None
 
 
 def test_create_worktree_agent_broadcasts_proto_created(
@@ -325,8 +310,8 @@ def test_on_applications_changed(
     agent_manager._on_applications_changed("app-agent")
 
     apps = agent_manager.get_applications()
-    assert len(apps["app-agent"]) == 1
-    assert apps["app-agent"][0].name == "web"
+    assert len(apps) == 1
+    assert apps[0].name == "web"
 
     raw = q.get_nowait()
     assert raw is not None
@@ -339,10 +324,10 @@ def test_read_applications_handles_invalid_toml(agent_manager: AgentManager, tmp
     toml_file = tmp_path / "bad.toml"
     toml_file.write_text("this is [[ not valid toml {{")
 
-    agent_manager._read_applications("test-agent", toml_file)
+    agent_manager._read_applications(toml_file)
 
     apps = agent_manager.get_applications()
-    assert apps.get("test-agent") == []
+    assert apps == []
 
 
 def test_handle_discovery_event_ignores_unknown_types(agent_manager: AgentManager) -> None:

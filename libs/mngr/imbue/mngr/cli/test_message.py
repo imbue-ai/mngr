@@ -107,7 +107,7 @@ def claude_agent(claude_test_env: dict[str, str], temp_git_repo: Path) -> Genera
         yield agent_name
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
@@ -128,7 +128,7 @@ def test_mngr_create_with_message_succeeds(claude_test_env: dict[str, str], temp
         )
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(300)

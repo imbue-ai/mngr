@@ -65,7 +65,7 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress, onNotification) {
+function startBackend(onProgress, onNotification, onAuthEvent) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -82,6 +82,10 @@ function startBackend(onProgress, onNotification) {
 
       let uvBin, args, cwd, env;
 
+      const mindsRootName = paths.getMindsRootName();
+      const mngrHostDir = paths.getMngrHostDir();
+      const mngrPrefix = paths.getMngrPrefix();
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -95,7 +99,13 @@ function startBackend(onProgress, onNotification) {
           '--no-browser',
         ];
         cwd = paths.getMonorepoRoot();
-        env = { ...process.env, MINDS_ELECTRON: '1' };
+        env = {
+          ...process.env,
+          MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
+        };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
@@ -122,6 +132,9 @@ function startBackend(onProgress, onNotification) {
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;
@@ -163,6 +176,8 @@ function startBackend(onProgress, onNotification) {
               }
             } else if (event.event === 'notification' && event.message && onNotification) {
               onNotification(event);
+            } else if ((event.event === 'auth_success' || event.event === 'auth_required') && onAuthEvent) {
+              onAuthEvent(event);
             }
           } catch {
             // Not valid JSON -- just log it
