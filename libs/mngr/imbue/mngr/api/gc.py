@@ -342,8 +342,9 @@ def _gc_single_host(
         # temporarily empty (e.g. between agent creation and discovery).
         try:
             certified_data = host.get_certified_data()
-        except (HostAuthenticationError, HostConnectionError, HostOfflineError) as e:
-            # Cannot determine age -- err on the side of caution.
+        except (HostAuthenticationError, HostConnectionError) as e:
+            # Cannot determine age -- err on the side of caution.  HostConnectionError
+            # also catches its HostOfflineError subclass.
             logger.warning("Cannot determine age of host {} during GC, skipping: {}", host.id, e)
             return
         host_age_seconds = (datetime.now(timezone.utc) - certified_data.created_at).total_seconds()
