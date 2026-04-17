@@ -72,12 +72,30 @@ jobs:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
 
-      - name: Combine coverage and check threshold
+      - name: Combine coverage and check per-package thresholds
         if: always()
         run: |
+          set -u
           i=0; for f in $(find test-results/ -name ".coverage"); do cp "$f" ".coverage.$i"; i=$((i+1)); done
           uv run coverage combine .coverage.*
-          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80
+          FAILED_PKGS=""
+          for pkg in libs/* apps/*; do
+            [ -f "$pkg/pyproject.toml" ] || continue
+            THRESHOLD=$(python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1],'rb')); n=d.get('tool',{}).get('coverage',{}).get('report',{}).get('fail_under'); print('' if n is None else n)" "$pkg/pyproject.toml")
+            [ -n "$THRESHOLD" ] || continue
+            echo "=== $pkg (fail_under=${THRESHOLD}%) ==="
+            if ! uv run coverage report --include="$pkg/*" --fail-under="$THRESHOLD"; then
+              FAILED_PKGS="$FAILED_PKGS $pkg"
+            fi
+          done
+          # Global backstop against regression of the combined gate.
+          echo "=== combined (fail_under=80%) ==="
+          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80 || FAILED_PKGS="$FAILED_PKGS [combined]"
+          if [ -n "$FAILED_PKGS" ]; then
+            echo ""
+            echo "FAILED coverage gates:$FAILED_PKGS"
+            exit 1
+          fi
 
       - name: Report test results
         if: always()

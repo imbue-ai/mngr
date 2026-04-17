@@ -45,3 +45,6 @@ omit = [
     "test_*.py",
     "*/conftest.py",
 ]
+
+[tool.coverage.report]
+fail_under = 80

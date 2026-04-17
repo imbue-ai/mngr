@@ -70,3 +70,6 @@ venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.11"
 strict = ["**/*.py"]
+
+[tool.coverage.report]
+fail_under = 45
