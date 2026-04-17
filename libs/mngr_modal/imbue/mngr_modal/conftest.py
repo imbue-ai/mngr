@@ -254,14 +254,15 @@ def modal_test_session_host_dir(tmp_path_factory: pytest.TempPathFactory) -> Pat
     return host_dir
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def modal_test_sleep_agent_type(modal_test_session_host_dir: Path) -> str:
     """Mint a long-running agent type in the session-scoped Modal host dir.
 
-    Modal subprocess tests share a session host dir (so their settings
-    propagate to the subprocess ``mngr`` they spawn). Any test that wants a
-    placeholder agent imports this fixture and passes it to ``mngr create``
-    as ``--type <value>``.
+    Modal subprocess tests share the session host dir (so their settings
+    propagate to the subprocess ``mngr`` they spawn). Scoped per-test (not
+    per-session) so each test mints a fresh ``test_sleep_<uuid>`` with a
+    distinct ``sleep <N>`` -- leaked processes stay traceable to the test
+    that spawned them.
     """
     return make_test_sleep_agent_type(modal_test_session_host_dir)
 
