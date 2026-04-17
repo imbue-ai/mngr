@@ -115,12 +115,27 @@ class HermesAgentConfig(AgentTypeConfig):
         )
 
 
+_HERMES_TUI_READY_INDICATOR: Final[str] = "❯"
+
+
 class HermesAgent(BaseAgent[HermesAgentConfig]):
     """Agent implementation for Hermes with isolated HERMES_HOME per agent."""
 
     def _get_hermes_home_dir(self) -> Path:
         """Return the per-agent HERMES_HOME directory path."""
         return self._get_agent_dir() / _HERMES_HOME_DIR_NAME
+
+    def get_tui_ready_indicator(self) -> str | None:
+        """Return the hermes prompt character.
+
+        prompt_toolkit renders the '❯' character in its input area only after
+        ``Application.run()`` has started the event loop and bound the Enter
+        handler. It is not present in hermes's startup banner. Waiting for it
+        before sending the initial message avoids a race where the message
+        text is typed into the buffer but Enter arrives before the handler is
+        bound, leaving the message queued but unsubmitted.
+        """
+        return _HERMES_TUI_READY_INDICATOR
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Inject HERMES_HOME pointing to the per-agent hermes home directory."""
