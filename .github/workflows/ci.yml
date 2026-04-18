@@ -85,14 +85,25 @@ jobs:
           echo "=== Coverage-data delivery diagnostic ==="
           echo "  .coverage files collected:        $cov_count"
           echo "  per-sandbox junit files (sb-*.xml): $junit_count"
-          # Show .coverage file count grouped by parent dir — offload downloads
-          # per-sandbox into test-results/<sandbox-id>/, so each sandbox should
-          # produce the same count. Directories with fewer than the mode are
-          # candidates for partial delivery.
-          echo "  .coverage file counts per parent dir:"
-          find test-results/ -name ".coverage" -type f 2>/dev/null | sed 's|/\.coverage$||' | sort | uniq -c | awk '{print "    " $0}'
-          echo "  distribution of counts (count-per-dir: number-of-dirs):"
-          find test-results/ -name ".coverage" -type f 2>/dev/null | sed 's|/\.coverage$||' | sort | uniq -c | awk '{print $1}' | sort | uniq -c | awk '{print "    " $2 " .coverage files: " $1 " dirs"}'
+          # Correlate junit vs .coverage per sandbox ID. Offload downloads
+          # per-sandbox results into test-results/<sandbox-id>/, so each
+          # junit file sb-<id>.xml should have a matching .coverage file
+          # somewhere under test-results/<sandbox-id>/.
+          junit_ids=$(find test-results/junit-parts/ -name "sb-*.xml" 2>/dev/null \
+            | sed -E 's|.*/(sb-[^/]+)\.xml$|\1|' | sort -u)
+          cov_ids=$(find test-results/ -mindepth 2 -name ".coverage" -type f 2>/dev/null \
+            | sed -E 's|^test-results/([^/]+)/.*|\1|' | sort -u)
+          if [ "$cov_count" != "$junit_count" ]; then
+            if [ "$junit_count" -gt "$cov_count" ]; then
+              echo "  MISMATCH: $(( junit_count - cov_count )) sandboxes delivered junit but not .coverage"
+            else
+              echo "  MISMATCH: $(( cov_count - junit_count )) sandboxes delivered .coverage but not junit"
+            fi
+            echo "  sandboxes with junit but no .coverage:"
+            comm -23 <(printf '%s\n' "$junit_ids") <(printf '%s\n' "$cov_ids") | awk 'NF{print "    " $0}'
+            echo "  sandboxes with .coverage but no junit:"
+            comm -13 <(printf '%s\n' "$junit_ids") <(printf '%s\n' "$cov_ids") | awk 'NF{print "    " $0}'
+          fi
           i=0; for f in $(find test-results/ -name ".coverage"); do cp "$f" ".coverage.$i"; i=$((i+1)); done
           uv run coverage combine .coverage.*
           FAILED_PKGS=""
