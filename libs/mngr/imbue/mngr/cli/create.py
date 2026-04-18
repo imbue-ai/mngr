@@ -215,10 +215,16 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     # path (via _parse_agent_opts / auto-labels) but not applied by
     # _create_headless. Rejecting them surfaces the mismatch instead of
     # silently dropping the user's value.
+    #
+    # --host-label is intentionally *not* listed: when the headless address
+    # creates a new host (NAME@.PROVIDER or --new-host), _parse_target_host
+    # reads opts.host_label to populate host tags, so the flag is honored.
+    # This matches the treatment of other host-level flags (--host-env,
+    # --snapshot, --idle-timeout, ...) which are also only meaningful on
+    # new-host creation.
     ("id", "--id"),
     ("label", "--label"),
     ("project", "--project"),
-    ("host_label", "--host-label"),
 )
 
 

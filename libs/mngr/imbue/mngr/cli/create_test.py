@@ -869,7 +869,6 @@ def test_create_headless_rejects_conflicting_positional_and_type_flag(
         (["--id", "abc123"], "--id"),
         (["--label", "key=value"], "--label"),
         (["--project", "myproj"], "--project"),
-        (["--host-label", "env=prod"], "--host-label"),
     ],
 )
 def test_create_headless_rejects_agent_metadata_flags(
@@ -878,9 +877,12 @@ def test_create_headless_rejects_agent_metadata_flags(
     flag_args: list[str],
     expected_in_error: str,
 ) -> None:
-    """Agent identity/metadata flags (--id, --label, --project, --host-label) are
-    consumed on the non-headless path but not by _create_headless. They must be
-    rejected rather than silently dropped.
+    """Agent identity/metadata flags (--id, --label, --project) are consumed on
+    the non-headless path but not by _create_headless. They must be rejected
+    rather than silently dropped.
+
+    --host-label is intentionally *not* in this list: it is honored on
+    new-host creation via _parse_target_host.
     """
     result = cli_runner.invoke(
         create,
