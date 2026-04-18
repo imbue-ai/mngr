@@ -143,6 +143,12 @@ mngr schedule remove [OPTIONS] NAMES...
 ```
 **Options:**
 
+## Execution
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Provider on which the triggers are deployed (e.g. 'local', 'modal'). | None |
+
 ## Safety
 
 | Name | Type | Description | Default |
@@ -172,6 +178,12 @@ mngr schedule remove [OPTIONS] NAMES...
 mngr schedule run [OPTIONS] NAME
 ```
 **Options:**
+
+## Execution
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Provider on which the trigger is deployed (e.g. 'local', 'modal'). | None |
 
 ## Common
 

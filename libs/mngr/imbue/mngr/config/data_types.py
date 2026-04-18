@@ -856,6 +856,7 @@ class CreateCliOptions(CommonCliOptions):
     type: str | None
     reuse: bool
     connect: bool
+    foreground: bool
     connect_command: str | None
     ensure_clean: bool
     name: str | None

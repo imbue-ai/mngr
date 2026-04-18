@@ -27,6 +27,8 @@ from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
+from imbue.mngr.cli.create import _resolve_agent_type_name
+from imbue.mngr.cli.create import _resolve_early_agent_type
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
 from imbue.mngr.cli.create import _split_address_and_target_path
@@ -35,6 +37,7 @@ from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -56,6 +59,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
+from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -699,6 +703,251 @@ def test_split_cli_args_empty() -> None:
 
 
 # =============================================================================
+# Tests for _resolve_agent_type_name (shared resolution logic)
+# =============================================================================
+
+
+def test_resolve_agent_type_name_type_flag_wins() -> None:
+    """--type flag takes precedence over positional."""
+    assert _resolve_agent_type_name("headless_command", "claude") == "headless_command"
+
+
+def test_resolve_agent_type_name_positional_fallback() -> None:
+    """Positional arg used when --type is None."""
+    assert _resolve_agent_type_name(None, "headless_claude") == "headless_claude"
+
+
+def test_resolve_agent_type_name_all_none() -> None:
+    """All None returns None (default to claude)."""
+    assert _resolve_agent_type_name(None, None) is None
+
+
+# =============================================================================
+# Tests for _resolve_early_agent_type
+# =============================================================================
+
+
+def test_resolve_early_agent_type_from_type_flag(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag should be returned as the agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_from_positional(default_create_cli_opts: CreateCliOptions) -> None:
+    """Positional agent type should be returned when --type is not set."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_claude"
+
+
+def test_resolve_early_agent_type_flag_takes_precedence(default_create_cli_opts: CreateCliOptions) -> None:
+    """--type flag takes precedence over positional agent type."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "headless_command"),
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "headless_claude"),
+    )
+
+    result = _resolve_early_agent_type(opts)
+
+    assert result == "headless_command"
+
+
+def test_resolve_early_agent_type_returns_none_when_unset(default_create_cli_opts: CreateCliOptions) -> None:
+    """Returns None when neither --type nor positional agent type is set."""
+    result = _resolve_early_agent_type(default_create_cli_opts)
+
+    assert result is None
+
+
+# =============================================================================
+# Tests for _create_headless
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_headless_streams_output(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+) -> None:
+    """Creating a headless_command agent with --foreground should stream output.
+
+    Registers a custom headless_command-based agent type with a specific command
+    via settings.toml (since --command is not a CLI flag).
+    """
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    assert "headless-test-output" in result.output
+
+
+# =============================================================================
+# Tests for incompatible flag rejection on the headless path
+# =============================================================================
+
+
+def test_create_headless_rejects_incompatible_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Headless agent types should reject flags that don't apply to the headless flow."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "--foreground", "--env", "FOO=bar"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "does not support" in result.output
+    assert "--env" in result.output
+
+
+def test_create_headless_rejects_multiple_incompatible_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Error message should list all incompatible flags that were explicitly set."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--message",
+            "hi",
+            "--reuse",
+            "--env",
+            "FOO=bar",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--env" in result.output
+    assert "--message" in result.output
+    assert "--reuse" in result.output
+
+
+def test_create_headless_rejects_conflicting_positional_and_type_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Conflicting positional agent type and --type flag should raise even for headless types."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "headless_command", "--type", "headless_claude"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Conflicting agent types" in result.output
+
+
+@pytest.mark.parametrize(
+    "flag_args,expected_in_error",
+    [
+        (["--id", "abc123"], "--id"),
+        (["--label", "key=value"], "--label"),
+        (["--project", "myproj"], "--project"),
+    ],
+)
+def test_create_headless_rejects_agent_metadata_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    flag_args: list[str],
+    expected_in_error: str,
+) -> None:
+    """Agent identity/metadata flags (--id, --label, --project) are consumed on
+    the non-headless path but not by _create_headless. They must be rejected
+    rather than silently dropped.
+
+    --host-label is intentionally *not* in this list: it is honored on
+    new-host creation via _parse_target_host.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "--foreground", *flag_args],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert expected_in_error in result.output
+    assert "does not support" in result.output
+
+
+# =============================================================================
+# Tests for --foreground flag
+# =============================================================================
+
+
+def test_create_headless_without_foreground_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Headless agent types require --foreground."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
+    assert "headless" in result.output.lower()
+
+
+def test_create_foreground_with_non_headless_type_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--foreground with a non-headless agent type should be rejected."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "claude", "--foreground"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
+    assert "not headless" in result.output
+
+
+def test_create_foreground_without_type_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--foreground without any agent type (default claude) should be rejected."""
+    result = cli_runner.invoke(
+        create,
+        ["--foreground"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--foreground" in result.output
+
+
+# =============================================================================
 # Tests for --label option in _parse_agent_opts
 # =============================================================================
 
@@ -815,30 +1064,6 @@ def test_parse_agent_opts_agent_id_none_by_default(
     )
 
     assert result.agent_id is None
-
-
-def test_parse_agent_opts_conflicting_type_and_positional_raises(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Specifying both --type and positional agent type with different values should raise."""
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    source_location = HostLocation(host=local_host, path=temp_work_dir)
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().type, "claude"),
-        to_update(default_create_cli_opts.field_ref().positional_agent_type, "codex"),
-    )
-
-    with pytest.raises(UserInputError, match="Conflicting agent types"):
-        _parse_agent_opts(
-            opts=opts,
-            address=AgentAddress(),
-            initial_message=None,
-            source_location=source_location,
-            mngr_ctx=temp_mngr_ctx,
-        )
 
 
 def test_parse_agent_opts_matching_type_and_positional_ok(
