@@ -100,13 +100,16 @@ test-unit:
 test-integration:
   uv run pytest {{_parallel}} --cov-report=html --cov-fail-under=80
 
+# Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
 # Examples:
 #   just test-quick
 #   just test-quick libs/mngr
 #   just test-quick libs/mngr/.../foo_test.py::test_bar
-#   just test-quick -m 'not tmux and not modal'
-# Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
-test-quick *args="":
+#   just test-quick "libs/mngr -m 'not tmux and not modal'"
+# Note: pass complex argument strings (anything with spaces, like -m exprs)
+# as ONE outer-quoted argument. Variadic {{args}} splits on whitespace
+# and drops inner quoting, which would truncate `-m 'a and b'` to `-m a`.
+test-quick args="":
   uv run pytest {{_parallel}} --no-cov {{args}}
 
 test-acceptance:
