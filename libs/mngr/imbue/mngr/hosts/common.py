@@ -152,9 +152,12 @@ def check_agent_type_known(
     return is_agent_class_registered(effective_type)
 
 
-@pure
 def seconds_since(activity_time: datetime | None) -> float | None:
-    """Seconds elapsed since a UTC timestamp; None if input is None."""
+    """Seconds elapsed since a UTC timestamp; None if input is None.
+
+    Not marked @pure because it reads the current wall-clock time, so it
+    does not return the same output for the same input.
+    """
     if activity_time is None:
         return None
     return (datetime.now(timezone.utc) - activity_time).total_seconds()
