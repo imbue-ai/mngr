@@ -4,9 +4,12 @@
 # image add Docker-in-Docker plumbing on top of the regular one.
 
 # ---- Extra apt packages for Docker-in-Docker ----
+# util-linux provides flock, used by ensure-dockerd.sh to serialize
+# concurrent start-dockerd.sh invocations.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     iptables \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Docker-in-Docker (static binaries) ----
