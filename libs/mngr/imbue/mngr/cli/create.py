@@ -189,7 +189,7 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("rsync_args", "--rsync-args"),
     ("ensure_clean", "--ensure-clean/--no-ensure-clean"),
     ("include_unclean", "--include-unclean/--exclude-unclean"),
-    ("include_gitignored", "--include-gitignored"),
+    ("include_gitignored", "--include-gitignored/--no-include-gitignored"),
     ("target_path", "--target-path"),
     ("env", "--env"),
     ("env_file", "--env-file"),
