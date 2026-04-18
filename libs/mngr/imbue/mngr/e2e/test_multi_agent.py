@@ -76,11 +76,8 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_list_filter_by_state(e2e: E2eSession) -> None:
-    # Pin a distinct sleep value per agent so a leaked `sleep <N>` in `ps`
-    # is grep-able back to the specific agent that spawned it.
-    sleep_per_agent = {"running-agent": "sleep 100121", "stopped-agent": "sleep 100122"}
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100103")
     for name in ["running-agent", "stopped-agent"]:
-        sleep_agent_type = e2e.make_sleep_agent_type(sleep_per_agent[name])
         expect(
             e2e.run(
                 f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
