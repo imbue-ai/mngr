@@ -14,9 +14,10 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100098")
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="Create agent to be destroyed",
         )
     ).to_succeed()

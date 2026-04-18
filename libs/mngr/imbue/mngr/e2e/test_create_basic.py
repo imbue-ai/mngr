@@ -12,6 +12,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_default(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100070")
     e2e.write_tutorial_block("""
     # running mngr create is strictly better than running claude! It's less letters to type :-D
     # running this command launches claude (Claude Code) immediately *in a new worktree*
@@ -19,7 +20,7 @@ def test_create_default(e2e: E2eSession) -> None:
     # the defaults are the following: agent=claude, provider=local, project=current dir
     """)
     result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
         comment="running mngr create is strictly better than running claude!",
     )
     expect(result).to_succeed()
@@ -35,6 +36,7 @@ def test_create_default(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_in_place(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100071")
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
     mngr create --transfer=none
@@ -42,7 +44,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        "mngr create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+        f"mngr create my-task --transfer=none --type {sleep_agent_type} --no-ensure-clean",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
@@ -66,21 +68,23 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_short_forms(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100072")
     e2e.write_tutorial_block("""
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
     mngr create my-task claude
     mngr c my-task
     """)
-    # Test "mngr create <name>" form (claude is the default type, --command substitutes for the real agent)
+    # Test "mngr create <name>" form. --type test_sleep stands in for the real
+    # claude agent so the test doesn't need claude installed.
     result_full = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
         comment="you can use a short form for most commands (like create) as well",
     )
     expect(result_full).to_succeed()
 
     # Test "mngr c <name>" short form (needs a different name since my-task already exists)
     result_short = e2e.run(
-        "mngr c my-other-task --command 'sleep 99999' --no-ensure-clean",
+        f"mngr c my-other-task --type {sleep_agent_type} --no-ensure-clean",
         comment="the above command is the same as these",
     )
     expect(result_short).to_succeed()
@@ -126,6 +130,7 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100073")
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
     # by using `--` to separate the agent arguments from the mngr arguments:
@@ -133,7 +138,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     # that command launches claude with the "opus" model instead of the default
     """)
     result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean -- --model opus",
+        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean -- --model opus",
         comment="you can specify the arguments to the *agent* by using `--` to separate the agent arguments",
     )
     expect(result).to_succeed()
@@ -151,6 +156,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_named_agent(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100074")
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
     mngr create my-task
@@ -158,7 +164,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
             comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
         )
     ).to_succeed()
@@ -172,6 +178,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_json_output(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100075")
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
     mngr create my-task --no-connect --format json
@@ -179,7 +186,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
+            f"mngr create my-task --no-connect --type {sleep_agent_type} --no-ensure-clean --format json",
             comment="you can control output format for scripting",
         )
     ).to_succeed()
@@ -194,6 +201,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100076")
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
     # if you want to be sure that interactivity is disabled, you can use the --headless flag:
@@ -201,7 +209,7 @@ def test_create_headless(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --headless",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --headless",
             comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
         )
     ).to_succeed()

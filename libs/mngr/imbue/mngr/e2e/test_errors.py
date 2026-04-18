@@ -18,15 +18,16 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100099")
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect",
+            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --no-connect",
             comment="Create first agent",
         )
     ).to_succeed()
 
     duplicate_result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect",
+        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --no-connect",
         comment="Attempt to create agent with duplicate name",
     )
     expect(duplicate_result).to_fail()
