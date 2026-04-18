@@ -375,7 +375,7 @@ _WORKSPACE_PACKAGES = (
 
 
 @pytest.fixture
-def isolated_mngr_venv(tmp_path: Path) -> Path:
+def isolated_mngr_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a temporary venv with mngr installed for subprocess-based tests.
 
     Returns the venv directory. Use ``venv / "bin" / "mngr"`` to run mngr
@@ -400,10 +400,10 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
 
     python_path = str(venv_dir / "bin" / "python")
 
-    # Unset UV_OFFLINE so uv can fetch packages from cache or network.
-    # The autouse fixture sets UV_OFFLINE=1 for test isolation, but this
-    # fixture needs to install packages into a fresh venv.
-    uv_env = {k: v for k, v in os.environ.items() if k not in ("UV_OFFLINE", "UV_FROZEN")}
+    # Undo the autouse fixture's UV_OFFLINE/UV_FROZEN so uv can fetch
+    # packages into the fresh venv from its local cache.
+    monkeypatch.delenv("UV_OFFLINE", raising=False)
+    monkeypatch.delenv("UV_FROZEN", raising=False)
 
     cg = ConcurrencyGroup(name="isolated-venv-setup")
     with cg:
@@ -411,7 +411,6 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
         export_result = cg.run_process_to_completion(
             ("uv", "export", "--package", "imbue-mngr", "--no-hashes", "--frozen"),
             cwd=_REPO_ROOT,
-            env=uv_env,
         )
         reqs_file = tmp_path / "pinned-deps.txt"
         reqs_file.write_text(
@@ -420,16 +419,14 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
             )
         )
 
-        cg.run_process_to_completion(("uv", "venv", str(venv_dir)), env=uv_env)
+        cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
         # Install pinned deps from cache (no resolution or network needed)
         cg.run_process_to_completion(
             ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file)),
-            env=uv_env,
         )
         # Install workspace packages as editable (no-deps since deps are already installed)
         cg.run_process_to_completion(
             ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args),
-            env=uv_env,
         )
 
     # Write a uv-receipt.toml so plugin add/remove recognise this as a

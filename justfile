@@ -35,6 +35,20 @@ _generate-dockerignore:
     # file so adding a new test-offload-<target> recipe doesn't require editing here.
     echo '.offload-*cache-key' >> .dockerignore
 
+# Generate Dockerfile.release from Dockerfile + Dockerfile.release.extras so the
+# two Dockerfiles stay in sync without duplicating the base layers. Strips the
+# trailing CMD from Dockerfile; the .extras file provides its own CMD.
+[private]
+_generate-release-dockerfile:
+    #!/bin/bash
+    set -ueo pipefail
+    base=libs/mngr/imbue/mngr/resources/Dockerfile
+    extras=libs/mngr/imbue/mngr/resources/Dockerfile.release.extras
+    out=libs/mngr/imbue/mngr/resources/Dockerfile.release
+    # Everything from the base Dockerfile up to (not including) the first CMD line.
+    awk '/^CMD/{exit} {print}' "$base" > "$out"
+    cat "$extras" >> "$out"
+
 # Run tests on Modal via Offload
 test-offload args="":
     #!/bin/bash
@@ -123,11 +137,16 @@ test-offload-release args="":
     tmpdir=$(mktemp -d)
     trap "rm -rf $tmpdir" EXIT
 
+    # Regenerate Dockerfile.release from Dockerfile + Dockerfile.release.extras
+    # so the two stay in sync.
+    just _generate-release-dockerfile
+
     # Invalidate offload's image cache when build inputs change.
     # Include the Docker startup scripts COPY'd into the image so that edits
     # to those scripts also invalidate the cache.
     CACHE_KEY=$(cat .offload-base-commit \
-        libs/mngr/imbue/mngr/resources/Dockerfile.release \
+        libs/mngr/imbue/mngr/resources/Dockerfile \
+        libs/mngr/imbue/mngr/resources/Dockerfile.release.extras \
         libs/mngr/imbue/mngr/resources/start-dockerd.sh \
         libs/mngr/imbue/mngr/resources/ensure-dockerd.sh \
         offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
