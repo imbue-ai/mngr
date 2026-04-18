@@ -332,26 +332,24 @@ def _offer_diagnose(
     if not click.confirm("\nRun diagnostic agent now?", default=True):
         return False
 
-    # Walk up to the root context (the AliasAwareGroup) to find the diagnose command.
-    root_ctx = ctx
-    while root_ctx is not None and root_ctx.parent is not None:
-        root_ctx = root_ctx.parent
-    if root_ctx is None:
-        logger.warning("Could not find root CLI group to invoke diagnose command")
+    # ctx here is the AliasAwareGroup's own context (the root CLI group), passed
+    # down from main.py's except-block where the error was caught.
+    if ctx is None:
+        logger.warning("No CLI context available to invoke diagnose command")
         return False
 
-    root_command = root_ctx.command
+    root_command = ctx.command
     if not isinstance(root_command, click.Group):
         logger.warning("Root CLI command is not a group")
         return False
 
-    diagnose_command = root_command.get_command(root_ctx, "diagnose")
+    diagnose_command = root_command.get_command(ctx, "diagnose")
     if diagnose_command is None:
         logger.warning("Diagnose command not found in CLI group")
         return False
 
     diagnose_args = ["--context-file", str(context_file_path)]
-    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=root_ctx)
+    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=ctx)
     with diagnose_ctx:
         diagnose_command.invoke(diagnose_ctx)
     return True
