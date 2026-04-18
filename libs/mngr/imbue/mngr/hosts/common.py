@@ -179,11 +179,16 @@ def compute_idle_seconds(
 def get_seconds_since_last_activity(host: OnlineHostInterface) -> float | None:
     """Return seconds since the most recent host-level activity across all sources.
 
-    Aggregates every ActivitySource file in the host's activity directory
-    (BOOT, SSH, USER, etc.) and returns the elapsed time since the most
+    Aggregates every host-level ActivitySource file in the host's activity
+    directory (BOOT, SSH, USER) and returns the elapsed time since the most
     recent one, or None if nothing has been recorded.
+
+    Only host-level sources are checked (not agent-level ones like AGENT or
+    START) because each check on a remote host is a separate SSH round-trip,
+    and agent-level sources are never written at the host-level activity
+    path so checking them would waste SSH calls without ever finding data.
     """
-    activity_times = [host.get_reported_activity_time(source) for source in ActivitySource]
+    activity_times = [host.get_reported_activity_time(source) for source in HOST_LEVEL_ACTIVITY_SOURCES]
     latest_activity = max((t for t in activity_times if t is not None), default=None)
     return seconds_since(latest_activity)
 
