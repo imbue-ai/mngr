@@ -1,6 +1,19 @@
 from pathlib import Path
 
+import pytest
+from pydantic import AnyUrl
+
+from imbue.minds.desktop_client.minds_config import DEFAULT_CLOUDFLARE_FORWARDING_URL
+from imbue.minds.desktop_client.minds_config import DEFAULT_SUPERTOKENS_CONNECTION_URI
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.errors import MindsConfigError
+
+
+@pytest.fixture(autouse=True)
+def _clear_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure no stray env-var overrides leak into url-resolution tests."""
+    monkeypatch.delenv("CLOUDFLARE_FORWARDING_URL", raising=False)
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
 
 
 def _make_config(tmp_path: Path) -> MindsConfig:
@@ -50,12 +63,19 @@ def test_persistence_across_instances(tmp_path: Path) -> None:
     assert config2.get_auto_open_requests_panel() is False
 
 
-def test_corrupt_toml_returns_defaults(tmp_path: Path) -> None:
-    """A corrupt config.toml is handled gracefully with defaults."""
+def test_corrupt_toml_raises(tmp_path: Path) -> None:
+    """A corrupt config.toml raises MindsConfigError rather than silently
+    returning defaults. Silent fallback would hide data corruption -- e.g.
+    the next ``set_*`` call would overwrite the unparseable file with a
+    fresh one derived from an empty dict, losing whatever the user had
+    intended to be stored.
+    """
     config = _make_config(tmp_path)
     (tmp_path / "config.toml").write_text("not valid toml {{{")
-    assert config.get_default_account_id() is None
-    assert config.get_auto_open_requests_panel() is True
+    with pytest.raises(MindsConfigError):
+        config.get_default_account_id()
+    with pytest.raises(MindsConfigError):
+        config.get_auto_open_requests_panel()
 
 
 def test_multiple_settings_coexist(tmp_path: Path) -> None:
@@ -69,3 +89,71 @@ def test_multiple_settings_coexist(tmp_path: Path) -> None:
 
     config.set_default_account_id("user-new")
     assert config.get_auto_open_requests_panel() is False
+
+
+# -- URL settings (env > file > default) --
+
+
+def test_cloudflare_forwarding_url_defaults_when_unset(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.cloudflare_forwarding_url == AnyUrl(DEFAULT_CLOUDFLARE_FORWARDING_URL)
+
+
+def test_supertokens_connection_uri_defaults_when_unset(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.supertokens_connection_uri == AnyUrl(DEFAULT_SUPERTOKENS_CONNECTION_URI)
+
+
+def test_cloudflare_forwarding_url_file_overrides_default(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text('cloudflare_forwarding_url = "https://cf-from-file.example.com/"\n')
+    config = _make_config(tmp_path)
+    assert str(config.cloudflare_forwarding_url) == "https://cf-from-file.example.com/"
+    # unrelated URL still uses default
+    assert config.supertokens_connection_uri == AnyUrl(DEFAULT_SUPERTOKENS_CONNECTION_URI)
+
+
+def test_supertokens_connection_uri_file_overrides_default(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text('supertokens_connection_uri = "https://st-from-file.example.com/"\n')
+    config = _make_config(tmp_path)
+    assert str(config.supertokens_connection_uri) == "https://st-from-file.example.com/"
+
+
+def test_cloudflare_forwarding_url_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "config.toml").write_text('cloudflare_forwarding_url = "https://cf-from-file.example.com/"\n')
+    monkeypatch.setenv("CLOUDFLARE_FORWARDING_URL", "https://cf-from-env.example.com/")
+    config = _make_config(tmp_path)
+    assert str(config.cloudflare_forwarding_url) == "https://cf-from-env.example.com/"
+
+
+def test_supertokens_connection_uri_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "config.toml").write_text('supertokens_connection_uri = "https://st-from-file.example.com/"\n')
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st-from-env.example.com/")
+    config = _make_config(tmp_path)
+    assert str(config.supertokens_connection_uri) == "https://st-from-env.example.com/"
+
+
+def test_invalid_url_in_file_raises(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text('cloudflare_forwarding_url = "not-a-url"\n')
+    config = _make_config(tmp_path)
+    with pytest.raises(MindsConfigError):
+        _ = config.cloudflare_forwarding_url
+
+
+def test_invalid_url_in_env_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLOUDFLARE_FORWARDING_URL", "not-a-url")
+    config = _make_config(tmp_path)
+    with pytest.raises(MindsConfigError):
+        _ = config.cloudflare_forwarding_url
+
+
+def test_url_settings_coexist_with_user_preferences(tmp_path: Path) -> None:
+    """Setting a user preference does not clobber URL config, and vice versa."""
+    (tmp_path / "config.toml").write_text(
+        'cloudflare_forwarding_url = "https://cf.example.com/"\ndefault_account_id = "user-1"\n'
+    )
+    config = _make_config(tmp_path)
+    assert str(config.cloudflare_forwarding_url) == "https://cf.example.com/"
+    assert config.get_default_account_id() == "user-1"
+    # Writing a user preference preserves the URL config on re-read.
+    config.set_auto_open_requests_panel(False)
+    assert str(config.cloudflare_forwarding_url) == "https://cf.example.com/"

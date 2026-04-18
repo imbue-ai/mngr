@@ -82,6 +82,10 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
 
       let uvBin, args, cwd, env;
 
+      const mindsRootName = paths.getMindsRootName();
+      const mngrHostDir = paths.getMngrHostDir();
+      const mngrPrefix = paths.getMngrPrefix();
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -95,7 +99,13 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           '--no-browser',
         ];
         cwd = paths.getMonorepoRoot();
-        env = { ...process.env, MINDS_ELECTRON: '1' };
+        env = {
+          ...process.env,
+          MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
+        };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
@@ -122,6 +132,9 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;

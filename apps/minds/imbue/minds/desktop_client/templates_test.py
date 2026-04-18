@@ -29,14 +29,14 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
-    assert "No workspaces yet" in html
+    assert "No projects yet" in html
 
 
 def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     assert "Discovering agents" in html
     assert "reload" in html
-    assert "No workspaces yet" not in html
+    assert "No projects yet" not in html
     assert "/forwarding/" not in html
 
 
@@ -87,7 +87,7 @@ def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
 def test_render_agent_servers_page_has_back_link() -> None:
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
     assert 'href="/"' in html
-    assert "Back to all workspaces" in html
+    assert "Back to all projects" in html
 
 
 def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:

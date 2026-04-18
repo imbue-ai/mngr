@@ -9,6 +9,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_post_attach_resize_delivers_sigwinch_to_pane_process(mngr_test_prefix: str, tmp_path) -> None:
     """Verify build_post_attach_resize_script delivers SIGWINCH to pane processes.

@@ -904,7 +904,8 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
     Syncs directories (skills/, agents/, commands/, plugins/) and individual
     files (keybindings.json) depending on the ``symlink`` flag. In symlink mode,
     plugins/ uses child-level symlinks (not a dir-level symlink) so that
-    installed_plugins.json can be rewritten in place without modifying the source.
+    per-agent generated files (installed_plugins.json, known_marketplaces.json)
+    can be written as real files without modifying the shared source.
     settings.json is handled separately by _build_settings_json.
     """
     home_claude = get_user_claude_config_dir()
@@ -918,9 +919,15 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
                 f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
         elif dir_name == "plugins":
-            # Child-level symlinks so installed_plugins.json can be overwritten
+            # Child-level symlinks so per-agent generated files can coexist with
+            # shared directory contents (cache/, marketplaces/, etc.). Skip the
+            # files that will be overwritten by _write_generated_files; symlinking
+            # them would cause writes to corrupt the shared source.
             host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            skip_names = {_INSTALLED_PLUGINS_RELATIVE_PATH.name, _KNOWN_MARKETPLACES_RELATIVE_PATH.name}
             for child in source.iterdir():
+                if child.name in skip_names:
+                    continue
                 host.execute_idempotent_command(
                     f"ln -sf {shlex.quote(str(child))} {shlex.quote(str(dest / child.name))}",
                     timeout_seconds=5.0,
