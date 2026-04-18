@@ -21,7 +21,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.common import compute_idle_seconds  # noqa: E402
+from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
