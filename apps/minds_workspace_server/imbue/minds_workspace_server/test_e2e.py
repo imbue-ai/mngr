@@ -114,6 +114,7 @@ def _make_agent_fixture(
         id=agent_id,
         name=agent_name,
         state="RUNNING",
+        agent_type="claude",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
     )

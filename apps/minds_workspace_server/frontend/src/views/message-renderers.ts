@@ -8,6 +8,14 @@ import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
 
+// Hermes injects skill invocations into the conversation as role=user
+// messages whose content starts with
+//   [SYSTEM: The user has invoked the "<name>" skill, ...
+// followed by the full skill markdown. Treat these the same way we treat
+// Claude Code's "Base directory for this skill: ..." expansion so the UI
+// renders them as a collapsible skill block rather than a raw user turn.
+const HERMES_SKILL_INVOCATION_PATTERN = /^\[SYSTEM: The user has invoked the "([^"]+)" skill/;
+
 export function isCollapsibleUserMessage(content: string): { label: string } | null {
   if (content.startsWith("Stop hook feedback:\n")) {
     return { label: "Stop hook feedback" };
@@ -15,6 +23,10 @@ export function isCollapsibleUserMessage(content: string): { label: string } | n
   if (content.startsWith("Base directory for this skill:")) {
     const match = content.match(/skills\/([^\n/]+)/);
     return { label: match ? `Skill: ${match[1]}` : "Skill expansion" };
+  }
+  const hermesMatch = content.match(HERMES_SKILL_INVOCATION_PATTERN);
+  if (hermesMatch) {
+    return { label: `Skill: ${hermesMatch[1]}` };
   }
   return null;
 }
@@ -28,13 +40,19 @@ export function isHiddenUserMessage(content: string): boolean {
   //   2. the skill expansion, which starts with
   //      "Base directory for this skill: .../skills/welcome/..." and
   //      carries the SKILL.md body.
-  // Hide both so the first visible turn is just the assistant's greeting.
+  // Hermes produces a single role=user event starting with
+  //   [SYSTEM: The user has invoked the "welcome" skill, ...
+  // Hide all three so the first visible turn is just the assistant's greeting.
   // Restricted to the welcome skill specifically -- any OTHER slash
-  // command the user later runs still renders normally.
+  // command the user later runs still renders normally (collapsed).
   if (content.includes("<command-name>/welcome</command-name>")) {
     return true;
   }
   if (content.startsWith("Base directory for this skill:") && /skills\/welcome(\/|\b)/.test(content)) {
+    return true;
+  }
+  const hermesMatch = content.match(HERMES_SKILL_INVOCATION_PATTERN);
+  if (hermesMatch && hermesMatch[1] === "welcome") {
     return true;
   }
   return false;

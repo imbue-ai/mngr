@@ -23,6 +23,13 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
 
 
+class AgentType(UpperCaseStrEnum):
+    """Which agent runtime backs a workspace."""
+
+    CLAUDE = auto()
+    HERMES = auto()
+
+
 class AgentName(NonEmptyStr):
     """User-chosen name for an agent."""
 

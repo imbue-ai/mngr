@@ -7,6 +7,7 @@ from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.primitives import AgentType
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -213,6 +214,19 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       </div>
       <div class="form-group">
         <div class="form-label">
+          <label for="agent_type">Agent type</label>
+          <p class="help-text">Which agent runtime powers the workspace.</p>
+        </div>
+        <div class="form-input">
+          <select id="agent_type" name="agent_type">
+            {% for type in agent_types %}
+            <option value="{{ type.value }}"{% if type.value == selected_agent_type %} selected{% endif %}>{{ type.value | lower }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="form-label">
           <label for="include_env_file">Include .env file</label>
           <p class="help-text">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
         </div>
@@ -403,6 +417,7 @@ def render_create_form(
     agent_name: str = "",
     branch: str = "",
     launch_mode: LaunchMode = LaunchMode.LOCAL,
+    agent_type: AgentType = AgentType.CLAUDE,
 ) -> str:
     """Render the agent creation form page.
 
@@ -419,6 +434,8 @@ def render_create_form(
         branch=effective_branch,
         launch_modes=list(LaunchMode),
         selected_launch_mode=launch_mode.value,
+        agent_types=list(AgentType),
+        selected_agent_type=agent_type.value,
     )
 
 

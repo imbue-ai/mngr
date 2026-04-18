@@ -73,6 +73,7 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.primitives import AgentType
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -860,8 +861,18 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
         launch_mode = LaunchMode.LOCAL
+    try:
+        agent_type = AgentType(str(form.get("agent_type", AgentType.CLAUDE.value)))
+    except ValueError:
+        agent_type = AgentType.CLAUDE
     if not git_url:
-        html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+        html = render_create_form(
+            git_url="",
+            agent_name=agent_name,
+            branch=branch,
+            launch_mode=launch_mode,
+            agent_type=agent_type,
+        )
         return HTMLResponse(content=html, status_code=400)
 
     agent_id = agent_creator.start_creation(
@@ -869,6 +880,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
+        agent_type=agent_type,
         include_env_file=include_env_file,
     )
     return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
@@ -920,6 +932,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "Invalid launch_mode"}',
             media_type="application/json",
         )
+    try:
+        agent_type = AgentType(str(body.get("agent_type", AgentType.CLAUDE.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid agent_type"}',
+            media_type="application/json",
+        )
     if not git_url:
         return Response(
             status_code=400,
@@ -932,6 +952,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         agent_name=agent_name,
         branch=branch,
         launch_mode=launch_mode,
+        agent_type=agent_type,
         include_env_file=include_env_file,
     )
     return Response(

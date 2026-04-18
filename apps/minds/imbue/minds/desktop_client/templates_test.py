@@ -9,6 +9,7 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.primitives import AgentType
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -138,6 +139,23 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
     html = render_create_form(launch_mode=LaunchMode.DEV)
     assert 'value="DEV" selected' in html
     assert 'value="LOCAL" selected' not in html
+
+
+def test_render_create_form_contains_all_agent_types() -> None:
+    html = render_create_form()
+    for agent_type in AgentType:
+        assert agent_type.value.lower() in html
+
+
+def test_render_create_form_selects_claude_by_default() -> None:
+    html = render_create_form()
+    assert 'value="CLAUDE" selected' in html
+
+
+def test_render_create_form_selects_specified_agent_type() -> None:
+    html = render_create_form(agent_type=AgentType.HERMES)
+    assert 'value="HERMES" selected' in html
+    assert 'value="CLAUDE" selected' not in html
 
 
 def test_render_login_page_shows_prompt() -> None:

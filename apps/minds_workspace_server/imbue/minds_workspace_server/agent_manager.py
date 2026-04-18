@@ -202,8 +202,13 @@ class AgentManager:
         """Generate a random agent name using mngr's name generator."""
         return str(generate_agent_name(AgentNameStyle.COOLNAME))
 
-    def create_worktree_agent(self, name: str, selected_agent_id: str) -> str:
-        """Create a new worktree agent. Returns the pre-generated agent ID."""
+    def create_worktree_agent(self, name: str, selected_agent_id: str, agent_type: str) -> str:
+        """Create a new worktree agent. Returns the pre-generated agent ID.
+
+        ``agent_type`` (e.g. "claude", "hermes") tags the placeholder
+        ``AgentStateItem`` so the chat view picks the right session watcher
+        during the brief window before ``mngr observe`` re-discovers the agent.
+        """
         agent_id = str(AgentId())
 
         with self._lock:
@@ -263,12 +268,15 @@ class AgentManager:
         labels = {"user_created": "true", "workspace": name}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels, agent_type)
 
         return agent_id
 
-    def create_chat_agent(self, name: str) -> str:
-        """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID."""
+    def create_chat_agent(self, name: str, agent_type: str) -> str:
+        """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID.
+
+        See ``create_worktree_agent`` for the meaning of ``agent_type``.
+        """
         agent_id = str(AgentId())
 
         with self._lock:
@@ -321,7 +329,7 @@ class AgentManager:
         for key in ("workspace", "project"):
             if key in primary_labels:
                 labels[key] = primary_labels[key]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels, agent_type)
 
         return agent_id
 
@@ -333,11 +341,12 @@ class AgentManager:
         work_dir: Path,
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
+        agent_type: str,
     ) -> None:
         """Start a background thread to run agent creation and stream logs."""
         self._creation_cg.start_new_thread(
             target=self._run_creation,
-            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels),
+            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels, agent_type),
             name=f"create-{agent_id[:8]}",
             is_checked=False,
         )
@@ -368,6 +377,7 @@ class AgentManager:
         work_dir: Path,
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
+        agent_type: str,
     ) -> None:
         """Run mngr create in the background and capture output."""
         cmd_str = shlex.join(cmd)
@@ -405,6 +415,7 @@ class AgentManager:
                     id=agent_id,
                     name=agent_name,
                     state="RUNNING",
+                    agent_type=agent_type,
                     labels=labels,
                     work_dir=str(work_dir),
                 )
@@ -424,6 +435,7 @@ class AgentManager:
                         id=agent_info.id,
                         name=agent_info.name,
                         state=agent_info.state,
+                        agent_type=agent_info.agent_type,
                         labels=agent_info.labels,
                         work_dir=agent_info.work_dir,
                     )
@@ -445,6 +457,7 @@ class AgentManager:
                     id=agent_info.id,
                     name=agent_info.name,
                     state=agent_info.state,
+                    agent_type=agent_info.agent_type,
                     labels=agent_info.labels,
                     work_dir=agent_info.work_dir,
                 )
@@ -534,6 +547,7 @@ class AgentManager:
                 id=str(agent.agent_id),
                 name=str(agent.agent_name),
                 state="RUNNING",
+                agent_type=str(agent.agent_type) if agent.agent_type is not None else "",
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
@@ -561,6 +575,7 @@ class AgentManager:
             id=agent_id,
             name=str(agent.agent_name),
             state="RUNNING",
+            agent_type=str(agent.agent_type) if agent.agent_type is not None else "",
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
         )
