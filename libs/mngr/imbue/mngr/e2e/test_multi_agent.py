@@ -43,11 +43,8 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
-    # Pin a distinct sleep value per agent so a leaked `sleep <N>` in `ps`
-    # is grep-able back to the specific agent that spawned it.
-    sleep_per_agent = {"agent-x": "sleep 100119", "agent-y": "sleep 100120"}
+    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100102")
     for name in ["agent-x", "agent-y"]:
-        sleep_agent_type = e2e.make_sleep_agent_type(sleep_per_agent[name])
         expect(
             e2e.run(
                 f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
