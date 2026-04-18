@@ -1,5 +1,6 @@
 """Integration tests for the clone CLI command."""
 
+from pathlib import Path
 from uuid import uuid4
 
 import pluggy
@@ -9,6 +10,7 @@ from click.testing import CliRunner
 from imbue.mngr.cli.clone import clone
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -19,11 +21,13 @@ def test_clone_creates_agent_from_source(
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
 ) -> None:
     """Test that clone creates a new agent by delegating to create --from."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100008")
     source_name = f"test-clone-source-{uuid4().hex}"
     clone_name = f"test-clone-target-{uuid4().hex}"
-    create_test_agent(source_name)
+    create_test_agent(source_name, "sleep 300001")
     clone_session = f"{mngr_test_prefix}{clone_name}"
 
     # Clone session is created by clone command, not by create_test_agent, so clean it up separately
@@ -34,8 +38,8 @@ def test_clone_creates_agent_from_source(
             [
                 source_name,
                 clone_name,
-                "--command",
-                "sleep 482917",
+                "--type",
+                test_sleep_agent_type,
                 "--transfer=none",
                 "--no-connect",
             ],

@@ -5,16 +5,10 @@ An agent type is a named configuration that tells `mngr` how to set up and run a
 ```bash
 mngr create my-agent claude        # "claude" is the agent type
 mngr create my-agent codex         # "codex" is the agent type
-mngr create my-agent ./my-script   # any command can be an agent type
+mngr create my-agent my-script     # any command on PATH whose name is a plain identifier
 ```
 
-Alternatively, you can use `--command` to run a literal command directly without specifying an agent type:
-
-```bash
-mngr create my-agent --command "sleep 1000"   # run a literal command
-```
-
-Using `--command` implicitly uses the "generic" agent type, which simply runs the provided command. This means `--command` and `--type` are mutually exclusive.
+To run a literal command with spaces or shell metacharacters, define a [custom agent type](#custom-agent-types) with that command.
 
 Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
 
@@ -55,8 +49,20 @@ mngr create my-agent my_claude
 
 Custom types can be scoped to a project by using `mngr config edit --scope project`. This is useful for project-specific configurations that shouldn't apply globally.
 
+To run a literal shell command (with spaces, pipes, or other shell metacharacters), set `command` on a custom type and omit `parent_type`:
+
+```toml
+[agent_types.my_server]
+command = "python -m http.server 8080"
+```
+
+```bash
+mngr create my-task my_server
+```
+
 ### Available Settings
 
+- `command`: literal shell command to run as the agent. When set on a type without a `parent_type`, this defines a standalone command-based agent type; when set alongside `parent_type`, it overrides the command inherited from the parent type.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 

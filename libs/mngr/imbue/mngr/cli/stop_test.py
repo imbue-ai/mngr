@@ -183,7 +183,7 @@ def test_stop_archive_sets_archived_at_label(
     temp_host_dir: Path,
 ) -> None:
     """stop --archive should stop the agent and set the archived_at label."""
-    create_test_agent("archive-test-agent")
+    create_test_agent("archive-test-agent", "sleep 300018")
 
     result = cli_runner.invoke(
         stop,

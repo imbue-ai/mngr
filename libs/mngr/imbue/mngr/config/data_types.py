@@ -861,7 +861,6 @@ class CreateCliOptions(CommonCliOptions):
     name: str | None
     id: str | None
     name_style: str
-    command: str | None
     extra_window: tuple[str, ...]
     source: str | None
     target_path: str | None

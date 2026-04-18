@@ -75,7 +75,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -240,10 +239,6 @@ class _CreateCommand(click.Command):
     help="Auto-generated name style",
 )
 @optgroup.option("--type", help="Which type of agent to run [default: claude]")
-@optgroup.option(
-    "--command",
-    help="Run a literal command using the generic agent type (mutually exclusive with --type)",
-)
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(
@@ -1314,10 +1309,6 @@ def _parse_agent_opts(
     # Determine agent type: --type and positional are equivalent; specifying both
     # with different values is an error. _CreateCommand.parse_args handles --
     # correctly so positional_agent_type is always a real positional.
-    #
-    # Special case: --command implies using the "generic" agent type, which simply
-    # runs the provided command. If --type is also specified to something other
-    # than "generic", that's an error (they are mutually exclusive).
     resolved_agent_type = opts.type
     resolved_agent_args = opts.agent_args
 
@@ -1329,17 +1320,6 @@ def _parse_agent_opts(
     if opts.positional_agent_type and resolved_agent_type is None:
         resolved_agent_type = opts.positional_agent_type
 
-    # Handle --command: it implies using the "generic" agent type
-    if opts.command:
-        if resolved_agent_type is not None and resolved_agent_type != "generic":
-            raise UserInputError(
-                f"--command and --type are mutually exclusive. "
-                f"Use --command to run a literal command (implicitly uses 'generic' agent type), "
-                f"or use --type to specify an agent type like '{resolved_agent_type}'."
-            )
-        # Automatically use the "generic" agent type when --command is provided
-        resolved_agent_type = "generic"
-
     is_clone = source_agent_state_dir is not None
 
     # Parse worktree base folder
@@ -1349,7 +1329,6 @@ def _parse_agent_opts(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
         name=parsed_agent_name,
-        command=CommandString(opts.command) if opts.command else None,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
         target_path=target_path,
