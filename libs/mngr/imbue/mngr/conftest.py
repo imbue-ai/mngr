@@ -14,6 +14,7 @@ import pluggy
 import psutil
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mngr.main
@@ -690,9 +691,6 @@ def _ensure_dockerd_for_release() -> None:
     verify /var/run/docker.sock exists before returning. If we still cannot
     bring dockerd up, we raise -- otherwise every docker/docker_sdk test in
     the session would fail with an opaque FileNotFoundError on the socket.
-
-    Output is written to sys.stderr unconditionally because pytest's session-
-    scope capture otherwise swallows ConcurrencyGroup's subprocess output.
     """
     start_script = Path("/start-dockerd.sh")
     if not start_script.exists():
@@ -708,17 +706,16 @@ def _ensure_dockerd_for_release() -> None:
                 is_checked_after=False,
             )
         if last_result.returncode == 0 and docker_sock.exists():
-            sys.stderr.write(f"[_ensure_dockerd_for_release] dockerd ready on attempt {attempt + 1}\n")
-            sys.stderr.flush()
+            logger.info("[_ensure_dockerd_for_release] dockerd ready on attempt {}", attempt + 1)
             return
-        sys.stderr.write(
-            f"[_ensure_dockerd_for_release] attempt {attempt + 1} failed: "
-            f"returncode={last_result.returncode} "
-            f"socket_exists={docker_sock.exists()}\n"
-            f"stdout: {last_result.stdout}\n"
-            f"stderr: {last_result.stderr}\n"
+        logger.warning(
+            "[_ensure_dockerd_for_release] attempt {} failed: returncode={} socket_exists={}\nstdout: {}\nstderr: {}",
+            attempt + 1,
+            last_result.returncode,
+            docker_sock.exists(),
+            last_result.stdout,
+            last_result.stderr,
         )
-        sys.stderr.flush()
 
     raise RuntimeError(
         f"Failed to start dockerd after 3 attempts. "
