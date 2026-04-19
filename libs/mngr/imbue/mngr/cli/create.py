@@ -317,29 +317,25 @@ def _create_headless(
     requires the source host to match the resolved target host, since the
     headless path does not perform any transfer.
     """
-    # Resolve the source first when --source is given: it is the source host
-    # that decides where the agent actually runs (we never transfer on the
-    # headless path), so we must not start an unrelated target host first.
+    # When --source is given, the source host doubles as the target host: the
+    # agent runs in-place there (no transfer on the headless path). Pinning a
+    # separate target via the address or --provider would require starting an
+    # unrelated host just to reject it, so we forbid that combination at the
+    # name level without touching any providers.
     source_location: HostLocation | None
     if opts.source is not None:
+        if address.host_name is not None or address.provider_name is not None or opts.provider is not None:
+            raise UserInputError(
+                "On the headless path, --source determines the target host (the agent "
+                "runs in-place with no transfer). Drop the target pinned via the address "
+                "(@HOST / @.PROVIDER) or --provider, or drop --source."
+            )
         agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
         resolved_source = _resolve_source_location(
             opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host
         )
         source_location = resolved_source.location
         host = resolved_source.location.host
-
-        # If the user also pinned a target host via the address or --provider,
-        # it must agree with the source host. Mismatched hosts would require a
-        # transfer, which the headless path does not perform.
-        if address.host_name is not None or address.provider_name is not None or opts.provider is not None:
-            target_host = _resolve_online_host(opts, address, mngr_ctx)
-            if target_host.id != host.id:
-                raise UserInputError(
-                    f"Headless with --source requires the source and target hosts to match "
-                    f"(the agent runs in-place, with no transfer). "
-                    f"Source host is '{host.id}' but target resolves to '{target_host.id}'."
-                )
     else:
         source_location = None
         host = _resolve_online_host(opts, address, mngr_ctx)
