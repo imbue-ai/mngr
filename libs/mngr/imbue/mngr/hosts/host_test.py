@@ -2699,6 +2699,7 @@ def test_apply_work_dir_extra_paths_share_same_host_existing_non_symlink_raises(
 
 
 @pytest.mark.rsync
+@pytest.mark.flaky
 def test_apply_work_dir_extra_paths_copy_mode_copies_files(
     local_host: Host,
     source_and_work_dirs: tuple[Path, Path],

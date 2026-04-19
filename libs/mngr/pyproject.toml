@@ -119,6 +119,12 @@ omit = [
   "*/providers/docker/testing.py",
   # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
   "*/minds/*",
+  # These packages are gated individually by their own (lower) fail_under
+  # thresholds; excluding them from the combined report keeps the
+  # combined 80% gate focused on the "main" set of packages and
+  # prevents their lower coverage from dragging the combined mean down.
+  "*/mngr_vps_docker/*",
+  "*/mngr_vultr/*",
 ]
 
 [tool.inline-snapshot]

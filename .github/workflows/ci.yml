@@ -124,12 +124,13 @@ jobs:
               FAILED_PKGS="$FAILED_PKGS $pkg"
             fi
           done
-          # Global backstop against regression of the combined gate. The
-          # threshold sits at 78 rather than 80 because mngr_vps_docker and
-          # mngr_vultr are individually below 80% and pull the combined
-          # mean down.
-          echo "=== combined (fail_under=78%) ==="
-          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=78 || FAILED_PKGS="$FAILED_PKGS [combined]"
+          # Global backstop against regression of the combined gate.
+          # Packages with their own much-lower fail_under (and minds, which
+          # has its own coverage config) are excluded from the combined
+          # report via libs/mngr/pyproject.toml's [tool.coverage.report].omit
+          # so this 80% gate reflects the "main" package set.
+          echo "=== combined (fail_under=80%) ==="
+          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80 || FAILED_PKGS="$FAILED_PKGS [combined]"
           if [ -n "$FAILED_PKGS" ]; then
             echo ""
             echo "FAILED coverage gates:$FAILED_PKGS"
