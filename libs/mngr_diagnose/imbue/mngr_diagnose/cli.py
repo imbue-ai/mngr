@@ -124,8 +124,7 @@ def diagnose(
     logger.info("Launching diagnostic agent...")
 
     # Diagnose-owned create args, then user-provided pass-through args.
-    # Click's last-wins semantics let pass-through args override defaults like
-    # --no-ensure-clean if the user really wants to.
+    # Click's last-wins semantics let pass-through args override defaults.
     full_create_args: list[str] = [
         "--from",
         f":{resolved_clone_dir}",
@@ -135,7 +134,6 @@ def diagnose(
         "main:",
         "--message",
         message,
-        "--no-ensure-clean",
         *create_args,
     ]
 
