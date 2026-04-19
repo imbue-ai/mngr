@@ -2165,6 +2165,36 @@ def _make_remote_host(
     )
 
 
+def _run_gc_on_remote_host(
+    host: _RemoteHost,
+    *,
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    provider_name: str,
+    dry_run: bool = False,
+) -> tuple[_DestroyableProvider, GcResult]:
+    """Wrap `host` in a _DestroyableProvider and run gc_machines against it.
+
+    Returns the provider and result so callers can assert on `destroyed_hosts`
+    and `machines_destroyed`.
+    """
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName(provider_name),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=dry_run,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+    return provider, result
+
+
 def test_gc_machines_skips_young_online_host_with_no_agents(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2172,20 +2202,8 @@ def test_gc_machines_skips_young_online_host_with_no_agents(
 ) -> None:
     """gc_machines skips online hosts with no agents that are younger than the minimum age."""
     host = _make_remote_host(local_provider, last_activity_seconds_ago=60)
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-remote"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-remote"
     )
 
     assert len(result.machines_destroyed) == 0
@@ -2199,20 +2217,8 @@ def test_gc_machines_destroys_old_online_host_with_no_agents(
 ) -> None:
     """gc_machines destroys online hosts with no agents that exceed the minimum age."""
     host = _make_remote_host(local_provider, last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60)
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-remote-old"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-remote-old"
     )
 
     assert len(result.machines_destroyed) == 1
@@ -2235,20 +2241,8 @@ def test_gc_machines_skips_host_on_auth_error_during_discover(
         last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
         host_cls=_RemoteAuthErrorOnDiscoverHost,
     )
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-auth-skip"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-auth-skip"
     )
 
     assert len(result.machines_destroyed) == 0
@@ -2266,20 +2260,8 @@ def test_gc_machines_skips_host_on_connection_error_during_discover(
         last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
         host_cls=_RemoteConnectionErrorOnDiscoverHost,
     )
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-conn-skip"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-conn-skip"
     )
 
     assert len(result.machines_destroyed) == 0
@@ -2293,20 +2275,12 @@ def test_gc_machines_dry_run_identifies_but_does_not_destroy_old_online_host(
 ) -> None:
     """gc_machines dry run reports old online hosts but does not actually destroy them."""
     host = _make_remote_host(local_provider, last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60)
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-dry-run"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
+    provider, result = _run_gc_on_remote_host(
+        host,
+        temp_host_dir=temp_host_dir,
+        temp_mngr_ctx=temp_mngr_ctx,
+        provider_name="test-dry-run",
         dry_run=True,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
     )
 
     assert len(result.machines_destroyed) == 1
@@ -2323,20 +2297,8 @@ def test_gc_machines_skips_host_when_activity_time_unreadable(
         local_provider,
         host_cls=_ActivityTimeAuthErrorHost,
     )
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-cert-error"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-cert-error"
     )
 
     assert len(result.machines_destroyed) == 0
@@ -2355,21 +2317,8 @@ def test_gc_machines_skips_host_when_no_activity_recorded(
     and must not destroy it.
     """
     host = _make_remote_host(local_provider, last_activity_seconds_ago=None)
-
-    provider = _DestroyableProvider(
-        name=ProviderInstanceName("test-no-activity"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_hosts=[host],
-    )
-
-    result = GcResult()
-    gc_machines(
-        mngr_ctx=temp_mngr_ctx,
-        hosts_by_provider=_hosts_for(provider),
-        dry_run=False,
-        error_behavior=ErrorBehavior.ABORT,
-        result=result,
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-no-activity"
     )
 
     assert len(result.machines_destroyed) == 0
