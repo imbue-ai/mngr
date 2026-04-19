@@ -101,12 +101,15 @@ def _is_local_path(repo_source: str) -> bool:
 
 
 def _redact_url_credentials(url: str) -> str:
-    """Strip any ``user:password@`` component from an HTTPS URL for logging.
+    """Strip any ``user[:password]@`` userinfo from a URL's netloc for logging.
 
-    Returns URLs without a netloc userinfo component unchanged, so local paths
-    and SSH-style URLs (``git@github.com:...``) are passed through as-is. Used
-    to avoid leaking tokens like ``https://x-access-token:<TOKEN>@...`` into
-    debug logs.
+    Used to avoid leaking tokens like ``https://x-access-token:<TOKEN>@...`` into
+    debug logs. Strings that urlsplit parses with no netloc userinfo -- local
+    paths and SCP-style SSH URLs (``git@github.com:user/repo.git``, which has no
+    scheme so urlsplit produces an empty netloc) -- are returned unchanged.
+    Schemed URLs that do have userinfo (including ``ssh://git@host/...``) have
+    that userinfo stripped; losing the schemed ``user@`` prefix is harmless
+    since it isn't a secret and the remaining URL still identifies the repo.
     """
     parts = urlsplit(url)
     if "@" not in parts.netloc:
