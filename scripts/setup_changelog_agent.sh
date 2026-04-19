@@ -54,9 +54,9 @@ done
 # have fields in the repo's settings.toml that the container mngr doesn't know.
 # Needed plugins: schedule (deploy mechanism), modal (runtime provider),
 # headless_command (the agent type that runs our bash script).
-DISABLE_PLUGIN_ARGS=$(python3 -c "
+DISABLE_PLUGIN_ARGS=$(uv run python -c "
 import importlib.metadata
-enabled = {'schedule', 'modal', 'headless_command'}
+enabled = {'schedule', 'modal', 'headless_command', 'file'}
 names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')} - enabled)
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
