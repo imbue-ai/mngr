@@ -1057,6 +1057,43 @@ def test_create_headless_with_source_runs_in_place(
     assert "/tmp/mngr-headless-" not in result.output
 
 
+@pytest.mark.parametrize(
+    "pinned_args",
+    [
+        pytest.param(["agent@.local"], id="provider_in_address"),
+        pytest.param(["agent", "--provider", "local"], id="provider_flag"),
+        pytest.param(["agent@localhost"], id="host_in_address"),
+    ],
+)
+def test_create_headless_rejects_source_with_pinned_target(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+    pinned_args: list[str],
+) -> None:
+    """Headless --source cannot be combined with a pinned target.
+
+    On the headless path the source host doubles as the target (no transfer),
+    so pinning a different target via @HOST / @.PROVIDER / --provider is
+    ambiguous and must be rejected with a clear error.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            *pinned_args,
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(tmp_path),
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--source determines the target host" in result.output
+
+
 # =============================================================================
 # Tests for _apply_host_labels
 # =============================================================================
