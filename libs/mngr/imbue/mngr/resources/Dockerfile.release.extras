@@ -28,6 +28,21 @@ RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
 # time; otherwise every sandbox would re-download ~300MB.
 RUN uv run --with playwright python -m playwright install --with-deps chromium
 
+# ---- minds_workspace_server frontend build ----
+# The release e2e tests (apps/minds_workspace_server/imbue/minds_workspace_server/test_e2e.py)
+# load the workspace-server UI in chromium and assert on rendered content.
+# Without a built frontend, server.py serves an "Frontend not built" fallback
+# page, so every locator check fails. Install node+pnpm and run the build so
+# apps/minds_workspace_server/imbue/minds_workspace_server/static/index.html
+# is present.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g pnpm && \
+    rm -rf /var/lib/apt/lists/*
+RUN cd /code/mngr/apps/minds_workspace_server/frontend && \
+    pnpm install --frozen-lockfile=false && \
+    pnpm run build
+
 # ---- Docker daemon startup script ----
 # dockerd itself is started by the _ensure_dockerd_for_release pytest
 # session fixture (libs/mngr/imbue/mngr/conftest.py), so we only need
