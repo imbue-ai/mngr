@@ -88,6 +88,7 @@ def headless_agent_output(
     host: OnlineHostInterface,
     mngr_ctx: MngrContext,
     agent_type: AgentTypeName,
+    source_location: HostLocation | None,
     agent_args: tuple[str, ...] = (),
     label_options: AgentLabelOptions | None = None,
     name: AgentName | None = None,
@@ -95,22 +96,38 @@ def headless_agent_output(
 ) -> Iterator[StreamingHeadlessAgentMixin]:
     """Create a headless agent, yield it for streaming, and destroy it on exit.
 
-    Creates a temporary directory on the host as the work path (no git branch
-    creation). If ``pre_create_setup`` is provided, it is called with the host
-    and work path before the agent is created, allowing callers to write files
-    that the agent command can reference.
+    When ``source_location`` is None, a temporary directory is created on the
+    host as the work path (blank-directory mode, used by ``mngr ask``). When
+    provided, the agent runs in-place at that location; the caller owns the
+    directory and it is not removed on exit. ``source_location.host`` must be
+    the same host as ``host``.
+
+    If ``pre_create_setup`` is provided, it is called with the host and work
+    path before the agent is created, allowing callers to write files that the
+    agent command can reference.
 
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
     check_streaming_headless_agent_type(str(agent_type))
 
-    work_path = create_work_dir_on_host(host)
+    if source_location is not None and source_location.host.id != host.id:
+        raise MngrError(
+            "headless_agent_output requires source_location.host to match host; "
+            "cross-host transfer is not supported on the headless path."
+        )
+
+    created_temp_dir = source_location is None
+    if created_temp_dir:
+        work_path = create_work_dir_on_host(host)
+    else:
+        assert source_location is not None
+        work_path = source_location.path
     try:
         if pre_create_setup is not None:
             pre_create_setup(host, work_path)
 
-        source_location = HostLocation(host=host, path=work_path)
+        resolved_source = HostLocation(host=host, path=work_path)
         agent_options = CreateAgentOptions(
             agent_type=agent_type,
             agent_args=agent_args,
@@ -120,7 +137,7 @@ def headless_agent_output(
         )
 
         result = api_create(
-            source_location=source_location,
+            source_location=resolved_source,
             target_host=host,
             agent_options=agent_options,
             mngr_ctx=mngr_ctx,
@@ -133,7 +150,8 @@ def headless_agent_output(
                 raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
             yield agent
     finally:
-        remove_work_dir_on_host(host, work_path)
+        if created_temp_dir:
+            remove_work_dir_on_host(host, work_path)
 
 
 def accumulate_chunks(chunks: Iterator[str]) -> str:

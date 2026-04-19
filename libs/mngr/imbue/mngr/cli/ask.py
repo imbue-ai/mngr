@@ -259,10 +259,13 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     mngr_ctx: MngrContext
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        # `ask` always runs in a fresh throwaway directory — nothing in the user's
+        # cwd should leak in, and our prompt files should not land in their repo.
         with headless_agent_output(
             host=self.host,
             mngr_ctx=self.mngr_ctx,
             agent_type=AgentTypeName("headless_claude"),
+            source_location=None,
             agent_args=_HEADLESS_CLAUDE_ARGS,
             label_options=AgentLabelOptions(labels={"internal": "ask"}),
             name=AgentName("ask"),
