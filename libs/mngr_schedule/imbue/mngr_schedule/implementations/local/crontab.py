@@ -95,14 +95,18 @@ def read_system_crontab() -> str:
     """Read the current user's crontab.
 
     Returns the crontab content as a string, or an empty string if
-    no crontab exists. Raises ScheduleDeployError for unexpected errors
-    (e.g. permission denied) to prevent silent data loss.
+    no crontab exists (including when the crontab binary is not
+    installed on the host). Raises ScheduleDeployError for unexpected
+    errors (e.g. permission denied) to prevent silent data loss.
     """
-    result = subprocess.run(
-        ["crontab", "-l"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return ""
     if result.returncode != 0:
         if "no crontab" in result.stderr.lower():
             return ""
@@ -113,13 +117,17 @@ def read_system_crontab() -> str:
 def write_system_crontab(content: str) -> None:
     """Write content to the current user's crontab.
 
-    Raises ScheduleDeployError if the write fails.
+    Raises ScheduleDeployError if the write fails (including when
+    the crontab binary is not installed on the host).
     """
-    result = subprocess.run(
-        ["crontab", "-"],
-        input=content,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["crontab", "-"],
+            input=content,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ScheduleDeployError("Failed to write crontab: crontab binary not available on this host") from exc
     if result.returncode != 0:
         raise ScheduleDeployError(f"Failed to write crontab: {result.stderr.strip()}")

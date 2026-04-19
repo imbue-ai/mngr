@@ -1,9 +1,16 @@
 """Unit tests for crontab.py pure functions."""
 
+from pathlib import Path
+
+import pytest
+
+from imbue.mngr_schedule.errors import ScheduleDeployError
 from imbue.mngr_schedule.implementations.local.crontab import add_crontab_entry
 from imbue.mngr_schedule.implementations.local.crontab import build_marker_comment
 from imbue.mngr_schedule.implementations.local.crontab import list_managed_trigger_names
+from imbue.mngr_schedule.implementations.local.crontab import read_system_crontab
 from imbue.mngr_schedule.implementations.local.crontab import remove_crontab_entry
+from imbue.mngr_schedule.implementations.local.crontab import write_system_crontab
 
 _TEST_PREFIX = "mngr-test-"
 
@@ -141,3 +148,28 @@ def test_add_crontab_entry_appends_newline_to_existing_content_without_trailing_
     lines = result.splitlines()
     assert lines[0] == "0 1 * * * /some/other/cron/job"
     assert lines[1] == f"# {_TEST_PREFIX}schedule:nightly"
+
+
+def test_read_system_crontab_returns_empty_when_binary_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the crontab binary is not on PATH, reading yields empty instead of crashing.
+
+    Regression: CI runners without crontab would raise FileNotFoundError from
+    subprocess.run, causing downstream schedule operations to fail intermittently.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("PATH", str(tmp_path))
+        assert read_system_crontab() == ""
+
+
+def test_write_system_crontab_raises_schedule_deploy_error_when_binary_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the crontab binary is not on PATH, writing raises ScheduleDeployError."""
+    with monkeypatch.context() as m:
+        m.setenv("PATH", str(tmp_path))
+        with pytest.raises(ScheduleDeployError, match="crontab binary not available"):
+            write_system_crontab("0 2 * * * /path/run.sh\n")
