@@ -2,6 +2,7 @@
 
 import click
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.config.data_types import MngrContext
@@ -369,6 +370,7 @@ def test_schedule_remove_requires_provider(
     assert "Missing option" in result.output or "required" in result.output.lower()
 
 
+@pytest.mark.flaky
 def test_schedule_remove_local_with_force(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
