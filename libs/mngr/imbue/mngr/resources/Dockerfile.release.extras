@@ -4,12 +4,9 @@
 # image add Docker-in-Docker plumbing on top of the regular one.
 
 # ---- Extra apt packages for Docker-in-Docker ----
-# util-linux provides flock, used by ensure-dockerd.sh to serialize
-# concurrent start-dockerd.sh invocations.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     iptables \
-    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Docker-in-Docker (static binaries) ----
@@ -26,14 +23,13 @@ RUN rm -f /usr/local/bin/runc \
 RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 
-# ---- Docker daemon startup scripts ----
+# ---- Docker daemon startup script ----
+# dockerd itself is started by the _ensure_dockerd_for_release pytest
+# session fixture (libs/mngr/imbue/mngr/conftest.py), so we only need
+# the start script on the image. No BASH_ENV indirection -- that used
+# to trigger start-dockerd.sh per bash subshell and serialized tests.
 COPY libs/mngr/imbue/mngr/resources/start-dockerd.sh /start-dockerd.sh
-COPY libs/mngr/imbue/mngr/resources/ensure-dockerd.sh /ensure-dockerd.sh
-RUN chmod +x /start-dockerd.sh /ensure-dockerd.sh
-
-# BASH_ENV ensures dockerd is running before every bash command at runtime.
-# Placed after all RUN instructions so it does not affect the image build.
-ENV BASH_ENV=/ensure-dockerd.sh
+RUN chmod +x /start-dockerd.sh
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

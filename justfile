@@ -148,7 +148,6 @@ test-offload-release args="":
         libs/mngr/imbue/mngr/resources/Dockerfile \
         libs/mngr/imbue/mngr/resources/Dockerfile.release.extras \
         libs/mngr/imbue/mngr/resources/start-dockerd.sh \
-        libs/mngr/imbue/mngr/resources/ensure-dockerd.sh \
         offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
     CACHE_KEY_FILE=".offload-release-cache-key"
     if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then

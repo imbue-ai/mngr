@@ -681,10 +681,11 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
 def _ensure_dockerd_for_release() -> None:
     """Start the Docker daemon if running inside a release test sandbox.
 
-    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh, and
-    BASH_ENV=/ensure-dockerd.sh handles bash subprocesses, but tests that
-    use the Docker Python SDK connect to the socket directly. This fixture
-    ensures the daemon is running before any test code tries to connect.
+    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh.
+    The sandbox CMD also runs /start-dockerd.sh at launch, but this fixture
+    is a belt-and-suspenders fallback for sessions where the CMD path didn't
+    run (e.g. offload sandboxes that exec a different entrypoint) so that
+    tests using the Docker Python SDK can connect to the socket directly.
 
     Uses /usr/local/bin/docker directly to bypass the resource guard PATH
     wrapper (which would block docker commands outside @pytest.mark.docker tests).
