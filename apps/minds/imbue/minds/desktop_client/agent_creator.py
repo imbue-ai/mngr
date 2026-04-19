@@ -529,7 +529,7 @@ class AgentCreator(MutableModel):
                     clone_target = Path(tempfile.gettempdir()) / f"minds-clone-{repo_name}"
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
-                    log_queue.put("[minds] Cloning {}...".format(repo_source))
+                    log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True)
                     workspace_dir = clone_target
 
