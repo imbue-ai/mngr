@@ -6,6 +6,8 @@ for reading/writing the system crontab via subprocess.
 
 import subprocess
 
+from loguru import logger
+
 from imbue.imbue_common.pure import pure
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
@@ -106,6 +108,7 @@ def read_system_crontab() -> str:
             text=True,
         )
     except FileNotFoundError:
+        logger.warning("crontab binary not found on this host; treating as empty crontab")
         return ""
     if result.returncode != 0:
         if "no crontab" in result.stderr.lower():
