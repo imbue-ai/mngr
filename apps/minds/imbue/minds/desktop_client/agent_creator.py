@@ -19,6 +19,8 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from loguru import logger
 from pydantic import Field
@@ -98,6 +100,21 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
+def _redact_url_credentials(url: str) -> str:
+    """Strip any ``user:password@`` component from an HTTPS URL for logging.
+
+    Returns URLs without a netloc userinfo component unchanged, so local paths
+    and SSH-style URLs (``git@github.com:...``) are passed through as-is. Used
+    to avoid leaking tokens like ``https://x-access-token:<TOKEN>@...`` into
+    debug logs.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    _, _, host = parts.netloc.rpartition("@")
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
 def _is_git_worktree(repo_dir: Path) -> bool:
     """Check if a directory is a git worktree (not the main repo).
 
@@ -122,7 +139,7 @@ def clone_git_repo(
     When is_shallow is True, clones with --depth 1 to skip history.
     Raises GitCloneError if the clone fails.
     """
-    logger.debug("Cloning {} to {}", git_url, clone_dir)
+    logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     command = ["git", "clone"]
     if is_shallow:
         command.extend(["--depth", "1"])

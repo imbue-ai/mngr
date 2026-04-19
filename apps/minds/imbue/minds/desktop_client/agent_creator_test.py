@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -77,6 +78,30 @@ def test_is_local_path_tilde() -> None:
 def test_is_local_path_url() -> None:
     assert _is_local_path("https://github.com/user/repo.git") is False
     assert _is_local_path("git@github.com:user/repo.git") is False
+
+
+# -- _redact_url_credentials tests --
+
+
+def test_redact_url_credentials_strips_user_password() -> None:
+    assert (
+        _redact_url_credentials("https://x-access-token:ghp_secret@github.com/user/repo.git")
+        == "https://github.com/user/repo.git"
+    )
+
+
+def test_redact_url_credentials_leaves_plain_url_untouched() -> None:
+    assert _redact_url_credentials("https://github.com/user/repo.git") == "https://github.com/user/repo.git"
+
+
+def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
+    # SSH-style URLs (git@host:path) have no scheme, so urlsplit returns an
+    # empty netloc. The function must pass them through unchanged.
+    assert _redact_url_credentials("git@github.com:user/repo.git") == "git@github.com:user/repo.git"
+
+
+def test_redact_url_credentials_leaves_local_path_untouched() -> None:
+    assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
 
 
 # -- _build_mngr_create_command tests --
