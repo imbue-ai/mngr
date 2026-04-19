@@ -484,7 +484,12 @@ class AgentCreator(MutableModel):
         emit_log = make_log_callback(log_queue)
         host_env_file: Path | None = None
         try:
-            with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
+            with log_span(
+                "Creating agent {} from {} (mode: {})",
+                agent_id,
+                _redact_url_credentials(repo_source),
+                launch_mode,
+            ):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
