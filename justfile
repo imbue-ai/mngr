@@ -93,12 +93,16 @@ test-offload-acceptance args="":
 # Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
 # so they don't leak into offload sandboxes (which run `-p no:xdist`).
 _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
+# Default mark filter for local unit + integration recipes. Kept out of
+# pyproject addopts because it would collide with offload-modal-acceptance
+# (which runs the opposite filter). A later -m on CLI overrides this.
+_skip_acceptance_and_release := "-m 'not acceptance and not release'"
 
 test-unit:
-  uv run pytest {{_parallel}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest {{_parallel}} --cov-report=html --cov-fail-under=80
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
 
 # Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
 # Examples:
@@ -109,8 +113,10 @@ test-integration:
 # Note: pass complex argument strings (anything with spaces, like -m exprs)
 # as ONE outer-quoted argument. Variadic {{args}} splits on whitespace
 # and drops inner quoting, which would truncate `-m 'a and b'` to `-m a`.
+# The recipe's default `-m 'not acceptance and not release'` can be
+# overridden by supplying a `-m` inside args (later CLI -m wins).
 test-quick args="":
-  uv run pytest {{_parallel}} --no-cov {{args}}
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
