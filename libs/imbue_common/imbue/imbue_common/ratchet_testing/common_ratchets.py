@@ -464,6 +464,21 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
 )
 
 
+PREVENT_HARDCODED_GUARDED_BINARY = RegexRatchetRule(
+    rule_name="hardcoded guarded-binary paths",
+    rule_description=(
+        "Do not reference binaries guarded by the pytest resource guard by absolute path "
+        "(e.g. '/usr/local/bin/docker', '/opt/homebrew/bin/tmux'). Absolute paths bypass the "
+        "guard's PATH wrapper and defeat @pytest.mark.<binary> enforcement. Invoke the "
+        "binary by bare name so the wrapper can intercept it. If a test hits a resource "
+        "guard, add the corresponding mark (e.g. @pytest.mark.docker, @pytest.mark.tmux, "
+        "@pytest.mark.rsync, @pytest.mark.unison, @pytest.mark.modal, @pytest.mark.lima) "
+        "to the test rather than working around the guard with an absolute path."
+    ),
+    pattern_string=r"/(?:usr/local/bin|usr/bin|opt/homebrew/bin|opt/local/bin)/(?:docker|tmux|rsync|unison|modal|lima)(?![\w-])",
+)
+
+
 # --- Terminal management ---
 
 PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
