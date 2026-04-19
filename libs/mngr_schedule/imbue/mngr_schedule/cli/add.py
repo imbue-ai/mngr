@@ -125,9 +125,17 @@ def check_safe_create_command(args: str) -> str | None:
     Currently checks:
     - Either --branch with a {DATE} placeholder in its NEW part, or --reuse
       must be specified, so that each scheduled run doesn't conflict.
+
+    Skipped entirely when --foreground is present: headless agents auto-destroy
+    after each run and never create persistent branches, so neither --branch
+    {DATE} nor --reuse is applicable (in fact both are rejected by the
+    headless path in create).
     """
     parts = shlex.split(args) if args else []
     mngr_args, _passthrough_args = _split_args_at_separator(parts)
+
+    if _has_flag(mngr_args, "--foreground"):
+        return None
 
     if _has_flag(mngr_args, "--reuse"):
         return None
@@ -184,6 +192,7 @@ def check_safe_create_command(args: str) -> str | None:
     default=True,
     show_default=True,
     help="Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). "
+    "Skipped for --foreground (headless) create commands, which auto-destroy per run. "
     "Pass --no-ensure-safe-commands to downgrade these errors to warnings.",
 )
 @add_common_options
