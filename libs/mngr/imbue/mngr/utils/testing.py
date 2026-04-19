@@ -143,6 +143,13 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     or modifying the real home directory. Use this directly for lightweight
     test suites (e.g. minds). For full mngr test isolation (MNGR_HOST_DIR,
     MNGR_PREFIX, tmux server, etc.) use setup_test_mngr_env instead.
+
+    Also writes a minimal .gitconfig with `safe.directory = *` so subprocess
+    git invocations (e.g. mngr schedule add shelling out to
+    `git rev-parse --show-toplevel` inside /code/mngr on release sandboxes)
+    don't get blocked by git's repo-ownership guard. The image-time entry
+    /root/.gitconfig is invisible once HOME is redirected, so every
+    isolate_home() call must re-establish the exemption.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -150,6 +157,10 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # to the temp HOME, not an inherited agent config dir.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+
+    gitconfig = tmp_path / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("[safe]\n\tdirectory = *\n")
 
 
 @contextmanager
