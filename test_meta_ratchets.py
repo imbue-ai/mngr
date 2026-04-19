@@ -292,9 +292,10 @@ def test_gitignore_patterns_use_double_star() -> None:
     syntax (where bare names only match at root). Patterns with an interior /
     (like */*/_tasks/) are already path-qualified and are allowed.
 
-    .dockerignore is committed alongside .gitignore and is expected to stay
-    nearly identical to it (the offload Docker build context reuses the same
-    exclusions), so both files should use patterns valid in each syntax.
+    .dockerignore is generated from .gitignore by the _generate-dockerignore
+    justfile recipe before each offload run, so the two files must use patterns
+    valid in both syntaxes. Enforcing **/ on the .gitignore side keeps the
+    generator a trivial passthrough.
     """
     gitignore = (_REPO_ROOT / ".gitignore").read_text()
     violations: list[str] = []

@@ -21,6 +21,16 @@ run target:
     exit 1; \
   fi
 
+# Generate .dockerignore from .gitignore. Kept as a generator (not a
+# committed file) so .dockerignore stays in lockstep with .gitignore and
+# never needs manual sync. The generator strips the `/.dockerignore` self-
+# reference so offload 0.7.1's copy_untracked_files picks up this
+# gitignored-but-not-dockerignored file and ships it into the exported
+# build context, where Docker uses it to filter what lands in the image.
+[private]
+_generate-dockerignore:
+    grep -vE '^/?\.dockerignore$' .gitignore > .dockerignore
+
 # Generate Dockerfile.release from Dockerfile + Dockerfile.release.extras so the
 # two Dockerfiles stay in sync without duplicating the base layers. Strips the
 # trailing CMD from Dockerfile; the .extras file provides its own CMD.
@@ -41,6 +51,8 @@ test-offload args="":
     set -ueo pipefail
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
     # offload 0.7.1 manages build context + image caching via git notes; no
     # tarballs, patches, or local cache-key files needed.
     offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
@@ -58,6 +70,8 @@ test-offload-acceptance args="":
     set -ueo pipefail
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml {{args}} run \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
@@ -74,6 +88,8 @@ test-offload-release args="":
     # Regenerate Dockerfile.release from Dockerfile + Dockerfile.release.extras
     # so the two stay in sync.
     just _generate-release-dockerfile
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     # GITHUB_TOKEN authorises cloning the private forever-claude-template repo
