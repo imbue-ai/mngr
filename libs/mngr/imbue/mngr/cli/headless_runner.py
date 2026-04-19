@@ -63,8 +63,8 @@ def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
     """Remove a work directory on the host, suppressing errors."""
     try:
         host.execute_idempotent_command(f"rm -rf '{work_path}'")
-    except (OSError, BaseMngrError):
-        logger.debug("Failed to remove work dir {}", work_path)
+    except (OSError, BaseMngrError) as exc:
+        logger.warning("Failed to remove work dir {}: {}", work_path, exc)
 
 
 @contextmanager
@@ -75,12 +75,12 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
     finally:
         try:
             host.stop_agents([agent.id])
-        except (OSError, BaseMngrError):
-            logger.debug("Failed to stop agent {}", agent.name)
+        except (OSError, BaseMngrError) as exc:
+            logger.warning("Failed to stop agent {}: {}", agent.name, exc)
         try:
             host.destroy_agent(agent)
-        except (OSError, BaseMngrError):
-            logger.debug("Failed to destroy agent {}", agent.name)
+        except (OSError, BaseMngrError) as exc:
+            logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 
 @contextmanager
