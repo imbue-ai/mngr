@@ -49,11 +49,9 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# copy in all of our code:
-COPY . /code/
-
-# extract our code into the project directory
-RUN mkdir -p /code/mngr/ && tar -xzf /code/current.tar.gz -C /code/mngr/ && rm /code/*.tar.gz && git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/
+# copy in all of our code (offload exports the repo tree as the build context)
+COPY . /code/mngr/
+RUN git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run

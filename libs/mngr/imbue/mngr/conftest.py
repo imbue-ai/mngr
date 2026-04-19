@@ -681,37 +681,34 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
 def _ensure_dockerd_for_release() -> None:
     """Start the Docker daemon if running inside a release test sandbox.
 
-    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh.
-    The sandbox CMD also runs /start-dockerd.sh at launch, but this fixture
-    is a belt-and-suspenders fallback for sessions where the CMD path didn't
-    run (e.g. offload sandboxes that exec a different entrypoint) so that
-    tests using the Docker Python SDK can connect to the socket directly.
+    The Dockerfile.release installs /start-dockerd.sh. The sandbox CMD also
+    runs it at launch, but this fixture is a belt-and-suspenders fallback
+    for sessions where the CMD path didn't run (e.g. offload sandboxes that
+    exec a different entrypoint) so that tests using the Docker Python SDK
+    can connect to the socket directly.
 
-    Uses /usr/local/bin/docker directly to bypass the resource guard PATH
-    wrapper (which would block docker commands outside @pytest.mark.docker tests).
+    start-dockerd.sh is idempotent and polls `docker info` internally until
+    the daemon is ready, so we just invoke it unconditionally and let the
+    script no-op when dockerd is already up. This avoids touching the docker
+    binary from Python (which would otherwise trip the resource-guard PATH
+    wrapper outside @pytest.mark.docker tests).
     """
     start_script = Path("/start-dockerd.sh")
-    docker_bin = Path("/usr/local/bin/docker")
-    if not start_script.exists() or not docker_bin.exists():
+    if not start_script.exists():
         return
     cg = ConcurrencyGroup(name="ensure-dockerd")
     with cg:
-        result = cg.run_process_to_completion(
-            [str(docker_bin), "info"],
+        start_result = cg.run_process_to_completion(
+            [str(start_script)],
             is_checked_after=False,
         )
-        if result.returncode != 0:
-            start_result = cg.run_process_to_completion(
-                [str(start_script)],
-                is_checked_after=False,
+        if start_result.returncode != 0:
+            logger.error(
+                "Docker daemon failed to start (exit {}). stdout: {} stderr: {}",
+                start_result.returncode,
+                start_result.stdout,
+                start_result.stderr,
             )
-            if start_result.returncode != 0:
-                logger.error(
-                    "Docker daemon failed to start (exit {}). stdout: {} stderr: {}",
-                    start_result.returncode,
-                    start_result.stdout,
-                    start_result.stderr,
-                )
 
 
 @pytest.fixture(scope="session", autouse=True)
