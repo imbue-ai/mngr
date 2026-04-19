@@ -21,6 +21,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -48,22 +49,6 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
-
-
-def _compute_idle_seconds(
-    user_activity: datetime | None,
-    agent_activity: datetime | None,
-    ssh_activity: datetime | None,
-) -> float | None:
-    """Compute idle seconds from the most recent activity time."""
-    latest_activity: datetime | None = None
-    for activity_time in (user_activity, agent_activity, ssh_activity):
-        if activity_time is not None:
-            if latest_activity is None or activity_time > latest_activity:
-                latest_activity = activity_time
-    if latest_activity is None:
-        return None
-    return (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
 
 def _build_host_details_from_host(
@@ -157,7 +142,7 @@ def _build_agent_details_from_online_agent(
     runtime_seconds = (now - start_time).total_seconds() if start_time else None
 
     # idle_seconds: include host-level ssh_activity; 0.0 if no activity yet
-    idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
+    idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
 
     # Compute plugin-specific fields from field generators
     plugin_data: dict[str, Any] = {}
@@ -328,7 +313,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
     @abstractmethod
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Permanently destroy a host and delete its snapshots."""
+        """Permanently destroy a host.
+
+        Providers that support snapshots should preserve snapshot records and
+        mark the host as DESTROYED so that gc_snapshots can age-gate their
+        deletion.
+        """
         ...
 
     @abstractmethod
@@ -347,6 +337,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Returns the number of seconds that a host is allowed to be in DESTROYED state.
         After this all associated data will be permanently deleted.
         """
+        ...
+
+    @abstractmethod
+    def get_min_online_host_age_seconds(self) -> float:
+        """Return the minimum age (in seconds) before GC will destroy an online host with no agents."""
         ...
 
     # =========================================================================

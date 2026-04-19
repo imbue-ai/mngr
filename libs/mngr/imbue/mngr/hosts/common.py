@@ -152,20 +152,45 @@ def check_agent_type_known(
     return is_agent_class_registered(effective_type)
 
 
+def seconds_since(activity_time: datetime | None) -> float | None:
+    """Seconds elapsed since a UTC timestamp; None if input is None.
+
+    Not marked @pure because it reads the current wall-clock time, so it
+    does not return the same output for the same input.
+    """
+    if activity_time is None:
+        return None
+    return (datetime.now(timezone.utc) - activity_time).total_seconds()
+
+
 def compute_idle_seconds(
     user_activity: datetime | None,
     agent_activity: datetime | None,
     ssh_activity: datetime | None,
 ) -> float | None:
     """Compute idle seconds from the most recent activity time."""
-    latest_activity: datetime | None = None
-    for activity_time in (user_activity, agent_activity, ssh_activity):
-        if activity_time is not None:
-            if latest_activity is None or activity_time > latest_activity:
-                latest_activity = activity_time
-    if latest_activity is None:
-        return None
-    return (datetime.now(timezone.utc) - latest_activity).total_seconds()
+    latest_activity = max(
+        (t for t in (user_activity, agent_activity, ssh_activity) if t is not None),
+        default=None,
+    )
+    return seconds_since(latest_activity)
+
+
+def get_seconds_since_last_activity(host: OnlineHostInterface) -> float | None:
+    """Return seconds since the most recent host-level activity across all sources.
+
+    Aggregates every host-level ActivitySource file in the host's activity
+    directory (BOOT, SSH, USER) and returns the elapsed time since the most
+    recent one, or None if nothing has been recorded.
+
+    Only host-level sources are checked (not agent-level ones like AGENT or
+    START) because each check on a remote host is a separate SSH round-trip,
+    and agent-level sources are never written at the host-level activity
+    path so checking them would waste SSH calls without ever finding data.
+    """
+    activity_times = [host.get_reported_activity_time(source) for source in HOST_LEVEL_ACTIVITY_SOURCES]
+    latest_activity = max((t for t in activity_times if t is not None), default=None)
+    return seconds_since(latest_activity)
 
 
 @pure

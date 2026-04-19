@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -200,39 +201,6 @@ def test_save_failed_host_record(testing_provider: ModalProviderInstance) -> Non
     assert record.certified_host_data.build_log == "Error: dependency not found"
     # Failed hosts have no SSH info
     assert record.ssh_host is None
-
-
-def test_clear_snapshots_from_host_record(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    snapshots = [
-        make_snapshot("snap-1", "s1"),
-        make_snapshot("snap-2", "s2"),
-    ]
-    record = make_host_record(host_id=host_id, snapshots=snapshots)
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_snapshots(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    record = make_host_record(host_id=host_id, snapshots=[])
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_record(testing_provider: ModalProviderInstance) -> None:
-    # Should not raise
-    testing_provider._clear_snapshots_from_host_record(HostId.generate())
 
 
 # ---------------------------------------------------------------------------
@@ -903,10 +871,11 @@ def test_destroy_host(
     with pytest.raises(ModalProxyError, match="terminated"):
         sandbox.exec("echo", "should fail")
 
-    # Snapshots cleared
+    # Snapshots preserved (for gc_snapshots to age-gate), but host marked DESTROYED
     updated = testing_provider._read_host_record(host_id, use_cache=False)
     assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
+    assert len(updated.certified_host_data.snapshots) == 1
+    assert updated.certified_host_data.stop_reason == HostState.DESTROYED.value
 
     # Agents removed
     agents = testing_provider.list_persisted_agent_data_for_host(host_id)

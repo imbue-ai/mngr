@@ -26,11 +26,11 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.hosts.common import get_seconds_since_last_activity
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import WorkDirInfo
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import DiscoveredHost
@@ -328,20 +328,46 @@ def _gc_single_host(
             agent_refs = host.discover_agents()
             if len(agent_refs) > 0:
                 return
-            host_to_destroy: HostInterface = host
-        except HostAuthenticationError:
-            # hosts that fail to authenticate should be destroyed--we assume all hosts are reachable
-            logger.warning("Failed to authenticate with host during GC, destroying: {}", host.id)
-            host_to_destroy = host.to_offline_host()
+        except HostAuthenticationError as e:
+            # Transient auth failures (network blip, infrastructure hiccup) must
+            # not trigger destruction -- we cannot verify the host has no agents
+            # or determine its age when we cannot authenticate.
+            logger.warning("Failed to authenticate with host {} during GC, skipping: {}", host.id, e)
+            return
         except HostConnectionError as e:
             # we skip hosts that suddenly appear offline for now--it's hard to tell exactly what happened
             logger.warning("Failed to connect to host {} during gc, skipping: {}", host.id, e)
             return
 
+        # Only destroy hosts that have been quiet for long enough.  Young or
+        # recently-touched hosts may be mid-setup, being debugged via SSH, or
+        # otherwise in active use outside of mngr's view.
+        try:
+            seconds_since_activity = get_seconds_since_last_activity(host)
+        except (HostAuthenticationError, HostConnectionError) as e:
+            # Cannot determine activity -- err on the side of caution.  HostConnectionError
+            # also catches its HostOfflineError subclass.
+            logger.warning("Cannot determine last activity of host {} during GC, skipping: {}", host.id, e)
+            return
+        if seconds_since_activity is None:
+            # No activity recorded -- conservative: skip.  Should be rare for
+            # mngr-managed hosts (BOOT is recorded on create/start).
+            logger.warning("No activity recorded for host {} during GC, skipping", host.id)
+            return
+        min_age_seconds = provider.get_min_online_host_age_seconds()
+        if seconds_since_activity < min_age_seconds:
+            logger.trace(
+                "Skipped GC for host {} (last activity {:.0f}s ago < minimum {:.0f}s)",
+                host.id,
+                seconds_since_activity,
+                min_age_seconds,
+            )
+            return
+
         if not dry_run:
-            mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy, mngr_ctx=mngr_ctx)
-            provider.destroy_host(host_to_destroy)
-            mngr_ctx.pm.hook.on_host_destroyed(host=host_to_destroy, mngr_ctx=mngr_ctx)
+            mngr_ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=mngr_ctx)
+            provider.destroy_host(host)
+            mngr_ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host_ref.host_id, [])
 
         with results_lock:
@@ -360,11 +386,13 @@ def gc_snapshots(
     error_behavior: ErrorBehavior,
     result: GcResult,
 ) -> None:
-    """Garbage collect snapshots from destroyed hosts.
+    """Garbage collect old snapshots from destroyed hosts.
 
     Only deletes snapshots from hosts that were in DESTROYED state at
-    discovery time -- these snapshots serve no purpose because the host
-    can never be resumed.
+    discovery time, and only after the snapshot exceeds the provider's
+    ``destroyed_host_persisted_seconds`` threshold (default 7 days).
+    Younger snapshots are preserved so users can recover via
+    ``mngr create --snapshot``.
 
     Uses the host_state from the pre-computed discovery results rather than
     calling get_host(), because gc_machines may have already destroyed the
@@ -374,10 +402,13 @@ def gc_snapshots(
     - PAUSED/STOPPED hosts need their snapshots for resumption
     - RUNNING hosts may have snapshots for backup/restore purposes
     """
+    now = datetime.now(timezone.utc)
     for provider, host_refs in hosts_by_provider:
         if not provider.supports_snapshots:
             logger.trace("Skipped provider {} (does not support snapshots)", provider.name)
             continue
+
+        min_snapshot_age_seconds = provider.get_max_destroyed_host_persisted_seconds()
 
         try:
             for host_ref in host_refs:
@@ -393,6 +424,17 @@ def gc_snapshots(
                     snapshots = provider.list_snapshots(host_ref.host_id)
 
                     for snapshot in snapshots:
+                        snapshot_age_seconds = (now - snapshot.created_at).total_seconds()
+                        if snapshot_age_seconds < min_snapshot_age_seconds:
+                            logger.trace(
+                                "Skipped snapshot {} on host {} (age {:.0f}s < minimum {:.0f}s)",
+                                snapshot.id,
+                                host_ref.host_id,
+                                snapshot_age_seconds,
+                                min_snapshot_age_seconds,
+                            )
+                            continue
+
                         if not dry_run:
                             provider.delete_snapshot(host_ref.host_id, snapshot.id)
 
