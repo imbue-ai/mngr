@@ -199,7 +199,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
     CatalogEntry(
         entry_point_name="diagnose",
         package_name="imbue-mngr-diagnose",
-        description="Diagnose plugin for mngr - launch an agent to diagnose bugs and prepare GitHub issues",
+        description="Diagnose plugin for mngr - launch an agent to investigate bugs and prepare GitHub issues",
         tier=PluginTier.INDEPENDENT,
         is_recommended=True,
     ),

@@ -1,6 +1,6 @@
 # mngr-diagnose
 
-Diagnose plugin for mngr -- launch an agent to diagnose bugs and prepare GitHub issues.
+Diagnose plugin for mngr -- launch an agent to investigate bugs and prepare GitHub issues.
 
 ## Usage
 

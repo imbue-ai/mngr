@@ -1,7 +1,7 @@
 [project]
 name = "imbue-mngr-diagnose"
 version = "0.1.0"
-description = "Diagnose plugin for mngr - launch an agent to diagnose bugs and prepare GitHub issues"
+description = "Diagnose plugin for mngr - launch an agent to investigate bugs and prepare GitHub issues"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
