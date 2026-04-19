@@ -113,9 +113,19 @@ PY
 # Step 4: commit, push, open PR
 echo "=== step 4: commit + push + PR ==="
 DATE_STR=$(echo "$DATE_HEADING" | sed 's/## //')
+
+# Configure git identity + gh auth for push (no ssh in container)
+git config user.email "changelog-bot@imbue.com" || true
+git config user.name "Changelog Bot" || true
+gh auth setup-git || echo "gh auth setup-git failed (continuing)"
+
 git add -A
 git commit -m "Consolidate changelog entries for $DATE_STR"
-git push origin HEAD
+
+# Use a fresh branch name so push doesn't require force / conflict with existing
+BRANCH="mngr/changelog-consolidation-$(date -u +%Y-%m-%d-%H-%M-%S)"
+git checkout -b "$BRANCH"
+git push --set-upstream origin "$BRANCH"
 
 PR_OUT=$(gh pr create --base main --title "Changelog consolidation $DATE_STR" --body "Automated nightly consolidation of changelog entries." 2>&1)
 echo "$PR_OUT"
