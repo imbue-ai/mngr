@@ -823,6 +823,43 @@ def test_create_headless_rejects_incompatible_flags(
     assert "--env" in result.output
 
 
+def test_create_headless_rejects_explicit_connect(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--connect contradicts headless semantics and should be rejected."""
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "--foreground", "--connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--connect" in result.output
+    assert "does not support" in result.output
+
+
+def test_create_headless_allows_no_connect(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--no-connect is redundant with headless (which never connects) and should be allowed.
+
+    Checks the error message for a different flag (--env) to verify --connect/--no-connect
+    are not listed as incompatible when --no-connect is passed.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["--type", "headless_command", "--foreground", "--no-connect", "--env", "FOO=bar"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--env" in result.output
+    assert "--connect" not in result.output
+    assert "--no-connect" not in result.output
+
+
 def test_create_headless_rejects_multiple_incompatible_flags(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

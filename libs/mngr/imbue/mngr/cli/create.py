@@ -203,7 +203,8 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("message", "--message"),
     ("message_file", "--message-file"),
     ("edit_message", "--edit-message"),
-    ("connect", "--connect/--no-connect"),
+    # --no-connect is allowed (redundant but consistent — headless never connects);
+    # only explicit --connect=True is rejected. Handled in the function body below.
     ("reconnect", "--reconnect/--no-reconnect"),
     ("attach_command", "--attach-command"),
     ("connect_command", "--connect-command"),
@@ -231,6 +232,7 @@ def _reject_incompatible_headless_flags(
     ctx: click.Context,
     agent_type_name: str,
     target_path: Path | None,
+    opts: CreateCliOptions,
 ) -> None:
     """Raise UserInputError if any flags incompatible with the headless path were explicitly set.
 
@@ -250,6 +252,11 @@ def _reject_incompatible_headless_flags(
 
     if target_path is not None:
         explicit_flags.append("--target-path or :PATH suffix")
+
+    # --connect/--no-connect share a param. --no-connect is redundant (headless
+    # already never connects) so it's allowed; explicit --connect contradicts.
+    if is_param_explicit(ctx, "connect") and opts.connect:
+        explicit_flags.append("--connect")
 
     if explicit_flags:
         flags_str = ", ".join(explicit_flags)
@@ -717,7 +724,7 @@ def create(ctx: click.Context, **kwargs) -> None:
 
         if is_headless:
             assert resolved_agent_type is not None
-            _reject_incompatible_headless_flags(ctx, resolved_agent_type, target_path)
+            _reject_incompatible_headless_flags(ctx, resolved_agent_type, target_path, opts)
             _create_headless(mngr_ctx, output_opts, opts, address, resolved_agent_type)
             return
 
