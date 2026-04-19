@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
+from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -102,6 +103,47 @@ def test_redact_url_credentials_leaves_ssh_url_untouched() -> None:
 
 def test_redact_url_credentials_leaves_local_path_untouched() -> None:
     assert _redact_url_credentials("/home/user/my-template") == "/home/user/my-template"
+
+
+# -- _redact_url_credentials_in_text tests --
+
+
+def test_redact_url_credentials_in_text_strips_embedded_url() -> None:
+    # Typical git stderr on auth failure -- we must scrub the token but keep
+    # the rest of the message for debuggability.
+    line = "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/user/repo.git/': 403"
+    assert _redact_url_credentials_in_text(line) == "fatal: unable to access 'https://github.com/user/repo.git/': 403"
+
+
+def test_redact_url_credentials_in_text_leaves_plain_text_untouched() -> None:
+    assert _redact_url_credentials_in_text("no URLs here") == "no URLs here"
+    assert _redact_url_credentials_in_text("Cloning into 'my-repo'...") == "Cloning into 'my-repo'..."
+
+
+def test_redact_url_credentials_in_text_strips_multiple_urls() -> None:
+    text = "a https://u:p@host1/x and b https://user@host2/y"
+    assert _redact_url_credentials_in_text(text) == "a https://host1/x and b https://host2/y"
+
+
+def test_redact_url_credentials_in_text_leaves_bare_scp_url_untouched() -> None:
+    # SCP-style SSH URLs don't have a scheme, so the regex won't match and
+    # the user@host prefix (not a secret) is preserved.
+    assert (
+        _redact_url_credentials_in_text("cloning from git@github.com:user/repo.git")
+        == "cloning from git@github.com:user/repo.git"
+    )
+
+
+def test_clone_git_repo_redacts_credentials_in_error(tmp_path: Path) -> None:
+    """GitCloneError must not leak embedded credentials from git's stderr."""
+    # Point at a clearly-bogus credentialed URL; git will fail and echo the
+    # URL in its stderr. The raised error must have the token stripped.
+    dest = tmp_path / "dest"
+    secret_token = "ghp_thisshouldneverappear"
+    bad_url = f"https://x-access-token:{secret_token}@127.0.0.1:1/does-not-exist.git"
+    with pytest.raises(GitCloneError) as excinfo:
+        clone_git_repo(GitUrl(bad_url), dest)
+    assert secret_token not in str(excinfo.value)
 
 
 # -- _build_mngr_create_command tests --

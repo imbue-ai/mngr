@@ -11,6 +11,7 @@ via get_log_queue().
 
 import os
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -118,6 +119,26 @@ def _redact_url_credentials(url: str) -> str:
     return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
+# Matches the ``scheme://user[:password]@`` prefix of a URL embedded anywhere
+# in a free-form string (e.g. a line of git's stderr like
+# ``fatal: unable to access 'https://x-access-token:TOKEN@github.com/...': ...``).
+# Userinfo stops at the first ``/``, ``@``, whitespace, or quote, which are all
+# invalid in the unencoded userinfo and reliably terminate it.
+_URL_CREDENTIALS_IN_TEXT_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s'\"]+@")
+
+
+def _redact_url_credentials_in_text(text: str) -> str:
+    """Strip ``user[:password]@`` userinfo from any ``scheme://...`` URL inside a string.
+
+    Used to redact credentials from git's streamed stdout/stderr and from
+    error messages, which often echo the full URL the user passed in. The
+    input is arbitrary text (not a valid URL), so we can't just urlsplit it.
+    SCP-style SSH URLs (``git@host:path``, no scheme) are left alone, matching
+    :func:`_redact_url_credentials`.
+    """
+    return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
+
+
 def _is_git_worktree(repo_dir: Path) -> bool:
     """Check if a directory is a git worktree (not the main repo).
 
@@ -147,18 +168,32 @@ def clone_git_repo(
     if is_shallow:
         command.extend(["--depth", "1"])
     command.extend([str(git_url), str(clone_dir)])
+
+    # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
+    # of embedded credentials before being forwarded. Git commonly echoes the
+    # full clone URL in error messages (e.g. `fatal: unable to access '...'`),
+    # which would otherwise leak tokens from credentialed URLs into logs.
+    redacted_on_output: OutputCallback | None = None
+    if on_output is not None:
+        caller_on_output = on_output
+
+        def redacted_on_output(line: str, is_stdout: bool) -> None:
+            caller_on_output(_redact_url_credentials_in_text(line), is_stdout)
+
     cg = ConcurrencyGroup(name="git-clone")
     with cg:
         result = cg.run_process_to_completion(
             command=command,
             is_checked_after=False,
-            on_output=on_output,
+            on_output=redacted_on_output,
         )
     if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
         raise GitCloneError(
             "git clone failed (exit code {}):\n{}".format(
                 result.returncode,
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                _redact_url_credentials_in_text(stderr if stderr else stdout),
             )
         )
 
