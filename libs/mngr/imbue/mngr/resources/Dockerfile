@@ -52,7 +52,11 @@ ENV UV_LINK_MODE=copy
 # copy in all of our code (offload exports the repo tree as the build context).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
-RUN git config --global --add safe.directory /code/mngr/
+# --system writes to /etc/gitconfig so the exemption survives tests that
+# redirect HOME to a tmp dir (isolate_home). Tests that also set
+# GIT_CONFIG_NOSYSTEM=1 still need a per-test-home .gitconfig, which
+# isolate_home and isolate_git both now provide.
+RUN git config --system --add safe.directory '*'
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run
