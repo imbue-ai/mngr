@@ -20,7 +20,14 @@ enable_docker = true
 type = "pytest"
 paths = ["."]
 command = "uv run pytest"
-run_args = "--no-cov -p no:xdist"
+# `-o addopts=` is required here: when pytest auto-detects rootdir as a
+# subpackage (e.g. libs/mngr/ when the test it's running lives there),
+# that pyproject's addopts include `-m "not acceptance and not release"`,
+# which deselects acceptance tests before our `-m 'acceptance and not
+# docker and not docker_sdk'` filter below gets applied. Wiping addopts
+# avoids the collision. Unlike offload-modal.toml (whose filter aligns
+# with the default `-m`), acceptance's filter is the opposite.
+run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 4
