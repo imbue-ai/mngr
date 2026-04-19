@@ -46,7 +46,7 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-When the desktop client is configured with Cloudflare credentials (via `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, and `OWNER_EMAIL` environment variables), it creates a Cloudflare tunnel for each new agent. The tunnel provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
+The forwarding URL comes from `MindsConfig.cloudflare_forwarding_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `CLOUDFLARE_FORWARDING_URL` environment variable (env overrides file), with a dev-deployed default baked in. Auth credentials (`CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`) stay environment-variable-only since they are secrets. With any of these set, the desktop client creates a Cloudflare tunnel for each new agent that provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
 
 The per-agent servers page shows both local forwarding links and global Cloudflare links, with toggle controls for enabling/disabling global forwarding per service.
 

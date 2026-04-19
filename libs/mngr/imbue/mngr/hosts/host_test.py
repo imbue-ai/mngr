@@ -23,6 +23,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -551,6 +552,55 @@ def test_get_created_branch_name_returns_none_when_null(
     (agent_dir / "data.json").write_text(json.dumps(data))
 
     assert agent.get_created_branch_name() is None
+
+
+# =========================================================================
+# Tests for _ensure_work_dir_exists
+# =========================================================================
+
+
+def test_ensure_work_dir_exists_succeeds_when_dir_exists(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_ensure_work_dir_exists should be a no-op when the directory exists."""
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir)
+    host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_raises_when_no_branch(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_ensure_work_dir_exists should raise with plain message when no branch is recorded."""
+    missing_dir = tmp_path / "nonexistent"
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, missing_dir)
+
+    with pytest.raises(AgentStartError, match="does not exist"):
+        host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_raises_with_recovery_command(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_ensure_work_dir_exists should include a git worktree add command when branch is known."""
+    missing_dir = tmp_path / "worktrees" / "gone"
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    options = CreateAgentOptions(
+        name=AgentName("test-recovery-cmd"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(missing_dir, options, created_branch_name="mngr/my-branch")
+
+    with pytest.raises(AgentStartError, match="git worktree add.*mngr/my-branch"):
+        host._ensure_work_dir_exists(agent)
 
 
 # =========================================================================

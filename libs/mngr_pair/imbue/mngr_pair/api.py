@@ -180,7 +180,7 @@ class UnisonSyncer(MutableModel):
         return self._started_event.is_set()
 
     def wait_for_started(self, timeout: float) -> None:
-        """Block until unison has produced its first output line."""
+        """Block until unison has produced its first output line, or until timeout elapses."""
         self._started_event.wait(timeout=timeout)
 
 

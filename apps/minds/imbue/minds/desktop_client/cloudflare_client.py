@@ -9,6 +9,7 @@ import base64
 
 import httpx
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -16,7 +17,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.primitives import AgentId
 
 
-class CloudflareForwardingUrl(NonEmptyStr):
+class CloudflareForwardingUrl(AnyUrl):
     """URL of the Cloudflare forwarding API."""
 
     ...
@@ -89,6 +90,15 @@ class CloudflareForwardingClient(FrozenModel):
         """Truncate an agent ID to a 16-char prefix for use in hostnames."""
         return str(agent_id).removeprefix("agent-")[:16]
 
+    def _url(self, path: str) -> str:
+        """Join the forwarding URL with ``path`` without introducing a double slash.
+
+        pydantic's AnyUrl normalizes bare origins to have a trailing slash (e.g.
+        ``https://example.com`` -> ``https://example.com/``), so naive
+        ``f"{self.forwarding_url}{path}"`` can yield double slashes.
+        """
+        return str(self.forwarding_url).rstrip("/") + path
+
     def make_tunnel_name(self, agent_id: AgentId) -> str:
         """Build the tunnel name for an agent."""
         return f"{self._effective_username()}--{self._truncate_agent_id(agent_id)}"
@@ -113,7 +123,7 @@ class CloudflareForwardingClient(FrozenModel):
             request_body["default_auth_policy"] = default_policy
         try:
             response = httpx.post(
-                f"{self.forwarding_url}/tunnels",
+                self._url("/tunnels"),
                 headers={"Authorization": self._auth_header()},
                 json=request_body,
                 timeout=30.0,
@@ -143,7 +153,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.get(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/services",
+                self._url(f"/tunnels/{tunnel_name}/services"),
                 headers={"Authorization": self._auth_header()},
                 timeout=10.0,
             )
@@ -167,7 +177,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.post(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/services",
+                self._url(f"/tunnels/{tunnel_name}/services"),
                 headers={"Authorization": self._auth_header()},
                 json={"service_name": service_name, "service_url": service_url},
                 timeout=15.0,
@@ -194,7 +204,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.get(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/auth",
+                self._url(f"/tunnels/{tunnel_name}/auth"),
                 headers={"Authorization": self._auth_header()},
                 timeout=10.0,
             )
@@ -213,7 +223,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.get(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/services/{service_name}/auth",
+                self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
                 headers={"Authorization": self._auth_header()},
                 timeout=10.0,
             )
@@ -229,7 +239,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.put(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/services/{service_name}/auth",
+                self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
                 headers={"Authorization": self._auth_header()},
                 json={"rules": rules},
                 timeout=15.0,
@@ -244,7 +254,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.delete(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}/services/{service_name}",
+                self._url(f"/tunnels/{tunnel_name}/services/{service_name}"),
                 headers={"Authorization": self._auth_header()},
                 timeout=15.0,
             )
@@ -260,4 +270,27 @@ class CloudflareForwardingClient(FrozenModel):
             return True
         except httpx.HTTPError as e:
             logger.warning("Failed to remove service {} from {}: {}", service_name, tunnel_name, e)
+            return False
+
+    def delete_tunnel(self, agent_id: AgentId) -> bool:
+        """Delete the entire Cloudflare tunnel for an agent. Returns True on success."""
+        tunnel_name = self.make_tunnel_name(agent_id)
+        try:
+            response = httpx.delete(
+                f"{self.forwarding_url}/tunnels/{tunnel_name}",
+                headers={"Authorization": self._auth_header()},
+                timeout=30.0,
+            )
+            if response.status_code not in (200, 204):
+                logger.warning(
+                    "Failed to delete tunnel {}: {} {}",
+                    tunnel_name,
+                    response.status_code,
+                    response.text,
+                )
+                return False
+            logger.info("Deleted Cloudflare tunnel: {}", tunnel_name)
+            return True
+        except httpx.HTTPError as e:
+            logger.warning("Failed to delete tunnel {}: {}", tunnel_name, e)
             return False

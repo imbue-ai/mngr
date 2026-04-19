@@ -22,6 +22,9 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
@@ -252,7 +255,7 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
@@ -997,7 +1000,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create a Workspace" in response.text
+    assert "Create a Project" in response.text
     assert "git_url" in response.text
 
 
@@ -1028,7 +1031,7 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create a Workspace" in response.text
+    assert "Create a Project" in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -1217,7 +1220,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your workspace" in response.text
+    assert "Creating your project" in response.text
     agent_creator.wait_for_all()
 
 
@@ -1525,3 +1528,135 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+# -- Tests for new account management and request routes --
+
+
+def _create_test_client_with_stores(
+    tmp_path: Path,
+) -> tuple[TestClient, FileAuthStore]:
+    """Create a desktop client with session store and config for testing new routes."""
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    request_inbox = RequestInbox()
+
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=request_inbox,
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+    client = TestClient(app)
+    return client, auth_store
+
+
+def test_accounts_page_requires_auth(tmp_path: Path) -> None:
+    """The /accounts page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts")
+    assert response.status_code == 403
+
+
+def test_accounts_page_shows_empty_when_no_accounts(tmp_path: Path) -> None:
+    """The /accounts page shows no accounts when none are logged in."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "No accounts logged in" in response.text
+
+
+def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
+    """The /accounts page lists logged-in accounts."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    session_store.add_or_update_session(
+        access_token="tok-123",
+        refresh_token=None,
+        user_id="user-test-123",
+        email="test@example.com",
+    )
+
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "test@example.com" in response.text
+
+
+def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
+    """The workspace settings page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/workspace/agent-123/settings")
+    assert response.status_code == 403
+
+
+def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None:
+    """A workspace not associated with any account shows the associate prompt."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    test_agent_id = AgentId()
+    response = client.get(f"/workspace/{test_agent_id}/settings")
+    assert response.status_code == 200
+    assert "associated with an account" in response.text.lower()
+
+
+def test_requests_panel_requires_auth(tmp_path: Path) -> None:
+    """The requests panel requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/_chrome/requests-panel")
+    assert response.status_code == 200
+    assert "Not authenticated" in response.text
+
+
+def test_requests_panel_shows_empty_inbox(tmp_path: Path) -> None:
+    """The requests panel shows no pending requests when inbox is empty."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/_chrome/requests-panel")
+    assert response.status_code == 200
+    assert "Requests (0)" in response.text
+
+
+def test_request_page_not_found(tmp_path: Path) -> None:
+    """Requesting a non-existent request ID returns 404."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/requests/nonexistent-id")
+    assert response.status_code == 404
+
+
+def test_set_default_account(tmp_path: Path) -> None:
+    """Setting a default account works correctly."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post(
+        "/accounts/set-default",
+        data={"user_id": "user-default-123"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_default_account_id() == "user-default-123"
+
+
+def test_auto_open_toggle(tmp_path: Path) -> None:
+    """The auto-open requests panel setting can be toggled."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post(
+        "/_chrome/requests-auto-open",
+        json={"enabled": False},
+    )
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_auto_open_requests_panel() is False

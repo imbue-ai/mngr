@@ -567,7 +567,9 @@ def list_schedule_creation_records(
     for entry in entries:
         if not entry.path.endswith(".json"):
             continue
-        file_path = f"{_SCHEDULE_RECORDS_PREFIX}/{entry.path}"
+        # entry.path from volume.listdir() is relative to the volume root,
+        # not relative to the listdir prefix, so don't prepend the prefix again.
+        file_path = entry.path
         try:
             data = volume.read_file(file_path)
         except (modal.exception.NotFoundError, FileNotFoundError, OSError) as exc:

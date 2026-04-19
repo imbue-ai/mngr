@@ -101,14 +101,17 @@ _CLAUDE_HOME_SYNC_DIRS: Final[tuple[str, ...]] = ("skills", "agents", "commands"
 _CLAUDE_HOME_SYNC_FILES: Final[tuple[str, ...]] = ("keybindings.json",)
 
 _INSTALLED_PLUGINS_RELATIVE_PATH: Final[Path] = Path("plugins") / "installed_plugins.json"
+_KNOWN_MARKETPLACES_RELATIVE_PATH: Final[Path] = Path("plugins") / "known_marketplaces.json"
 
 _INSTALLED_PLUGINS_SENTINEL_PREFIX: Final[str] = "/__mngr_plugins_source__"
-"""Sentinel prefix written into installPath values at deploy build time.
+"""Sentinel prefix written into plugin/marketplace path values at deploy build time.
 
 At build time, ``get_files_for_deploy`` rewrites absolute local paths
-(e.g. /home/user/.claude/plugins/cache/...) to use this sentinel prefix.
-At runtime, the fixup rewrites the sentinel to the actual per-agent config dir.
-This avoids depending on the build machine's home directory path.
+(e.g. /home/user/.claude/plugins/cache/...) to use this sentinel prefix
+in both installed_plugins.json (installPath) and known_marketplaces.json
+(installLocation).  At runtime, ``_resolve_plugins_dir_sentinel``
+rewrites the sentinel to the actual per-agent config dir.  This avoids
+depending on the build machine's home directory path.
 """
 
 
@@ -323,6 +326,25 @@ is used as the relative path under the target config dir's plugins/ directory.
 """
 
 
+def _rebase_plugin_path(path: str, source_claude_dir: Path, target_config_dir: Path) -> str | None:
+    """Rebase an absolute plugin/marketplace path from source to target config dir.
+
+    Returns the rebased path, or None if the path could not be rewritten
+    (no '/plugins/' segment found). Handles two cases:
+    1. Path starts with source_claude_dir -- direct prefix replacement.
+    2. Path has a '/plugins/' segment -- best-effort extraction of the
+       relative path after the last '/plugins/' occurrence.
+    """
+    source_prefix = str(source_claude_dir) + "/"
+    if path.startswith(source_prefix):
+        return str(target_config_dir / path[len(source_prefix) :])
+    marker_idx = path.rfind(_PLUGINS_DIR_MARKER)
+    if marker_idx != -1:
+        relative = "plugins/" + path[marker_idx + len(_PLUGINS_DIR_MARKER) :]
+        return str(target_config_dir / relative)
+    return None
+
+
 def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, target_config_dir: Path) -> str:
     """Rewrite installPath values in installed_plugins.json for a target config dir.
 
@@ -339,16 +361,11 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     for plugin_name, plugin_entries in data.get("plugins", {}).items():
         for entry in plugin_entries:
             install_path = entry.get("installPath", "")
-            if install_path.startswith(source_prefix):
-                relative = install_path[len(source_prefix) :]
-                entry["installPath"] = str(target_config_dir / relative)
-            else:
-                # Best-effort rewrite: extract relative path from last /plugins/ segment.
-                marker_idx = install_path.rfind(_PLUGINS_DIR_MARKER)
-                if marker_idx != -1:
-                    relative = "plugins/" + install_path[marker_idx + len(_PLUGINS_DIR_MARKER) :]
-                    expected_path = str(source_claude_dir / relative)
-                    entry["installPath"] = str(target_config_dir / relative)
+            rewritten = _rebase_plugin_path(install_path, source_claude_dir, target_config_dir)
+            if rewritten is not None:
+                # Log warnings for best-effort rewrites (path didn't start with expected prefix).
+                if not install_path.startswith(source_prefix):
+                    expected_path = str(source_claude_dir / rewritten[len(str(target_config_dir)) + 1 :])
                     if _MNGR_AGENT_CONFIG_DIR_MARKER in install_path:
                         logger.warning(
                             "Plugin {!r} in {} has installPath pointing to a previous mngr agent's "
@@ -378,16 +395,17 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
                             source_claude_dir,
                             installed_plugins_path,
                         )
-                else:
-                    logger.warning(
-                        "Plugin {!r} in {} has installPath {!r} that could not be rewritten "
-                        "(no '{}' segment found). Keeping path as-is; the plugin may not "
-                        "work on the remote host.",
-                        plugin_name,
-                        installed_plugins_path,
-                        install_path,
-                        _PLUGINS_DIR_MARKER,
-                    )
+                entry["installPath"] = rewritten
+            else:
+                logger.warning(
+                    "Plugin {!r} in {} has installPath {!r} that could not be rewritten "
+                    "(no '{}' segment found). Keeping path as-is; the plugin may not "
+                    "work on the remote host.",
+                    plugin_name,
+                    installed_plugins_path,
+                    install_path,
+                    _PLUGINS_DIR_MARKER,
+                )
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -481,6 +499,44 @@ def _generate_installed_plugins_content(source_claude_dir: Path, target_config_d
         return None
     content = source_path.read_text()
     return _rewrite_installed_plugins_paths(content, source_claude_dir, target_config_dir)
+
+
+def _rewrite_known_marketplaces_paths(content: str, source_claude_dir: Path, target_config_dir: Path) -> str:
+    """Rewrite installLocation values in known_marketplaces.json for a target config dir.
+
+    Rebases absolute paths from source_claude_dir onto target_config_dir so that
+    Claude Code can find marketplace git clones in the per-agent config dir.
+    Without this, Claude Code re-clones marketplaces from GitHub on startup and
+    may invalidate plugin caches when the remote clone has a different HEAD.
+    """
+    data: dict[str, Any] = json.loads(content)
+    for marketplace_name, marketplace_info in data.items():
+        install_location = marketplace_info.get("installLocation", "")
+        rewritten = _rebase_plugin_path(install_location, source_claude_dir, target_config_dir)
+        if rewritten is not None:
+            marketplace_info["installLocation"] = rewritten
+        else:
+            logger.warning(
+                "Marketplace {!r} has installLocation {!r} that could not be rewritten "
+                "(no '{}' segment found). Keeping path as-is; the marketplace may not "
+                "work on the remote host.",
+                marketplace_name,
+                install_location,
+                _PLUGINS_DIR_MARKER,
+            )
+    return json.dumps(data, indent=2) + "\n"
+
+
+def _generate_known_marketplaces_content(source_claude_dir: Path, target_config_dir: Path) -> str | None:
+    """Read known_marketplaces.json from source and rewrite paths to target.
+
+    Returns None if the file does not exist at source_claude_dir.
+    """
+    source_path = source_claude_dir / _KNOWN_MARKETPLACES_RELATIVE_PATH
+    if not source_path.exists():
+        return None
+    content = source_path.read_text()
+    return _rewrite_known_marketplaces_paths(content, source_claude_dir, target_config_dir)
 
 
 def _check_claude_installed(host: OnlineHostInterface) -> bool:
@@ -825,6 +881,12 @@ def _write_generated_files(
         for relative, content in generated_files.items():
             dest = config_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # Break any existing symlink so we write a regular file instead
+            # of following the symlink back to the source (e.g. ~/.claude/).
+            # _sync_user_resources creates child-level symlinks for plugins/;
+            # writing through them would corrupt the user's original files.
+            if dest.is_symlink():
+                dest.unlink()
             host.write_text_file(dest, content)
     else:
         local_host = _get_local_host(mngr_ctx)
@@ -842,7 +904,8 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
     Syncs directories (skills/, agents/, commands/, plugins/) and individual
     files (keybindings.json) depending on the ``symlink`` flag. In symlink mode,
     plugins/ uses child-level symlinks (not a dir-level symlink) so that
-    installed_plugins.json can be rewritten in place without modifying the source.
+    per-agent generated files (installed_plugins.json, known_marketplaces.json)
+    can be written as real files without modifying the shared source.
     settings.json is handled separately by _build_settings_json.
     """
     home_claude = get_user_claude_config_dir()
@@ -856,9 +919,15 @@ def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink
                 f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
         elif dir_name == "plugins":
-            # Child-level symlinks so installed_plugins.json can be overwritten
+            # Child-level symlinks so per-agent generated files can coexist with
+            # shared directory contents (cache/, marketplaces/, etc.). Skip the
+            # files that will be overwritten by _write_generated_files; symlinking
+            # them would cause writes to corrupt the shared source.
             host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            skip_names = {_INSTALLED_PLUGINS_RELATIVE_PATH.name, _KNOWN_MARKETPLACES_RELATIVE_PATH.name}
             for child in source.iterdir():
+                if child.name in skip_names:
+                    continue
                 host.execute_idempotent_command(
                     f"ln -sf {shlex.quote(str(child))} {shlex.quote(str(dest / child.name))}",
                     timeout_seconds=5.0,
@@ -912,25 +981,38 @@ def _rsync_claude_home_directories(
         host.copy_directory(local_host, local_claude_dir, config_dir, extra_args=" ".join(include_args))
 
 
-def _resolve_installed_plugins_sentinel(host: OnlineHostInterface) -> None:
-    """Resolve sentinel-prefixed installPaths in the claude home plugins directory.
+def _resolve_plugins_dir_sentinel(host: OnlineHostInterface) -> None:
+    """Resolve sentinel-prefixed paths in the claude home plugins directory.
 
-    Deploy images have installPath values rewritten to a sentinel prefix at
-    build time (because the container's home directory isn't known then). This
-    resolves them to the actual claude home path in place, so all downstream
+    Deploy images have paths rewritten to a sentinel prefix at build time
+    (because the container's home directory isn't known then). This resolves
+    them to the actual claude home path in place, so all downstream
     provisioning code can assume paths use the real claude home as the prefix.
 
-    No-op if the file doesn't exist or doesn't contain the sentinel.
+    Handles both installed_plugins.json (installPath) and
+    known_marketplaces.json (installLocation).
+
+    No-op if the files don't exist or don't contain the sentinel.
     """
     local_claude_dir = get_user_claude_config_dir()
+
     installed_plugins_path = local_claude_dir / _INSTALLED_PLUGINS_RELATIVE_PATH
-    if not installed_plugins_path.exists():
-        return
-    content = installed_plugins_path.read_text()
-    if _INSTALLED_PLUGINS_SENTINEL_PREFIX not in content:
-        return
-    rewritten = _rewrite_installed_plugins_paths(content, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX), local_claude_dir)
-    installed_plugins_path.write_text(rewritten)
+    if installed_plugins_path.exists():
+        content = installed_plugins_path.read_text()
+        if _INSTALLED_PLUGINS_SENTINEL_PREFIX in content:
+            rewritten = _rewrite_installed_plugins_paths(
+                content, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX), local_claude_dir
+            )
+            installed_plugins_path.write_text(rewritten)
+
+    known_marketplaces_path = local_claude_dir / _KNOWN_MARKETPLACES_RELATIVE_PATH
+    if known_marketplaces_path.exists():
+        content = known_marketplaces_path.read_text()
+        if _INSTALLED_PLUGINS_SENTINEL_PREFIX in content:
+            rewritten = _rewrite_known_marketplaces_paths(
+                content, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX), local_claude_dir
+            )
+            known_marketplaces_path.write_text(rewritten)
 
 
 def _load_claude_resource_script(filename: str) -> str:
@@ -1703,6 +1785,15 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
             if installed_plugins:
                 generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins
+        if config.sync_home_settings:
+            # Rewrite marketplace installLocation for both local and remote hosts.
+            # Claude Code expects installLocation to point inside $CLAUDE_CONFIG_DIR.
+            # Without rewriting, the paths point to ~/.claude/plugins/marketplaces/
+            # which Claude Code treats as "corrupted", silently skipping marketplace
+            # refreshes and leaving the plugin cache stale.
+            known_marketplaces = _generate_known_marketplaces_content(source_claude_dir, config_dir)
+            if known_marketplaces:
+                generated_files[_KNOWN_MARKETPLACES_RELATIVE_PATH] = known_marketplaces
 
         # Remote credentials: read locally, include in generated files for staging
         if not host.is_local and config.sync_claude_credentials:
@@ -1751,7 +1842,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # (because the container's home dir isn't known at build). Resolve
         # them to the actual ~/.claude/ path now, so all downstream code
         # can assume paths use ~/.claude/ as the prefix.
-        _resolve_installed_plugins_sentinel(host)
+        _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             config = self.agent_config
@@ -2431,6 +2522,11 @@ def get_files_for_deploy(
                 # without needing to know the build machine's home directory
                 if relative_path == _INSTALLED_PLUGINS_RELATIVE_PATH:
                     content = _rewrite_installed_plugins_paths(
+                        file_path.read_text(), local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
+                    )
+                    files[Path("~/.claude") / relative_path] = content
+                elif relative_path == _KNOWN_MARKETPLACES_RELATIVE_PATH:
+                    content = _rewrite_known_marketplaces_paths(
                         file_path.read_text(), local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
                     )
                     files[Path("~/.claude") / relative_path] = content

@@ -30,8 +30,8 @@ from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import get_agent_ready_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
@@ -277,7 +277,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     def get_ready_timeout_seconds(self) -> float:
         data = self._read_data()
-        return data.get("ready_timeout_seconds", DEFAULT_AGENT_READY_TIMEOUT_SECONDS)
+        return data.get("ready_timeout_seconds", get_agent_ready_timeout())
 
     @property
     def session_name(self) -> str:

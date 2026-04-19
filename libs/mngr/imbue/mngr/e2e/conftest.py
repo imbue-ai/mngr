@@ -41,6 +41,45 @@ class E2eSession(Session):
         session.output_dir = output_dir
         return session
 
+    def collect_remote_diagnostics(self, agent_name: str) -> str:
+        """Collect diagnostic info from a remote agent for debugging failures.
+
+        Captures tmux sessions, Claude Code pane content, session_started file
+        status, and running processes. Returns a formatted string suitable for
+        inclusion in assertion messages.
+        """
+        diag_parts = [f"Diagnostics from remote agent '{agent_name}':"]
+        for diag_cmd, label in [
+            (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
+            (
+                f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
+                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                "claude pane",
+            ),
+            (
+                # Agent state lives at $MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/ per
+                # libs/mngr/docs/conventions.md, and MNGR_HOST_DIR defaults to
+                # ~/.mngr (i.e. /root/.mngr on remote hosts where HOME=/root).
+                f'mngr exec {agent_name} \'ls -la "$HOME/.mngr/agents"/*/session_started 2>/dev/null'
+                " || echo session_started-not-found'",
+                "session_started",
+            ),
+            (
+                f"mngr exec {agent_name} 'ps aux | grep -E \"claude|node\" | grep -v grep || echo no-claude-process'",
+                "processes",
+            ),
+        ]:
+            # Best-effort: never let a diagnostic subprocess failure mask the
+            # primary test assertion that triggered this call. Narrowed to
+            # OSError (covers Popen spawn failures like FileNotFoundError /
+            # PermissionError) so unrelated programmer errors still propagate.
+            try:
+                diag = self.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
+                diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
+            except OSError as exc:
+                diag_parts.append(f"\n[{label}] error: {exc!r}")
+        return "\n".join(diag_parts)
+
     def write_tutorial_block(self, block: str) -> None:
         """Write the original tutorial script block to the test output directory.
 
