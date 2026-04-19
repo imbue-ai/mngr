@@ -23,6 +23,11 @@ RUN rm -f /usr/local/bin/runc \
 RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 
+# ---- Playwright (chromium + deps) baked in for minds release tests ----
+# Bake-in (not sandbox_init_cmd) so the install only happens at image build
+# time; otherwise every sandbox would re-download ~300MB.
+RUN uv run --with playwright python -m playwright install --with-deps chromium
+
 # ---- Docker daemon startup script ----
 # dockerd itself is started by the _ensure_dockerd_for_release pytest
 # session fixture (libs/mngr/imbue/mngr/conftest.py), so we only need
