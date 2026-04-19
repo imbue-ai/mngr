@@ -48,6 +48,10 @@ class NotificationRequest(FrozenModel):
         default=NotificationUrgency.NORMAL,
         description="Urgency level (low, normal, critical)",
     )
+    url: str | None = Field(
+        default=None,
+        description="URL to navigate to when the notification is clicked",
+    )
 
 
 _URGENCY_COLOR_BY_LEVEL: dict[NotificationUrgency, str] = {
@@ -69,6 +73,8 @@ def _dispatch_electron_notification(
     }
     if request.title is not None:
         data["title"] = request.title
+    if request.url is not None:
+        data["url"] = request.url
     emit_event("notification", data, OutputFormat.JSONL)
 
 

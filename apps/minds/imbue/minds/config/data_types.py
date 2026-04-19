@@ -8,8 +8,6 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 
-DEFAULT_DATA_DIR_NAME: Final[str] = ".minds"
-
 DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
@@ -27,14 +25,14 @@ class WorkspacePaths(FrozenModel):
         """Directory for authentication data (signing key, one-time codes)."""
         return self.data_dir / "auth"
 
+    @property
+    def mngr_host_dir(self) -> Path:
+        """Directory where mngr stores agent state for this minds install (e.g. ~/.minds/mngr)."""
+        return self.data_dir / "mngr"
+
     def workspace_dir(self, agent_id: AgentId) -> Path:
         """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
         return self.data_dir / str(agent_id)
-
-
-def get_default_data_dir() -> Path:
-    """Return the default data directory for minds (~/.minds)."""
-    return Path.home() / DEFAULT_DATA_DIR_NAME
 
 
 def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:

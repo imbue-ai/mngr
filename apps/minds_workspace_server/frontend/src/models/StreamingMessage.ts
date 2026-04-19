@@ -3,7 +3,6 @@
  * Connects to the backend's SSE stream and appends new events.
  */
 
-import m from "mithril";
 import { apiUrl } from "../base-path";
 import { appendEvents, type TranscriptEvent } from "./Response";
 

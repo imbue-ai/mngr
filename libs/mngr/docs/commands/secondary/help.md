@@ -49,6 +49,7 @@ mngr help [OPTIONS] [TOPIC]...
 - environment_variables - Environment Variables
 - hosts - Hosts
 - idle_detection - Idle Detection
+- modal_usage - Using Modal
 - multi_target - Commands that target from multiple hosts/agents
 - permissions - Permissions
 - plugins - Plugins

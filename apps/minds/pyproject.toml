@@ -32,7 +32,7 @@ license-files = [
 ]
 
 [project.scripts]
-minds = "imbue.minds.main:cli"
+minds = "imbue.minds.main:main"
 
 [build-system]
 requires = ["hatchling"]

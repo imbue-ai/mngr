@@ -83,7 +83,7 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
-    _applications: dict[str, list[ApplicationEntry]]
+    _applications: list[ApplicationEntry]
     _app_observers: dict[str, Any]
     _proto_agents: dict[str, dict[str, Any]]
     _log_queues: dict[str, queue.Queue[str | None]]
@@ -100,7 +100,7 @@ class AgentManager:
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
         manager._agents = {}
-        manager._applications = {}
+        manager._applications = []
         manager._app_observers = {}
         manager._proto_agents = {}
         manager._log_queues = {}
@@ -156,23 +156,19 @@ class AgentManager:
         """
         with self._lock:
             self._agents.pop(agent_id, None)
-            self._applications.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
-    def get_applications(self) -> dict[str, list[ApplicationEntry]]:
-        """Return per-agent application map."""
+    def get_applications(self) -> list[ApplicationEntry]:
+        """Return the primary agent's application list."""
         with self._lock:
-            return dict(self._applications)
+            return list(self._applications)
 
-    def get_applications_serialized(self) -> dict[str, list[dict[str, str]]]:
-        """Return per-agent application map serialized for JSON."""
+    def get_applications_serialized(self) -> list[dict[str, str]]:
+        """Return the primary agent's application list serialized for JSON."""
         with self._lock:
-            return {
-                agent_id: [{"name": app.name, "url": app.url} for app in apps]
-                for agent_id, apps in self._applications.items()
-            }
+            return [{"name": app.name, "url": app.url} for app in self._applications]
 
     def get_agents_serialized(self) -> list[dict[str, Any]]:
         """Return agent list serialized for JSON."""
@@ -271,17 +267,17 @@ class AgentManager:
 
         return agent_id
 
-    def create_chat_agent(self, name: str, parent_agent_id: str) -> str:
-        """Create a new chat agent in the same work dir. Returns the pre-generated agent ID."""
+    def create_chat_agent(self, name: str) -> str:
+        """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID."""
         agent_id = str(AgentId())
 
         with self._lock:
-            work_dir = self._resolve_agent_work_dir(parent_agent_id)
-            parent = self._agents.get(parent_agent_id)
-            parent_labels = dict(parent.labels) if parent else {}
+            work_dir = self._resolve_agent_work_dir(self._own_agent_id)
+            primary = self._agents.get(self._own_agent_id)
+            primary_labels = dict(primary.labels) if primary else {}
 
         if work_dir is None:
-            msg = f"Cannot determine work directory for agent {parent_agent_id}"
+            msg = f"Cannot determine work directory for primary agent {self._own_agent_id}"
             raise AgentCreationError(msg)
 
         cmd = [
@@ -294,15 +290,13 @@ class AgentManager:
             "none",
             "--template",
             "chat",
-            "--label",
-            f"chat_parent_id={parent_agent_id}",
             "--no-connect",
         ]
 
-        # Inherit workspace and project labels from the parent agent
+        # Inherit workspace and project labels from the primary agent
         for key in ("workspace", "project"):
-            if key in parent_labels:
-                cmd.extend(["--label", f"{key}={parent_labels[key]}"])
+            if key in primary_labels:
+                cmd.extend(["--label", f"{key}={primary_labels[key]}"])
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -310,7 +304,7 @@ class AgentManager:
             "agent_id": agent_id,
             "name": name,
             "creation_type": "chat",
-            "parent_agent_id": parent_agent_id,
+            "parent_agent_id": None,
         }
         with self._lock:
             self._proto_agents[agent_id] = proto_info
@@ -320,13 +314,13 @@ class AgentManager:
             agent_id=agent_id,
             name=name,
             creation_type="chat",
-            parent_agent_id=parent_agent_id,
+            parent_agent_id=None,
         )
 
-        labels = {"chat_parent_id": parent_agent_id}
+        labels: dict[str, str] = {}
         for key in ("workspace", "project"):
-            if key in parent_labels:
-                labels[key] = parent_labels[key]
+            if key in primary_labels:
+                labels[key] = primary_labels[key]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
@@ -436,7 +430,7 @@ class AgentManager:
                     self._agents[agent_info.id] = agent_state
 
             for agent_info in agents:
-                if agent_info.work_dir:
+                if agent_info.id == self._own_agent_id and agent_info.work_dir:
                     self._start_app_watcher(agent_info.id, Path(agent_info.work_dir))
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Initial agent discovery failed")
@@ -551,7 +545,7 @@ class AgentManager:
 
         for agent_id in new_ids:
             agent = new_agents[agent_id]
-            if agent.work_dir:
+            if agent_id == self._own_agent_id and agent.work_dir:
                 self._start_app_watcher(agent_id, Path(agent.work_dir))
 
         for agent_id in old_ids - new_ids:
@@ -574,7 +568,7 @@ class AgentManager:
         with self._lock:
             self._agents[agent_id] = agent_state
 
-        if agent_state.work_dir:
+        if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
@@ -585,7 +579,6 @@ class AgentManager:
 
         with self._lock:
             self._agents.pop(agent_id, None)
-            self._applications.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
@@ -596,7 +589,6 @@ class AgentManager:
             aid = str(agent_id)
             with self._lock:
                 self._agents.pop(aid, None)
-                self._applications.pop(aid, None)
             self._stop_app_watcher(aid)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
@@ -613,7 +605,7 @@ class AgentManager:
         if not watch_dir.exists():
             watch_dir.mkdir(parents=True, exist_ok=True)
 
-        self._read_applications(agent_id, toml_path)
+        self._read_applications(toml_path)
 
         handler = _make_applications_file_handler(agent_id, self._on_applications_changed)
         observer = _Observer()
@@ -637,7 +629,7 @@ class AgentManager:
             observer.stop()
 
     def _on_applications_changed(self, agent_id: str) -> None:
-        """Called when an agent's applications.toml changes."""
+        """Called when the primary agent's applications.toml changes."""
         with self._lock:
             agent = self._agents.get(agent_id)
             work_dir = agent.work_dir if agent is not None else None
@@ -646,11 +638,11 @@ class AgentManager:
             return
 
         toml_path = Path(work_dir) / _APPLICATIONS_TOML_FILENAME
-        self._read_applications(agent_id, toml_path)
+        self._read_applications(toml_path)
         self._broadcaster.broadcast_applications_updated(self.get_applications_serialized())
 
-    def _read_applications(self, agent_id: str, toml_path: Path) -> None:
-        """Read and parse runtime/applications.toml for an agent."""
+    def _read_applications(self, toml_path: Path) -> None:
+        """Read and parse runtime/applications.toml for the primary agent."""
         apps: list[ApplicationEntry] = []
         if toml_path.exists():
             try:
@@ -661,7 +653,7 @@ class AgentManager:
                     if name and url:
                         apps.append(ApplicationEntry(name=name, url=url))
             except (OSError, tomllib.TOMLDecodeError, KeyError, ValueError):
-                _loguru_logger.exception("Failed to parse {} for agent {}", toml_path, agent_id)
+                _loguru_logger.exception("Failed to parse {}", toml_path)
 
         with self._lock:
-            self._applications[agent_id] = apps
+            self._applications = apps

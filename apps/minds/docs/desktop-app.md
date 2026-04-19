@@ -50,6 +50,7 @@ If the backend exits unexpectedly, Electron shows an error screen with the last 
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
+- `MINDS_ROOT_NAME`: Controls the data-dir/prefix scheme described above (default: `minds`). Must match `[a-z0-9_-]+`.
 
 ## Output and logging conventions
 
@@ -70,7 +71,7 @@ Both are placed in the `resources/` directory (outside the asar archive) and add
 
 ## Data directory
 
-All desktop app state lives in `~/.minds/`:
+All desktop app state lives in `~/.<MINDS_ROOT_NAME>/` (default: `~/.minds/`):
 
 ```
 ~/.minds/
@@ -81,8 +82,33 @@ All desktop app state lives in `~/.minds/`:
     minds.log             # Combined stdout/stderr log from the backend
     minds-events.jsonl    # Structured JSONL event log
   auth/                   # Cookie signing key, one-time codes
-  <agent-id>/             # Per-agent directories
+  config.toml             # Optional minds config (cloudflare/supertokens URLs)
+  mngr/                   # mngr host directory (MNGR_HOST_DIR)
+    agents/               # per-agent state managed by mngr
+  <agent-id>/             # Per-agent workspace directories
 ```
+
+`MINDS_ROOT_NAME` is a single env var that isolates an installed minds
+from a dev copy. Exporting `MINDS_ROOT_NAME=devminds` moves the entire
+layout to `~/.devminds/` (separate venv, caches, logs, auth, agents).
+The corresponding `MNGR_HOST_DIR` becomes `~/.devminds/mngr/` and
+`MNGR_PREFIX` becomes `devminds-` so tmux sessions and containers for
+the two copies never collide. Standalone `mngr` invocations ignore
+`MINDS_ROOT_NAME`.
+
+### Configuration file
+
+`~/.<MINDS_ROOT_NAME>/config.toml` is optional. When present, it may set:
+
+```toml
+cloudflare_forwarding_url = "https://..."
+supertokens_connection_uri = "https://..."
+```
+
+Environment variables (`CLOUDFLARE_FORWARDING_URL`,
+`SUPERTOKENS_CONNECTION_URI`) override the file. Both fields have
+built-in defaults that point at the current dev-deployed servers, so
+packaged minds works out of the box with no config file.
 
 ## Development
 
