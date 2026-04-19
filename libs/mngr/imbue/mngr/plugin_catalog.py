@@ -196,6 +196,13 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Wait plugin for mngr - wait for agents/hosts to reach target states",
         tier=PluginTier.INDEPENDENT,
     ),
+    CatalogEntry(
+        entry_point_name="diagnose",
+        package_name="imbue-mngr-diagnose",
+        description="Diagnose plugin for mngr - launch an agent to investigate bugs and prepare GitHub issues",
+        tier=PluginTier.INDEPENDENT,
+        is_recommended=True,
+    ),
 )
 
 # Pre-computed index for fast lookup by entry point name.

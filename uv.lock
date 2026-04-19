@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -16,6 +16,7 @@ members = [
     "imbue-common",
     "imbue-mngr",
     "imbue-mngr-claude",
+    "imbue-mngr-diagnose",
     "imbue-mngr-file",
     "imbue-mngr-kanpan",
     "imbue-mngr-lima",
@@ -1539,6 +1540,17 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
+
+[[package]]
+name = "imbue-mngr-diagnose"
+version = "0.1.0"
+source = { editable = "libs/mngr_diagnose" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-file"

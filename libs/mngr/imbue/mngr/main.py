@@ -116,7 +116,7 @@ class AliasAwareGroup(DefaultCommandGroup):
         except Exception as e:
             _call_on_error_hook(ctx, e)
             if ctx.meta.get("is_error_reporting_enabled", False):
-                handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"))
+                handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"), ctx=ctx)
             raise
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:

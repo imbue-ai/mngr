@@ -1,8 +1,11 @@
+import hashlib
+import importlib.metadata
 import json
 import os
 import sys
 import traceback
 import webbrowser
+from pathlib import Path
 from typing import Final
 from typing import NoReturn
 from urllib.parse import quote
@@ -256,8 +259,129 @@ def build_unexpected_error_issue_body(error: Exception, traceback_str: str) -> s
     )
 
 
-def handle_unexpected_error(error: Exception, is_interactive: bool | None = None) -> NoReturn:
-    """Handle an unexpected error by showing the traceback and optionally reporting it."""
+def get_mngr_version() -> str:
+    """Get the installed mngr version, falling back to 'unknown'."""
+    try:
+        return importlib.metadata.version("imbue-mngr")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def write_diagnose_context_file(
+    traceback_str: str,
+    mngr_version: str,
+    error_type: str,
+    error_message: str,
+) -> Path:
+    """Write error context to a temp JSON file for use by `mngr diagnose`.
+
+    Returns the path to the written file.
+    """
+    content = json.dumps(
+        {
+            "traceback_str": traceback_str,
+            "mngr_version": mngr_version,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+    )
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:12]
+    path = Path(f"/tmp/mngr-diagnose-context-{content_hash}.json")
+    path.write_text(content)
+    return path
+
+
+DIAGNOSE_FLOW_META_KEY: Final[str] = "mngr_in_diagnose_flow"
+
+
+def _is_diagnose_command(ctx: click.Context | None) -> bool:
+    """Check if an error is propagating out of an in-flight diagnose flow.
+
+    Diagnose sets ``ctx.meta[DIAGNOSE_FLOW_META_KEY] = True`` before delegating
+    to create. click.Context.meta is shared across the context tree, so the
+    AliasAwareGroup can see this flag on the root context when catching the
+    exception -- even though by then the inner contexts have been unwound.
+
+    We use a dedicated key rather than ``hook_command_name`` because create's
+    ``setup_command_context`` overwrites ``hook_command_name`` to "create" when
+    diagnose delegates to it, so that key cannot reliably distinguish "the
+    inner create crashed" from "a top-level create crashed".
+    """
+    if ctx is None:
+        return False
+    return ctx.meta.get(DIAGNOSE_FLOW_META_KEY) is True
+
+
+def _offer_diagnose(
+    context_file_path: Path,
+    ctx: click.Context | None,
+) -> bool:
+    """Print the diagnose command and offer to run it.
+
+    Returns True if the diagnose command was successfully invoked (the user
+    has been handed off to the diagnostic agent), False otherwise.
+    """
+    if os.environ.get("IS_AUTONOMOUS", "0") == "1":
+        return False
+
+    diagnose_cmd = f"mngr diagnose --context-file {context_file_path}"
+
+    pm = ctx.obj if ctx is not None else None
+    has_diagnose = pm is not None and pm.has_plugin("diagnose")
+
+    if has_diagnose:
+        logger.info("")
+        logger.info("To launch an agent to diagnose this problem, run:")
+        logger.info("  {}", diagnose_cmd)
+    else:
+        logger.info("")
+        logger.info(
+            "To launch an agent to diagnose this problem, install the diagnose plugin"
+            " and then run the diagnose command:"
+        )
+        logger.info("  mngr plugin add imbue-mngr-diagnose")
+        logger.info("  {}", diagnose_cmd)
+        return False
+
+    if not click.confirm("\nRun diagnostic agent now?", default=True):
+        return False
+
+    # ctx here is the AliasAwareGroup's own context (the root CLI group), passed
+    # down from main.py's except-block where the error was caught.
+    if ctx is None:
+        logger.warning("No CLI context available to invoke diagnose command")
+        return False
+
+    root_command = ctx.command
+    if not isinstance(root_command, click.Group):
+        logger.warning("Root CLI command is not a group")
+        return False
+
+    diagnose_command = root_command.get_command(ctx, "diagnose")
+    if diagnose_command is None:
+        logger.warning("Diagnose command not found in CLI group")
+        return False
+
+    diagnose_args = ["--context-file", str(context_file_path)]
+    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=ctx)
+    with diagnose_ctx:
+        diagnose_command.invoke(diagnose_ctx)
+    return True
+
+
+def handle_unexpected_error(
+    error: Exception,
+    is_interactive: bool | None = None,
+    ctx: click.Context | None = None,
+) -> NoReturn:
+    """Handle an unexpected error by showing the traceback and optionally reporting it.
+
+    Two distinct flows depending on context:
+    - Normal command crash: offer `mngr diagnose` to investigate. No GitHub issue fallback
+      unless diagnose itself fails.
+    - Diagnose command crash: skip diagnose (avoid recursion), go straight to GitHub issue
+      reporting with a message acknowledging the irony.
+    """
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
 
     # Show the full traceback
@@ -270,10 +394,29 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
     if not is_interactive_resolved:
         raise SystemExit(1)
 
-    # In interactive mode, offer to report
     error_message = str(error) if str(error) else type(error).__name__
-    title = build_unexpected_error_issue_title(error)
-    body = build_unexpected_error_issue_body(error, tb_str)
-    _prompt_and_report_issue(title, body, error_message)
+
+    if _is_diagnose_command(ctx):
+        # The diagnostic agent itself crashed -- skip diagnose (would recurse),
+        # go straight to GitHub issue reporting.
+        logger.info("")
+        logger.info("Alas, the crash-diagnosing agent has crashed...")
+        title = build_unexpected_error_issue_title(error)
+        body = build_unexpected_error_issue_body(error, tb_str)
+        _prompt_and_report_issue(title, body, error_message)
+        raise SystemExit(1)
+
+    # Normal command crash: offer diagnose. If the diagnose path itself raises
+    # (disk issue writing context, crash in the diagnostic agent's own
+    # invocation, ...), let the exception propagate -- the original error has
+    # already been logged above, and a separate diagnose failure is useful to
+    # surface so the user can report it as its own issue.
+    context_path = write_diagnose_context_file(
+        traceback_str=tb_str,
+        mngr_version=get_mngr_version(),
+        error_type=type(error).__name__,
+        error_message=error_message,
+    )
+    _offer_diagnose(context_path, ctx)
 
     raise SystemExit(1)
