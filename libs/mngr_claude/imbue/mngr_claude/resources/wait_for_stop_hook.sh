@@ -113,6 +113,50 @@ mark_inactive() {
         >> "$MNGR_HOST_DIR/events/mngr/activity/events.jsonl"
 }
 
+# --- Post-completion: upload autofix issues to Modal volume (best-effort) ---
+upload_autofix_issues() {
+    local issues_dir=".reviewer/outputs/autofix/issues"
+    if [ ! -d "$issues_dir" ] || ! ls "$issues_dir"/*.jsonl >/dev/null 2>&1; then
+        return
+    fi
+
+    local commit
+    commit=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    local nested_path="${commit:0:4}/${commit:4:4}/${commit:8:4}/${commit:12:4}/${commit:16}"
+
+    local volume_name="code-review-json"
+    local volume_mount="/code_reviews"
+
+    local combined
+    combined=$(mktemp)
+    cat "$issues_dir"/*.jsonl > "$combined"
+
+    # Method 1: Copy to mounted volume + sync (Modal sandbox)
+    local mount_dir="${volume_mount}/${nested_path}"
+    if mkdir -p "${mount_dir}" 2>/dev/null && cp "$combined" "${mount_dir}/autofix.json" 2>/dev/null; then
+        sync "${volume_mount}" 2>/dev/null || true
+    fi
+
+    # Method 2: Upload via modal CLI (local machine with Modal credentials)
+    uv run modal volume put "${volume_name}" "$combined" "/${nested_path}/autofix.json" --force 2>/dev/null || true
+
+    rm -f "$combined"
+}
+
+# --- Post-completion actions (run after all other stop hooks finish) ---
+run_post_completion() {
+    # Only run post-completion if the orchestrator succeeded.
+    # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
+    # on success with the commit hash.
+    if [ -f ".reviewer/outputs/orchestrator_success" ]; then
+        upload_autofix_issues
+        rm -f ".reviewer/outputs/orchestrator_success"
+    fi
+
+    # Always notify the user (regardless of success/failure)
+    notify_user 2>/dev/null || true
+}
+
 # --- Signal handler: mark inactive and exit on SIGTERM/SIGINT ---
 on_signal() {
     local sig="$1"
@@ -164,6 +208,7 @@ while true; do
 
     if [ "$ALL_DONE" = true ]; then
         echo "wait_for_stop_hook: all other stop hooks have finished"
+        run_post_completion
         mark_inactive
         exit 0
     fi
