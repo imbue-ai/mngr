@@ -400,7 +400,7 @@ def handle_unexpected_error(
         # The diagnostic agent itself crashed -- skip diagnose (would recurse),
         # go straight to GitHub issue reporting.
         logger.info("")
-        logger.info("The diagnostic agent itself crashed. Please report this so we can fix the fixer.")
+        logger.info("Alas, the crash-diagnosing agent has crashed...")
         title = build_unexpected_error_issue_title(error)
         body = build_unexpected_error_issue_body(error, tb_str)
         _prompt_and_report_issue(title, body, error_message)
