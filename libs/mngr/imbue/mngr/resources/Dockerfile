@@ -49,9 +49,10 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# copy in all of our code (offload exports the repo tree as the build context)
+# copy in all of our code (offload exports the repo tree as the build context).
+# COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
-RUN git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/
+RUN git config --global --add safe.directory /code/mngr/
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run
