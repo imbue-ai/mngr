@@ -139,6 +139,20 @@ def _redact_url_credentials_in_text(text: str) -> str:
     return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
 
 
+class _RedactingOutputCallback(FrozenModel):
+    """OutputCallback wrapper that scrubs embedded credentials from each line.
+
+    Used by :func:`clone_git_repo` to forward git's streamed stdout/stderr to
+    the caller's callback with any ``scheme://user[:password]@...`` URLs
+    redacted.
+    """
+
+    inner: OutputCallback
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        self.inner(_redact_url_credentials_in_text(line), is_stdout)
+
+
 def _is_git_worktree(repo_dir: Path) -> bool:
     """Check if a directory is a git worktree (not the main repo).
 
@@ -173,12 +187,7 @@ def clone_git_repo(
     # of embedded credentials before being forwarded. Git commonly echoes the
     # full clone URL in error messages (e.g. `fatal: unable to access '...'`),
     # which would otherwise leak tokens from credentialed URLs into logs.
-    redacted_on_output: OutputCallback | None = None
-    if on_output is not None:
-        caller_on_output = on_output
-
-        def redacted_on_output(line: str, is_stdout: bool) -> None:
-            caller_on_output(_redact_url_credentials_in_text(line), is_stdout)
+    redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
     cg = ConcurrencyGroup(name="git-clone")
     with cg:
