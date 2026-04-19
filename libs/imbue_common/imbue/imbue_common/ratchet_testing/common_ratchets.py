@@ -464,6 +464,20 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
 )
 
 
+PREVENT_HARDCODED_DOCKER_BINARY = RegexRatchetRule(
+    rule_name="hardcoded docker binary paths",
+    rule_description=(
+        "Do not reference the docker binary by absolute path (e.g. '/usr/local/bin/docker', "
+        "'/usr/bin/docker', '/opt/homebrew/bin/docker'). Absolute paths bypass the pytest "
+        "resource guard's PATH wrapper and defeat the @pytest.mark.docker enforcement. "
+        "Invoke 'docker' by bare name so the guard wrapper can intercept it. "
+        "If a test hits the docker resource guard, add @pytest.mark.docker to the test "
+        "(do not work around the guard with an absolute path)."
+    ),
+    pattern_string=r"/(?:usr/local/bin|usr/bin|opt/homebrew/bin|opt/local/bin)/docker\b",
+)
+
+
 # --- Terminal management ---
 
 PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(

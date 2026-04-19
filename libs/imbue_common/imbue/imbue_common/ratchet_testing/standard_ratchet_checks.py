@@ -22,6 +22,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_FUNCTOOLS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GETATTR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_GLOBAL_KEYWORD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_CLAUDE_DIR
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_HARDCODED_DOCKER_BINARY
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IF_ELIF_WITHOUT_ELSE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORTLIB_IMPORT_MODULE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_IMPORT_DATETIME
@@ -198,6 +199,14 @@ def check_hardcoded_claude_dir(source_dir: Path, max_count: int) -> None:
     )
     chunks = check_ratchet_rule(PREVENT_HARDCODED_CLAUDE_DIR, source_dir, excluded)
     assert len(chunks) <= max_count, PREVENT_HARDCODED_CLAUDE_DIR.format_failure(chunks)
+
+
+def check_hardcoded_docker_binary(source_dir: Path, max_count: int) -> None:
+    # If a test is hitting the docker resource guard, add @pytest.mark.docker to the
+    # test rather than working around the guard by hardcoding an absolute docker path.
+    excluded = _SELF_EXCLUSION + ("common_ratchets.py",)
+    chunks = check_ratchet_rule(PREVENT_HARDCODED_DOCKER_BINARY, source_dir, excluded)
+    assert len(chunks) <= max_count, PREVENT_HARDCODED_DOCKER_BINARY.format_failure(chunks)
 
 
 # --- Naming conventions ---

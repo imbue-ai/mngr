@@ -266,5 +266,11 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(1))
 
 
+# If a test hits the docker resource guard, add @pytest.mark.docker instead of
+# bypassing the PATH wrapper by hardcoding an absolute docker binary path.
+def test_prevent_hardcoded_docker_binary() -> None:
+    rc.check_hardcoded_docker_binary(_DIR, snapshot(0))
+
+
 def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
