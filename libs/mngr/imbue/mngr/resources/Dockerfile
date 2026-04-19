@@ -65,12 +65,23 @@ RUN git config --system --add safe.directory '*'
 # repository". Detect the worktree-style file, drop it, and re-init with
 # a single snapshot commit so `git ls-files` and friends still work for
 # ratchet tests and mngr CLI commands that need repo discovery.
+#
+# Also ensure an `origin` remote is present -- offload's export_tree
+# invokes `git init` + `git fetch --depth=1` against a file:// URL, which
+# does NOT register an origin. Downstream mngr_schedule release tests
+# shell out via `make_tar_of_repo.sh` which calls `git remote get-url
+# origin`. The URL value itself is only used to derive a GitHub base for
+# the packaged tarball, so the precise string doesn't matter -- it just
+# has to exist and point at a plausible github.com URL.
 RUN if [ -f /code/mngr/.git ]; then \
         echo "Normalizing worktree-style /code/mngr/.git -> fresh in-image .git" ; \
         rm /code/mngr/.git && cd /code/mngr && git init -q . && \
         git add -A && \
         git -c user.email=ci@local -c user.name=ci commit -q -m 'sandbox-init' ; \
-    fi
+    fi && \
+    cd /code/mngr && \
+    (git remote get-url origin >/dev/null 2>&1 || \
+        git remote add origin https://github.com/imbue-ai/mngr.git)
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run
