@@ -1,5 +1,0 @@
-# Override for the changelog consolidation agent running inside a Modal container.
-# Disables the modal provider since it's not needed (and not installed) inside
-# the container -- the agent only needs to run locally within the container.
-[providers.modal]
-is_enabled = false

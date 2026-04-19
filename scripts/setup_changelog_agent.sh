@@ -4,20 +4,19 @@ set -euo pipefail
 # Idempotent setup of the nightly changelog consolidation agent.
 #
 # This script ensures exactly one "changelog-consolidation" schedule exists.
-# Safe to run multiple times: skips creation if the schedule already exists,
-# so there is never a risk of duplicate agents.
+# Safe to run multiple times: skips creation if the schedule already exists.
 #
-# The scheduled agent runs at midnight PST, consolidates per-PR changelog
-# entries into UNABRIDGED_CHANGELOG.md via the deterministic script
-# (scripts/consolidate_changelog.py), then writes a concise AI-generated
-# summary to CHANGELOG.md, commits, and opens a PR.
+# The scheduled agent runs at midnight PST, executes
+# scripts/run_changelog_consolidation.sh (which consolidates entries, uses
+# claude for an AI-generated summary, commits, pushes, and opens a PR), and
+# writes a machine-readable status.json to the agent state dir so callers can
+# check the result via `mngr file get` even after the Modal sandbox exits.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
 #
 # Environment:
-#   CHANGELOG_PROVIDER  - Provider to use (default: "local"). Set to "modal"
-#                         for production use (requires Modal credentials).
+#   CHANGELOG_PROVIDER  - Provider to use (default: "modal").
 #   CHANGELOG_VERIFY    - Verification mode (default: "full"). Set to "none"
 #                         or "quick" to skip/shorten post-deploy verification.
 
@@ -32,10 +31,11 @@ SCHEDULE="0 8 * * *"
 PROVIDER="${CHANGELOG_PROVIDER:-modal}"
 VERIFY="${CHANGELOG_VERIFY:-full}"
 
-# The container's checked-in settings.toml references the modal provider, but
-# the modal plugin isn't installed in the container. MNGR_ALLOW_UNKNOWN_CONFIG
-# makes mngr warn instead of error on unknown backends.
-export MNGR_ALLOW_UNKNOWN_CONFIG=1
+# Use an isolated mngr config namespace both locally and inside the container,
+# so neither loads the user's personal settings or the repo's .mngr/settings.toml
+# (which references providers/plugins that may not exist in the container).
+# Mirrors the pattern used by test_schedule_run.py's build_subprocess_env.
+export MNGR_ROOT_NAME="mngr-changelog-schedule"
 
 # Validate that required env vars are set so the agent can function.
 for var in GH_TOKEN ANTHROPIC_API_KEY; do
@@ -45,8 +45,20 @@ for var in GH_TOKEN ANTHROPIC_API_KEY; do
     fi
 done
 
-# Check if the trigger already exists by listing schedules as JSON.
-EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json 2>/dev/null || echo '{"schedules":[]}')
+# Compute --disable-plugin args for every installed plugin EXCEPT the minimum
+# set the scheduled run needs. This avoids config-parse errors for plugins that
+# have fields in the repo's settings.toml that the container mngr doesn't know.
+# Needed plugins: schedule (deploy mechanism), modal (runtime provider),
+# headless_command (the agent type that runs our bash script).
+DISABLE_PLUGIN_ARGS=$(python3 -c "
+import importlib.metadata
+enabled = {'schedule', 'modal', 'headless_command'}
+names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')} - enabled)
+print(' '.join(f'--disable-plugin {n}' for n in names))
+")
+
+# Check if the trigger already exists.
+EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -59,9 +71,13 @@ fi
 
 echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..."
 
-# The agent runs scripts/consolidate_changelog.py (a deterministic Python
-# script) to consolidate entries into UNABRIDGED_CHANGELOG.md, then updates
-# CHANGELOG.md with a concise AI-generated summary, commits, and opens a PR.
+# headless_command with --foreground makes mngr create run synchronously
+# inside the container and stream stdout until the command exits. This keeps
+# the Modal container alive until our consolidation script finishes. The
+# script writes status.json to $MNGR_AGENT_STATE_DIR which persists on the
+# Modal state volume and can be read via `mngr file get` afterward.
+#
+# -S passes a config override so headless_command runs our bash script.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
@@ -71,15 +87,16 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --no-auto-merge \
     --exclude-user-settings \
     --exclude-project-settings \
-    --upload "$SCRIPT_DIR/changelog_agent_settings.toml:.mngr/settings.local.toml" \
     --pass-env GH_TOKEN \
     --pass-env ANTHROPIC_API_KEY \
-    --pass-env MNGR_ALLOW_UNKNOWN_CONFIG \
+    --pass-env MNGR_ROOT_NAME \
     --no-auto-fix-args \
-    --args '--type headless_claude --foreground --no-ensure-clean --host-label SCHEDULE=changelog-consolidation --branch :mngr/changelog-consolidation-{DATE} --message "Step 1: Run uv run python scripts/consolidate_changelog.py to consolidate changelog entries into UNABRIDGED_CHANGELOG.md. If it reports no entries, exit without changes. Step 2: Read the new section that was just added to UNABRIDGED_CHANGELOG.md (the topmost ## section). Then update CHANGELOG.md by adding a concise, human-friendly summary of these changes under the same date heading, inserted after the header text. Group related changes, use natural language, and keep it brief. Step 3: Commit all changed files. Step 4: Open a PR targeting main with a title like Changelog consolidation YYYY-MM-DD. Step 5: After the PR is opened (or if there was nothing to do), write a JSON status file to the agent state directory at status.json containing the keys status (one of done, skipped-no-entries, failed), pr_url (if a PR was opened, else null), and notes (a short explanation). This file is how we know the run succeeded, since the Modal sandbox exits after this message completes."'
+    --no-ensure-safe-commands \
+    $DISABLE_PLUGIN_ARGS \
+    --args "--type headless_command --foreground -S agent_types.headless_command.command='bash scripts/run_changelog_consolidation.sh'"
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
-echo "To check result after a run (works even if sandbox has exited):"
-echo "  uv run mngr list --include 'labels.SCHEDULE == \"${TRIGGER_NAME}\"' --format json"
-echo "  uv run mngr file get <agent-id> status.json --relative-to state"
+echo "To check the result of a run (works even if sandbox has exited):"
+echo "  uv run mngr list --format json $DISABLE_PLUGIN_ARGS"
+echo "  uv run mngr file get <agent-id> status.json --relative-to state $DISABLE_PLUGIN_ARGS"
