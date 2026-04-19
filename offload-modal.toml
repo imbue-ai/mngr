@@ -23,7 +23,7 @@ retry_count = 0
 filters = "-m 'not acceptance and not release and not flaky'"
 
 [groups.flaky]
-retry_count = 5
+retry_count = 4
 filters = "-m 'flaky and not acceptance and not release'"
 
 [report]
