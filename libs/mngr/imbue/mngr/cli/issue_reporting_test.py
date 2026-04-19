@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import click
 import pytest
 from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.mngr.cli.issue_reporting import DIAGNOSE_FLOW_META_KEY
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
@@ -21,6 +23,7 @@ from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
 from imbue.mngr.cli.issue_reporting import search_for_existing_issue
 from imbue.mngr.cli.issue_reporting import write_diagnose_context_file
+from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
 
 
@@ -444,3 +447,24 @@ def test_offer_diagnose_shows_install_hint_when_no_plugin() -> None:
 
 def test_is_diagnose_command_returns_false_for_none() -> None:
     assert _is_diagnose_command(None) is False
+
+
+def test_is_diagnose_command_returns_false_without_flag() -> None:
+    """A context from a non-diagnose command has the flag unset."""
+    ctx = click.Context(cli)
+    assert _is_diagnose_command(ctx) is False
+
+
+def test_is_diagnose_command_returns_true_when_flag_set_on_shared_meta() -> None:
+    """Diagnose sets the flag via ctx.meta; click shares .meta across the tree.
+
+    This mirrors what happens at runtime: diagnose writes to its own ctx.meta
+    before invoking create, and the root context's .meta dict reflects that
+    write (they are the same dict).
+    """
+    root_ctx = click.Context(cli)
+    # A child ctx's .meta is the same dict as the parent's
+    child_ctx = click.Context(cli, parent=root_ctx)
+    child_ctx.meta[DIAGNOSE_FLOW_META_KEY] = True
+
+    assert _is_diagnose_command(root_ctx) is True

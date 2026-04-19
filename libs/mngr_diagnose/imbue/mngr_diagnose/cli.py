@@ -10,6 +10,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.create import create as create_cmd
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.issue_reporting import DIAGNOSE_FLOW_META_KEY
 from imbue.mngr.cli.issue_reporting import get_mngr_version
 from imbue.mngr_diagnose.clone import ensure_mngr_clone
 from imbue.mngr_diagnose.context_file import read_diagnose_context
@@ -137,6 +138,12 @@ def diagnose(
         "--no-ensure-clean",
         *create_args,
     ]
+
+    # Mark the shared meta dict so that AliasAwareGroup's error handler can
+    # detect a crash inside a diagnose flow and skip offering diagnose again
+    # (which would recurse). create's setup_command_context overwrites
+    # hook_command_name, so we use a dedicated flag.
+    ctx.meta[DIAGNOSE_FLOW_META_KEY] = True
 
     create_ctx = create_cmd.make_context("diagnose", full_create_args, parent=ctx)
     with create_ctx:

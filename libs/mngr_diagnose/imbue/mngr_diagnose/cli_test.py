@@ -1,7 +1,6 @@
 import json
 import tomllib
 from pathlib import Path
-from typing import Any
 
 import click
 import pluggy
@@ -9,6 +8,8 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.cli.issue_reporting import DIAGNOSE_FLOW_META_KEY
+from imbue.mngr.cli.issue_reporting import _is_diagnose_command
 from imbue.mngr.cli.issue_reporting import get_mngr_version
 from imbue.mngr_diagnose.cli import DIAGNOSE_CLONE_DIR
 from imbue.mngr_diagnose.cli import diagnose
@@ -16,16 +17,22 @@ from imbue.mngr_diagnose.cli import diagnose
 _MNGR_PYPROJECT = Path(__file__).resolve().parents[4] / "libs" / "mngr" / "pyproject.toml"
 
 
-def _stub_clone_and_capture_create_args(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Stub out the clone step and capture the args passed to `create`.
+class _CreateRecord:
+    """What a recording stand-in for ``create_cmd`` captured on invocation."""
 
-    Patches `ensure_mngr_clone` to be a no-op (just mkdir) and replaces
-    `click.Command.make_context` with a spy that records the args list
-    whenever the diagnose command invokes the create command, then raises
-    SystemExit(0) to short-circuit the actual agent creation.
+    def __init__(self, args: list[str], parent_ctx: click.Context) -> None:
+        self.args = args
+        self.parent_ctx = parent_ctx
 
-    Returns the (initially empty) list that will be populated with one
-    entry per intercepted invocation.
+
+def _install_recording_create(monkeypatch: pytest.MonkeyPatch) -> list[_CreateRecord]:
+    """Replace the ``create_cmd`` imported by diagnose with a recording fake.
+
+    This is targeted: we swap the module-level reference, not any click
+    internals. The fake is itself a real click command, so all the
+    existing ``make_context``/``invoke`` flow still runs.
+
+    Also stubs ``ensure_mngr_clone`` so the test does not hit the network.
     """
 
     def fake_ensure(clone_dir: Path, cg: ConcurrencyGroup) -> None:
@@ -33,20 +40,17 @@ def _stub_clone_and_capture_create_args(monkeypatch: pytest.MonkeyPatch) -> list
 
     monkeypatch.setattr("imbue.mngr_diagnose.cli.ensure_mngr_clone", fake_ensure)
 
-    captured: list[list[str]] = []
-    original_make_context = click.Command.make_context
+    records: list[_CreateRecord] = []
 
-    def capturing_make_context(self: click.Command, info_name: str, args: list[str], **kwargs: Any) -> click.Context:
-        # Distinguish the inner call (from diagnose -> create) from the outer
-        # CLI invocation: the inner call always passes "git-worktree" (hardcoded
-        # by diagnose), the outer call carries user-supplied CLI args.
-        if info_name == "diagnose" and "git-worktree" in args:
-            captured.append(args)
-            raise SystemExit(0)
-        return original_make_context(self, info_name, args, **kwargs)
+    @click.command(context_settings={"ignore_unknown_options": True})
+    @click.argument("args", nargs=-1, type=click.UNPROCESSED)
+    @click.pass_context
+    def fake_create(ctx: click.Context, args: tuple[str, ...]) -> None:
+        assert ctx.parent is not None
+        records.append(_CreateRecord(list(args), ctx.parent))
 
-    monkeypatch.setattr(click.Command, "make_context", capturing_make_context)
-    return captured
+    monkeypatch.setattr("imbue.mngr_diagnose.cli.create_cmd", fake_create)
+    return records
 
 
 def test_get_mngr_version_matches_pyproject() -> None:
@@ -74,7 +78,7 @@ def test_diagnose_with_context_file(
         )
     )
 
-    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
+    records = _install_recording_create(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -82,8 +86,8 @@ def test_diagnose_with_context_file(
         obj=plugin_manager,
     )
 
-    assert len(captured_args) == 1
-    args = captured_args[0]
+    assert len(records) == 1
+    args = records[0].args
     assert "--from" in args
     assert "--transfer" in args
     assert "git-worktree" in args
@@ -102,7 +106,7 @@ def test_diagnose_with_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose with just a description passes it through."""
-    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
+    records = _install_recording_create(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -110,8 +114,8 @@ def test_diagnose_with_description(
         obj=plugin_manager,
     )
 
-    assert len(captured_args) == 1
-    args = captured_args[0]
+    assert len(records) == 1
+    args = records[0].args
     msg_idx = args.index("--message") + 1
     assert "test error description" in args[msg_idx]
 
@@ -123,7 +127,7 @@ def test_diagnose_forwards_unknown_options_to_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Options not recognized by diagnose are forwarded verbatim to create."""
-    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
+    records = _install_recording_create(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -142,8 +146,8 @@ def test_diagnose_forwards_unknown_options_to_create(
         obj=plugin_manager,
     )
 
-    assert len(captured_args) == 1
-    args = captured_args[0]
+    assert len(records) == 1
+    args = records[0].args
     assert "--type" in args
     assert "opencode" in args
     assert "--provider" in args
@@ -158,7 +162,7 @@ def test_diagnose_rejects_reserved_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose refuses pass-through args that conflict with its hardcoded create options."""
-    _stub_clone_and_capture_create_args(monkeypatch)
+    _install_recording_create(monkeypatch)
 
     result = cli_runner.invoke(
         diagnose,
@@ -176,7 +180,7 @@ def test_diagnose_rejects_reserved_message_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose refuses --message in pass-through (it builds the message itself)."""
-    _stub_clone_and_capture_create_args(monkeypatch)
+    _install_recording_create(monkeypatch)
 
     result = cli_runner.invoke(
         diagnose,
@@ -194,7 +198,7 @@ def test_diagnose_rejects_reserved_flag_with_equals_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reserved flag detection handles --flag=value form too."""
-    _stub_clone_and_capture_create_args(monkeypatch)
+    _install_recording_create(monkeypatch)
 
     result = cli_runner.invoke(
         diagnose,
@@ -213,7 +217,7 @@ def test_diagnose_does_not_pass_auto_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnose relies on interactive trust prompts, not blanket -y."""
-    captured_args = _stub_clone_and_capture_create_args(monkeypatch)
+    records = _install_recording_create(monkeypatch)
 
     cli_runner.invoke(
         diagnose,
@@ -221,10 +225,37 @@ def test_diagnose_does_not_pass_auto_approve(
         obj=plugin_manager,
     )
 
-    assert len(captured_args) == 1
-    assert "-y" not in captured_args[0]
+    assert len(records) == 1
+    assert "-y" not in records[0].args
 
 
 def test_diagnose_default_clone_dir() -> None:
     """Default clone dir is /tmp/mngr-diagnose."""
     assert DIAGNOSE_CLONE_DIR == Path("/tmp/mngr-diagnose")
+
+
+def test_diagnose_sets_flow_flag_before_invoking_create(
+    tmp_path: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: running diagnose sets the meta flag that the error handler uses.
+
+    Uses a recording stand-in for create_cmd so the test exercises the real
+    diagnose flow without launching an actual agent.
+    """
+    records = _install_recording_create(monkeypatch)
+
+    cli_runner.invoke(
+        diagnose,
+        ["--description", "error", "--clone-dir", str(tmp_path / "clone")],
+        obj=plugin_manager,
+    )
+
+    assert len(records) == 1
+    # The parent ctx captured when create was invoked is the same ctx that
+    # AliasAwareGroup will pass to handle_unexpected_error on a crash.
+    parent_ctx = records[0].parent_ctx
+    assert parent_ctx.meta.get(DIAGNOSE_FLOW_META_KEY) is True
+    assert _is_diagnose_command(parent_ctx) is True

@@ -291,11 +291,25 @@ def write_diagnose_context_file(
     return path
 
 
+DIAGNOSE_FLOW_META_KEY: Final[str] = "mngr_in_diagnose_flow"
+
+
 def _is_diagnose_command(ctx: click.Context | None) -> bool:
-    """Check if the crashing command is diagnose itself."""
+    """Check if an error is propagating out of an in-flight diagnose flow.
+
+    Diagnose sets ``ctx.meta[DIAGNOSE_FLOW_META_KEY] = True`` before delegating
+    to create. click.Context.meta is shared across the context tree, so the
+    AliasAwareGroup can see this flag on the root context when catching the
+    exception -- even though by then the inner contexts have been unwound.
+
+    We use a dedicated key rather than ``hook_command_name`` because create's
+    ``setup_command_context`` overwrites ``hook_command_name`` to "create" when
+    diagnose delegates to it, so that key cannot reliably distinguish "the
+    inner create crashed" from "a top-level create crashed".
+    """
     if ctx is None:
         return False
-    return ctx.meta.get("hook_command_name") == "diagnose"
+    return ctx.meta.get(DIAGNOSE_FLOW_META_KEY) is True
 
 
 def _offer_diagnose(
