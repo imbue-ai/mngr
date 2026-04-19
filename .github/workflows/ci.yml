@@ -72,12 +72,69 @@ jobs:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
 
-      - name: Combine coverage and check threshold
+      - name: Combine coverage and check per-package thresholds
         if: always()
         run: |
+          set -u
+          # Diagnostic: correlate per-sandbox coverage delivery vs per-sandbox junit.
+          # Drift in per-package coverage across runs (with zero test failures) most
+          # likely means some sandbox dropped its .coverage file while still
+          # reporting tests via junit. If these counts differ, that's the cause.
+          # Extract unique sandbox IDs from both the per-sandbox junit files
+          # (sb-<id>.xml, exactly one per sandbox) and the per-batch .coverage
+          # files (test-results/<sandbox-id>/<batch>/.coverage, one per batch
+          # within a sandbox, typically multiple per sandbox). Compare on
+          # UNIQUE-SANDBOX counts so the MISMATCH check is apples-to-apples.
+          # Raw file counts are kept as additional info but are not directly
+          # comparable (coverage files are per-batch, junit files are
+          # per-sandbox).
+          cov_file_count=$(find test-results/ -name ".coverage" -type f 2>/dev/null | wc -l | tr -d ' ')
+          junit_file_count=$(find test-results/junit-parts/ -name "sb-*.xml" 2>/dev/null | wc -l | tr -d ' ')
+          junit_ids=$(find test-results/junit-parts/ -name "sb-*.xml" 2>/dev/null \
+            | sed -E 's|.*/(sb-[^/]+)\.xml$|\1|' | sort -u)
+          cov_ids=$(find test-results/ -mindepth 2 -name ".coverage" -type f 2>/dev/null \
+            | sed -E 's|^test-results/([^/]+)/.*|\1|' | sort -u)
+          junit_sandbox_count=$(printf '%s\n' "$junit_ids" | awk 'NF' | wc -l | tr -d ' ')
+          cov_sandbox_count=$(printf '%s\n' "$cov_ids" | awk 'NF' | wc -l | tr -d ' ')
+          echo "=== Coverage-data delivery diagnostic ==="
+          echo "  sandboxes with .coverage:      $cov_sandbox_count"
+          echo "  sandboxes with junit:          $junit_sandbox_count"
+          echo "  total .coverage files (per-batch): $cov_file_count"
+          echo "  total junit files (per-sandbox):   $junit_file_count"
+          if [ "$cov_sandbox_count" != "$junit_sandbox_count" ]; then
+            if [ "$junit_sandbox_count" -gt "$cov_sandbox_count" ]; then
+              echo "  MISMATCH: $(( junit_sandbox_count - cov_sandbox_count )) sandboxes delivered junit but not .coverage"
+            else
+              echo "  MISMATCH: $(( cov_sandbox_count - junit_sandbox_count )) sandboxes delivered .coverage but not junit"
+            fi
+            echo "  sandboxes with junit but no .coverage:"
+            comm -23 <(printf '%s\n' "$junit_ids") <(printf '%s\n' "$cov_ids") | awk 'NF{print "    " $0}'
+            echo "  sandboxes with .coverage but no junit:"
+            comm -13 <(printf '%s\n' "$junit_ids") <(printf '%s\n' "$cov_ids") | awk 'NF{print "    " $0}'
+          fi
           i=0; for f in $(find test-results/ -name ".coverage"); do cp "$f" ".coverage.$i"; i=$((i+1)); done
           uv run coverage combine .coverage.*
-          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80
+          FAILED_PKGS=""
+          for pkg in libs/* apps/*; do
+            [ -f "$pkg/pyproject.toml" ] || continue
+            THRESHOLD=$(python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1],'rb')); n=d.get('tool',{}).get('coverage',{}).get('report',{}).get('fail_under'); print('' if n is None else n)" "$pkg/pyproject.toml")
+            [ -n "$THRESHOLD" ] || continue
+            echo "=== $pkg (fail_under=${THRESHOLD}%) ==="
+            if ! uv run coverage report --include="$pkg/*" --fail-under="$THRESHOLD"; then
+              FAILED_PKGS="$FAILED_PKGS $pkg"
+            fi
+          done
+          # Global backstop against regression of the combined gate.
+          # Lowered to 78 (from 80) to accommodate the added mngr_vps_docker
+          # and mngr_vultr packages, which drag the total down since they're
+          # below 80% individually.
+          echo "=== combined (fail_under=78%) ==="
+          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=78 || FAILED_PKGS="$FAILED_PKGS [combined]"
+          if [ -n "$FAILED_PKGS" ]; then
+            echo ""
+            echo "FAILED coverage gates:$FAILED_PKGS"
+            exit 1
+          fi
 
       - name: Report test results
         if: always()

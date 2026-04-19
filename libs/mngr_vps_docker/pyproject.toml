@@ -23,18 +23,12 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.mngr_vps_docker",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=40",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -51,6 +45,10 @@ omit = [
 ]
 
 [tool.coverage.report]
+# fail_under is carried forward from pre-refactor (40); recalibrate if CI
+# measures a different baseline now that coverage actually flows from the
+# unit/integration tests via root addopts' `--cov=imbue.mngr_vps_docker`.
+fail_under = 40
 omit = [
   "*_test.py",
   "test_*.py",

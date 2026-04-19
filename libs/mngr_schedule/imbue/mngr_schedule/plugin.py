@@ -44,7 +44,9 @@ def get_files_for_deploy(
         # subdirectories -- those are handled by provider plugins themselves.
         profile_dir = mngr_ctx.profile_dir
         if profile_dir.is_dir():
-            for file_path in profile_dir.iterdir():
+            # Sort so the returned dict has deterministic insertion order
+            # regardless of filesystem iteration order.
+            for file_path in sorted(profile_dir.iterdir()):
                 if file_path.is_file():
                     relative = file_path.relative_to(user_home)
                     files[Path(f"~/{relative}")] = file_path
