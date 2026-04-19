@@ -192,7 +192,6 @@ def check_safe_create_command(args: str) -> str | None:
     default=True,
     show_default=True,
     help="Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). "
-    "Skipped for --foreground (headless) create commands, which auto-destroy per run. "
     "Pass --no-ensure-safe-commands to downgrade these errors to warnings.",
 )
 @add_common_options

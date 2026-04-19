@@ -86,7 +86,7 @@ mngr schedule add [OPTIONS] [POSITIONAL_NAME]
 | ---- | ---- | ----------- | ------- |
 | `--update` | boolean | If a schedule with the same name already exists, update it instead of failing. | `False` |
 | `--auto-fix-args`, `--no-auto-fix-args` | boolean | Automatically add args to create commands to make sure they work as expected (e.g. --headless, --no-connect, --host-label SCHEDULE=<name>). | `True` |
-| `--ensure-safe-commands`, `--no-ensure-safe-commands` | boolean | Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). Skipped for --foreground (headless) create commands, which auto-destroy per run. Pass --no-ensure-safe-commands to downgrade these errors to warnings. | `True` |
+| `--ensure-safe-commands`, `--no-ensure-safe-commands` | boolean | Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). Pass --no-ensure-safe-commands to downgrade these errors to warnings. | `True` |
 
 ## Common
 
