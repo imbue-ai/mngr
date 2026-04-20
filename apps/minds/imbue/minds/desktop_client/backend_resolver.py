@@ -521,11 +521,10 @@ class MngrStreamManager(MutableModel):
         except (json.JSONDecodeError, ValueError) as e:
             # Never log the raw line -- it may contain plaintext credentials
             # from HOST_AUTH_INFO events. Log only the error and event type.
-            event_type = "unknown"
             try:
                 event_type = json.loads(line).get("type", "unknown")
             except (json.JSONDecodeError, ValueError):
-                pass
+                event_type = "unknown"
             logger.error("Failed to parse discovery event (type={}): {}", event_type, e)
             return
 
