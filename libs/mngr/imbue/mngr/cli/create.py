@@ -28,7 +28,6 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
-from imbue.mngr.api.create import resolve_target_host as api_resolve_target_host
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -272,31 +271,6 @@ def _reject_incompatible_headless_flags(
             f"root, or --source), streams output, and auto-destroys. Git, transfer, "
             f"provisioning, environment, and connection options do not apply."
         )
-
-
-def _resolve_online_host(
-    opts: CreateCliOptions,
-    address: AgentAddress,
-    mngr_ctx: MngrContext,
-) -> OnlineHostInterface:
-    """Resolve CLI options and address into an online host.
-
-    Consolidates the three-step host resolution chain used by both the normal
-    create path and the headless path: _parse_target_host -> _resolve_target_host
-    -> api_resolve_target_host (for NewHostOptions).
-    """
-    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
-    lifecycle = _parse_host_lifecycle_options(opts)
-    target_host = _parse_target_host(
-        opts=opts,
-        address=address,
-        agent_and_host_loader=agent_and_host_loader,
-        lifecycle=lifecycle,
-    )
-    resolved = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
-    if isinstance(resolved, NewHostOptions):
-        return api_resolve_target_host(resolved, mngr_ctx)
-    return resolved
 
 
 def _create_headless(
