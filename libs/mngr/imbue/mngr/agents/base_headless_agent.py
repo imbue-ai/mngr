@@ -198,7 +198,11 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         return []
 
     def _get_state_dir_diagnostic(self) -> str:
-        """Return a short inventory of the stdout/stderr files' existence and size.
+        """Return an inventory of the stdout/stderr files plus the agent's lifecycle state.
+
+        Each stdout/stderr line reports existence, size, and tail; a trailing
+        ``lifecycle: ...`` line reports the current lifecycle state (or folds
+        in the probe error if the state cannot be read).
 
         Called by :meth:`_raise_no_output_error` and unconditionally included
         in every no-output error message, alongside stderr / extra sources /
