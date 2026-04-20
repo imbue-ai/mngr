@@ -199,6 +199,11 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
             lines.append(f"lifecycle: {lifecycle.value}")
         except (OSError, HostError) as e:
             logger.trace("get_lifecycle_state failed: {}", e)
+            # Fold the error into the rendered output per the docstring
+            # contract -- trace-level logging alone would effectively
+            # drop this information, which defeats the purpose of the
+            # diagnostic (triage after a silent agent exit).
+            lines.append(f"lifecycle: probe failed: {e}")
 
         return "\n".join(lines)
 
