@@ -26,12 +26,6 @@ from imbue.mngr_schedule.testing import build_subprocess_env
 
 _ENABLED_PLUGINS = frozenset({"schedule"})
 
-# The default mngr config prefix (see MngrConfig.prefix in
-# libs/mngr/imbue/mngr/config/data_types.py). We assert on the full marker
-# rather than the bare trigger name so parallel xdist workers don't
-# false-positive on each other's entries in the shared user crontab.
-_MNGR_PREFIX = "mngr-"
-
 
 def _read_crontab() -> str:
     """Read the current user's crontab, returning '' when unset or missing.
@@ -50,8 +44,14 @@ def _read_crontab() -> str:
     return result.stdout
 
 
-def _marker_for(trigger_name: str) -> str:
-    return f"# {_MNGR_PREFIX}schedule:{trigger_name}"
+def _marker_for(prefix: str, trigger_name: str) -> str:
+    """Build the crontab marker comment the CLI is expected to write.
+
+    The full marker (prefix + "schedule:" + name) is matched rather than
+    the bare trigger name so parallel xdist workers don't false-positive
+    on each other's entries in the shared user crontab.
+    """
+    return f"# {prefix}schedule:{trigger_name}"
 
 
 @pytest.mark.release
@@ -60,8 +60,12 @@ def test_schedule_local_add_and_remove_lifecycle() -> None:
     """End-to-end: CLI add installs a real crontab entry; CLI remove takes it out."""
     # Unique per test run to avoid colliding with other workers or leftover state.
     trigger_name = f"test-local-lifecycle-{os.getpid()}-{get_short_random_string()}"
-    marker = _marker_for(trigger_name)
     env = build_subprocess_env()
+    # Derive the crontab prefix the same way `load_mngr_context` does:
+    # `f"{MNGR_ROOT_NAME}-"`. `build_subprocess_env` sets MNGR_ROOT_NAME
+    # to isolate the subprocess's mngr config namespace, so the marker the
+    # CLI writes is based on that value -- not the ambient default.
+    marker = _marker_for(f"{env['MNGR_ROOT_NAME']}-", trigger_name)
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
 
     try:
