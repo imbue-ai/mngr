@@ -85,8 +85,14 @@ def launch_browser(
     def launch(**kwargs: Any) -> Browser:
         launch_options = {**browser_type_launch_args, **kwargs}
         if connect_options:
+            # Copied verbatim from pytest-playwright's upstream launch_browser
+            # fixture. ty cannot verify the dynamic **connect_options spread
+            # against connect's typed parameters (ws_endpoint: str, timeout,
+            # headers, expose_network); the dict shape is dictated by
+            # pytest-playwright's extension point for remote-browser use and
+            # we mirror it exactly so downstream overrides stay compatible.
             return browser_type.connect(
-                **{
+                **{  # ty: ignore[invalid-argument-type]
                     **connect_options,
                     "headers": {
                         "x-playwright-launch-options": json.dumps(launch_options),
