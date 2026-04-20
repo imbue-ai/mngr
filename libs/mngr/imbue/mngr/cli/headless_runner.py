@@ -1,4 +1,3 @@
-import shlex
 import sys
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -122,74 +121,52 @@ def headless_agent_output(
     this contextmanager does not create or remove it. For a fresh throwaway
     directory, wrap with :func:`ephemeral_work_location`.
 
-    ``initial_message`` is the caller's ``--message`` content. It is handed
-    to the agent type's ``prepare_headless_work_dir`` classmethod so that
-    types that drive claude via prompt files can materialise it on disk
-    before the process starts. It is deliberately NOT plumbed onto
-    ``CreateAgentOptions.initial_message`` -- ``api_create`` treats a
-    non-None initial_message as "call ``wait_for_ready_signal`` and then
-    ``send_message``", which raises on headless agents (they have no TUI to
-    send keys to). The prompt reaches the agent via the on-disk prompt file
-    that the agent command ``cat``s, not via ``send_message``.
-
-    Any paths returned by ``prepare_headless_work_dir`` are removed on exit
-    (both success and failure), so agent types that stage prompt files in
-    an in-place source directory do not leak them into the user's checkout.
+    ``initial_message`` is the caller's ``--message`` content. It is stored
+    on the agent via ``CreateAgentOptions.initial_message`` like on the
+    non-headless path, and ``api_create`` dispatches it through
+    ``agent.stage_initial_message`` (which writes the prompt into the
+    agent's state dir) before starting the agent. Headless agents cannot
+    receive messages via ``send_message``, so ``api_create`` short-circuits
+    its wait-for-ready + send dance for any ``StreamingHeadlessAgentMixin``.
 
     If ``pre_create_setup`` is provided, it is called with the host and work
-    path after the initial-message hook runs but before the agent is created,
-    allowing callers to write additional files that the agent command can
-    reference.
+    path before the agent is created, allowing callers to write additional
+    files into the work dir that the agent command can reference (e.g.
+    ``mngr ask`` stages its system prompt this way).
 
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
-    agent_class = check_streaming_headless_agent_type(str(agent_type))
+    check_streaming_headless_agent_type(str(agent_type))
 
     host = source_location.host
     work_path = source_location.path
 
-    # Initialise before the try so the finally's cleanup loop always has a
-    # well-defined iterable, even if prepare_headless_work_dir itself raises.
-    staged_paths: tuple[Path, ...] = ()
-    try:
-        staged_paths = agent_class.prepare_headless_work_dir(host, work_path, initial_message)
-        if pre_create_setup is not None:
-            pre_create_setup(host, work_path)
+    if pre_create_setup is not None:
+        pre_create_setup(host, work_path)
 
-        agent_options = CreateAgentOptions(
-            agent_type=agent_type,
-            agent_args=agent_args,
-            label_options=label_options or AgentLabelOptions(),
-            target_path=work_path,
-            name=name,
-        )
+    agent_options = CreateAgentOptions(
+        agent_type=agent_type,
+        agent_args=agent_args,
+        label_options=label_options or AgentLabelOptions(),
+        target_path=work_path,
+        name=name,
+        initial_message=initial_message,
+    )
 
-        result = api_create(
-            source_location=source_location,
-            target_host=host,
-            agent_options=agent_options,
-            mngr_ctx=mngr_ctx,
-            create_work_dir=False,
-        )
+    result = api_create(
+        source_location=source_location,
+        target_host=host,
+        agent_options=agent_options,
+        mngr_ctx=mngr_ctx,
+        create_work_dir=False,
+    )
 
-        agent = result.agent
-        with _destroy_on_exit(host, agent):
-            if not isinstance(agent, StreamingHeadlessAgentMixin):
-                raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
-            yield agent
-    finally:
-        # Remove any files that prepare_headless_work_dir staged into
-        # work_path. When the work path is an in-place source directory
-        # (the default on `mngr create --foreground`), leaving these
-        # files behind would show up in the user's git status and could
-        # persist prompt contents. Suppress cleanup errors so a flaky
-        # filesystem does not mask the real exception.
-        for staged_path in staged_paths:
-            try:
-                host.execute_idempotent_command(f"rm -f {shlex.quote(str(staged_path))}")
-            except (OSError, BaseMngrError):
-                logger.debug("Failed to remove staged headless file {}", staged_path)
+    agent = result.agent
+    with _destroy_on_exit(host, agent):
+        if not isinstance(agent, StreamingHeadlessAgentMixin):
+            raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
+        yield agent
 
 
 def accumulate_chunks(chunks: Iterator[str]) -> str:

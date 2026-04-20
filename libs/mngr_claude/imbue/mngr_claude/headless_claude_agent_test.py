@@ -119,16 +119,17 @@ def _write_fake_agent_output(
     (agent_dir / "stderr.log").write_text(stderr)
 
 
-def _stage_prompt_file(agent: HeadlessClaude, prompt: str) -> None:
-    """Write .mngr-prompt into the agent's work dir.
+def _set_agent_initial_message(host: Host, agent: HeadlessClaude, message: str) -> None:
+    """Persist ``initial_message`` into the agent's data.json so get_initial_message() returns it.
 
-    Mirrors what HeadlessClaude.prepare_headless_work_dir does at runtime:
-    the file sitting on disk is what signals assemble_command to append a
-    cat reference. This runs before assemble_command is called, matching
-    the real ordering (prepare_headless_work_dir -> create_agent_state ->
-    assemble_command).
+    Drives the real data.json -> _read_data -> get_initial_message path
+    rather than monkeypatching the method (which would bump the
+    PREVENT_MONKEYPATCH_SETATTR ratchet). Mirrors the production flow
+    where create_agent_state persists CreateAgentOptions values to disk.
     """
-    (agent.work_dir / ".mngr-prompt").write_text(prompt)
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data.json").write_text(json.dumps({"initial_message": message}))
 
 
 class _AlwaysFinishedHeadlessClaude(HeadlessClaude):
@@ -246,80 +247,67 @@ def test_assemble_command_raises_without_command(
         agent.assemble_command(host, agent_args=(), command_override=None)
 
 
-def test_prepare_headless_work_dir_writes_prompt_file(
+def test_stage_initial_message_writes_prompt_file_in_state_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """The classmethod hook writes the initial message to .mngr-prompt and reports the path."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
+    """stage_initial_message writes the prompt into the agent's state dir (not work dir).
 
-    staged = HeadlessClaude.prepare_headless_work_dir(host, work_dir, "please fix the tests")
-
-    prompt_path = work_dir / ".mngr-prompt"
-    assert prompt_path.read_text() == "please fix the tests"
-    # The returned tuple signals to headless_agent_output which files to
-    # clean up on exit, preventing leaks into in-place source directories.
-    assert staged == (prompt_path,)
-
-
-def test_prepare_headless_work_dir_no_message_is_noop(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    """No initial message means no file gets written and an empty tuple is returned."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    staged = HeadlessClaude.prepare_headless_work_dir(host, work_dir, None)
-
-    assert not (work_dir / ".mngr-prompt").exists()
-    assert staged == ()
-
-
-def test_assemble_command_appends_prompt_ref_when_prompt_file_exists(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    """When a .mngr-prompt file has been staged in the work dir and agent_args do not
-    already reference it, assemble_command appends a cat of .mngr-prompt so claude
-    actually receives the user's message.
+    Writing to the state dir means the file is blown away when the agent is
+    destroyed, so it never leaks into an in-place source directory.
     """
     agent, host = _make_headless_agent(local_provider, tmp_path)
-    _stage_prompt_file(agent, "hi there")
+    # The agent state dir is normally created by create_agent_state; mirror
+    # that here so stage_initial_message's write has a parent directory.
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    agent.stage_initial_message("please fix the tests")
+
+    assert (agent_dir / ".mngr-prompt").read_text() == "please fix the tests"
+    # Work dir remains clean.
+    assert not (agent.work_dir / ".mngr-prompt").exists()
+
+
+def test_assemble_command_appends_prompt_ref_when_initial_message_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When the agent has an initial_message (persisted via CreateAgentOptions -> data.json)
+    and agent_args do not already reference the prompt file, assemble_command appends a
+    cat of $MNGR_AGENT_STATE_DIR/.mngr-prompt so claude actually receives the user's message.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    _set_agent_initial_message(host, agent, "hi there")
 
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)
 
     assert ".mngr-prompt" in cmd
-    # Cat-form, not a literal — prompts may be long / contain shell metacharacters.
-    assert 'cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt"' in cmd
+    # Cat-form against the state dir (not the work dir), so cleanup is automatic.
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in cmd
 
 
 def test_assemble_command_does_not_duplicate_prompt_ref(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """If the caller already included a .mngr-prompt reference in agent_args,
+    """If the caller already included a state-dir .mngr-prompt reference in agent_args,
     assemble_command must not append a second one (would double-feed the prompt).
     """
     agent, host = _make_headless_agent(local_provider, tmp_path)
-    _stage_prompt_file(agent, "hi there")
+    _set_agent_initial_message(host, agent, "hi there")
 
-    explicit_prompt_arg = '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"'
+    explicit_prompt_arg = '"$(cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt")"'
     cmd = agent.assemble_command(host, agent_args=(explicit_prompt_arg,), command_override=None)
 
     assert cmd.count(".mngr-prompt") == 1
 
 
-def test_assemble_command_no_prompt_ref_when_no_prompt_file(
+def test_assemble_command_no_prompt_ref_when_no_initial_message(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """No .mngr-prompt file staged = no appended prompt reference."""
+    """No initial_message persisted = no appended prompt reference."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)

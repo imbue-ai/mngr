@@ -471,33 +471,17 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         """Yield output chunks as they become available."""
         ...
 
-    @classmethod
-    def prepare_headless_work_dir(
-        cls,
-        host: OnlineHostInterface,
-        work_dir: Path,
-        initial_message: str | None,
-    ) -> tuple[Path, ...]:
-        """Write agent-type-specific files into ``work_dir`` before the agent is created.
+    def stage_initial_message(self, initial_message: str) -> None:
+        """Materialise ``initial_message`` on disk before the agent process starts.
 
-        Called by ``headless_agent_output`` after ``work_dir`` exists but
-        before the agent instance is constructed. Agent types override this
-        to materialise the caller's ``initial_message`` into whatever form
-        their command reads (prompt files, piped stdin, etc.). Default is a
-        no-op; overrides are only needed when the message (or any other
-        setup) must be on disk before the process starts.
+        Called by ``api_create`` after ``create_agent_state`` (so the agent's
+        state dir / ``$MNGR_AGENT_STATE_DIR`` exists) but before
+        ``start_agents``. Agent types override this to write prompt files
+        that their command reads on startup, since headless agents cannot
+        receive messages via ``send_message``. Files staged under the
+        agent's state dir are removed when the agent is destroyed, so no
+        explicit cleanup is required.
 
-        Returns the tuple of file paths that were written. The caller
-        (``headless_agent_output``) removes these on exit so that agent
-        types that stage prompt files in an in-place source directory do
-        not leak them into the user's checkout.
-
-        Partial-failure contract: if an override writes more than one
-        file and a later write raises, already-written files are *not*
-        visible to the caller's cleanup (the return value never gets
-        returned). Overrides that write multiple files must therefore
-        clean up anything they have already written before re-raising --
-        otherwise those files will leak into an in-place source
-        directory.
+        Default is a no-op -- agent types that ignore the initial message,
+        or that expose it some other way, do not need to override.
         """
-        return ()
