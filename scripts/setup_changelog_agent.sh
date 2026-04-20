@@ -58,7 +58,9 @@ names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')}
 print(' '.join(f'--disable-plugin {n}' for n in names))
 ")
 
-# Check if the trigger already exists.
+# Check if the trigger already exists. Error unless CHANGELOG_REPLACE=1 was
+# set, since the user probably wants to know they're about to clobber a live
+# schedule.
 EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
@@ -66,8 +68,13 @@ data = json.load(sys.stdin)
 names = [s['trigger']['name'] for s in data.get('schedules', [])]
 sys.exit(0 if '${TRIGGER_NAME}' in names else 1)
 " 2>/dev/null; then
-    echo "Schedule '${TRIGGER_NAME}' already exists. No action needed."
-    exit 0
+    if [ "${CHANGELOG_REPLACE:-}" != "1" ]; then
+        echo "Error: Schedule '${TRIGGER_NAME}' already exists on provider '$PROVIDER'." >&2
+        echo "       Set CHANGELOG_REPLACE=1 to remove the existing schedule and redeploy." >&2
+        exit 1
+    fi
+    echo "CHANGELOG_REPLACE=1 set. Removing existing schedule before redeploy..."
+    uv run mngr schedule remove "$TRIGGER_NAME" --provider "$PROVIDER" --force $DISABLE_PLUGIN_ARGS
 fi
 
 echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..."
