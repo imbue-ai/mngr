@@ -729,19 +729,19 @@ def _ensure_dockerd_for_release() -> None:
             last_result.stderr,
         )
 
-    # Pull stdout/stderr into locals so the !r conversion binds to a plain
-    # name. Written inline as `last_result.stdout if last_result else ''!r`,
-    # the !r only applies to the '' literal, so dockerd's multi-line output
-    # would land verbatim in the error -- defeating the intent of using repr
-    # to keep embedded newlines/control chars visible during triage.
-    last_stdout = last_result.stdout if last_result else ""
-    last_stderr = last_result.stderr if last_result else ""
+    # `last_result` is guaranteed non-None: range(3) is non-empty and each
+    # iteration assigns it unconditionally before the early-return check.
+    # Assert to document the invariant and narrow the type for Pyright, so
+    # the error template can format `last_result.X!r` directly instead of
+    # hiding the attribute access behind a None-guarded ternary (which
+    # would bind !r to the fallback literal, not the real value).
+    assert last_result is not None
     raise _DockerdStartupError(
         f"Failed to start dockerd after 3 attempts. "
-        f"Last returncode={last_result.returncode if last_result else 'N/A'}, "
+        f"Last returncode={last_result.returncode}, "
         f"socket_exists={docker_sock.exists()}. "
-        f"stdout={last_stdout!r} "
-        f"stderr={last_stderr!r}"
+        f"stdout={last_result.stdout!r} "
+        f"stderr={last_result.stderr!r}"
     )
 
 
