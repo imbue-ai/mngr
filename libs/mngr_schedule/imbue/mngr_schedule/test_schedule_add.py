@@ -1,7 +1,7 @@
-"""Acceptance test for mngr schedule add with Modal deployment.
+"""Release test for mngr schedule add with Modal deployment.
 
 This test requires Modal credentials and network access. It is marked
-with @pytest.mark.acceptance and @pytest.mark.timeout(600).
+with @pytest.mark.release and @pytest.mark.timeout(600).
 """
 
 import json
