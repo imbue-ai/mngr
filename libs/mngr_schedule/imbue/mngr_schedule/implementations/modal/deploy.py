@@ -657,10 +657,15 @@ def remove_modal_schedule(
             else:
                 logger.warning("Failed to stop Modal app '{}': {}", app_name, stop_result.stderr)
         elif apps:
-            # We got a parseable list but didn't find a match; only warn in
-            # this case to avoid a misleading "not found" log when the list
-            # itself was unusable (already warned about above).
+            # List parsed but no matching app. Note: on the parse-failure
+            # path, apps is [] so this branch is skipped -- we already warned
+            # about the parse failure above and adding "not found" on top
+            # would be misleading.
             logger.warning("Modal app '{}' not found in environment '{}'", app_name, environment_name)
+        else:
+            # Parse failed (or list was legitimately empty). Either way, we
+            # already logged the relevant warning above; nothing to add.
+            pass
     else:
         logger.warning("Failed to list Modal apps: {}", list_result.stderr)
 
