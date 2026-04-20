@@ -305,6 +305,14 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     Raises RuntimeError if the underlying mngr command fails or the verify
     step times out.
     """
+    # Validate verify_mode up front, before any side effects. Otherwise an
+    # invalid value would only be caught after `mngr create` has already
+    # created an agent, leaving it orphaned because we would raise before
+    # the destroy/poll path could run.
+    normalized_verify = verify_mode.lower()
+    if normalized_verify not in ("none", "quick", "full"):
+        raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
+
     trigger = _deploy_config["trigger"]
 
     if not trigger.get("is_enabled", True):
@@ -362,10 +370,6 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     exit_code, full_output = _run_and_stream(cmd, is_checked=False)
     if exit_code != 0:
         raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nOutput:\n{full_output}")
-
-    normalized_verify = verify_mode.lower()
-    if normalized_verify not in ("none", "quick", "full"):
-        raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
 
     # Include `output` so callers using fn.remote() (e.g. `mngr schedule run
     # --provider modal`) can print the captured command output. fn.remote()
