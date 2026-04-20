@@ -164,9 +164,14 @@ _AGENT_MISSING_STATE: str = "MISSING"
 _AGENT_POLL_INTERVAL_SECONDS: float = 10.0
 
 # Maximum time to wait for the agent to reach a terminal state during full
-# verification. Kept below the Modal function timeout so the function can
-# return the failure result instead of being killed.
-_AGENT_FINISH_TIMEOUT_SECONDS: float = 3400.0
+# verification. Kept far enough below the Modal function timeout (3600s) that
+# the full timeout path -- poll loop exhausts, best-effort destroy (its own
+# 300s subprocess timeout), sentinel emission -- still fits, even after
+# `mngr create` has already consumed some of the function's budget. Rough
+# accounting: 3600 - 180 (mngr create) - 300 (destroy) - 20 (overhead) = 3100s;
+# using 3000s leaves additional slack so the container is never killed before
+# `_print_result_sentinel` runs.
+_AGENT_FINISH_TIMEOUT_SECONDS: float = 3000.0
 
 
 def _run_and_stream(

@@ -35,7 +35,10 @@ from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
 # Three timers stack for full-verify:
-#   1. cron_runner._AGENT_FINISH_TIMEOUT_SECONDS (~3400s) -- inner poll.
+#   1. cron_runner._AGENT_FINISH_TIMEOUT_SECONDS (~3000s) -- inner poll.
+#      Kept small enough that the poll + destroy + sentinel-emit path fits
+#      inside (2) even after `mngr create` has already consumed part of the
+#      function's budget.
 #   2. cron_runner @app.function(timeout=3600) -- Modal-side wall clock.
 #   3. VERIFICATION_TIMEOUT_SECONDS -- local `modal run` subprocess wall
 #      clock, which MUST exceed (2) with enough headroom for CLI spin-up,
