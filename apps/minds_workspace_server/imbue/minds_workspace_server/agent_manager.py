@@ -19,7 +19,6 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
@@ -551,7 +550,7 @@ class AgentManager:
         """Log an error if the observe subprocess exits before shutdown."""
         try:
             process.wait()
-        except (ProcessError, ProcessSetupError, EnvironmentStoppedError) as e:
+        except (ProcessError, EnvironmentStoppedError) as e:
             if self._shutdown_event.is_set():
                 return
             _loguru_logger.error("mngr observe subprocess failed: {}", e)
