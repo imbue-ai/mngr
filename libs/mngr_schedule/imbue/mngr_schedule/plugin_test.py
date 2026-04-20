@@ -8,8 +8,10 @@ from typing import cast
 import click
 import pytest
 
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.plugin import get_files_for_deploy
+from imbue.mngr_schedule.plugin import modify_env_vars_for_deploy
 from imbue.mngr_schedule.plugin import register_cli_commands
 
 
@@ -178,3 +180,52 @@ def test_get_files_for_deploy_excludes_project_settings_when_flag_false(tmp_path
     )
 
     assert result == {}
+
+
+# =============================================================================
+# modify_env_vars_for_deploy Tests
+# =============================================================================
+
+
+def _make_mngr_ctx_with_config(profile_dir: Path, prefix: str = "mngr-") -> MngrContext:
+    """Stand-in MngrContext with minimal fields exercised by modify_env_vars_for_deploy."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    config = MngrConfig(default_host_dir=profile_dir.parent, prefix=prefix)
+    return cast(
+        MngrContext,
+        SimpleNamespace(profile_dir=profile_dir, config=config, get_profile_user_id=lambda: "deployer-uid"),
+    )
+
+
+def test_modify_env_vars_for_deploy_sets_mngr_prefix_and_user_id(tmp_path: Path) -> None:
+    """Hook injects MNGR_PREFIX and MNGR_USER_ID so the scheduled container anchors to deployer's env."""
+    mngr_ctx = _make_mngr_ctx_with_config(tmp_path / "profile", prefix="mngr-ev-")
+    env_vars: dict[str, str] = {}
+
+    modify_env_vars_for_deploy(mngr_ctx=mngr_ctx, env_vars=env_vars)
+
+    assert env_vars["MNGR_PREFIX"] == "mngr-ev-"
+    assert env_vars["MNGR_USER_ID"] == "deployer-uid"
+
+
+def test_modify_env_vars_for_deploy_respects_pre_existing_values(tmp_path: Path) -> None:
+    """Hook leaves pre-existing MNGR_PREFIX / MNGR_USER_ID alone so an explicit
+    --pass-env or --env-file can redirect the scheduled trigger to a non-default env."""
+    mngr_ctx = _make_mngr_ctx_with_config(tmp_path / "profile", prefix="mngr-")
+    env_vars: dict[str, str] = {"MNGR_PREFIX": "override-", "MNGR_USER_ID": "override-uid"}
+
+    modify_env_vars_for_deploy(mngr_ctx=mngr_ctx, env_vars=env_vars)
+
+    assert env_vars["MNGR_PREFIX"] == "override-"
+    assert env_vars["MNGR_USER_ID"] == "override-uid"
+
+
+def test_modify_env_vars_for_deploy_preserves_unrelated_keys(tmp_path: Path) -> None:
+    """Hook must not touch env vars unrelated to the mngr env anchor."""
+    mngr_ctx = _make_mngr_ctx_with_config(tmp_path / "profile")
+    env_vars: dict[str, str] = {"GH_TOKEN": "ghp_xxx", "CUSTOM_VAR": "value"}
+
+    modify_env_vars_for_deploy(mngr_ctx=mngr_ctx, env_vars=env_vars)
+
+    assert env_vars["GH_TOKEN"] == "ghp_xxx"
+    assert env_vars["CUSTOM_VAR"] == "value"
