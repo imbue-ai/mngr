@@ -21,6 +21,7 @@ from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.main import load_plugin_hookspecs
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -56,6 +57,7 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
     pm.load_setuptools_entrypoints("mngr")
+    load_plugin_hookspecs(pm)
     load_local_backend_only(pm)
     load_agents_from_plugins(pm)
 
