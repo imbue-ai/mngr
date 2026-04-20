@@ -156,8 +156,8 @@ def verify_schedule_deployment(
 
     Raises ScheduleDeployError on timeout, non-zero exit, detected errors,
     missing sentinel, or a verify result that indicates failure (e.g. full
-    verify finishing in FAILED, or quick verify unable to extract an agent
-    name).
+    verify finishing in a non-terminal-success state, or verify unable to
+    extract an agent name from mngr create output).
 
     The caller should only invoke this when verify_mode != VerifyMode.NONE.
     """
