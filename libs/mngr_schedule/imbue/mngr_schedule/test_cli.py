@@ -2,7 +2,6 @@
 
 import click
 import pluggy
-import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.config.data_types import MngrContext
@@ -10,6 +9,8 @@ from imbue.mngr_schedule.cli.commands import schedule
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
+from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
+from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 
 
 def test_schedule_defaults_to_add_subcommand(
@@ -370,14 +371,34 @@ def test_schedule_remove_requires_provider(
     assert "Missing option" in result.output or "required" in result.output.lower()
 
 
-@pytest.mark.flaky
-def test_schedule_remove_local_with_force(
+def test_schedule_remove_local_cli_cleans_up_disk_artifacts(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Removing a deployed local trigger with --force should succeed."""
+    """CLI wiring for remove --force: trigger dir + creation record get cleaned up.
+
+    The deploy side is mocked via `_deploy_local_trigger` (fake crontab
+    reader/writer), but the CLI-driven remove path invokes
+    `remove_local_schedule` with its default system crontab reader/writer,
+    which do shell out to real `crontab -l` / `crontab -`. This test
+    therefore only asserts on the CLI wiring and on cleanup of on-disk
+    artifacts; the real user crontab is read but no entry matching the
+    test trigger should exist (deploy didn't write one), so `crontab -`
+    is only invoked if there happens to be stale state, which remove
+    tolerates idempotently. The pure crontab text manipulation is covered
+    by the unit tests in `cli/remove_test.py`, and end-to-end crontab
+    interaction is covered by the release test in
+    `test_schedule_local_lifecycle.py`.
+    """
     _deploy_local_trigger(temp_mngr_ctx, "test-remove-trigger")
+
+    # Sanity-check that deploy actually staged the on-disk artifacts we're
+    # about to assert removal of. If this fails, the test setup is broken
+    # and the post-remove assertions below would be vacuous.
+    trigger_dir = get_local_trigger_run_script(temp_mngr_ctx, "test-remove-trigger").parent
+    assert trigger_dir.is_dir(), f"deploy should have created {trigger_dir}"
+    assert get_local_schedule_creation_record(temp_mngr_ctx, "test-remove-trigger") is not None
 
     result = cli_runner.invoke(
         schedule,
@@ -386,6 +407,8 @@ def test_schedule_remove_local_with_force(
     )
     assert result.exit_code == 0, f"remove failed: {result.output}"
     assert "Removed schedule" in result.output
+    assert not trigger_dir.exists(), f"trigger dir {trigger_dir} should have been removed"
+    assert get_local_schedule_creation_record(temp_mngr_ctx, "test-remove-trigger") is None
 
 
 def test_schedule_remove_local_missing_trigger_with_force(

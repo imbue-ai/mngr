@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     build-essential \
     ca-certificates \
+    cron \
     curl \
     fd-find \
     git \
