@@ -254,8 +254,16 @@
 **/test-results
 **/current.tar.gz
 
-# Minds deploy-time build artifacts
-**/.minds/
+# Minds deploy-time build artifacts.
+# Ignore contents so we can un-ignore the committed `template/` subtree: git
+# won't descend into a fully-ignored directory, so negations must live below
+# the contents pattern rather than below the directory pattern.
+**/.minds/*
+# The template directory is committed: it defines the expected keys for each
+# <service>.sh file, with empty values. `scripts/push_modal_secrets.py` uses
+# it to check that per-env .sh files declare every template key.
+!/.minds/template/
+!/.minds/template/**
 
 # Autofix session artifacts
 **/.autofix/

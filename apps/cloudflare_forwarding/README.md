@@ -19,7 +19,13 @@ Deployment is split into two pieces so you can rotate secrets without redeployin
 
 ### 1. Environment-scoped Modal secrets
 
-Local secrets live at `.minds/<env-name>/<service>.sh` (gitignored). Each file is shell-style:
+The committed `.minds/template/*.sh` files declare the expected keys for each service. Per-env secrets live at `.minds/<env-name>/<service>.sh` and are gitignored; to bootstrap a new env, copy the template into it:
+
+```bash
+cp -r .minds/template/ .minds/production/
+```
+
+Each file is shell-style:
 
 ```sh
 # .minds/production/cloudflare.sh
@@ -34,7 +40,7 @@ Push them to Modal with:
 uv run scripts/push_modal_secrets.py production
 ```
 
-This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-production` and `supertokens-production`.
+This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-production` and `supertokens-production`. The push aborts with a diagnostic if any per-env file is missing a key declared in the template -- so if you add a new secret to the template, existing envs must declare it (empty values are fine) before they can be pushed again.
 
 **cloudflare.sh** holds the Cloudflare API credentials:
 
