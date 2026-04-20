@@ -257,7 +257,7 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
     expect(result).to_succeed()
 
 
-@pytest.mark.release
+@pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(120)
 def test_create_modal_snapshot_invalid_id_fails(e2e: E2eSession) -> None:

@@ -119,7 +119,8 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     assert "my-task" in agent_names
 
 
-@pytest.mark.release
+@pytest.mark.acceptance
+@pytest.mark.modal
 def test_create_rejects_dirty_tree_by_default(e2e: E2eSession) -> None:
     """Verify that mngr create fails when the working tree is dirty and --no-ensure-clean is not passed."""
     e2e.write_tutorial_block("""
