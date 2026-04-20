@@ -153,6 +153,13 @@ _RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "
 # forbidden from importing from imbue.*; see the file-level comment.
 _VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
 
+# Private sentinel returned by `_get_lifecycle_state` when the named agent is
+# not present in `mngr list` output. Deliberately distinct from any real
+# AgentLifecycleState value so the deploy-side verifier can tell "agent
+# vanished" apart from "agent reached an unexpected terminal state". The
+# value must be kept in sync with the matching constant in verification.py.
+_AGENT_MISSING_STATE: str = "MISSING"
+
 # How often to poll the agent's lifecycle state during full verification.
 _AGENT_POLL_INTERVAL_SECONDS: float = 10.0
 
@@ -203,8 +210,9 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
 
     Shells `mngr list --provider local --include 'name == "<agent_name>"'
     --format json` and parses the result. A transient subprocess failure
-    yields None so the caller can retry; absent agent yields "MISSING";
-    otherwise yields the state string reported by mngr.
+    yields None so the caller can retry; an absent agent yields
+    `_AGENT_MISSING_STATE`; otherwise yields the state string reported by
+    mngr.
     """
     # Agent names from `Starting agent <name>` are produced by mngr itself and
     # use a restricted character set ([\w-]+), so interpolating into the CEL
@@ -251,7 +259,7 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
         return None
     agents = data.get("agents", [])
     if not agents:
-        return "MISSING"
+        return _AGENT_MISSING_STATE
     state = agents[0].get("state")
     return str(state) if state is not None else None
 

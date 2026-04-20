@@ -49,6 +49,13 @@ VERIFICATION_TIMEOUT_SECONDS: Final[float] = _MODAL_FUNCTION_TIMEOUT_SECONDS + _
 # Must match cron_runner._RESULT_SENTINEL exactly.
 _RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
 
+# Must match cron_runner._AGENT_MISSING_STATE exactly. This is the state
+# value the in-container poll loop emits when the agent is not present in
+# `mngr list` output (as opposed to a real AgentLifecycleState like DONE or
+# STOPPED). We special-case it below so the deploy-side error message can
+# explain "agent vanished" rather than the generic "non-terminal state".
+_AGENT_MISSING_STATE: Final[str] = "MISSING"
+
 # Matches the sentinel anywhere on a line (so Modal-side log prefixes such as
 # container ids or timestamps don't defeat detection) and captures the JSON
 # payload that follows it. Greedy match up to end-of-line so that payloads
@@ -242,6 +249,13 @@ def verify_schedule_deployment(
                 final_state,
             )
             return
+        if final_state == _AGENT_MISSING_STATE:
+            raise ScheduleDeployError(
+                f"Full verification of schedule '{trigger_name}' could not find agent "
+                f"{result.get('agent_name')!r} in `mngr list` output before it reached a terminal "
+                f"state. The agent may have been destroyed externally or never registered with the "
+                f"local provider inside the container."
+            )
         raise ScheduleDeployError(
             f"Full verification of schedule '{trigger_name}' finished with non-terminal-success "
             f"state {final_state!r} for agent {result.get('agent_name')!r}."
