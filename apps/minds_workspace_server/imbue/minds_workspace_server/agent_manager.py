@@ -481,10 +481,9 @@ class AgentManager:
     def _build_observe_command(self) -> list[str]:
         """Build the argv for the mngr observe discovery-only subprocess.
 
-        Exposed as a method so tests can assert that the first element
-        resolves to a real mngr binary (an earlier bug invoked
-        ``python -m imbue.mngr``, which has no ``__main__`` and crashed
-        silently on startup).
+        Factored into a method so tests can assert on the command shape
+        (specifically that the first element is a real mngr binary)
+        without actually spawning the subprocess.
         """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
