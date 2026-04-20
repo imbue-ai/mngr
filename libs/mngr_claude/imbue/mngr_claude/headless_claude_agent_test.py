@@ -119,19 +119,6 @@ def _write_fake_agent_output(
     (agent_dir / "stderr.log").write_text(stderr)
 
 
-def _set_agent_initial_message(host: Host, agent: HeadlessClaude, message: str) -> None:
-    """Persist ``initial_message`` into the agent's data.json so get_initial_message() returns it.
-
-    Drives the real data.json -> _read_data -> get_initial_message path
-    rather than monkeypatching the method (which would bump the
-    PREVENT_MONKEYPATCH_SETATTR ratchet). Mirrors the production flow
-    where create_agent_state persists CreateAgentOptions values to disk.
-    """
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "data.json").write_text(json.dumps({"initial_message": message}))
-
-
 class _AlwaysFinishedHeadlessClaude(HeadlessClaude):
     """HeadlessClaude subclass with fast timeouts that always reports as finished.
 
@@ -273,14 +260,15 @@ def test_assemble_command_appends_prompt_ref_when_initial_message_set(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """When the agent has an initial_message (persisted via CreateAgentOptions -> data.json)
-    and agent_args do not already reference the prompt file, assemble_command appends a
-    cat of $MNGR_AGENT_STATE_DIR/.mngr-prompt so claude actually receives the user's message.
+    """When initial_message is passed (via Host.create_agent_state from
+    CreateAgentOptions.initial_message) and agent_args do not already
+    reference the prompt file, assemble_command appends a cat of
+    $MNGR_AGENT_STATE_DIR/.mngr-prompt so claude actually receives the
+    user's message.
     """
     agent, host = _make_headless_agent(local_provider, tmp_path)
-    _set_agent_initial_message(host, agent, "hi there")
 
-    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None, initial_message="hi there")
 
     assert ".mngr-prompt" in cmd
     # Cat-form against the state dir (not the work dir), so cleanup is automatic.
@@ -295,10 +283,11 @@ def test_assemble_command_does_not_duplicate_prompt_ref(
     assemble_command must not append a second one (would double-feed the prompt).
     """
     agent, host = _make_headless_agent(local_provider, tmp_path)
-    _set_agent_initial_message(host, agent, "hi there")
 
     explicit_prompt_arg = '"$(cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt")"'
-    cmd = agent.assemble_command(host, agent_args=(explicit_prompt_arg,), command_override=None)
+    cmd = agent.assemble_command(
+        host, agent_args=(explicit_prompt_arg,), command_override=None, initial_message="hi there"
+    )
 
     assert cmd.count(".mngr-prompt") == 1
 
@@ -307,7 +296,7 @@ def test_assemble_command_no_prompt_ref_when_no_initial_message(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """No initial_message persisted = no appended prompt reference."""
+    """No initial_message supplied = no appended prompt reference."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)

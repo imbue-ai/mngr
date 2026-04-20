@@ -64,8 +64,17 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Assemble the full command to execute for this agent.
+
+        ``initial_message`` is the ``CreateAgentOptions.initial_message`` value
+        (the content of ``--message`` / ``--message-file``) threaded through
+        so agent types that bake the prompt into the command line (e.g.
+        streaming headless agents that ``cat`` a staged prompt file) can make
+        that decision without reading ``data.json`` -- at assembly time,
+        inside ``Host.create_agent_state``, ``data.json`` has not been
+        written yet.
 
         May raise NoCommandDefinedError if no command is defined.
         """

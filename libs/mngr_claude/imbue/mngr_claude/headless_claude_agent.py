@@ -275,6 +275,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Build a simplified command for headless operation.
 
@@ -298,17 +299,21 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         # When the caller supplied --message (or --message-file),
         # stage_initial_message writes the prompt to
         # $MNGR_AGENT_STATE_DIR/.mngr-prompt. Append a cat reference so
-        # claude reads it on startup. assemble_command runs during
-        # start_agents, after create_agent_state has persisted the
-        # CreateAgentOptions values to data.json, so get_initial_message()
-        # is the authoritative source here.
+        # claude reads it on startup.
+        #
+        # ``initial_message`` is passed in by ``Host.create_agent_state``
+        # from ``CreateAgentOptions.initial_message``. We deliberately do
+        # NOT read ``self.get_initial_message()`` here: ``assemble_command``
+        # runs inside ``create_agent_state`` *before* ``data.json`` is
+        # written, so the persisted initial_message is not yet visible via
+        # ``_read_data``.
         #
         # The "already referenced" check is an exact-equality membership
         # test against all_extra_args, not a substring scan of the joined
         # args: a substring scan would falsely match any arg containing
         # `.mngr-prompt` (e.g. an unrelated path) and silently drop the
         # prompt.
-        if self.get_initial_message() is not None and _MNGR_PROMPT_CAT_ARG not in all_extra_args:
+        if initial_message is not None and _MNGR_PROMPT_CAT_ARG not in all_extra_args:
             parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)
