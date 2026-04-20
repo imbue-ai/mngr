@@ -33,7 +33,6 @@ def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
     return None
 
 
-
 def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
     """Add a git safe.directory entry on a remote host.
 

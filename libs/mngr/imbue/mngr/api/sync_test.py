@@ -435,7 +435,9 @@ def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
 
 
 def test_build_ssh_git_url_produces_correct_url() -> None:
-    conn = SSHConnectionInfo(user="root", hostname="example.com", port=2222, auth=SSHKeyAuth(key_path=Path("/tmp/key")))
+    conn = SSHConnectionInfo(
+        user="root", hostname="example.com", port=2222, auth=SSHKeyAuth(key_path=Path("/tmp/key"))
+    )
     result = _build_ssh_git_url(conn, Path("/home/user/project"))
     assert result == "ssh://root@example.com:2222/home/user/project/.git"
 

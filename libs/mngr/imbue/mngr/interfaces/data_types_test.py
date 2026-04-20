@@ -15,12 +15,12 @@ from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 
 
 def test_relative_path_accepts_relative_string() -> None:

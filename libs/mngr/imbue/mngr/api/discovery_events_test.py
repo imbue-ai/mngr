@@ -40,6 +40,7 @@ from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -48,7 +49,6 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent

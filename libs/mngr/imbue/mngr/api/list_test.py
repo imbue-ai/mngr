@@ -43,6 +43,7 @@ from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -56,7 +57,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry

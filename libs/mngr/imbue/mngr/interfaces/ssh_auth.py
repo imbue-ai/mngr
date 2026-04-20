@@ -229,3 +229,18 @@ class SSHConnectionInfo(FrozenModel):
     hostname: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
     auth: SSHAuthField = Field(description="SSH authentication method")
+
+
+class SSHInfo(FrozenModel):
+    """SSH connection info carried in discovery events and listing output.
+
+    The auth field carries the full SSHAuthMethod (extensible discriminated
+    union). Distinct from SSHConnectionInfo (internal value-type used by Host
+    interfaces) -- SSHInfo is the wire/serialization format for events and
+    CLI output.
+    """
+
+    user: str = Field(description="SSH username")
+    host: str = Field(description="SSH hostname")
+    port: int = Field(description="SSH port")
+    auth: SSHAuthField = Field(description="SSH authentication method")

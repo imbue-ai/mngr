@@ -16,7 +16,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
-from imbue.mngr.interfaces.ssh_auth import SSHAuthField
 
 # === Enums ===
 
@@ -364,19 +363,6 @@ class SnapshotName(str):
 
 class CertifiedDataError(Exception):
     """Raised when certified_data contains an unexpected type for a field."""
-
-
-class SSHInfo(FrozenModel):
-    """SSH connection information for a remote host.
-
-    Used in discovery events and listing output. The auth field carries the
-    full SSHAuthMethod (extensible discriminated union).
-    """
-
-    user: str = Field(description="SSH username")
-    host: str = Field(description="SSH hostname")
-    port: int = Field(description="SSH port")
-    auth: SSHAuthField = Field(description="SSH authentication method")
 
 
 class DiscoveredHost(FrozenModel):
