@@ -55,21 +55,15 @@ class BoardSnapshot(FrozenModel):
 
 
 class DataSourceConfig(FrozenModel):
-    """Generic configuration for a data source (enable/disable only).
+    """Base configuration for a data source (enable/disable only).
 
-    Source-specific configuration (e.g. GitHub field toggles) is owned by
-    each data source implementation and read directly from the config dict.
+    Used as the base class for source-specific configs (e.g. GitHubDataSourceConfig)
+    that add their own fields. User-facing `KanpanPluginConfig.data_sources` stores
+    raw dicts because the TOML loader uses ``model_construct`` and each source parses
+    its own shape.
     """
 
     enabled: bool = Field(default=True, description="Whether this data source is enabled")
-
-
-class ShellCommandSourceConfig(FrozenModel):
-    """Configuration for a shell command data source."""
-
-    name: str = Field(description="Human-readable name")
-    header: str = Field(description="Column header text")
-    command: str = Field(description="Shell command to run per agent")
 
 
 class CustomCommand(FrozenModel):
@@ -118,13 +112,15 @@ class KanpanPluginConfig(PluginConfig):
         default=60.0,
         description="Minimum seconds before retrying after a failed full refresh",
     )
-    data_sources: dict[str, DataSourceConfig] = Field(
+    data_sources: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
-        description="Data source configurations keyed by source name (e.g. 'github', 'repo_paths')",
+        description="Data source configurations keyed by source name (e.g. 'github', 'repo_paths'). "
+        "Each entry is a raw dict -- source-specific fields are parsed by the matching data source.",
     )
-    shell_commands: dict[str, ShellCommandSourceConfig] = Field(
+    shell_commands: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
-        description="Shell command data sources keyed by field key",
+        description="Shell command data sources keyed by field key. "
+        "Each entry should have 'name', 'header', and 'command' (all str).",
     )
 
     columns: dict[str, Any] = Field(
