@@ -512,10 +512,11 @@ class AgentManager:
         self._observe_cg.__enter__()
 
         try:
-            # Run from $HOME so mngr picks up its global config instead of any
-            # project-local .mngr/settings.toml in the current directory --
-            # in particular the monorepo's settings has is_allowed_in_pytest
-            # disabled, which would abort the observe subprocess.
+            # Run from $HOME so mngr picks up the user's global config instead
+            # of any project-local .mngr/settings.toml (or settings.local.toml)
+            # that happens to live in the current working directory, which
+            # would otherwise override the user config and change which agents
+            # observe reports.
             process = self._observe_cg.run_process_in_background(
                 command=cmd,
                 cwd=Path.home(),
