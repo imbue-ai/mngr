@@ -1,8 +1,10 @@
 """Unit tests for crontab.py pure functions."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+from loguru import logger
 
 from imbue.mngr_schedule.errors import ScheduleDeployError
 from imbue.mngr_schedule.implementations.local.crontab import add_crontab_entry
@@ -156,12 +158,26 @@ def test_read_system_crontab_returns_empty_when_binary_missing(
 ) -> None:
     """If the crontab binary is not on PATH, reading yields empty instead of crashing.
 
+    Asserts the warning log was emitted -- this distinguishes the
+    FileNotFoundError branch from the separate "no crontab for user"
+    branch, which also returns "" but without logging a warning.
+
     Regression: CI runners without crontab would raise FileNotFoundError from
     subprocess.run, causing downstream schedule operations to fail intermittently.
     """
-    with monkeypatch.context() as m:
-        m.setenv("PATH", str(tmp_path))
-        assert read_system_crontab() == ""
+    messages: list[str] = []
+
+    def sink(message: Any) -> None:
+        messages.append(message.record["message"])
+
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        with monkeypatch.context() as m:
+            m.setenv("PATH", str(tmp_path))
+            assert read_system_crontab() == ""
+    finally:
+        logger.remove(handler_id)
+    assert any("crontab binary not found" in msg for msg in messages), messages
 
 
 def test_write_system_crontab_raises_schedule_deploy_error_when_binary_missing(
