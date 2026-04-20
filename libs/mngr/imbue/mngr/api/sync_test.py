@@ -17,7 +17,6 @@ from imbue.mngr.api.sync import UncommittedChangesError
 from imbue.mngr.api.sync import _build_remote_rsync_command
 from imbue.mngr.api.sync import _build_rsync_command
 from imbue.mngr.api.sync import _build_ssh_git_url
-from imbue.mngr.api.sync import _build_ssh_transport_args
 from imbue.mngr.api.sync import sync_git
 from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
@@ -26,7 +25,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
-from imbue.mngr.utils.testing import init_git_repo_with_config
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 
 # =============================================================================
@@ -200,24 +199,21 @@ def test_git_sync_error_provides_user_help_text() -> None:
 
 
 def test_local_git_context_has_uncommitted_changes_returns_true_when_changes_exist(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "dirty.txt").write_text("dirty")
+    (temp_git_repo / "dirty.txt").write_text("dirty")
 
     ctx = LocalGitContext(cg=cg)
-    assert ctx.has_uncommitted_changes(tmp_path) is True
+    assert ctx.has_uncommitted_changes(temp_git_repo) is True
 
 
 def test_local_git_context_has_uncommitted_changes_returns_false_when_clean(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     ctx = LocalGitContext(cg=cg)
-    assert ctx.has_uncommitted_changes(tmp_path) is False
+    assert ctx.has_uncommitted_changes(temp_git_repo) is False
 
 
 def test_local_git_context_has_uncommitted_changes_raises_on_non_git_dir(
@@ -230,86 +226,75 @@ def test_local_git_context_has_uncommitted_changes_raises_on_non_git_dir(
 
 
 def test_local_git_context_git_stash_returns_true_on_success(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
+    (temp_git_repo / "README.md").write_text("modified")
 
     ctx = LocalGitContext(cg=cg)
-    result = ctx.git_stash(tmp_path)
+    result = ctx.git_stash(temp_git_repo)
     assert result is True
 
 
 def test_local_git_context_git_stash_returns_false_when_no_changes_to_save(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     ctx = LocalGitContext(cg=cg)
-    result = ctx.git_stash(tmp_path)
+    result = ctx.git_stash(temp_git_repo)
     assert result is False
 
 
 def test_local_git_context_git_stash_pop_succeeds(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
+    (temp_git_repo / "README.md").write_text("modified")
 
     ctx = LocalGitContext(cg=cg)
-    ctx.git_stash(tmp_path)
-    ctx.git_stash_pop(tmp_path)
+    ctx.git_stash(temp_git_repo)
+    ctx.git_stash_pop(temp_git_repo)
 
-    assert (tmp_path / "README.md").read_text() == "modified"
+    assert (temp_git_repo / "README.md").read_text() == "modified"
 
 
 def test_local_git_context_git_stash_pop_raises_when_no_stash(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     ctx = LocalGitContext(cg=cg)
     with pytest.raises(MngrError, match="git stash pop failed"):
-        ctx.git_stash_pop(tmp_path)
+        ctx.git_stash_pop(temp_git_repo)
 
 
 def test_local_git_context_git_reset_hard_succeeds(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
-    (tmp_path / "untracked.txt").write_text("untracked")
+    (temp_git_repo / "README.md").write_text("modified")
+    (temp_git_repo / "untracked.txt").write_text("untracked")
 
     ctx = LocalGitContext(cg=cg)
-    ctx.git_reset_hard(tmp_path)
+    ctx.git_reset_hard(temp_git_repo)
 
-    assert (tmp_path / "README.md").read_text() == "Initial content"
-    assert not (tmp_path / "untracked.txt").exists()
+    assert (temp_git_repo / "README.md").read_text() == "Initial content"
+    assert not (temp_git_repo / "untracked.txt").exists()
 
 
 def test_local_git_context_get_current_branch_returns_branch_name(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     ctx = LocalGitContext(cg=cg)
-    assert ctx.get_current_branch(tmp_path) == "main"
+    assert ctx.get_current_branch(temp_git_repo) == "main"
 
 
 def test_local_git_context_is_git_repository_returns_true_for_git_repo(
-    tmp_path: Path,
+    temp_git_repo: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     ctx = LocalGitContext(cg=cg)
-    assert ctx.is_git_repository(tmp_path) is True
+    assert ctx.is_git_repository(temp_git_repo) is True
 
 
 def test_local_git_context_is_git_repository_returns_false_for_non_git_dir(
@@ -326,24 +311,21 @@ def test_local_git_context_is_git_repository_returns_false_for_non_git_dir(
 
 
 def test_remote_git_context_has_uncommitted_changes_returns_true_when_changes_exist(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "dirty.txt").write_text("dirty")
+    (temp_git_repo / "dirty.txt").write_text("dirty")
 
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    assert ctx.has_uncommitted_changes(tmp_path) is True
+    assert ctx.has_uncommitted_changes(temp_git_repo) is True
 
 
 def test_remote_git_context_has_uncommitted_changes_returns_false_when_clean(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    assert ctx.has_uncommitted_changes(tmp_path) is False
+    assert ctx.has_uncommitted_changes(temp_git_repo) is False
 
 
 def test_remote_git_context_has_uncommitted_changes_raises_on_non_git_dir(
@@ -356,97 +338,85 @@ def test_remote_git_context_has_uncommitted_changes_raises_on_non_git_dir(
 
 
 def test_remote_git_context_git_stash_returns_true_on_success(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
+    (temp_git_repo / "README.md").write_text("modified")
 
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    result = ctx.git_stash(tmp_path)
+    result = ctx.git_stash(temp_git_repo)
     assert result is True
 
 
 def test_remote_git_context_git_stash_returns_false_when_no_changes_to_save(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    result = ctx.git_stash(tmp_path)
+    result = ctx.git_stash(temp_git_repo)
     assert result is False
 
 
 def test_remote_git_context_git_stash_pop_succeeds(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
+    (temp_git_repo / "README.md").write_text("modified")
 
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    ctx.git_stash(tmp_path)
-    ctx.git_stash_pop(tmp_path)
+    ctx.git_stash(temp_git_repo)
+    ctx.git_stash_pop(temp_git_repo)
 
-    assert (tmp_path / "README.md").read_text() == "modified"
+    assert (temp_git_repo / "README.md").read_text() == "modified"
 
 
 def test_remote_git_context_git_stash_pop_raises_when_no_stash(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
     with pytest.raises(MngrError, match="git stash pop failed"):
-        ctx.git_stash_pop(tmp_path)
+        ctx.git_stash_pop(temp_git_repo)
 
 
 def test_remote_git_context_git_reset_hard_succeeds(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    (tmp_path / "README.md").write_text("modified")
-    (tmp_path / "untracked.txt").write_text("untracked")
+    (temp_git_repo / "README.md").write_text("modified")
+    (temp_git_repo / "untracked.txt").write_text("untracked")
 
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    ctx.git_reset_hard(tmp_path)
+    ctx.git_reset_hard(temp_git_repo)
 
-    assert (tmp_path / "README.md").read_text() == "Initial content"
-    assert not (tmp_path / "untracked.txt").exists()
+    assert (temp_git_repo / "README.md").read_text() == "Initial content"
+    assert not (temp_git_repo / "untracked.txt").exists()
 
 
 def test_remote_git_context_get_current_branch_returns_branch_name(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    assert ctx.get_current_branch(tmp_path) == "main"
+    assert ctx.get_current_branch(temp_git_repo) == "main"
 
 
 def test_remote_git_context_get_current_branch_returns_feature_branch(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-    run_git_command(tmp_path, "checkout", "-b", "feature-branch")
+    run_git_command(temp_git_repo, "checkout", "-b", "feature-branch")
 
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    assert ctx.get_current_branch(tmp_path) == "feature-branch"
+    assert ctx.get_current_branch(temp_git_repo) == "feature-branch"
 
 
 def test_remote_git_context_is_git_repository_returns_true_for_git_repo(
-    tmp_path: Path,
+    temp_git_repo: Path,
 ) -> None:
-    init_git_repo_with_config(tmp_path)
-
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
-    assert ctx.is_git_repository(tmp_path) is True
+    assert ctx.is_git_repository(temp_git_repo) is True
 
 
 def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
@@ -460,21 +430,6 @@ def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
 # =============================================================================
 # SSH helper function tests
 # =============================================================================
-
-
-def test_build_ssh_transport_args_produces_correct_ssh_command() -> None:
-    ssh_info = ("root", "example.com", 2222, Path("/tmp/test_key"))
-    result = _build_ssh_transport_args(ssh_info)
-    assert "ssh" in result
-    assert "-i /tmp/test_key" in result
-    assert "-p 2222" in result
-    assert "-o StrictHostKeyChecking=no" in result
-
-
-def test_build_ssh_transport_args_quotes_key_path_with_spaces() -> None:
-    ssh_info = ("user", "host.com", 22, Path("/path with spaces/key"))
-    result = _build_ssh_transport_args(ssh_info)
-    assert "'/path with spaces/key'" in result
 
 
 def test_build_ssh_git_url_produces_correct_url() -> None:
@@ -518,6 +473,7 @@ def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
         source_path=Path("/local/src"),
         destination_path=Path("/remote/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=False,
         is_delete=False,
@@ -533,6 +489,7 @@ def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
         source_path=Path("/remote/src"),
         destination_path=Path("/local/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PULL,
         is_dry_run=False,
         is_delete=False,
@@ -547,6 +504,7 @@ def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         ssh_info=ssh_info,
+        known_hosts_file=None,
         mode=SyncMode.PUSH,
         is_dry_run=True,
         is_delete=True,
@@ -573,7 +531,7 @@ def test_sync_git_adds_safe_directory_for_non_local_host(
     local_dir = tmp_path / "local"
     agent_dir = tmp_path / "agent"
 
-    init_git_repo_with_config(local_dir)
+    init_git_repo(local_dir)
 
     subprocess.run(
         ["git", "clone", str(local_dir), str(agent_dir)],

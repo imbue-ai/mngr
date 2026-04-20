@@ -61,11 +61,16 @@ class _PerTestGuardState:
 # process via the _PYTEST_GUARD_WRAPPER_DIR env var.
 # _session_env_patcher is the patch.dict that manages PATH and _PYTEST_GUARD_WRAPPER_DIR;
 # stopping it automatically restores PATH to its original value.
-# _guarded_resources is populated by register_resource_guard() and extended by
-# create_sdk_resource_guards(); the hooks read from it at session start.
+# _binary_guarded_resources is populated only by register_resource_guard() and drives
+# PATH wrapper script creation. _guarded_resources is the union of binary and SDK
+# guard names (populated by register_resource_guard() and register_sdk_guard()); it
+# drives pytest mark registration, per-test env var setup, and violation checks. The
+# distinction matters so we only create wrapper scripts for names that were meant to
+# guard a real binary -- SDK-only names must not produce stray wrapper scripts.
 _guard_wrapper_dir: str | None = None
 _owns_guard_wrapper_dir: bool = False
 _session_env_patcher: patch.dict | None = None  # ty: ignore[invalid-type-form]
+_binary_guarded_resources: list[str] = []
 _guarded_resources: list[str] = []
 
 # Module-level state for SDK guards. Each entry is (name, install_fn, cleanup_fn).
@@ -76,15 +81,43 @@ _registered_sdk_guards: list[tuple[str, Callable[[], None], Callable[[], None]]]
 def register_resource_guard(name: str) -> None:
     """Register a binary to be guarded by PATH wrapper scripts.
 
-    Call this from each project's conftest.py before register_conftest_hooks().
     The resource name must correspond to both a binary on PATH and a pytest
     mark name (e.g., register_resource_guard("tmux") guards the tmux binary
-    and enforces @pytest.mark.tmux).
+    and enforces @pytest.mark.tmux). Call register_guarded_resource_markers()
+    from pytest_configure to register the corresponding pytest marks.
 
     Duplicate registrations are ignored.
     """
+    if name not in _binary_guarded_resources:
+        _binary_guarded_resources.append(name)
     if name not in _guarded_resources:
         _guarded_resources.append(name)
+
+
+def get_guarded_resource_names() -> tuple[str, ...]:
+    """Return the guarded resource names (binary + SDK guards)."""
+    return tuple(_guarded_resources)
+
+
+def register_guarded_resource_markers(
+    config: pytest.Config,
+    *,
+    skip_names: set[str] | None = None,
+) -> None:
+    """Register pytest markers for all guarded resources.
+
+    Call this from pytest_configure to register marks for every resource
+    registered via register_resource_guard() or register_sdk_guard().
+
+    Resources that overlap with existing markers can be skipped via skip_names.
+    """
+    skip = skip_names or set()
+    for name in _guarded_resources:
+        if name not in skip:
+            config.addinivalue_line(
+                "markers",
+                f"{name}: marks tests that use the {name} resource",
+            )
 
 
 def generate_wrapper_script(resource: str, real_path: str) -> str:
@@ -154,11 +187,13 @@ exit 127
 
 
 def create_resource_guard_wrappers() -> None:
-    """Create wrapper scripts for guarded resources and prepend to PATH.
+    """Create wrapper scripts for binary-guarded resources and prepend to PATH.
 
     Each wrapper intercepts calls to the corresponding binary and enforces
     that the test has the appropriate pytest mark. The list of resources
-    comes from prior register_resource_guard() calls.
+    comes from prior register_resource_guard() calls; SDK-only guards are
+    intentionally excluded so they do not produce stray wrapper scripts
+    named after internal SDK identifiers.
 
     For xdist: the controller creates the wrappers and modifies PATH. Workers
     inherit the modified PATH and wrapper directory via environment variables.
@@ -179,7 +214,7 @@ def create_resource_guard_wrappers() -> None:
     _guard_wrapper_dir = tempfile.mkdtemp(prefix="pytest_resource_guards_")
     _owns_guard_wrapper_dir = True
 
-    for resource in _guarded_resources:
+    for resource in _binary_guarded_resources:
         real_path = shutil.which(resource)
         wrapper_path = Path(_guard_wrapper_dir) / resource
         if real_path is not None:
@@ -269,10 +304,15 @@ def register_sdk_guard(
     before register_conftest_hooks() to push SDK-specific guard
     implementations into the infrastructure. Deduplicates by name so
     multiple conftest files can safely call the registration function.
+
+    Adds the guard name to _guarded_resources and defers the install/cleanup
+    functions to create_sdk_resource_guards().
     """
     registered_names = {entry[0] for entry in _registered_sdk_guards}
     if name not in registered_names:
         _registered_sdk_guards.append((name, install, cleanup))
+        if name not in _guarded_resources:
+            _guarded_resources.append(name)
 
 
 class MethodKind(StrEnum):
@@ -355,15 +395,12 @@ def create_sdk_method_guard(
 
 
 def create_sdk_resource_guards() -> None:
-    """Install all registered SDK guards and add their names to _guarded_resources.
+    """Install all registered SDK guards.
 
-    Iterates through guards registered via register_sdk_guard(), calls each
-    install function, and extends _guarded_resources so the per-test hooks
-    set up env vars for them.
+    Iterates through guards registered via register_sdk_guard() and calls
+    each install function.
     """
-    for name, install, _cleanup in _registered_sdk_guards:
-        if name not in _guarded_resources:
-            _guarded_resources.append(name)
+    for _name, install, _cleanup in _registered_sdk_guards:
         install()
 
 

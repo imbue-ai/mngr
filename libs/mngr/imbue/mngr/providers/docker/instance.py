@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import docker
+import docker.context
 import docker.errors
 import docker.models.containers
 import docker.models.images
@@ -169,6 +170,49 @@ def _get_ssh_host_from_docker_config(docker_host_url: str) -> str:
     return "127.0.0.1"
 
 
+def _get_docker_context_host() -> str | None:
+    """Read the Docker endpoint from the active Docker context.
+
+    Returns the ``Host`` URL (e.g. ``unix:///Users/x/.docker/run/docker.sock``)
+    if a non-default context is active, or ``None`` if the context cannot be
+    read or the default context is selected (in which case ``docker.from_env``
+    already does the right thing).
+    """
+    try:
+        ctx = docker.context.ContextAPI.get_current_context()
+    except Exception as e:
+        # The Docker SDK raises bare ``Exception`` when context metadata is
+        # corrupted, so we must catch broadly here.  This is a best-effort
+        # lookup; any failure falls back to ``docker.from_env()``.
+        logger.debug("Failed to read Docker context (falling back to default): {}", e)
+        return None
+
+    if ctx is None or ctx.Name == "default":
+        return None
+
+    host: str | None = ctx.Host
+    return host if host else None
+
+
+def create_docker_client() -> docker.DockerClient:
+    """Create a Docker client using the same resolution order as the Docker CLI.
+
+    1. ``DOCKER_HOST`` environment variable (via ``docker.from_env()``).
+    2. The active Docker context (read from ``~/.docker/config.json``).
+    3. Platform default (via ``docker.from_env()``).
+
+    Use this instead of ``docker.from_env()`` directly to avoid connection
+    failures on macOS Docker Desktop, where the default socket path
+    (``/var/run/docker.sock``) may not exist but the Docker context points
+    to the correct socket.
+    """
+    if not os.environ.get("DOCKER_HOST"):
+        context_host = _get_docker_context_host()
+        if context_host is not None:
+            return docker.DockerClient(base_url=context_host)
+    return docker.from_env()
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -185,7 +229,6 @@ class DockerProviderInstance(BaseProviderInstance):
 
     # Instance-level caches
     _container_cache_by_id: dict[HostId, docker.models.containers.Container] = PrivateAttr(default_factory=dict)
-    _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -207,6 +250,11 @@ class DockerProviderInstance(BaseProviderInstance):
     def _docker_client(self) -> docker.DockerClient:
         """Lazily create a Docker client.
 
+        When ``self.config.host`` is set, connects to that explicit URL.
+        Otherwise delegates to ``create_docker_client()`` which resolves
+        via DOCKER_HOST, then the active Docker context, then the platform
+        default.
+
         Raises ProviderUnavailableError (a MngrError subclass) instead of
         DockerException when the daemon is unreachable, so callers that catch
         MngrError handle the failure gracefully.
@@ -214,7 +262,7 @@ class DockerProviderInstance(BaseProviderInstance):
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
-            return docker.from_env()
+            return create_docker_client()
         except docker.errors.DockerException as e:
             raise ProviderUnavailableError(self.name, str(e)) from e
 
@@ -709,6 +757,10 @@ kill -TERM 1
         """Create a Host object from a running Docker container.
 
         Returns None if the host record doesn't exist.
+
+        If a cached Host already exists for this host_id and the SSH
+        connection details (host, port, key) have not changed, the cached
+        Host is returned as-is to preserve the existing SSH connection.
         """
         labels = container.labels or {}
         host_id, name, provider_name, user_tags = parse_container_labels(labels)
@@ -721,6 +773,18 @@ kill -TERM 1
         if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
             logger.warning("Skipped container {}: missing SSH info (likely failed host)", container.short_id)
             return None
+
+        # Reuse the cached Host if the SSH details have not changed.
+        # This avoids creating a new pyinfra connector (and eventually a
+        # new SSH connection) on every discovery poll when the underlying
+        # container is the same.
+        cached = self._host_by_id_cache.get(host_id)
+        if isinstance(cached, Host):
+            cached_name = cached.connector.name
+            expected_name = host_record.ssh_host
+            cached_port = cached.connector.host.data.get("ssh_port")
+            if cached_name == expected_name and cached_port == host_record.ssh_port:
+                return cached
 
         add_host_to_known_hosts(
             self._known_hosts_path,
@@ -788,6 +852,16 @@ kill -TERM 1
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
+        # Fail fast if a container with this name already exists, before the
+        # expensive image build step.
+        container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        existing = self._find_container_by_name(name)
+        if existing is not None:
+            raise MngrError(
+                f"A container named '{container_name}' already exists (id: {existing.short_id}). "
+                f"Remove it with 'mngr destroy {name}' or 'docker rm -f {container_name}' first."
+            )
+
         base_image = str(image) if image else (self.config.default_image or DEFAULT_IMAGE)
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
@@ -814,7 +888,6 @@ kill -TERM 1
                 image_name = self._pull_image(base_image)
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
-            container_name = f"{self.mngr_ctx.config.prefix}{name}"
 
             # Create the per-host volume directory before starting the container
             # so the symlink target exists when the setup script runs.
@@ -918,11 +991,11 @@ kill -TERM 1
         host_id = host.id if isinstance(host, HostInterface) else host
         logger.info("Stopping Docker container: {}", host_id)
 
-        # Disconnect SSH before stopping
-        cached_host = self._host_by_id_cache.get(host_id)
-        host_to_disconnect = cached_host if cached_host is not None else host
-        if isinstance(host_to_disconnect, Host):
-            host_to_disconnect.disconnect()
+        # Disconnect SSH before stopping (also disconnect the passed-in host
+        # in case it is a different instance than the cached one).
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
 
         container = self._find_container_by_host_id(host_id)
         if container is not None:
@@ -953,7 +1026,6 @@ kill -TERM 1
             )
 
         self._container_cache_by_id.pop(host_id, None)
-        self._host_by_id_cache.pop(host_id, None)
 
     def start_host(
         self,
@@ -1000,7 +1072,7 @@ kill -TERM 1
                 container.start()
 
             self._container_cache_by_id[host_id] = container
-            self._host_by_id_cache.pop(host_id, None)
+            self._evict_cached_host(host_id)
 
             if host_record is None:
                 raise HostNotFoundError(host_id)
@@ -1021,7 +1093,7 @@ kill -TERM 1
                 host_data=host_record.certified_host_data,
             )
 
-            self._host_by_id_cache[host_id] = restored_host
+            self._evict_cached_host(host_id, replacement=restored_host)
             return restored_host
 
         # No container found, try snapshot restore
@@ -1095,7 +1167,7 @@ kill -TERM 1
             raise MngrError(f"Failed to create container from snapshot: {e}") from e
 
         self._container_cache_by_id[host_id] = new_container
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
         restored_host, _, _, _ = self._setup_container_ssh_and_create_host(
             container=new_container,
@@ -1106,7 +1178,7 @@ kill -TERM 1
             host_data=host_record.certified_host_data,
         )
 
-        self._host_by_id_cache[host_id] = restored_host
+        self._evict_cached_host(host_id, replacement=restored_host)
         return restored_host
 
     def destroy_host(
@@ -1149,18 +1221,18 @@ kill -TERM 1
                 logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
         self._container_cache_by_id.pop(host_id, None)
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host."""
         self._host_store.delete_host_record(host.id)
         self._container_cache_by_id.pop(host.id, None)
-        self._host_by_id_cache.pop(host.id, None)
+        self._evict_cached_host(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Clear all caches for a host on connection error."""
         self._container_cache_by_id.pop(host_id, None)
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
     # =========================================================================
@@ -1214,7 +1286,7 @@ kill -TERM 1
                         break
 
         if host_obj is not None:
-            self._host_by_id_cache[host_obj.id] = host_obj
+            self._evict_cached_host(host_obj.id, replacement=host_obj)
             return host_obj
 
         raise HostNotFoundError(host)
@@ -1293,7 +1365,7 @@ kill -TERM 1
                     logger.warning("Failed to create host from container {}: {}", host_id, e)
 
         for h, _ in hosts_with_state:
-            self._host_by_id_cache[h.id] = h
+            self._evict_cached_host(h.id, replacement=h)
 
         return [
             DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)

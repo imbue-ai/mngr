@@ -50,6 +50,7 @@ from coverage.exceptions import CoverageException
 
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -123,6 +124,7 @@ _registered: bool = False
 _SHARED_MARKERS: Final[list[str]] = [
     "acceptance: marks tests as requiring network access, Modal credentials, etc. These are required to pass in CI",
     "release: marks tests as being required for release (but not for merging PRs)",
+    "flaky: marks tests as known-flaky (retried by offload with a separate retry count)",
 ]
 
 # Additional markers registered by projects via register_marker().
@@ -597,6 +599,9 @@ def _pytest_configure(config: pytest.Config) -> None:
     # Register shared markers and any additional markers from register_marker()
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
+
+    # Register marks for guarded resources (see libs/resource_guards/README.md).
+    register_guarded_resource_markers(config)
 
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:

@@ -4,7 +4,7 @@ import click
 class MindError(click.ClickException):
     """Base exception for all minds errors.
 
-    Inherits from click.ClickException so that mind errors are
+    Inherits from click.ClickException so that minds errors are
     automatically formatted and displayed by click without needing
     manual re-raising as ClickException at every call site.
     """
@@ -24,31 +24,43 @@ class GitCloneError(MindError):
     ...
 
 
+class GitOperationError(MindError):
+    """Raised when a git operation (other than clone) fails."""
+
+    ...
+
+
 class MngrCommandError(MindError):
     """Raised when an mngr CLI command fails."""
 
     ...
 
 
-class GitOperationError(MindError):
-    """Raised when a git operation fails during mind management."""
+class MindsConfigError(MindError):
+    """Raised when minds config cannot be parsed or validated."""
 
     ...
 
 
-class VendorError(GitOperationError):
-    """Raised when vendoring a repo into a mind fails."""
+class TelegramError(MindError):
+    """Base exception for all telegram-related errors."""
 
     ...
 
 
-class ParentTrackingError(GitOperationError):
-    """Raised when a parent tracking git operation fails."""
+class TelegramCredentialError(TelegramError, ValueError):
+    """Raised when telegram credentials are invalid or missing."""
 
     ...
 
 
-class DirtyRepoError(VendorError):
-    """Raised when a local vendor repo has uncommitted changes or untracked files."""
+class TelegramCredentialExtractionError(TelegramError):
+    """Raised when credential extraction from the browser fails."""
+
+    ...
+
+
+class TelegramBotCreationError(TelegramError):
+    """Raised when bot creation via BotFather fails."""
 
     ...

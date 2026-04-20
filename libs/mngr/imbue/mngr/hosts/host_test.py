@@ -23,6 +23,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -34,6 +35,7 @@ from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
+from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
 from imbue.mngr.interfaces.data_types import PyinfraConnector
@@ -41,9 +43,9 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -473,6 +475,69 @@ def test_create_agent_state_stores_none_created_branch_name(
     assert agent.get_created_branch_name() is None
 
 
+def test_create_agent_state_update_preserves_create_time(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """In update mode, create_agent_state preserves the original create_time."""
+    host = local_host
+
+    # First, create the agent normally
+    original_options = CreateAgentOptions(
+        name=AgentName("test-update-time"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    original_agent = host.create_agent_state(temp_work_dir, original_options)
+    original_create_time = original_agent.create_time
+
+    # Now update the agent with is_update=True
+    update_options = CreateAgentOptions(
+        agent_id=original_agent.id,
+        name=AgentName("test-update-time"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 2"),
+        is_update=True,
+    )
+    updated_agent = host.create_agent_state(temp_work_dir, update_options)
+
+    assert updated_agent.id == original_agent.id
+    assert updated_agent.create_time == original_create_time
+    assert str(updated_agent.get_command()) == "sleep 2"
+
+
+def test_create_agent_state_update_overwrites_data(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """In update mode, create_agent_state overwrites data.json with new values."""
+    host = local_host
+
+    # First, create the agent normally
+    original_options = CreateAgentOptions(
+        name=AgentName("test-update-data"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"project": "old-project"}),
+    )
+    original_agent = host.create_agent_state(temp_work_dir, original_options)
+
+    # Now update with different labels
+    update_options = CreateAgentOptions(
+        agent_id=original_agent.id,
+        name=AgentName("test-update-data"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"project": "new-project"}),
+        is_update=True,
+    )
+    updated_agent = host.create_agent_state(temp_work_dir, update_options)
+
+    assert updated_agent.get_labels() == {"project": "new-project"}
+
+
 def test_get_created_branch_name_returns_none_when_null(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -487,6 +552,55 @@ def test_get_created_branch_name_returns_none_when_null(
     (agent_dir / "data.json").write_text(json.dumps(data))
 
     assert agent.get_created_branch_name() is None
+
+
+# =========================================================================
+# Tests for _ensure_work_dir_exists
+# =========================================================================
+
+
+def test_ensure_work_dir_exists_succeeds_when_dir_exists(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_ensure_work_dir_exists should be a no-op when the directory exists."""
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir)
+    host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_raises_when_no_branch(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_ensure_work_dir_exists should raise with plain message when no branch is recorded."""
+    missing_dir = tmp_path / "nonexistent"
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, missing_dir)
+
+    with pytest.raises(AgentStartError, match="does not exist"):
+        host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_raises_with_recovery_command(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_ensure_work_dir_exists should include a git worktree add command when branch is known."""
+    missing_dir = tmp_path / "worktrees" / "gone"
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    options = CreateAgentOptions(
+        name=AgentName("test-recovery-cmd"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(missing_dir, options, created_branch_name="mngr/my-branch")
+
+    with pytest.raises(AgentStartError, match="git worktree add.*mngr/my-branch"):
+        host._ensure_work_dir_exists(agent)
 
 
 # =========================================================================
@@ -965,9 +1079,13 @@ class _FakeSSHClient:
 
     def __init__(self, transport_return: object = None) -> None:
         self._transport = transport_return
+        self.close_call_count = 0
 
     def get_transport(self) -> object:
         return self._transport
+
+    def close(self) -> None:
+        self.close_call_count += 1
 
 
 class _FakeSSHConnector:
@@ -1621,6 +1739,51 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
 
 
 # =========================================================================
+# Tests for disconnect / _close_paramiko_client
+# =========================================================================
+
+
+def test_disconnect_closes_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must call close() on the underlying paramiko SSH client.
+
+    pyinfra's disconnect() only clears its SFTP cache and sets connected=False.
+    It does not close the paramiko SSHClient, which would leak the TCP socket.
+    """
+    ssh_client = _FakeSSHClient(transport_return=_FakeTransport())
+    fake = _FakeHostWithSSH(ssh_client=ssh_client)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    host.disconnect()
+
+    assert ssh_client.close_call_count == 1
+
+
+def test_disconnect_is_safe_without_paramiko_client(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Host.disconnect() must not raise when the pyinfra host has no SSH client."""
+    fake = _FakeHostWithSSH(ssh_client=None)
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    # Should not raise
+    host.disconnect()
+
+
+# =========================================================================
 # Tests for _format_env_file
 # =========================================================================
 
@@ -2152,32 +2315,6 @@ def test_host_provision_agent_with_extra_provision_commands(
     assert "provisioned" in marker_file.read_text()
 
 
-def test_host_provision_agent_with_append_to_file(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """provision_agent should append text to files."""
-    host = local_host
-    target_file = temp_work_dir / "bashrc"
-    target_file.write_text("existing content\n")
-
-    options = CreateAgentOptions(
-        name=AgentName("append-provision-agent"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(
-            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended line\n"),),
-        ),
-    )
-
-    agent = host.create_agent_state(temp_work_dir, options)
-    host.provision_agent(agent, options, temp_mngr_ctx)
-
-    assert target_file.read_text() == "existing content\nappended line\n"
-
-
 def test_host_provision_agent_with_create_directories(
     local_host: Host,
     temp_host_dir: Path,
@@ -2697,3 +2834,90 @@ def test_apply_work_dir_extra_paths_share_same_host_replaces_stale_symlink(
     target = work_dir / ".venv"
     assert target.is_symlink()
     assert target.resolve() == (source_dir / ".venv").resolve()
+
+
+# =============================================================================
+# Tests for _merge_agent_type_provisioning
+# =============================================================================
+
+
+def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:
+    """_merge_agent_type_provisioning should return the original options when agent config has no provisioning."""
+    agent_config = AgentTypeConfig()
+    options = CreateAgentOptions()
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert result is options
+
+
+def test_merge_agent_type_provisioning_prepends_extra_provision_commands() -> None:
+    """Agent type extra_provision_command should be prepended before CLI commands."""
+    agent_config = AgentTypeConfig(extra_provision_command=("echo agent_type",))
+    options = CreateAgentOptions(
+        provisioning=AgentProvisioningOptions(extra_provision_commands=("echo cli",)),
+    )
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert result.provisioning.extra_provision_commands == ("echo agent_type", "echo cli")
+
+
+def test_merge_agent_type_provisioning_prepends_upload_files() -> None:
+    """Agent type upload_file specs should be parsed and prepended."""
+    agent_config = AgentTypeConfig(upload_file=("local.txt:/remote.txt",))
+    options = CreateAgentOptions(
+        provisioning=AgentProvisioningOptions(
+            upload_files=(UploadFileSpec(local_path=Path("cli.txt"), remote_path=Path("/cli.txt")),),
+        ),
+    )
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert len(result.provisioning.upload_files) == 2
+    assert result.provisioning.upload_files[0].local_path == Path("local.txt")
+    assert result.provisioning.upload_files[0].remote_path == Path("/remote.txt")
+    assert result.provisioning.upload_files[1].local_path == Path("cli.txt")
+
+
+def test_merge_agent_type_provisioning_prepends_env_vars() -> None:
+    """Agent type env should be parsed and prepended to environment.env_vars."""
+    agent_config = AgentTypeConfig(env=("AGENT_TYPE_VAR=1",))
+    options = CreateAgentOptions(
+        environment=AgentEnvironmentOptions(
+            env_vars=(EnvVar(key="CLI_VAR", value="2"),),
+        ),
+    )
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert len(result.environment.env_vars) == 2
+    assert result.environment.env_vars[0].key == "AGENT_TYPE_VAR"
+    assert result.environment.env_vars[0].value == "1"
+    assert result.environment.env_vars[1].key == "CLI_VAR"
+
+
+def test_merge_agent_type_provisioning_prepends_env_files() -> None:
+    """Agent type env_file should be parsed and prepended to environment.env_files."""
+    agent_config = AgentTypeConfig(env_file=("/etc/agent.env",))
+    options = CreateAgentOptions(
+        environment=AgentEnvironmentOptions(
+            env_files=(Path("/etc/cli.env"),),
+        ),
+    )
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert result.environment.env_files == (Path("/etc/agent.env"), Path("/etc/cli.env"))
+
+
+def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
+    """Agent type create_directory should be parsed and prepended."""
+    agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))
+    options = CreateAgentOptions(
+        provisioning=AgentProvisioningOptions(create_directories=(Path("/tmp/existing"),)),
+    )
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert result.provisioning.create_directories == (Path("/tmp/mydir"), Path("/tmp/existing"))
+
+
+def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
+    """Both provisioning and env fields should be merged in one call."""
+    agent_config = AgentTypeConfig(
+        extra_provision_command=("echo setup",),
+        env=("KEY=val",),
+    )
+    options = CreateAgentOptions()
+    result = _merge_agent_type_provisioning(agent_config, options)
+    assert result.provisioning.extra_provision_commands == ("echo setup",)
+    assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)

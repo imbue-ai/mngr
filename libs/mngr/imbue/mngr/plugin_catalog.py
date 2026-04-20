@@ -13,6 +13,15 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import PluginTier
 
+# Packages not yet published on PyPI. Excluded from the install wizard.
+# Remove entries from here as they get published.
+UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
+    {
+        "imbue-mngr-schedule",
+        "imbue-mngr-tmr",
+    }
+)
+
 
 class SignalCheck(FrozenModel):
     """A heuristic to detect if the user likely wants a plugin enabled.
@@ -44,12 +53,6 @@ class PiSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("sh", "-c", "pi --help 2>&1 | grep -q 'pi - AI coding assistant'")
 
 
-class LlmSignalCheck(SignalCheck):
-    """Detects whether Simon Willison's llm CLI is installed."""
-
-    command: tuple[str, ...] = ("sh", "-c", "llm --help 2>&1 | grep -q datasette.io")
-
-
 class ModalSignalCheck(SignalCheck):
     """Detects whether Modal credentials are configured."""
 
@@ -60,7 +63,6 @@ class ModalSignalCheck(SignalCheck):
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
-_LLM_SIGNAL: Final[LlmSignalCheck] = LlmSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 
 
@@ -102,13 +104,6 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         signal=_PI_SIGNAL,
     ),
     CatalogEntry(
-        entry_point_name="llm",
-        package_name="imbue-mngr-llm",
-        description="LLM agent plugin for mngr - runs the llm CLI tool as an agent",
-        tier=PluginTier.INDEPENDENT,
-        signal=_LLM_SIGNAL,
-    ),
-    CatalogEntry(
         entry_point_name="modal",
         package_name="imbue-mngr-modal",
         description="Modal provider backend plugin for mngr",
@@ -145,13 +140,6 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.DEPENDENT,
         signal=_CLAUDE_SIGNAL,
     ),
-    CatalogEntry(
-        entry_point_name="claude_mind",
-        package_name="imbue-mngr-claude-mind",
-        description="Claude mind agent plugin for mngr - base class for mind agents built on Claude Code",
-        tier=PluginTier.DEPENDENT,
-        signal=_CLAUDE_SIGNAL,
-    ),
     # --- INDEPENDENT, no signal ---
     CatalogEntry(
         entry_point_name="ttyd",
@@ -169,18 +157,6 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         entry_point_name="kanpan",
         package_name="imbue-mngr-kanpan",
         description="All-seeing agent tracker",
-        tier=PluginTier.INDEPENDENT,
-    ),
-    CatalogEntry(
-        entry_point_name="mind",
-        package_name="imbue-mngr-mind",
-        description="Common code for mind-based agents in mngr",
-        tier=PluginTier.INDEPENDENT,
-    ),
-    CatalogEntry(
-        entry_point_name="mind_chat",
-        package_name="imbue-mngr-mind-chat",
-        description="Chat command plugin for mngr - connect to mind chat sessions",
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(
@@ -262,11 +238,13 @@ def get_installable_packages() -> tuple[CatalogEntry, ...]:
 
     Used by the install wizard to show per-package choices. Returns the
     first catalog entry for each package (typically the INDEPENDENT-tier entry
-    if one exists).
+    if one exists). Excludes packages not yet published on PyPI.
     """
     seen: set[str] = set()
     result: list[CatalogEntry] = []
     for entry in PLUGIN_CATALOG:
+        if entry.package_name in UNPUBLISHED_PACKAGES:
+            continue
         if entry.package_name not in seen:
             seen.add(entry.package_name)
             result.append(entry)

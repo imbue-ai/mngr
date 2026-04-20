@@ -339,9 +339,9 @@ def _gc_single_host(
             return
 
         if not dry_run:
-            mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
+            mngr_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy, mngr_ctx=mngr_ctx)
             provider.destroy_host(host_to_destroy)
-            mngr_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
+            mngr_ctx.pm.hook.on_host_destroyed(host=host_to_destroy, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host_ref.host_id, [])
 
         with results_lock:
@@ -362,8 +362,13 @@ def gc_snapshots(
 ) -> None:
     """Garbage collect snapshots from destroyed hosts.
 
-    Only deletes snapshots from hosts that are in DESTROYED state -- these
-    snapshots serve no purpose because the host can never be resumed.
+    Only deletes snapshots from hosts that were in DESTROYED state at
+    discovery time -- these snapshots serve no purpose because the host
+    can never be resumed.
+
+    Uses the host_state from the pre-computed discovery results rather than
+    calling get_host(), because gc_machines may have already destroyed the
+    host (and its record) earlier in the same GC run.
 
     Snapshots on RUNNING, PAUSED, and STOPPED hosts are never deleted:
     - PAUSED/STOPPED hosts need their snapshots for resumption
@@ -377,13 +382,11 @@ def gc_snapshots(
         try:
             for host_ref in host_refs:
                 try:
-                    host = provider.get_host(host_ref.host_id)
-                    host_state = host.get_state()
-                    if host_state != HostState.DESTROYED:
+                    if host_ref.host_state != HostState.DESTROYED:
                         logger.trace(
                             "Skipped snapshot GC for host {} (state: {})",
                             host_ref.host_id,
-                            host_state,
+                            host_ref.host_state,
                         )
                         continue
 
@@ -701,11 +704,20 @@ def _remove_work_dir_from_certified_data(host: OnlineHostInterface, work_dir_pat
 
 
 def _remove_directory(host: OnlineHostInterface, path: Path) -> None:
-    """Remove a directory and all its contents."""
+    """Remove a directory and all its contents.
+
+    Tries without sudo first, then retries with sudo if the initial
+    attempt fails (e.g. on Lima VMs where the SSH user is not root but
+    has passwordless sudo).
+    """
     result = host.execute_idempotent_command(f"test -e {shlex.quote(str(path))}")
     if result.success:
-        cmd = f"rm -rf {shlex.quote(str(path))}"
-        result = host.execute_idempotent_command(cmd)
+        quoted = shlex.quote(str(path))
+        result = host.execute_idempotent_command(f"rm -rf {quoted}")
+
+        if not result.success:
+            logger.debug("rm -rf failed for {}, retrying with sudo: {}", path, result.stderr)
+            result = host.execute_idempotent_command(f"sudo rm -rf {quoted}")
 
         if not result.success:
             raise MngrError(f"Failed to remove directory {path}: {result.stderr}")

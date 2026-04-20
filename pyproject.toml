@@ -69,18 +69,16 @@ addopts = [
   "--cov=imbue.mngr_schedule",
   "--cov=imbue.mngr_ttyd",
   "--cov=imbue.mngr_tutor",
-  "--cov=imbue.mngr_llm",
-  "--cov=imbue.mngr_mind",
-  "--cov=imbue.mngr_claude_mind",
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_recursive",
   "--cov=imbue.mngr_notifications",
-  "--cov=imbue.mngr_mind_chat",
   "--cov=imbue.mngr_file",
+  "--cov=imbue.mngr_lima",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
+  "--cov=imbue.cloudflare_forwarding",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
@@ -107,6 +105,9 @@ select = [
     "E",
     "F",
     "B",
+    "I",
+    "UP006",
+    "UP007",
 #    "T",
 #    "SIM",
 ]
@@ -134,7 +135,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "contrib/"]
+exclude = ["scripts/style_guide.py", "contrib/", "apps/minds/scripts/"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
@@ -158,6 +159,10 @@ omit = [
     "libs/mngr/imbue/mngr/providers/docker/instance.py",
     "libs/mngr/imbue/mngr/providers/docker/volume.py",
     "libs/mngr/imbue/mngr/providers/docker/testing.py",
+    # Lima provider requires Lima/QEMU for full integration testing
+    "libs/mngr_lima/imbue/mngr_lima/instance.py",
+    "libs/mngr_lima/imbue/mngr_lima/limactl.py",
+    "libs/mngr_lima/imbue/mngr_lima/testing.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",
@@ -167,6 +172,14 @@ omit = [
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",
     # don't bother with anything in scripts
     "scripts/*",
+]
+
+[tool.coverage.paths]
+# Map sandbox paths back to local paths so coverage data collected on
+# offload Modal sandboxes (rooted at /code/mngr/) can be combined locally.
+source = [
+    ".",
+    "/code/mngr/",
 ]
 
 [tool.importlinter]
@@ -197,7 +210,6 @@ type = "layers"
 layers = [
     "imbue.minds.desktop_client",
     "imbue.minds.cli",
-    "imbue.minds.forwarding_server",
     "imbue.minds.core",
     "imbue.minds.interfaces",
     "imbue.minds.config",

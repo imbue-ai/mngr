@@ -1,0 +1,37 @@
+# This file is appended to Dockerfile (with the CMD line stripped) to
+# produce Dockerfile.release. See justfile's _generate-release-dockerfile
+# recipe. Keeps the two Dockerfiles in sync while letting the release
+# image add Docker-in-Docker plumbing on top of the regular one.
+
+# ---- Extra apt packages for Docker-in-Docker ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
+    iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Docker-in-Docker (static binaries) ----
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+    | tar xz -C /usr/local/bin --strip-components=1
+
+# Modern runc for reliable networking under gVisor
+RUN rm -f /usr/local/bin/runc \
+    && wget -q https://github.com/opencontainers/runc/releases/download/v1.3.0/runc.amd64 \
+    && chmod +x runc.amd64 \
+    && mv runc.amd64 /usr/local/bin/runc
+
+# gVisor doesn't support nftables (https://github.com/google/gvisor/issues/10510)
+RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
+    && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
+# ---- Docker daemon startup script ----
+# dockerd itself is started by the _ensure_dockerd_for_release pytest
+# session fixture (libs/mngr/imbue/mngr/conftest.py), so we only need
+# the start script on the image. No BASH_ENV indirection -- that used
+# to trigger start-dockerd.sh per bash subshell and serialized tests.
+COPY libs/mngr/imbue/mngr/resources/start-dockerd.sh /start-dockerd.sh
+RUN chmod +x /start-dockerd.sh
+
+# Run idly forever while being responsive to SIGTERM.
+# PID 1 must explicitly install signal handlers in order to respect signals.
+# Start dockerd as part of the sandbox launch.
+CMD ["sh", "-c", "/start-dockerd.sh && trap 'exit 0' TERM; tail -f /dev/null & wait"]

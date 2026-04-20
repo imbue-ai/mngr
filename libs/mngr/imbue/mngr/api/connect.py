@@ -12,7 +12,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
+from imbue.mngr.utils.polling import poll_until
 
 # Exit codes used by the remote SSH wrapper script to signal post-disconnect actions.
 # These are checked by connect_to_agent after the SSH session ends to determine
@@ -239,15 +241,43 @@ def connect_to_agent(
         if fixed_env.get("TERM") == "xterm-kitty":
             fixed_env["TERM"] = "xterm-256color"
 
-        # Use run_interactive_subprocess instead of os.execvp so we can check the exit code
-        # and run post-disconnect actions (destroy/stop) triggered by tmux key bindings
-        completed = run_interactive_subprocess(ssh_args, env=fixed_env)
-        exit_code = completed.returncode
+        retry_delay_seconds = parse_duration_to_seconds(connection_opts.retry_delay)
+        max_attempts = 1 + connection_opts.retry_count
 
-        action = _determine_post_disconnect_action(exit_code, session_name)
-        if action is not None:
-            executable, argv = action
-            logger.info("Running post-disconnect action: {}", argv)
-            os.execvp(executable, argv)
-        else:
-            logger.debug("SSH session ended with exit code {} (no post-disconnect action)", exit_code)
+        for attempt in range(1, max_attempts + 1):
+            # Use run_interactive_subprocess instead of os.execvp so we can check the exit code
+            # and run post-disconnect actions (destroy/stop) triggered by tmux key bindings
+            completed = run_interactive_subprocess(ssh_args, env=fixed_env)
+            exit_code = completed.returncode
+
+            # Exit code 0 means normal disconnect -- no retry needed
+            if exit_code == 0:
+                logger.debug("SSH session ended normally")
+                return
+
+            # Check for post-disconnect actions (destroy/stop via tmux key bindings)
+            action = _determine_post_disconnect_action(exit_code, session_name)
+            if action is not None:
+                executable, argv = action
+                logger.info("Running post-disconnect action: {}", argv)
+                os.execvp(executable, argv)
+                # The exec call above replaces the process and never returns.
+                # This return is a safety net for tests that mock the exec call.
+                return
+
+            # Non-zero, non-signal exit code: SSH connection failed
+            if attempt < max_attempts:
+                logger.warning(
+                    "SSH connection failed (exit code {}). Retrying in {} ({}/{})...",
+                    exit_code,
+                    connection_opts.retry_delay,
+                    attempt,
+                    max_attempts,
+                )
+                poll_until(lambda: False, timeout=retry_delay_seconds, poll_interval=retry_delay_seconds)
+            else:
+                logger.debug(
+                    "SSH session ended with exit code {} after {} attempt(s)",
+                    exit_code,
+                    max_attempts,
+                )

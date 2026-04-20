@@ -7,10 +7,8 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
-import pluggy
 import pytest
 
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_provider_instance
@@ -20,7 +18,6 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -28,7 +25,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 
 
@@ -85,11 +82,11 @@ class _AgentHostHookTracker:
         self.hook_log.append("on_agent_destroyed")
 
     @hookimpl
-    def on_before_host_destroy(self, host: Any) -> None:
+    def on_before_host_destroy(self, host: Any, mngr_ctx: Any) -> None:
         self.hook_log.append("on_before_host_destroy")
 
     @hookimpl
-    def on_host_destroyed(self, host: Any) -> None:
+    def on_host_destroyed(self, host: Any, mngr_ctx: Any) -> None:
         self.hook_log.append("on_host_destroyed")
 
 
@@ -98,13 +95,7 @@ def _make_tracker_ctx(
     tracker: _AgentHostHookTracker,
 ) -> MngrContext:
     """Create a MngrContext with the tracker plugin registered."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_local_backend_only(pm)
-    pm.register(tracker)
-    return temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    return make_ctx_with_plugins(temp_mngr_ctx, [tracker], load_backends=True)
 
 
 def _get_local_host(ctx: MngrContext) -> OnlineHostInterface:
@@ -326,8 +317,8 @@ def test_host_destroy_hooks_fire_in_order(
     host = _get_local_host(ctx)
 
     # Call hooks directly (local hosts raise on destroy, so we just test the hooks)
-    ctx.pm.hook.on_before_host_destroy(host=host)
-    ctx.pm.hook.on_host_destroyed(host=host)
+    ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=ctx)
+    ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=ctx)
 
     assert tracker.hook_log == [
         "on_before_host_destroy",

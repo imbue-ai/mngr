@@ -2,22 +2,14 @@
 name: wait-for-agent
 argument-hint: [agent_name] [instructions...]
 description: Wait for another agent to enter WAITING state, then execute follow-up instructions
-allowed-tools: Bash(uv run mngr list *), Bash(while true; do*)
+allowed-tools: Bash(uv run mngr list *), Bash(while true; do*), Skill(find-agent)
 ---
 
 The user's message contains an agent name and optional follow-up instructions. Extract the agent name (the first word) and treat everything after it as follow-up instructions.
 
-Note: the user may paste a git branch name like `mngr/some-agent` instead of the bare agent name. In that case, strip the `mngr/` prefix to get the actual agent name (e.g. `mngr/better-tabcomplete` -> `better-tabcomplete`).
-
 ## Agent Name Resolution
 
-First, verify the target agent exists by running:
-
-```
-uv run mngr list --format '{name}'
-```
-
-If the extracted name doesn't match any agent exactly, check if the user's input was a description (e.g. "the agent working on X") rather than a name, and try to match against the listed agents and their git branches. If there's an unambiguous match, use it. Otherwise, use AskUserQuestion to ask the user which agent they meant, presenting the plausible candidates.
+Use the `/find-agent` skill with the first word of the user's input to resolve it to an exact agent name.
 
 ## Polling
 

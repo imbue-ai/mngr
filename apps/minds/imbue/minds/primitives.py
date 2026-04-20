@@ -6,22 +6,31 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 
 
+class OutputFormat(UpperCaseStrEnum):
+    """Output format for command results on stdout."""
+
+    HUMAN = auto()
+    JSON = auto()
+    JSONL = auto()
+
+
 class LaunchMode(UpperCaseStrEnum):
-    """How a mind agent should be launched."""
+    """How a workspace agent should be launched."""
 
     LOCAL = auto()
     CLOUD = auto()
     DEV = auto()
+    LIMA = auto()
 
 
 class AgentName(NonEmptyStr):
-    """User-chosen name for a mind agent."""
+    """User-chosen name for an agent."""
 
     ...
 
 
 class OneTimeCode(NonEmptyStr):
-    """A single-use authentication code for mind access."""
+    """A single-use authentication code for workspace access."""
 
     ...
 
@@ -33,7 +42,7 @@ class CookieSigningKey(SecretStr):
 
 
 class ServerName(NonEmptyStr):
-    """Name of a server run by a mind agent (e.g. 'web', 'api')."""
+    """Name of a server run by an agent (e.g. 'web', 'api')."""
 
     ...
 
@@ -52,5 +61,11 @@ class GitBranch(NonEmptyStr):
 
 class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
+
+    ...
+
+
+class ApiKeyHash(NonEmptyStr):
+    """SHA-256 hex digest of an agent's API key."""
 
     ...

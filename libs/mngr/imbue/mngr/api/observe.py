@@ -29,10 +29,12 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
@@ -381,7 +383,7 @@ class AgentObserver(MutableModel):
                     try:
                         with log_span("Performing periodic full state snapshot"):
                             self._do_full_state_snapshot()
-                    except (MngrError, OSError) as e:
+                    except (BaseMngrError, OSError) as e:
                         logger.warning("Periodic full state snapshot failed (continuing): {}", e)
             except KeyboardInterrupt:
                 pass
@@ -400,7 +402,7 @@ class AgentObserver(MutableModel):
     def _start_discovery_stream(self) -> None:
         """Start the 'mngr observe --discovery-only' subprocess for host discovery."""
         self._discovery_stream_process = self._concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error", "continue"],
             on_output=self._on_discovery_stream_output,
         )
 
@@ -419,6 +421,10 @@ class AgentObserver(MutableModel):
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
+        elif isinstance(event, HostDestroyedEvent):
+            self._handle_host_destroyed(event)
+        else:
+            pass
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update known hosts from a full discovery snapshot and sync activity streams."""
@@ -447,6 +453,13 @@ class AgentObserver(MutableModel):
             host = new_hosts[host_id_str]
             self._start_activity_stream(host_id_str, host.host_name)
 
+    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
+        """Remove a destroyed host from known hosts and stop its activity stream."""
+        host_id_str = str(event.host_id)
+        with self._lock:
+            self._known_hosts.pop(host_id_str, None)
+        self._stop_activity_stream(host_id_str)
+
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
     #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
     #  2. --no-watches to disable the activity streams entirely and just do periodic full snapshots (which will still emit change events, just with less granularity and more latency)
@@ -471,7 +484,7 @@ class AgentObserver(MutableModel):
             )
             with self._lock:
                 self._events_processes[host_id_str] = process
-        except (MngrError, OSError) as e:
+        except (BaseMngrError, OSError) as e:
             logger.debug("Failed to start activity stream for host {}: {}", host_name, e)
 
     def _stop_activity_stream(self, host_id_str: str) -> None:
@@ -519,7 +532,7 @@ class AgentObserver(MutableModel):
                     break
                 try:
                     self._fetch_and_emit_agent_state_for_host(hid)
-                except (MngrError, OSError) as e:
+                except (BaseMngrError, OSError) as e:
                     logger.warning("Failed to fetch agent state for host {}: {}", hid, e)
 
     def _fetch_and_emit_agent_state_for_host(self, host_id_str: str) -> None:

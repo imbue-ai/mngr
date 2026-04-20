@@ -1,20 +1,32 @@
 """Unit tests for gc API functions."""
 
 import os
+import subprocess
 import time
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
+import pluggy
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
 from imbue.mngr.api.gc import ProviderHosts
 from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
+from imbue.mngr.api.gc import _clean_work_dir
+from imbue.mngr.api.gc import _discover_hosts_for_gc
+from imbue.mngr.api.gc import _gc_single_host_work_dir
+from imbue.mngr.api.gc import _get_orphaned_work_dirs
 from imbue.mngr.api.gc import _handle_error
+from imbue.mngr.api.gc import _is_git_worktree
 from imbue.mngr.api.gc import _is_rotated_log_file
+from imbue.mngr.api.gc import _remove_directory
+from imbue.mngr.api.gc import _remove_git_worktree
+from imbue.mngr.api.gc import _remove_work_dir_from_certified_data
 from imbue.mngr.api.gc import gc
 from imbue.mngr.api.gc import gc_build_cache
 from imbue.mngr.api.gc import gc_logs
@@ -22,15 +34,24 @@ from imbue.mngr.api.gc import gc_machines
 from imbue.mngr.api.gc import gc_snapshots
 from imbue.mngr.api.gc import gc_volumes
 from imbue.mngr.api.gc import gc_work_dirs
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -40,6 +61,8 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
+from imbue.mngr.utils.logging import LoggingConfig
+from imbue.mngr.utils.testing import make_mngr_ctx
 
 
 def _hosts_for(provider: BaseProviderInstance) -> ProviderHosts:
@@ -67,16 +90,6 @@ def test_gc_machines_skips_local_hosts(local_provider: LocalProviderInstance, te
 # =========================================================================
 # gc_machines offline host deletion tests
 # =========================================================================
-
-
-@pytest.fixture
-def gc_mock_provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> MockProviderInstance:
-    """Create a MockProviderInstance for gc_machines tests."""
-    return MockProviderInstance(
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
 
 
 def _make_offline_host(
@@ -937,3 +950,1045 @@ def test_gc_with_machines_flag(temp_mngr_ctx: MngrContext, local_provider: Local
         error_behavior=ErrorBehavior.ABORT,
     )
     assert len(result.machines_destroyed) == 0
+
+
+# =========================================================================
+# _discover_hosts_for_gc error handling tests
+# =========================================================================
+
+
+class _DiscoveryErrorProvider(MockProviderInstance):
+    """MockProviderInstance that raises MngrError from discover_hosts."""
+
+    def discover_hosts(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> list:
+        raise MngrError("simulated discovery failure from test")
+
+
+def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """_discover_hosts_for_gc skips a provider entirely when discovery raises MngrError.
+
+    This is critical for gc_volumes: including the provider with an empty
+    host list would incorrectly treat all its volumes as orphaned.
+    """
+    error_provider = _DiscoveryErrorProvider(
+        name=ProviderInstanceName("error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    result = _discover_hosts_for_gc([error_provider], temp_mngr_ctx)
+
+    # The failing provider must be absent from the result.
+    assert result == []
+
+
+def test_discover_hosts_for_gc_continues_after_one_provider_fails(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """_discover_hosts_for_gc continues with other providers after one fails."""
+    error_provider = _DiscoveryErrorProvider(
+        name=ProviderInstanceName("error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    # A normal provider with no hosts - discovery succeeds and returns []
+    ok_provider = MockProviderInstance(
+        name=ProviderInstanceName("ok-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    result = _discover_hosts_for_gc([error_provider, ok_provider], temp_mngr_ctx)
+
+    # Only the ok_provider entry should appear.
+    assert len(result) == 1
+    assert result[0][0] is ok_provider
+
+
+# =========================================================================
+# gc_work_dirs: DESTROYED host skip test
+# =========================================================================
+
+
+def test_gc_work_dirs_skips_destroyed_hosts(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc_work_dirs skips hosts that are in DESTROYED state."""
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=HostState.DESTROYED.value)
+    gc_mock_provider.mock_hosts = [host]
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(gc_mock_provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.work_dirs_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+# =========================================================================
+# _get_orphaned_work_dirs tests using local host
+# =========================================================================
+
+
+def test_get_orphaned_work_dirs_returns_empty_when_no_generated_dirs(
+    local_host: Host, local_provider: LocalProviderInstance
+) -> None:
+    """_get_orphaned_work_dirs returns an empty list when no work dirs were generated."""
+    orphaned = _get_orphaned_work_dirs(host=local_host, provider_name=local_provider.name)
+    assert orphaned == []
+
+
+def test_get_orphaned_work_dirs_reports_dir_with_no_active_agent(
+    local_host: Host, local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """_get_orphaned_work_dirs returns work dirs not used by any active agent."""
+    work_dir = tmp_path / "orphaned_work_dir"
+    work_dir.mkdir()
+
+    # Register the work dir in certified data (simulating mngr having created it).
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    orphaned = _get_orphaned_work_dirs(host=local_host, provider_name=local_provider.name)
+
+    assert len(orphaned) == 1
+    assert orphaned[0].path == work_dir
+    assert orphaned[0].host_id == local_host.id
+    assert orphaned[0].provider_name == local_provider.name
+
+
+def test_get_orphaned_work_dirs_handles_size_command_failure(
+    local_host: Host, local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """_get_orphaned_work_dirs uses size 0 when the du command fails."""
+    # Use a path that does not exist so du returns non-zero.
+    nonexistent = tmp_path / "nonexistent_work_dir"
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(nonexistent),)),
+    )
+    local_host.set_certified_data(updated)
+
+    orphaned = _get_orphaned_work_dirs(host=local_host, provider_name=local_provider.name)
+
+    assert len(orphaned) == 1
+    # Size defaults to 0 when the directory does not exist.
+    assert orphaned[0].size_bytes == 0
+
+
+# =========================================================================
+# _is_git_worktree tests
+# =========================================================================
+
+
+def test_is_git_worktree_returns_true_for_worktree(local_host: Host, temp_git_repo: Path, tmp_path: Path) -> None:
+    """_is_git_worktree returns True for a real git worktree."""
+    wt_path = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "worktree", "add", str(wt_path)],
+        check=True,
+        capture_output=True,
+    )
+
+    assert _is_git_worktree(local_host, wt_path) is True
+
+
+def test_is_git_worktree_returns_false_for_plain_directory(local_host: Host, tmp_path: Path) -> None:
+    """_is_git_worktree returns False when there is no .git file."""
+    work_dir = tmp_path / "plain"
+    work_dir.mkdir()
+
+    assert _is_git_worktree(local_host, work_dir) is False
+
+
+def test_is_git_worktree_returns_false_for_git_directory(local_host: Host, temp_git_repo: Path) -> None:
+    """_is_git_worktree returns False for a real git repo (main repo, not worktree)."""
+    assert _is_git_worktree(local_host, temp_git_repo) is False
+
+
+# =========================================================================
+# _remove_directory tests
+# =========================================================================
+
+
+def test_remove_directory_removes_existing_directory(local_host: Host, tmp_path: Path) -> None:
+    """_remove_directory removes an existing directory and its contents."""
+    target = tmp_path / "to_remove"
+    target.mkdir()
+    (target / "file.txt").write_text("content")
+
+    _remove_directory(local_host, target)
+
+    assert not target.exists()
+
+
+def test_remove_directory_is_noop_for_nonexistent_path(local_host: Host, tmp_path: Path) -> None:
+    """_remove_directory silently skips paths that do not exist."""
+    nonexistent = tmp_path / "does_not_exist"
+
+    # Should not raise
+    _remove_directory(local_host, nonexistent)
+
+
+# =========================================================================
+# _remove_work_dir_from_certified_data tests
+# =========================================================================
+
+
+def test_remove_work_dir_from_certified_data_removes_entry(local_host: Host, tmp_path: Path) -> None:
+    """_remove_work_dir_from_certified_data removes the work dir from certified data."""
+    work_dir = tmp_path / "my_work_dir"
+    work_dir.mkdir()
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    _remove_work_dir_from_certified_data(local_host, work_dir)
+
+    new_certified = local_host.get_certified_data()
+    assert str(work_dir) not in new_certified.generated_work_dirs
+
+
+def test_remove_work_dir_from_certified_data_is_idempotent(local_host: Host, tmp_path: Path) -> None:
+    """_remove_work_dir_from_certified_data is idempotent: removing absent dirs is safe."""
+    work_dir = tmp_path / "absent_dir"
+
+    # Should not raise even though the dir is not registered.
+    _remove_work_dir_from_certified_data(local_host, work_dir)
+
+    certified = local_host.get_certified_data()
+    assert str(work_dir) not in certified.generated_work_dirs
+
+
+# =========================================================================
+# _clean_work_dir tests
+# =========================================================================
+
+
+def test_clean_work_dir_removes_plain_directory(local_host: Host, tmp_path: Path) -> None:
+    """_clean_work_dir removes a plain (non-worktree) directory."""
+    work_dir = tmp_path / "plain_work_dir"
+    work_dir.mkdir()
+    (work_dir / "file.txt").write_text("content")
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    _clean_work_dir(host=local_host, work_dir_path=work_dir, dry_run=False)
+
+    assert not work_dir.exists()
+    new_certified = local_host.get_certified_data()
+    assert str(work_dir) not in new_certified.generated_work_dirs
+
+
+def test_clean_work_dir_is_noop_in_dry_run(local_host: Host, tmp_path: Path) -> None:
+    """_clean_work_dir does nothing in dry_run mode."""
+    work_dir = tmp_path / "dry_run_work_dir"
+    work_dir.mkdir()
+    (work_dir / "file.txt").write_text("content")
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    _clean_work_dir(host=local_host, work_dir_path=work_dir, dry_run=True)
+
+    # dry_run=True means _clean_work_dir returns immediately without doing anything.
+    assert work_dir.exists()
+
+
+def test_clean_work_dir_removes_git_worktree(local_host: Host, temp_git_repo: Path, tmp_path: Path) -> None:
+    """_clean_work_dir uses git worktree remove for git worktrees."""
+    wt_path = tmp_path / "my_worktree"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "worktree", "add", str(wt_path)],
+        check=True,
+        capture_output=True,
+    )
+
+    # Verify .git file (not directory) exists at worktree path.
+    assert (wt_path / ".git").is_file()
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(wt_path),)),
+    )
+    local_host.set_certified_data(updated)
+
+    _clean_work_dir(host=local_host, work_dir_path=wt_path, dry_run=False)
+
+    assert not wt_path.exists()
+    new_certified = local_host.get_certified_data()
+    assert str(wt_path) not in new_certified.generated_work_dirs
+
+
+# =========================================================================
+# _remove_git_worktree tests
+# =========================================================================
+
+
+def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_host: Host, tmp_path: Path) -> None:
+    """_remove_git_worktree falls back to rm -rf when the .git file cannot be parsed."""
+    work_dir = tmp_path / "pseudo_worktree"
+    work_dir.mkdir()
+    # Write a .git file with unparseable content so parse_worktree_git_file returns None.
+    (work_dir / ".git").write_text("not a valid gitdir line")
+    (work_dir / "some_file.py").write_text("code")
+
+    _remove_git_worktree(local_host, work_dir)
+
+    # The directory should have been removed via rm -rf fallback.
+    assert not work_dir.exists()
+
+
+def test_remove_git_worktree_falls_back_to_rm_when_git_not_in_main_repo(local_host: Host, tmp_path: Path) -> None:
+    """_remove_git_worktree falls back to rm -rf when git worktree remove fails."""
+    work_dir = tmp_path / "pseudo_worktree2"
+    work_dir.mkdir()
+    # Point to a non-existent main repo so git worktree remove fails.
+    (work_dir / ".git").write_text("gitdir: /nonexistent/repo/.git/worktrees/abc\n")
+    (work_dir / "some_file.py").write_text("code")
+
+    _remove_git_worktree(local_host, work_dir)
+
+    # The directory should have been removed via rm -rf fallback.
+    assert not work_dir.exists()
+
+
+# =========================================================================
+# gc_work_dirs: real work dir cleanup on local host
+# =========================================================================
+
+
+def test_gc_work_dirs_destroys_orphaned_dir_on_local_host(
+    local_host: Host,
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """gc_work_dirs removes orphaned work dirs on an online host."""
+    work_dir = tmp_path / "orphaned"
+    work_dir.mkdir()
+    (work_dir / "file.txt").write_text("content")
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(local_provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.work_dirs_destroyed) == 1
+    assert result.work_dirs_destroyed[0].path == work_dir
+    assert not work_dir.exists()
+
+
+def test_gc_work_dirs_dry_run_reports_but_does_not_delete(
+    local_host: Host,
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """gc_work_dirs in dry_run mode reports orphaned dirs without deleting them."""
+    work_dir = tmp_path / "orphaned_dry"
+    work_dir.mkdir()
+
+    certified = local_host.get_certified_data()
+    updated = certified.model_copy_update(
+        to_update(certified.field_ref().generated_work_dirs, (str(work_dir),)),
+    )
+    local_host.set_certified_data(updated)
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(local_provider),
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.work_dirs_destroyed) == 1
+    assert work_dir.exists()
+
+
+# =========================================================================
+# _gc_single_host_work_dir error path tests
+# =========================================================================
+
+
+class _HostOfflineErrorProvider(MockProviderInstance):
+    """Provider that returns the first host in mock_hosts from get_host."""
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        if self.mock_hosts:
+            return self.mock_hosts[0]
+        return super().get_host(host)
+
+
+class _OfflineErroringHost(Host):
+    """Host subclass whose get_certified_data raises HostOfflineError."""
+
+    def get_certified_data(self) -> CertifiedHostData:
+        raise HostOfflineError("simulated offline error from test")
+
+
+class _AuthErroringHost(Host):
+    """Host subclass whose get_certified_data raises HostAuthenticationError."""
+
+    def get_certified_data(self) -> CertifiedHostData:
+        raise HostAuthenticationError("simulated auth error from test")
+
+
+def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -> Host:
+    """Create an instance of host_cls using the local provider's connector and ID."""
+    pyinfra_host = provider._create_local_pyinfra_host()
+    connector = PyinfraConnector(pyinfra_host)
+    return host_cls(
+        id=provider.host_id,
+        connector=connector,
+        provider_instance=provider,
+        mngr_ctx=provider.mngr_ctx,
+    )
+
+
+def test_gc_single_host_work_dir_skips_host_offline_error(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """_gc_single_host_work_dir skips hosts that raise HostOfflineError."""
+    erroring_host = _make_erroring_host(local_provider, _OfflineErroringHost)
+
+    provider = _HostOfflineErrorProvider(
+        name=ProviderInstanceName("test-offline"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[erroring_host],
+    )
+
+    host_ref = DiscoveredHost(
+        host_id=erroring_host.id,
+        host_name=erroring_host.get_name(),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    _gc_single_host_work_dir(host_ref, provider, ErrorBehavior.ABORT, False, result)
+
+    assert len(result.work_dirs_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+def test_gc_single_host_work_dir_skips_host_auth_error(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """_gc_single_host_work_dir skips hosts that raise HostAuthenticationError."""
+    erroring_host = _make_erroring_host(local_provider, _AuthErroringHost)
+
+    provider = _HostOfflineErrorProvider(
+        name=ProviderInstanceName("test-auth"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[erroring_host],
+    )
+
+    host_ref = DiscoveredHost(
+        host_id=erroring_host.id,
+        host_name=erroring_host.get_name(),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    _gc_single_host_work_dir(host_ref, provider, ErrorBehavior.ABORT, False, result)
+
+    assert len(result.work_dirs_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+# =========================================================================
+# gc_machines: outer MngrError handler test
+# =========================================================================
+
+
+class _GetHostErrorProvider(MockProviderInstance):
+    """Provider that raises MngrError from get_host."""
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        raise MngrError("simulated get_host failure from test")
+
+
+def test_gc_machines_handles_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_machines catches MngrError per-host when ErrorBehavior.CONTINUE is set."""
+    host = _make_offline_host(
+        MockProviderInstance(
+            name=ProviderInstanceName("dummy"),
+            host_dir=temp_host_dir,
+            mngr_ctx=temp_mngr_ctx,
+        ),
+        temp_mngr_ctx,
+        days_old=14,
+    )
+
+    error_provider = _GetHostErrorProvider(
+        name=ProviderInstanceName("error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert len(result.errors) == 1
+    assert "simulated get_host failure from test" in result.errors[0]
+
+
+def test_gc_machines_handles_mngr_error_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_machines re-raises MngrError when ErrorBehavior.ABORT is set."""
+    host = _make_offline_host(
+        MockProviderInstance(
+            name=ProviderInstanceName("dummy"),
+            host_dir=temp_host_dir,
+            mngr_ctx=temp_mngr_ctx,
+        ),
+        temp_mngr_ctx,
+        days_old=14,
+    )
+
+    error_provider = _GetHostErrorProvider(
+        name=ProviderInstanceName("error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    with pytest.raises(MngrError, match="simulated get_host failure from test"):
+        gc_machines(
+            mngr_ctx=temp_mngr_ctx,
+            hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
+            dry_run=False,
+            error_behavior=ErrorBehavior.ABORT,
+            result=result,
+        )
+
+
+# =========================================================================
+# gc_snapshots: inner MngrError path
+# =========================================================================
+
+
+class _ListSnapshotsErrorProvider(MockProviderInstance):
+    """Provider that raises MngrError from list_snapshots."""
+
+    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
+        raise MngrError("simulated list_snapshots failure from test")
+
+
+def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_snapshots records inner MngrError per-host and continues when CONTINUE behavior."""
+    host = _make_offline_host(
+        MockProviderInstance(
+            name=ProviderInstanceName("dummy"),
+            host_dir=temp_host_dir,
+            mngr_ctx=temp_mngr_ctx,
+        ),
+        temp_mngr_ctx,
+        days_old=1,
+        stop_reason=HostState.DESTROYED.value,
+    )
+
+    error_provider = _ListSnapshotsErrorProvider(
+        name=ProviderInstanceName("snapshot-error"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_snapshots=True,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    gc_snapshots(
+        hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert len(result.errors) == 1
+    assert "simulated list_snapshots failure from test" in result.errors[0]
+    assert len(result.snapshots_destroyed) == 0
+
+
+def test_gc_snapshots_handles_inner_mngr_error_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_snapshots re-raises inner MngrError when ErrorBehavior.ABORT is set."""
+    host = _make_offline_host(
+        MockProviderInstance(
+            name=ProviderInstanceName("dummy"),
+            host_dir=temp_host_dir,
+            mngr_ctx=temp_mngr_ctx,
+        ),
+        temp_mngr_ctx,
+        days_old=1,
+        stop_reason=HostState.DESTROYED.value,
+    )
+
+    error_provider = _ListSnapshotsErrorProvider(
+        name=ProviderInstanceName("snapshot-error-abort"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_snapshots=True,
+        mock_hosts=[host],
+    )
+
+    result = GcResult()
+    with pytest.raises(MngrError, match="simulated list_snapshots failure from test"):
+        gc_snapshots(
+            hosts_by_provider=[(error_provider, _hosts_for(error_provider)[0][1])],
+            dry_run=False,
+            error_behavior=ErrorBehavior.ABORT,
+            result=result,
+        )
+
+
+# =========================================================================
+# gc_volumes: additional coverage tests
+# =========================================================================
+
+
+def test_gc_volumes_skips_destroyed_host_volumes(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_volumes treats volumes of DESTROYED hosts as orphaned.
+
+    A DESTROYED host's volumes have no active owner and should be cleaned up.
+    The DESTROYED host is skipped in the active-volume-id loop (line 430).
+    """
+    destroyed_host_id = HostId("host-00000000000000000000000000000002")
+    active_host_id = HostId("host-00000000000000000000000000000003")
+
+    # Volume attached to the destroyed host.
+    destroyed_vol = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000002"),
+        name="destroyed-vol",
+        size_bytes=0,
+        host_id=destroyed_host_id,
+    )
+    # Volume attached to the active host.
+    active_vol = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000003"),
+        name="active-vol",
+        size_bytes=0,
+        host_id=active_host_id,
+    )
+
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("vol-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[destroyed_vol, active_vol],
+    )
+
+    active_host_ref = DiscoveredHost(
+        host_id=active_host_id,
+        host_name=HostName("active-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    destroyed_host_ref = DiscoveredHost(
+        host_id=destroyed_host_id,
+        host_name=HostName("destroyed-host"),
+        provider_name=provider.name,
+        host_state=HostState.DESTROYED,
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [active_host_ref, destroyed_host_ref])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    # Only the destroyed host's volume should be removed.
+    assert len(result.volumes_destroyed) == 1
+    assert result.volumes_destroyed[0].volume_id == destroyed_vol.volume_id
+    assert provider.deleted_volumes == [destroyed_vol.volume_id]
+
+
+def test_gc_volumes_preserves_active_host_volumes(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_volumes preserves volumes that belong to active (non-destroyed) hosts."""
+    active_host_id = HostId("host-00000000000000000000000000000010")
+
+    vol = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000010"),
+        name="active-vol",
+        size_bytes=0,
+        host_id=active_host_id,
+    )
+
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("vol-provider2"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[vol],
+    )
+
+    active_host_ref = DiscoveredHost(
+        host_id=active_host_id,
+        host_name=HostName("active-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [active_host_ref])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.volumes_destroyed) == 0
+    assert provider.deleted_volumes == []
+
+
+class _DeleteVolumeErrorProvider(MockProviderInstance):
+    """Provider whose delete_volume raises MngrError."""
+
+    def delete_volume(self, volume_id: VolumeId) -> None:
+        raise MngrError(f"simulated delete_volume failure from test: {volume_id}")
+
+
+def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_volumes records MngrError from delete_volume and continues."""
+    vol = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000020"),
+        name="broken-vol",
+        size_bytes=0,
+        host_id=HostId("host-00000000000000000000000000000020"),
+    )
+
+    provider = _DeleteVolumeErrorProvider(
+        name=ProviderInstanceName("delete-error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[vol],
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert len(result.errors) == 1
+    assert "broken-vol" in result.errors[0]
+
+
+def test_gc_volumes_handles_delete_error_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_volumes re-raises MngrError from delete_volume when ABORT behavior is set."""
+    vol = VolumeInfo(
+        volume_id=VolumeId("vol-00000000000000000000000000000021"),
+        name="broken-vol-abort",
+        size_bytes=0,
+        host_id=HostId("host-00000000000000000000000000000021"),
+    )
+
+    provider = _DeleteVolumeErrorProvider(
+        name=ProviderInstanceName("delete-error-abort"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+        mock_volumes=[vol],
+    )
+
+    result = GcResult()
+    with pytest.raises(MngrError):
+        gc_volumes(
+            hosts_by_provider=[(provider, [])],
+            dry_run=False,
+            error_behavior=ErrorBehavior.ABORT,
+            result=result,
+        )
+
+
+class _ListVolumesUnavailableProvider(MockProviderInstance):
+    """Provider whose list_volumes raises ProviderUnavailableError."""
+
+    def list_volumes(self) -> list[VolumeInfo]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+class _ListVolumesMngrErrorProvider(MockProviderInstance):
+    """Provider whose list_volumes raises a generic MngrError."""
+
+    def list_volumes(self) -> list[VolumeInfo]:
+        raise MngrError("simulated list_volumes failure from test")
+
+
+def test_gc_volumes_skips_provider_when_unavailable(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """gc_volumes skips the provider silently when it raises ProviderUnavailableError."""
+    provider = _ListVolumesUnavailableProvider(
+        name=ProviderInstanceName("unavailable-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.volumes_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+def test_gc_volumes_handles_list_volumes_mngr_error_with_continue(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc_volumes records MngrError from list_volumes and continues."""
+    provider = _ListVolumesMngrErrorProvider(
+        name=ProviderInstanceName("list-error-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+    )
+
+    result = GcResult()
+    gc_volumes(
+        hosts_by_provider=[(provider, [])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert len(result.errors) == 1
+    assert "simulated list_volumes failure from test" in result.errors[0]
+
+
+def test_gc_volumes_handles_list_volumes_mngr_error_with_abort(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc_volumes re-raises MngrError from list_volumes when ABORT behavior is set."""
+    provider = _ListVolumesMngrErrorProvider(
+        name=ProviderInstanceName("list-error-abort"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_volumes=True,
+    )
+
+    result = GcResult()
+    with pytest.raises(MngrError, match="simulated list_volumes failure from test"):
+        gc_volumes(
+            hosts_by_provider=[(provider, [])],
+            dry_run=False,
+            error_behavior=ErrorBehavior.ABORT,
+            result=result,
+        )
+
+
+# =========================================================================
+# gc_logs: absolute log_dir path
+# =========================================================================
+
+
+def test_gc_logs_with_absolute_log_dir(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """gc_logs handles an absolute log_dir path (not relative to default_host_dir)."""
+    abs_log_dir = tmp_path / "absolute_logs"
+    logs_dir = abs_log_dir / "logs" / "mngr"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text("old content")
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 1)
+
+    abs_config = MngrConfig(
+        default_host_dir=temp_host_dir,
+        prefix=mngr_test_prefix,
+        is_error_reporting_enabled=False,
+        logging=LoggingConfig(log_dir=abs_log_dir),
+    )
+    ctx = make_mngr_ctx(
+        abs_config,
+        plugin_manager,
+        temp_mngr_ctx.profile_dir,
+        concurrency_group=active_concurrency_group,
+    )
+
+    result = GcResult()
+    gc_logs(
+        mngr_ctx=ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    assert not rotated.exists()
+
+
+# =========================================================================
+# gc_build_cache: non-directory entry skip
+# =========================================================================
+
+
+def test_gc_build_cache_skips_non_directory_provider_entries(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_build_cache skips non-directory entries inside the providers directory."""
+    providers_dir = temp_mngr_ctx.profile_dir / "providers"
+    providers_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a plain file directly inside providers/ (not a directory).
+    plain_file = providers_dir / "metadata.json"
+    plain_file.write_text("{}")
+
+    result = GcResult()
+    gc_build_cache(
+        mngr_ctx=temp_mngr_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    # The plain file should not be touched.
+    assert plain_file.exists()
+    assert len(result.build_cache_destroyed) == 0
+
+
+# =========================================================================
+# Additional coverage: on_resource_type_start callback
+# =========================================================================
+
+
+def test_gc_calls_on_resource_type_start_for_each_enabled_resource_type(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc() calls on_resource_type_start before processing each resource type."""
+    calls: list[str] = []
+
+    resource_types = GcResourceTypes(
+        is_work_dirs=True,
+        is_machines=True,
+        is_snapshots=True,
+        is_volumes=True,
+        is_logs=True,
+        is_build_cache=True,
+    )
+    gc(
+        mngr_ctx=temp_mngr_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        on_resource_type_start=calls.append,
+    )
+
+    assert "work_dirs" in calls
+    assert "machines" in calls
+    assert "snapshots" in calls
+    assert "volumes" in calls
+    assert "logs" in calls
+    assert "build_cache" in calls
+    assert len(calls) == 6
+
+
+# =========================================================================
+# Additional coverage: offline host in gc_work_dirs
+# =========================================================================
+
+
+def test_gc_work_dirs_skips_offline_host_not_online_interface(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc_work_dirs skips non-online hosts (OfflineHost instances) silently."""
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=HostState.STOPPED.value)
+    gc_mock_provider.mock_hosts = [host]
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(gc_mock_provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.work_dirs_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+# =========================================================================
+# Additional coverage: _remove_git_worktree when .git file not found
+# =========================================================================
+
+
+def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, tmp_path: Path) -> None:
+    """_remove_git_worktree falls back to rm -rf when the .git file does not exist."""
+    work_dir = tmp_path / "worktree_no_git_file"
+    work_dir.mkdir()
+    # No .git file created - host.read_text_file will raise FileNotFoundError.
+    (work_dir / "some_file.py").write_text("code")
+
+    _remove_git_worktree(local_host, work_dir)
+
+    # The directory should have been removed via rm -rf fallback.
+    assert not work_dir.exists()

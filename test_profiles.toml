@@ -26,8 +26,6 @@ testpaths = [
     "libs/mngr_pair",
     "libs/mngr_opencode",
     "libs/mngr_kanpan",
-    "libs/mngr_mind_chat",
-    "libs/mngr_claude_mind",
     "libs/mngr_schedule",
     "libs/mngr_recursive",
     "libs/mngr_ttyd",
@@ -40,8 +38,6 @@ cov_packages = []
 testpaths = [
     "test_meta_ratchets.py",
     "apps/minds",
-    "libs/mngr_mind_chat",
-    "libs/mngr_claude_mind",
 ]
 
 [profiles.common]

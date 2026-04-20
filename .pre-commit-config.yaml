@@ -11,7 +11,7 @@ repos:
     hooks:
     -   id: ruff
         name: "Python formatter + import sorter (ruff)"
-        entry: bash -c 'uv run ruff check --select UP006,UP007,I,F401 --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
+        entry: bash -c 'uv run ruff check --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
         language: system
         types: [python]
     -   id: regenerate-cli-docs
@@ -19,6 +19,12 @@ repos:
         entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mngr/docs/commands/ libs/mngr/README.md'
         language: system
         files: 'libs/mngr/imbue/mngr/cli/.*\.py$|libs/mngr/imbue/mngr/main\.py$|scripts/make_cli_docs\.py$|libs/mngr/docs/commands/.*\.md$|^README\.md$|^libs/mngr/README\.md$'
+        pass_filenames: false
+    -   id: compile-style-guide
+        name: "Compile style guide Python examples"
+        entry: bash -c 'uv run python scripts/compile_style_guide.py && git diff --quiet scripts/style_guide.py'
+        language: system
+        files: '^style_guide\.md$|scripts/compile_style_guide\.py$|scripts/style_guide\.py$'
         pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command

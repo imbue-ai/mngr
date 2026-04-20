@@ -19,5 +19,6 @@ if ! git rev-parse "$CHECKPOINT_HASH" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Diff against the working tree so uncommitted changes are included
-git diff "$CHECKPOINT_HASH"
+# Diff against the working tree so uncommitted changes are included.
+# --binary is needed so that binary file changes (e.g. images) can be applied by git apply.
+git diff --binary "$CHECKPOINT_HASH"

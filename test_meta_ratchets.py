@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
+_BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
     "migrate_state_mng_to_mngr.sh",
@@ -138,6 +139,39 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+def test_no_ruff_lint_errors_repo_wide() -> None:
+    """Ensure all Python files pass ruff lint and format checks repo-wide.
+
+    Runs both ruff check and ruff format --check over the entire repo root.
+    Per-project test_ratchets.py files also run ruff check within each project;
+    this test acts as a CI backstop for the pre-commit hook and additionally
+    covers repo-root and scripts/ files.
+    """
+    fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
+    errors: list[str] = []
+
+    lint = subprocess.run(
+        ["uv", "run", "ruff", "check", "--force-exclude", "--config", "pyproject.toml"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if lint.returncode != 0:
+        errors.append("Lint errors:\n" + lint.stdout)
+
+    fmt = subprocess.run(
+        ["uv", "run", "ruff", "format", "--check", "--force-exclude", "--config", "pyproject.toml"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if fmt.returncode != 0:
+        errors.append("Format errors:\n" + fmt.stdout)
+
+    if errors:
+        raise AssertionError("\n".join(errors) + "\n" + fix_hint)
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling."""
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
@@ -155,7 +189,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 

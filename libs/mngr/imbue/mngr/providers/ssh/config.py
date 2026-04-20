@@ -14,6 +14,9 @@ class SSHHostConfig(FrozenModel):
     port: int = Field(default=22, description="SSH port number")
     user: str = Field(default="root", description="SSH username")
     key_file: Path | None = Field(default=None, description="Path to SSH private key file")
+    known_hosts_file: Path | None = Field(
+        default=None, description="Path to known_hosts file for host key verification"
+    )
 
 
 class SSHProviderConfig(ProviderInstanceConfig):

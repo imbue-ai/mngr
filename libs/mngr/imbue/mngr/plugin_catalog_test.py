@@ -1,5 +1,6 @@
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import SignalCheck
+from imbue.mngr.plugin_catalog import UNPUBLISHED_PACKAGES
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
 from imbue.mngr.plugin_catalog import get_catalog_entry
@@ -33,7 +34,6 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
     basic_names = {e.entry_point_name for e in PLUGIN_CATALOG if e.tier == PluginTier.INDEPENDENT}
     assert "claude" in basic_names
     assert "opencode" in basic_names
-    assert "llm" in basic_names
     assert "tutor" in basic_names
 
 
@@ -115,11 +115,11 @@ def test_get_installable_packages_deduplicates_by_package_name() -> None:
     assert len(package_names) == len(set(package_names))
 
 
-def test_get_installable_packages_covers_all_packages() -> None:
+def test_get_installable_packages_covers_all_published_packages() -> None:
     packages = get_installable_packages()
     installable_names = {p.package_name for p in packages}
-    all_package_names = {e.package_name for e in PLUGIN_CATALOG}
-    assert installable_names == all_package_names
+    published_package_names = {e.package_name for e in PLUGIN_CATALOG} - UNPUBLISHED_PACKAGES
+    assert installable_names == published_package_names
 
 
 def test_get_installable_packages_prefers_basic_tier() -> None:

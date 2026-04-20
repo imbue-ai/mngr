@@ -20,7 +20,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _merge_command_defaults
-from imbue.mngr.config.loader import _normalize_cli_args_for_construct
+from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
 from imbue.mngr.config.loader import _parse_command_env_vars
 from imbue.mngr.config.loader import _parse_commands
@@ -271,6 +271,35 @@ def test_parse_providers_unknown_backend_mentions_disabled_plugins() -> None:
     raw = {"my-provider": {"backend": "nonexistent"}}
     with pytest.raises(ConfigParseError, match="Currently disabled plugins: modal"):
         _parse_providers(raw, disabled_plugins=frozenset({"modal"}))
+
+
+def test_parse_providers_skips_disabled_provider_with_unknown_backend() -> None:
+    """_parse_providers should skip providers with is_enabled=false when backend is unknown."""
+    raw = {"my-cloud": {"backend": "nonexistent", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert len(result) == 0
+
+
+def test_parse_providers_preserves_disabled_provider_with_known_backend() -> None:
+    """_parse_providers should preserve is_enabled=false when backend is known (for merge)."""
+    raw = {"my-local": {"backend": "local", "is_enabled": False}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert ProviderInstanceName("my-local") in result
+    assert result[ProviderInstanceName("my-local")].is_enabled is False
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_enabled() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not false."""
+    raw = {"my-provider": {"backend": "nonexistent", "is_enabled": True}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
+def test_parse_providers_still_raises_on_unknown_backend_when_is_enabled_unset() -> None:
+    """_parse_providers should still raise for unknown backends when is_enabled is not set."""
+    raw = {"my-provider": {"backend": "nonexistent"}}
+    with pytest.raises(ConfigParseError, match="references unknown backend"):
+        _parse_providers(raw, disabled_plugins=frozenset())
 
 
 # =============================================================================
@@ -749,6 +778,8 @@ def test_load_config_threads_every_field_from_toml(
     assert config.is_nested_tmux_allowed is True
     assert config.is_error_reporting_enabled is False
     assert config.default_destroyed_host_persisted_seconds == 12345.0
+    assert config.retry.connect_retry_times == 5
+    assert config.retry.connect_retry_delay == "10s"
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
@@ -770,6 +801,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "create_templates": {"modal": {"new_host": "modal"}},
     "pre_command_scripts": {"create": ["echo hello"]},
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
+    "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
@@ -803,6 +835,10 @@ create = ["echo hello"]
 [work_dir_extra_paths]
 ".venv" = "SHARE"
 ".test_output" = "COPY"
+
+[retry]
+connect_retry_times = 5
+connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"
@@ -1252,50 +1288,94 @@ def test_block_disabled_plugins_is_idempotent() -> None:
 
 
 # =============================================================================
-# Tests for _normalize_cli_args_for_construct
+# Tests for _normalize_tuple_fields_for_construct
 # =============================================================================
 
 
 def test_normalize_cli_args_no_cli_args_key() -> None:
-    """_normalize_cli_args_for_construct should return the input unchanged when no cli_args key."""
+    """_normalize_tuple_fields_for_construct should return the input unchanged when no cli_args key."""
     raw = {"some_key": "value"}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result == {"some_key": "value"}
 
 
 def test_normalize_cli_args_string_value() -> None:
-    """_normalize_cli_args_for_construct should split a non-empty string into a tuple."""
+    """_normalize_tuple_fields_for_construct should split a non-empty string into a tuple."""
     raw = {"cli_args": "--verbose --model opus"}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_empty_string() -> None:
-    """_normalize_cli_args_for_construct should convert an empty string to an empty tuple."""
+    """_normalize_tuple_fields_for_construct should convert an empty string to an empty tuple."""
     raw = {"cli_args": ""}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ()
 
 
 def test_normalize_cli_args_list_value() -> None:
-    """_normalize_cli_args_for_construct should convert a list to a tuple."""
+    """_normalize_tuple_fields_for_construct should convert a list to a tuple."""
     raw = {"cli_args": ["--verbose", "--model", "opus"]}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_tuple_value() -> None:
-    """_normalize_cli_args_for_construct should pass through a tuple."""
+    """_normalize_tuple_fields_for_construct should pass through a tuple."""
     raw = {"cli_args": ("--verbose",)}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == ("--verbose",)
 
 
 def test_normalize_cli_args_other_type_passes_through() -> None:
-    """_normalize_cli_args_for_construct should pass through unrecognized types."""
+    """_normalize_tuple_fields_for_construct should pass through unrecognized types."""
     raw = {"cli_args": 42}
-    result = _normalize_cli_args_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw)
     assert result["cli_args"] == 42
+
+
+def test_normalize_tuple_fields_converts_provisioning_lists() -> None:
+    """_normalize_tuple_fields_for_construct should convert TOML lists to tuples for provisioning fields."""
+    raw = {
+        "extra_provision_command": ["echo setup", "echo done"],
+        "env": ["FOO=1"],
+        "upload_file": ["a.txt:/a.txt"],
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["extra_provision_command"] == ("echo setup", "echo done")
+    assert result["env"] == ("FOO=1",)
+    assert result["upload_file"] == ("a.txt:/a.txt",)
+
+
+def test_normalize_tuple_fields_ignores_missing_fields() -> None:
+    """_normalize_tuple_fields_for_construct should leave config unchanged when no tuple fields present."""
+    raw = {"parent_type": "claude", "command": "my-cmd"}
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result == {"parent_type": "claude", "command": "my-cmd"}
+
+
+def test_normalize_tuple_fields_handles_all_fields_together() -> None:
+    """_normalize_tuple_fields_for_construct should normalize cli_args and provisioning fields in one call."""
+    raw = {
+        "cli_args": "--verbose",
+        "extra_provision_command": ["echo hi"],
+        "create_directory": ["/tmp/test"],
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["cli_args"] == ("--verbose",)
+    assert result["extra_provision_command"] == ("echo hi",)
+    assert result["create_directory"] == ("/tmp/test",)
+
+
+def test_normalize_tuple_fields_wraps_string_in_tuple() -> None:
+    """_normalize_tuple_fields_for_construct should wrap a bare string in a one-element tuple for provisioning fields."""
+    raw = {
+        "extra_provision_command": "echo setup",
+        "env": "FOO=1",
+    }
+    result = _normalize_tuple_fields_for_construct(raw)
+    assert result["extra_provision_command"] == ("echo setup",)
+    assert result["env"] == ("FOO=1",)
 
 
 # =============================================================================

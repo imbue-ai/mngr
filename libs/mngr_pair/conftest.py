@@ -9,14 +9,11 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.resource_guards.resource_guards import register_resource_guard
 
 suppress_warnings()
 
-# Register markers and guarded resources used by mngr-pair tests.
-register_marker("unison: marks tests that start a real unison file-sync process")
 register_resource_guard("unison")
 
 register_conftest_hooks(globals())

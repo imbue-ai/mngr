@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import cast
 
-import pluggy
 import pytest
 
 from imbue.imbue_common.model_update import to_update
@@ -25,10 +24,10 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentGitOptions
+from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -38,6 +37,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -903,6 +903,79 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
         assert exc_info.value.existing_agent_id == result.agent.id
 
 
+@pytest.mark.tmux
+def test_create_with_update_flag_updates_existing_agent(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Test that create() with is_update=True re-creates an existing agent in place.
+
+    Verifies the full end-to-end update flow:
+    1. Create an agent normally
+    2. Stop it
+    3. Call create() again with is_update=True and the same agent_id
+    4. The agent should be re-created with the same ID and work_dir but updated metadata
+    """
+    agent_name = AgentName(f"test-update-{int(time.time())}")
+    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
+
+        # Step 1: Create the agent normally
+        original_options = CreateAgentOptions(
+            agent_type=AgentTypeName("echo"),
+            name=agent_name,
+            command=CommandString("sleep 847291"),
+            label_options=AgentLabelOptions(labels={"project": "old-project"}),
+        )
+        original_result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=original_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        original_agent_id = original_result.agent.id
+        original_work_dir = original_result.agent.work_dir
+        original_create_time = original_result.agent.create_time
+
+        # Step 2: Stop the agent (the CLI does this before calling create with is_update)
+        local_host.stop_agents([original_agent_id])
+
+        # Step 3: Call create() with is_update=True and the same agent_id + work_dir
+        update_options = CreateAgentOptions(
+            agent_id=original_agent_id,
+            agent_type=AgentTypeName("echo"),
+            name=agent_name,
+            command=CommandString("sleep 847292"),
+            target_path=original_work_dir,
+            label_options=AgentLabelOptions(labels={"project": "new-project"}),
+            is_update=True,
+        )
+        update_result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=update_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        # Step 4: Verify the agent was updated, not duplicated
+        assert update_result.agent.id == original_agent_id
+        assert update_result.agent.work_dir == original_work_dir
+
+        # Verify the create_time was preserved
+        updated_agent = _get_agent_from_create_result(update_result, temp_mngr_ctx)
+        assert updated_agent.create_time == original_create_time
+
+        # Verify the labels were updated
+        assert updated_agent.get_labels()["project"] == "new-project"
+
+        # Verify there's only one agent with this name on the host
+        all_agents = local_host.get_agents()
+        matching = [a for a in all_agents if a.name == agent_name]
+        assert len(matching) == 1
+
+
 # =============================================================================
 # on_before_create Hook Tests
 # =============================================================================
@@ -974,15 +1047,7 @@ def test_on_before_create_hook_modifies_agent_options(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create hook can modify agent_options."""
-    # Create a new plugin manager with our test plugin
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginModifyingAgentOptions())
-
-    # Create a modified context with our test plugin manager
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginModifyingAgentOptions()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1007,13 +1072,7 @@ def test_on_before_create_hook_modifies_create_work_dir(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create hook can modify create_work_dir."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginModifyingCreateWorkDir())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginModifyingCreateWorkDir()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1036,13 +1095,7 @@ def test_on_before_create_hook_returning_none_passes_through(
     temp_work_dir: Path,
 ) -> None:
     """Test that on_before_create returning None passes values unchanged."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(PluginReturningNone())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginReturningNone()])
 
     local_host = _get_local_host_for_test(test_ctx)
 
@@ -1067,15 +1120,8 @@ def test_on_before_create_hooks_chain_in_order(
     temp_work_dir: Path,
 ) -> None:
     """Test that multiple on_before_create hooks chain properly."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
     # Register plugins in order A, B
-    pm.register(PluginChainA())
-    pm.register(PluginChainB())
-
-    test_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().pm, pm),
-    )
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [PluginChainA(), PluginChainB()])
 
     local_host = _get_local_host_for_test(test_ctx)
 

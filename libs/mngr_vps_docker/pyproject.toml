@@ -1,0 +1,72 @@
+[project]
+name = "imbue-mngr-vps-docker"
+version = "0.2.1"
+description = "VPS Docker provider base classes for mngr"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "imbue-mngr==0.2.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+
+[tool.uv.sources]
+imbue-mngr = { workspace = true }
+
+[tool.pytest.ini_options]
+timeout_func_only = true
+junit_family = "xunit1"
+testpaths = ["."]
+addopts = [
+  "-n 4",
+  "--dist=worksteal",
+  "--cov=imbue.mngr_vps_docker",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+  "--cov-report=xml",
+  "--cov-fail-under=40",
+  "--durations=20",
+  "--timeout=10",
+  "--timeout-method=signal",
+  "--max-worker-restart=0",
+  "-m not acceptance and not release",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/testing.py",
+]
+
+[tool.coverage.report]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/testing.py",
+]
+
+[tool.inline-snapshot]
+default-flags=["report"]
+default-flags-tui=["report"]
+default-flags-ide=["report"]
+format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]

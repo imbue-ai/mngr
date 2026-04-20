@@ -158,8 +158,15 @@ class KanpanPluginConfig(PluginConfig):
     column_order: list[str] | None = Field(
         default=None,
         description="Display order for all columns (built-in and custom). "
-        "Built-in names: name, state, git, pr, ci, link. "
-        "If None, defaults to: name, state, git, pr, ci, [custom in config order], link.",
+        "Built-in names: name, state, git, pr, ci. "
+        "If None, defaults to: name, state, git, pr, [custom in config order], ci.",
+    )
+    section_order: list[BoardSection] | None = Field(
+        default=None,
+        description="Display order for board sections. "
+        "Valid names: PR_MERGED, PR_CLOSED, PR_BEING_REVIEWED, STILL_COOKING, PRS_FAILED, MUTED. "
+        "If None, defaults to: PR_MERGED, PR_CLOSED, PR_BEING_REVIEWED, STILL_COOKING, PRS_FAILED, MUTED. "
+        "Sections not listed are omitted.",
     )
     refresh_interval_seconds: float = Field(
         default=600.0,
@@ -186,6 +193,7 @@ class KanpanPluginConfig(PluginConfig):
         merged_commands = {**self.commands, **override.commands}
         merged_columns = {**self.columns, **override.columns}
         merged_column_order = override.column_order if override.column_order is not None else self.column_order
+        merged_section_order = override.section_order if override.section_order is not None else self.section_order
         merged_refresh_interval = (
             override.refresh_interval_seconds
             if override.refresh_interval_seconds is not None
@@ -203,6 +211,7 @@ class KanpanPluginConfig(PluginConfig):
             commands=merged_commands,
             columns=merged_columns,
             column_order=merged_column_order,
+            section_order=merged_section_order,
             refresh_interval_seconds=merged_refresh_interval,
             retry_cooldown_seconds=merged_auto_cooldown,
             on_before_refresh=merged_on_before_refresh,

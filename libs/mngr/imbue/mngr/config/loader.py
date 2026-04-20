@@ -15,6 +15,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
@@ -24,6 +25,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
@@ -33,6 +35,7 @@ from imbue.mngr.config.pre_readers import load_project_config
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
+from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.primitives import AgentTypeName
@@ -181,6 +184,10 @@ def load_config(
     # CLI-level --disable-plugin flags that weren't known at startup.
     block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
 
+    # Include retry if not None
+    if config.retry is not None:
+        config_dict["retry"] = config.retry
+
     # Include logging if not None
     if config.logging is not None:
         config_dict["logging"] = config.logging
@@ -302,13 +309,24 @@ def _parse_providers(
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     Provider blocks whose plugin is disabled are silently skipped.
+    Provider blocks with is_enabled=false whose backend plugin is not installed
+    are also skipped, since there is no config class to resolve for a disabled
+    provider.  When the backend IS installed, is_enabled=false is preserved in
+    the parsed config so that config layer merging works correctly.
     """
     providers: dict[ProviderInstanceName, ProviderInstanceConfig] = {}
+    known_backends = set(list_registered_provider_backend_names())
 
     for name, raw_config in raw_providers.items():
         backend = raw_config.get("backend") or name
         plugin = raw_config.get("plugin") or backend
         if plugin in disabled_plugins:
+            continue
+        # Skip disabled providers whose backend plugin is not installed.
+        # We cannot skip unconditionally because is_enabled=false must be
+        # preserved in the parsed config when the backend IS installed,
+        # otherwise config layer merging would lose the override.
+        if raw_config.get("is_enabled") is False and backend not in known_backends:
             continue
         try:
             config_class = get_provider_config_class(backend)
@@ -344,18 +362,39 @@ def _parse_providers(
     return providers
 
 
-def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
-    """Normalize cli_args from str or list to tuple before model_construct (which bypasses validators)."""
-    if "cli_args" not in raw_config:
-        return raw_config
-    cli_args = raw_config["cli_args"]
-    if isinstance(cli_args, str):
-        normalized = split_cli_args_string(cli_args) if cli_args else ()
-    elif isinstance(cli_args, (list, tuple)):
-        normalized = tuple(cli_args)
-    else:
-        normalized = cli_args
-    return {**raw_config, "cli_args": normalized}
+_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+
+
+def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize tuple fields from str or list to tuple before model_construct (which bypasses validators).
+
+    cli_args gets special shell-splitting behavior for single strings.
+    All other tuple fields just convert list -> tuple.
+    """
+    result = raw_config
+    if "cli_args" in result:
+        cli_args = result["cli_args"]
+        if isinstance(cli_args, str):
+            normalized = split_cli_args_string(cli_args) if cli_args else ()
+        elif isinstance(cli_args, (list, tuple)):
+            normalized = tuple(cli_args)
+        else:
+            normalized = cli_args
+        result = {**result, "cli_args": normalized}
+
+    for field_name in _PLAIN_TUPLE_FIELDS:
+        if field_name not in result:
+            continue
+        value = result[field_name]
+        if isinstance(value, str):
+            # Single string -> wrap in a one-element tuple (no shell splitting for these fields)
+            result = {**result, field_name: (value,)}
+        elif isinstance(value, (list, tuple)):
+            result = {**result, field_name: tuple(value)}
+        else:
+            # Unrecognized type: pass through for Pydantic to validate or reject
+            pass
+    return result
 
 
 def _has_disabled_ancestor(
@@ -411,7 +450,7 @@ def _parse_agent_types(
             continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
-        normalized_config = _normalize_cli_args_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types
@@ -499,6 +538,15 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
                 )
         if not pm.is_blocked(name):
             pm.set_blocked(name)
+
+
+def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True) -> RetryConfig:
+    """Parse retry config.
+
+    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    """
+    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict)
+    return RetryConfig.model_construct(**raw_retry)
 
 
 def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -> LoggingConfig:
@@ -601,6 +649,7 @@ def parse_config(
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
+    kwargs["retry"] = _parse_retry_config(raw.pop("retry", {}), strict=strict) if "retry" in raw else None
     kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
