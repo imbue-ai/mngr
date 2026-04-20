@@ -244,13 +244,9 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     than tmp_path itself, so that .gitconfig does not appear as an untracked
     file in ``git status --porcelain``.
     """
-    # Safety check before any destructive write: refuse to run if HOME is not
-    # in a temp directory. Without this guard, a caller that forgets to run
-    # isolate_home() first would silently wipe the real ~/.gitconfig. On main
-    # the write was guarded with `if not gitconfig.exists()`, which doubled as
-    # protection; this function now overwrites unconditionally (so the caller
-    # gets the richer config even when isolate_home() wrote a minimal one),
-    # so the safety net moves here.
+    # Safety check before the unconditional .gitconfig overwrite below:
+    # refuse to run if HOME is not in a temp directory, so a caller who
+    # forgets to run isolate_home() first cannot wipe the real ~/.gitconfig.
     assert_home_is_temp_directory()
 
     for key, value in _GIT_ISOLATION_ENV.items():
