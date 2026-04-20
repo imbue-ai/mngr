@@ -64,7 +64,7 @@ def test_prevent_base_exception_catch() -> None:
 def test_prevent_builtin_exception_raises() -> None:
     # cron_runner.py cannot import imbue's exception types (forbidden from
     # imbue.* imports), so its new verify-path errors must use RuntimeError.
-    rc.check_builtin_exception_raises(_DIR, snapshot(8))
+    rc.check_builtin_exception_raises(_DIR, snapshot(9))
 
 
 # --- Import style ---
