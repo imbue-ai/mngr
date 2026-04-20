@@ -30,6 +30,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
@@ -55,6 +56,16 @@ _RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
 # STOPPED). We special-case it below so the deploy-side error message can
 # explain "agent vanished" rather than the generic "non-terminal state".
 _AGENT_MISSING_STATE: Final[str] = "MISSING"
+
+# Terminal states we accept as a successful full-verify outcome. Built from
+# the AgentLifecycleState enum so that adding a new state (or renaming one)
+# is caught at import time rather than silently treating the new state as a
+# failure. cron_runner.py cannot do this (no imbue.* imports allowed there),
+# which is why it has a separate drift test in cron_runner_test.py; this
+# file has no such restriction.
+_TERMINAL_SUCCESS_STATES: Final[frozenset[str]] = frozenset(
+    {AgentLifecycleState.DONE.value, AgentLifecycleState.STOPPED.value}
+)
 
 # Matches the sentinel anywhere on a line (so Modal-side log prefixes such as
 # container ids or timestamps don't defeat detection) and captures the JSON
@@ -241,7 +252,7 @@ def verify_schedule_deployment(
 
     if status == "finished":
         final_state = verify_block.get("final_state")
-        if final_state in ("DONE", "STOPPED"):
+        if final_state in _TERMINAL_SUCCESS_STATES:
             logger.info(
                 "Deployment verification complete for schedule '{}' (agent '{}' finished with state {})",
                 trigger_name,
