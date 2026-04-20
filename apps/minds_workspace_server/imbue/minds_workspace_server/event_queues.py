@@ -16,7 +16,11 @@ class AgentEventQueues:
     def __init__(self) -> None:
         self._queues: dict[str, list[queue.Queue[dict[str, Any] | None]]] = defaultdict(list)
         self._event_buffers: dict[str, list[dict[str, Any]]] = {}
-        self._lock: threading.Lock = threading.Lock()
+        # Reentrant because a CPython GC cycle during a put_nowait call inside
+        # the locked register() section can finalize an abandoned SSE
+        # event_generator, whose `finally` block calls unregister() on the
+        # same thread. With a non-reentrant Lock that re-entrance deadlocks.
+        self._lock: threading.RLock = threading.RLock()
         self._shutdown: bool = False
 
     @property
