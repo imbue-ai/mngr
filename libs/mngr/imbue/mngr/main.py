@@ -156,7 +156,7 @@ class AliasAwareGroup(DefaultCommandGroup):
 
 
 @click.command(cls=AliasAwareGroup)
-@click.version_option(package_name="mngr", prog_name="mngr", message="%(prog)s %(version)s")
+@click.version_option(package_name="imbue-mngr", prog_name="mngr", message="%(prog)s %(version)s")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """

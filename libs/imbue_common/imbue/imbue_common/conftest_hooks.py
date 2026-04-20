@@ -50,6 +50,7 @@ from coverage.exceptions import CoverageException
 
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -598,6 +599,9 @@ def _pytest_configure(config: pytest.Config) -> None:
     # Register shared markers and any additional markers from register_marker()
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
+
+    # Register marks for guarded resources (see libs/resource_guards/README.md).
+    register_guarded_resource_markers(config)
 
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:

@@ -333,8 +333,12 @@ def test_get_resume_message_returns_message_when_set(
 
 def test_get_ready_timeout_seconds_returns_default_when_not_set(
     test_agent: BaseAgent,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that get_ready_timeout_seconds returns default when not set in data.json."""
+    # get_ready_timeout_seconds falls back to get_agent_ready_timeout(), which
+    # honors MNGR_AGENT_READY_TIMEOUT. Remove it to guarantee the default path.
+    monkeypatch.delenv("MNGR_AGENT_READY_TIMEOUT", raising=False)
     assert test_agent.get_ready_timeout_seconds() == DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
