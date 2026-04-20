@@ -293,8 +293,11 @@ def test_raise_no_output_error_state_dir_reports_char_counts_and_tails(
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="pane")
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
+    # Use distinct lengths so the per-file char-count assertions are
+    # independent: "12 chars" vs "20 chars" each match only their own line.
     stdout_content = "hello-stdout"
-    stderr_content = "hello-stderr"
+    stderr_content = "stderr-content-extra"
+    assert len(stdout_content) != len(stderr_content), "test data must have distinct lengths"
     (agent_dir / "stdout.log").write_text(stdout_content)
     (agent_dir / "stderr.log").write_text(stderr_content)
     with pytest.raises(MngrError) as excinfo:
