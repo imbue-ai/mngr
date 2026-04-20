@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -302,6 +303,38 @@ def test_assemble_command_no_prompt_ref_when_no_initial_message(
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)
 
     assert ".mngr-prompt" not in cmd
+
+
+def test_create_agent_state_persists_prompt_cat_in_command_for_headless_claude(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """End-to-end regression: Host.create_agent_state must thread
+    options.initial_message into HeadlessClaude.assemble_command so the
+    persisted command (in data.json) actually cats the staged prompt.
+
+    Unit tests on assemble_command alone cannot catch a regression where
+    create_agent_state forgets to forward initial_message -- that is the
+    original bug this test pins down. Reading the command back from
+    data.json mirrors what start_agents does in production via
+    _get_agent_command.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    options = CreateAgentOptions(
+        name=AgentName("test-prompt-plumbing"),
+        agent_type=AgentTypeName("headless_claude"),
+        command=CommandString("claude"),
+        initial_message="hello from the regression test",
+    )
+    agent = host.create_agent_state(work_dir, options)
+
+    data_path = host.host_dir / "agents" / str(agent.id) / "data.json"
+    persisted = json.loads(data_path.read_text())
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in persisted["command"]
 
 
 def test_assemble_command_is_posix_compatible(
