@@ -114,8 +114,9 @@ class HostAuthInfoEvent(EventEnvelope):
     user: str = Field(description="SSH username")
     hostname: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
-    auth_type: str = Field(description="Auth method type discriminator")
-    auth_data: dict[str, str] = Field(description="Auth method data with secrets exposed as plaintext")
+    auth_data: dict[str, str] = Field(
+        description="Auth method data (includes auth_type discriminator) with secrets exposed as plaintext"
+    )
 
 
 # === Path Helpers ===
@@ -355,7 +356,6 @@ def build_host_auth_info_line(host_id: HostId, conn: SSHConnectionInfo) -> str:
         user=conn.user,
         hostname=conn.hostname,
         port=conn.port,
-        auth_type=conn.auth.auth_type,
         auth_data=_build_auth_data_with_secrets(conn.auth),
     )
     return json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
