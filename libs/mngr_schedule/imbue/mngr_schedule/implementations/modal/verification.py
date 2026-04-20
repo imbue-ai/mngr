@@ -33,10 +33,18 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 
-# Full-verify waits for the agent to finish, which the runner allows up to
-# ~3400s. Give the local `modal run` subprocess headroom on top of that for
-# container startup and the sentinel to flush.
-VERIFICATION_TIMEOUT_SECONDS: Final[float] = 3600.0
+# Three timers stack for full-verify:
+#   1. cron_runner._AGENT_FINISH_TIMEOUT_SECONDS (~3400s) -- inner poll.
+#   2. cron_runner @app.function(timeout=3600) -- Modal-side wall clock.
+#   3. VERIFICATION_TIMEOUT_SECONDS -- local `modal run` subprocess wall
+#      clock, which MUST exceed (2) with enough headroom for CLI spin-up,
+#      container cold start, and final sentinel flush. Otherwise a late
+#      successful verify gets killed by the client before we read the
+#      sentinel line. We mirror the Modal function timeout here and add
+#      a generous headroom so the client never fires first.
+_MODAL_FUNCTION_TIMEOUT_SECONDS: Final[float] = 3600.0
+_CLIENT_HEADROOM_SECONDS: Final[float] = 300.0
+VERIFICATION_TIMEOUT_SECONDS: Final[float] = _MODAL_FUNCTION_TIMEOUT_SECONDS + _CLIENT_HEADROOM_SECONDS
 
 # Must match cron_runner._RESULT_SENTINEL exactly.
 _RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
