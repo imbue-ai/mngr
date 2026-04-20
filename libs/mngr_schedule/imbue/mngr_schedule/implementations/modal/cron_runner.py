@@ -244,7 +244,7 @@ def _poll_until_done(
 ) -> str:
     """Poll the agent's lifecycle state until it leaves the running states.
 
-    Yields the final state string. Raises RuntimeError on timeout.
+    Returns the final state string. Raises RuntimeError on timeout.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
