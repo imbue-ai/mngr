@@ -12,7 +12,7 @@ from imbue.mngr_notifications.mock_notifier_test import RecordingNotifier
 from imbue.mngr_notifications.watcher import watch_for_waiting_agents
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 def test_watcher_detects_running_to_waiting_via_observe_events(
     temp_mngr_ctx: MngrContext,
 ) -> None:
