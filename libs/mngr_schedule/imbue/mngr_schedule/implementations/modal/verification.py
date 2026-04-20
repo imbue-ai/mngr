@@ -94,12 +94,12 @@ def _stream_and_capture(
         sys.stdout.flush()
 
         stripped = line.rstrip()
-        lower = stripped.lower()
 
-        if "traceback" in lower or "exception" in lower:
-            error_lines.append(stripped)
-            error_event.set()
-
+        # Detect the structured result sentinel first. If this line is the
+        # sentinel, skip the generic error-keyword scan: the sentinel's JSON
+        # payload may legitimately contain substrings like "exception" (e.g.
+        # inside a captured destroy_stderr) and those should not be
+        # mis-interpreted as an in-container failure.
         if not sentinel_holder:
             match = _SENTINEL_PATTERN.search(stripped)
             if match is not None:
@@ -113,6 +113,12 @@ def _stream_and_capture(
                     sentinel_holder.append(parsed)
                 else:
                     logger.warning("Verify sentinel payload was not a JSON object: {}", payload)
+                continue
+
+        lower = stripped.lower()
+        if "traceback" in lower or "exception" in lower:
+            error_lines.append(stripped)
+            error_event.set()
 
 
 def verify_schedule_deployment(
