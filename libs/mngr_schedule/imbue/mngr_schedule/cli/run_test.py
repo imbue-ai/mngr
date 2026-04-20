@@ -111,11 +111,11 @@ def test_emit_output_json_format(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_emit_output_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSONL format should emit a JSON object with an 'output' key."""
+    """JSONL format should tag the line with an 'event' field."""
     _emit_output("trigger output\n", OutputFormat.JSONL)
     captured = capsys.readouterr()
     data = json.loads(captured.out)
-    assert data == {"output": "trigger output\n"}
+    assert data == {"event": "output", "output": "trigger output\n"}
 
 
 def test_emit_output_empty_string_produces_no_output(capsys: pytest.CaptureFixture[str]) -> None:
