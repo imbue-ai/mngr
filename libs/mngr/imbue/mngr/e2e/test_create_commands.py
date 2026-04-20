@@ -10,6 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_custom_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can run *any* literal command instead of a named agent type:
