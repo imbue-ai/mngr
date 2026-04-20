@@ -126,7 +126,14 @@ class AuthBackendClient(FrozenModel):
             json={"user_id": user_id, "email": email},
             timeout=self.timeout_seconds,
         )
-        return response.status_code == 200
+        if response.status_code != 200:
+            logger.warning(
+                "Auth backend send-verification returned {}: {}",
+                response.status_code,
+                response.text[:200],
+            )
+            return False
+        return True
 
     def is_email_verified(self, user_id: str, email: str) -> bool:
         """Return whether the given user's email is verified."""
@@ -198,15 +205,26 @@ class AuthBackendClient(FrozenModel):
         return self._parse_auth_result(response)
 
     def get_user_provider(self, user_id: str) -> str:
-        """Return the login provider for a user ('email' or a third-party ID)."""
+        """Return the login provider for a user ('email' or a third-party ID).
+
+        Falls back to ``"email"`` (and logs a warning) if the backend call
+        fails or returns a malformed response, since the caller only uses
+        this value to render a human-readable label on the settings page.
+        """
         response = httpx.get(
             self._url(f"/auth/users/{user_id}"),
             timeout=self.timeout_seconds,
         )
         if response.status_code != 200:
+            logger.warning(
+                "Auth backend get-user-provider returned {}: {}",
+                response.status_code,
+                response.text[:200],
+            )
             return "email"
         try:
             data = response.json()
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("Auth backend get-user-provider returned non-JSON response: {}", exc)
             return "email"
         return str(data.get("provider", "email"))

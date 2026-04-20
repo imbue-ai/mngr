@@ -10,6 +10,7 @@ key, OAuth client secrets, or any other server-only credential.
 import html
 import json
 import webbrowser
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter
@@ -328,7 +329,7 @@ def _handle_reset_password_redirect(request: Request) -> Response:
     token = request.query_params.get("token", "")
     target = str(backend.base_url).rstrip("/") + "/auth/reset-password"
     if token:
-        target = f"{target}?token={token}"
+        target = f"{target}?{urlencode({'token': token})}"
     return Response(status_code=302, headers={"Location": target})
 
 
