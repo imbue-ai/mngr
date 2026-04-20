@@ -64,8 +64,6 @@ def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
 
     # Label-backed columns from config
     for field_key, col_config in config.columns.items():
-        if not isinstance(col_config, dict):
-            continue
         header = col_config.get("header", field_key.upper())
         colors = col_config.get("colors", {})
         label_key = col_config.get("label_key", field_key)

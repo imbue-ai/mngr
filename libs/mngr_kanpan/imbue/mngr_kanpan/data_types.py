@@ -123,7 +123,7 @@ class KanpanPluginConfig(PluginConfig):
         "Each entry should have 'name', 'header', and 'command' (all str).",
     )
 
-    columns: dict[str, Any] = Field(
+    columns: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Label-backed columns keyed by field key. "
         "Each entry should have 'header' (str) and optionally 'colors' (dict[str, str]).",
