@@ -1065,11 +1065,11 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
 ) -> None:
     """Headless with --source and --transfer=none should run the agent in the given directory.
 
-    After the step 2 refactor, headless shares the non-headless source /
-    transfer handling: the default transfer strategy creates a worktree
-    (or rsyncs) rather than running in-place. ``--transfer=none`` is the
-    explicit opt-in to in-place. Uses a ``pwd`` command so the streamed
-    output contains the work directory path.
+    Headless shares the non-headless source / transfer handling: the
+    default transfer strategy creates a worktree (or rsyncs) rather than
+    running in-place. ``--transfer=none`` is the explicit opt-in to
+    in-place. Uses a ``pwd`` command so the streamed output contains the
+    work directory path.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "pwd")
