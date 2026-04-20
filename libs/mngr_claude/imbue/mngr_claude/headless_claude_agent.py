@@ -286,16 +286,17 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         return self._get_agent_dir() / "stderr.log"
 
     def _get_extra_error_sources(self) -> list[str]:
-        """Check stdout.jsonl for stream-json error results, and include work-dir
-        diagnostic for silent exits.
+        """Return the stream-json stdout error (if any) and the work-dir diagnostic.
 
-        When claude exits with empty stdout/stderr (the test_ask_simple_query
-        failure mode), the stream-json error check in this function returns
-        nothing because there's no result event. In that case, a work-dir
-        diagnostic -- listing the .mngr-prompt / .mngr-system-prompt files
-        that the command substitution reads -- helps distinguish "claude
-        never ran because its prompt inputs were empty/missing" from
-        "claude ran but produced no output."
+        The work-dir diagnostic is always appended -- it's cheap to compute
+        and most valuable for silent-exit post-mortems (e.g. the
+        test_ask_simple_query failure mode, where stdout/stderr are both
+        empty because the stream-json error check can't find a result event).
+        Listing the .mngr-prompt / .mngr-system-prompt files that the command
+        substitution reads helps distinguish "claude never ran because its
+        prompt inputs were empty/missing" from "claude ran but produced no
+        output." When a stream-json error *is* present, the work-dir
+        diagnostic still provides useful triage context alongside it.
         """
         sources: list[str] = []
         stdout_error = self._get_stdout_stream_json_error()
