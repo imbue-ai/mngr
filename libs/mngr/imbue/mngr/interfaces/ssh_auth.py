@@ -177,9 +177,19 @@ class SSHKeyAuth(SSHAuthMethod):
 def _deserialize_ssh_auth(v: Any) -> "SSHAuthMethod":
     """Deserialize SSHAuthMethod from dict using the auth_type discriminator.
 
-    Dispatches to the correct subclass via the runtime registry populated by
-    __init_subclass__. Plugin auth types (e.g. SSHPasswordAuth) are available
-    as soon as their module is imported.
+    All SSHAuthMethod deserialization must flow through this function. It is
+    the single place where the dict -> concrete subclass dispatch happens, and
+    it is wired into every SSHAuthField Pydantic model via the BeforeValidator
+    below. Do not call SSHKeyAuth.model_validate / SSHPasswordAuth.model_validate
+    directly from outside -- use this, or let Pydantic call it via SSHAuthField.
+
+    Why manual dispatch instead of Pydantic's built-in discriminated union?
+    Pydantic's `Annotated[Union[...], Discriminator("auth_type")]` needs a
+    static list of union members at type-definition time. Our auth types are
+    registered dynamically by plugin packages (e.g. imbue-mngr-ssh-password-auth
+    registers SSHPasswordAuth via __init_subclass__ at import time). The set of
+    valid subclasses isn't known when SSHAuthField is defined in core, so we
+    dispatch through the runtime registry here.
     """
     if isinstance(v, SSHAuthMethod):
         return v
