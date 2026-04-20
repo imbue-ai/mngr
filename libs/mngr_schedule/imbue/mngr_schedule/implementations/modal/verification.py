@@ -247,6 +247,17 @@ def verify_schedule_deployment(
             f"state {final_state!r} for agent {result.get('agent_name')!r}."
         )
 
+    if status == "timeout":
+        timeout_message = verify_block.get("timeout_message", "")
+        destroy_exit_code = verify_block.get("destroy_exit_code")
+        destroy_stderr = verify_block.get("destroy_stderr", "")
+        raise ScheduleDeployError(
+            f"Full verification of schedule '{trigger_name}' timed out waiting for agent "
+            f"{result.get('agent_name')!r} to finish: {timeout_message}. "
+            f"Best-effort destroy exited {destroy_exit_code!r}"
+            f"{f' with stderr: {destroy_stderr}' if destroy_stderr else ''}."
+        )
+
     raise ScheduleDeployError(
         f"Deployment verification of schedule '{trigger_name}' returned unexpected verify status: {status!r}"
     )

@@ -419,8 +419,23 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
             "destroy_stderr": destroy_stderr,
         }
     else:
-        final_state = _poll_until_done(agent_name)
-        result["verify"] = {"status": "finished", "final_state": final_state}
+        try:
+            final_state = _poll_until_done(agent_name)
+        except RuntimeError as exc:
+            # Full-verify hit its inner timeout. Best-effort destroy so the
+            # agent is not orphaned, then report the timeout via the sentinel
+            # (instead of propagating the RuntimeError, which would bypass
+            # _print_result_sentinel and leave the deploy side with only a
+            # generic non-zero-exit error).
+            destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
+            result["verify"] = {
+                "status": "timeout",
+                "timeout_message": str(exc),
+                "destroy_exit_code": destroy_exit_code,
+                "destroy_stderr": destroy_stderr,
+            }
+        else:
+            result["verify"] = {"status": "finished", "final_state": final_state}
 
     _print_result_sentinel(result)
     return result
