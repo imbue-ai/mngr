@@ -11,22 +11,24 @@ from imbue.mngr.providers.registry import build_provider_instance
 from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
 
-# Track all created provider instances for cleanup at exit.
-_created_instances: list[BaseProviderInstance] = []
+# Cache provider instances by (name, mngr_ctx identity) so the same instance
+# is reused across calls within the same context. This prevents accumulating
+# duplicate instances (and their SSH connections) when discovery runs repeatedly.
+_instance_cache: dict[tuple[ProviderInstanceName, int], BaseProviderInstance] = {}
 _atexit_registered: dict[str, bool] = {"registered": False}
 
 
 def _close_all_provider_instances() -> None:
-    """Close all tracked provider instances.
+    """Close all cached provider instances.
 
     Called via atexit to ensure proper cleanup of resources like Modal app contexts.
     """
-    for instance in _created_instances:
+    for instance in _instance_cache.values():
         try:
             instance.close()
         except (MngrError, OSError) as e:
             logger.warning("Error closing provider instance {}: {}", instance.name, e)
-    _created_instances.clear()
+    _instance_cache.clear()
 
 
 def _ensure_atexit_registered() -> None:
@@ -36,27 +38,10 @@ def _ensure_atexit_registered() -> None:
         _atexit_registered["registered"] = True
 
 
-def close_providers(providers: list[BaseProviderInstance]) -> None:
-    """Close a list of provider instances and remove them from atexit tracking.
-
-    Call this when you're done with a set of providers to release their
-    resources (gRPC connections, Docker clients, etc.) immediately rather
-    than waiting for process exit.
-    """
-    closing = set(id(p) for p in providers)
-    for instance in providers:
-        try:
-            instance.close()
-        except (MngrError, OSError) as e:
-            logger.warning("Error closing provider instance {}: {}", instance.name, e)
-    # Remove closed instances from the atexit tracking list
-    _created_instances[:] = [i for i in _created_instances if id(i) not in closing]
-
-
 def reset_provider_instances() -> None:
     """Reset the provider instances tracking.
 
-    Closes all tracked provider instances and clears the tracking list.
+    Closes all cached provider instances and clears the instance cache.
     This is primarily used for test isolation to ensure a clean state between tests.
     """
     _close_all_provider_instances()
@@ -67,15 +52,20 @@ def get_provider_instance(
     name: ProviderInstanceName,
     mngr_ctx: MngrContext,
 ) -> BaseProviderInstance:
-    """Create a provider instance by name.
+    """Get or create a provider instance by name.
 
-    Creates a new instance every time. The caller is responsible for closing
-    it when done (via close_providers or the instance's close() method).
-    Instances are also tracked for atexit cleanup as a safety net.
-
-    Resolution order: check config.providers, then try as backend name with defaults.
+    Returns a cached instance if one already exists for this name and context.
+    Otherwise, creates a new instance: checks config.providers first, then falls
+    back to treating the name as a backend name with defaults.
+    The returned instance is tracked for cleanup at process exit via atexit.
     """
     _ensure_atexit_registered()
+
+    # Return the cached instance if one already exists for this name and context
+    cache_key = (name, id(mngr_ctx))
+    if cache_key in _instance_cache:
+        logger.trace("Returning cached provider instance {}", name)
+        return _instance_cache[cache_key]
 
     # Check if there's a configured provider instance with this name
     if name in mngr_ctx.config.providers:
@@ -101,7 +91,7 @@ def get_provider_instance(
         )
         logger.trace("Built provider instance {} using backend name as default", name)
 
-    _created_instances.append(instance)
+    _instance_cache[cache_key] = instance
     return instance
 
 
@@ -123,9 +113,6 @@ def get_all_provider_instances(
     reset_caches: bool = False,
 ) -> list[BaseProviderInstance]:
     """Get all available provider instances.
-
-    Creates fresh instances every time. The caller should close them when done
-    via close_providers() to release resources immediately.
 
     If provider_names is provided, only returns providers matching those names,
     allowing skipping expensive initialization of providers that won't be used.

@@ -9,7 +9,6 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
-from imbue.mngr.api.providers import close_providers
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import DiscoveredAgent
@@ -176,8 +175,7 @@ def discover_hosts_and_agents(
         if _all_identifiers_found(agent_identifiers, agents_by_host):
             return agents_by_host, providers
 
-        # Fall back to a full scan. Close the partial-scan providers first to avoid
-        # leaking their resources (gRPC connections, Docker clients, etc.).
-        close_providers(providers)
+        # Fall back to a full scan. Provider instances are cached so this
+        # does not leak resources even though get_all_provider_instances is called again.
         logger.debug("Event stream was stale (not all identifiers found), falling back to full scan")
         return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)

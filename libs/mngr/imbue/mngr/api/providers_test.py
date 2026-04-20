@@ -196,13 +196,15 @@ def test_get_provider_instance_returns_cached_instance(temp_mngr_ctx: MngrContex
 
 
 def test_reset_provider_instances_clears_tracking(temp_mngr_ctx: MngrContext) -> None:
-    """reset_provider_instances should close tracked instances so next call creates fresh ones."""
+    """reset_provider_instances should clear cached instances so next call rebuilds them."""
+    # Populate the cache by loading providers
     providers_before = get_all_provider_instances(temp_mngr_ctx)
     assert len(providers_before) > 0
 
+    # Reset should clear the cache
     reset_provider_instances()
 
-    # Loading again should succeed (creates fresh instances)
+    # Loading again should succeed (rebuilds from scratch)
     providers_after = get_all_provider_instances(temp_mngr_ctx)
     assert len(providers_after) > 0
 

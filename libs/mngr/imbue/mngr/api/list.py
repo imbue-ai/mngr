@@ -20,7 +20,6 @@ from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
-from imbue.mngr.api.providers import close_providers
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
@@ -255,21 +254,6 @@ def _list_agents_batch(
             include_destroyed=True,
             reset_caches=reset_caches,
         )
-    try:
-        _list_agents_batch_inner(mngr_ctx, agents_by_host, providers, params, result, results_lock)
-    finally:
-        close_providers(providers)
-
-
-def _list_agents_batch_inner(
-    mngr_ctx: MngrContext,
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
-    providers: list[BaseProviderInstance],
-    params: _ListAgentsParams,
-    result: ListResult,
-    results_lock: Lock,
-) -> None:
-    """Process all discovered hosts and agents and populate result."""
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -327,28 +311,25 @@ def _list_agents_streaming(
         providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
         logger.trace("Found {} provider instances", len(providers))
 
-        try:
-            with mngr_executor(
-                parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
-            ) as executor:
-                streaming_futures: list[Future[None]] = []
-                for provider in providers:
-                    streaming_futures.append(
-                        executor.submit(
-                            _discover_and_emit_details_for_provider,
-                            provider,
-                            params,
-                            result,
-                            results_lock,
-                            mngr_ctx.concurrency_group,
-                        )
+        with mngr_executor(
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
+        ) as executor:
+            streaming_futures: list[Future[None]] = []
+            for provider in providers:
+                streaming_futures.append(
+                    executor.submit(
+                        _discover_and_emit_details_for_provider,
+                        provider,
+                        params,
+                        result,
+                        results_lock,
+                        mngr_ctx.concurrency_group,
                     )
+                )
 
-            # Re-raise any thread exceptions
-            for future in streaming_futures:
-                future.result()
-        finally:
-            close_providers(providers)
+        # Re-raise any thread exceptions
+        for future in streaming_futures:
+            future.result()
 
 
 def _discover_and_emit_details_for_provider(
