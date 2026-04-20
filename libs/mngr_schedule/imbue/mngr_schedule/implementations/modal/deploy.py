@@ -590,8 +590,8 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
 
     `run_scheduled_trigger` returns a dict of shape
     `{"status": ..., "output": <captured stdout>, ...}`; we unpack the
-    "output" field so callers can display the command output. An earlier
-    branch that returned a bare string is tolerated for back-compat.
+    "output" field so callers can display the command output. A bare-string
+    return value from older deployments is also tolerated for back-compat.
 
     Raises MngrError if the function is not found or the invocation fails.
     """
