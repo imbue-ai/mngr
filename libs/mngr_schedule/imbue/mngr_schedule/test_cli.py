@@ -376,11 +376,18 @@ def test_schedule_remove_local_cli_cleans_up_disk_artifacts(
 ) -> None:
     """CLI wiring for remove --force: trigger dir + creation record get cleaned up.
 
-    Uses fake crontab reader/writer via `_deploy_local_trigger`, so this test
-    does NOT exercise the real `crontab` binary. The crontab path is covered
-    by the unit tests in `cli/remove_test.py` (which drive `remove_local_schedule`
-    directly with captured crontab content), and by the release test that
-    exercises the full lifecycle against a real crontab.
+    The deploy side is mocked via `_deploy_local_trigger` (fake crontab
+    reader/writer), but the CLI-driven remove path invokes
+    `remove_local_schedule` with its default system crontab reader/writer,
+    which do shell out to real `crontab -l` / `crontab -`. This test
+    therefore only asserts on the CLI wiring and on cleanup of on-disk
+    artifacts; the real user crontab is read but no entry matching the
+    test trigger should exist (deploy didn't write one), so `crontab -`
+    is only invoked if there happens to be stale state, which remove
+    tolerates idempotently. The pure crontab text manipulation is covered
+    by the unit tests in `cli/remove_test.py`, and end-to-end crontab
+    interaction is covered by the release test in
+    `test_schedule_local_lifecycle.py`.
     """
     _deploy_local_trigger(temp_mngr_ctx, "test-remove-trigger")
 
