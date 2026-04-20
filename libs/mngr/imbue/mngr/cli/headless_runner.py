@@ -121,11 +121,15 @@ def headless_agent_output(
     this contextmanager does not create or remove it. For a fresh throwaway
     directory, wrap with :func:`ephemeral_work_location`.
 
-    ``initial_message`` is the caller's ``--message`` content. It is both
-    stored on the agent (retrievable via ``get_initial_message()``) and
-    handed to the agent type's ``prepare_headless_work_dir`` classmethod
-    so that types that drive claude via prompt files can materialise it on
-    disk before the process starts.
+    ``initial_message`` is the caller's ``--message`` content. It is handed
+    to the agent type's ``prepare_headless_work_dir`` classmethod so that
+    types that drive claude via prompt files can materialise it on disk
+    before the process starts. It is deliberately NOT plumbed onto
+    ``CreateAgentOptions.initial_message`` -- ``api_create`` treats a
+    non-None initial_message as "call ``wait_for_ready_signal`` and then
+    ``send_message``", which raises on headless agents (they have no TUI to
+    send keys to). The prompt reaches the agent via the on-disk prompt file
+    that the agent command ``cat``s, not via ``send_message``.
 
     If ``pre_create_setup`` is provided, it is called with the host and work
     path after the initial-message hook runs but before the agent is created,
@@ -150,7 +154,6 @@ def headless_agent_output(
         label_options=label_options or AgentLabelOptions(),
         target_path=work_path,
         name=name,
-        initial_message=initial_message,
     )
 
     result = api_create(
