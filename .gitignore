@@ -252,6 +252,14 @@
 # Offload caches and local files
 **/.offload/**
 **/test-results
+# Safety net: the 0.6.x image-cache files were tracked pre-upgrade and are now
+# obsolete (offload 0.7.1 uses git notes), but can still appear locally from
+# leftover state. Keep them out of commits.
+/.offload-base-commit
+/.offload-image-cache
+/.offload-cache-key
+/.offload-release-cache-key
+/.offload-acceptance-cache-key
 
 # Minds deploy-time build artifacts
 **/.minds/
