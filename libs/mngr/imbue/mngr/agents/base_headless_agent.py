@@ -200,11 +200,13 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
     def _get_state_dir_diagnostic(self) -> str:
         """Return a short inventory of the stdout/stderr files' existence and size.
 
-        Useful when stderr is empty and the tmux pane only shows the original
-        command (e.g. claude exited silently). Confirms whether the redirect
-        files were ever created, how big they are, and includes the tail of
-        each so release-test post-mortems aren't stuck at "exited without
-        producing output". Delegates per-file rendering to
+        Called by :meth:`_raise_no_output_error` and unconditionally included
+        in every no-output error message, alongside stderr / extra sources /
+        tmux pane. Particularly useful when those other sources are empty
+        (e.g. claude exited silently), because it confirms whether the
+        redirect files were ever created, how big they are, and includes the
+        tail of each so release-test post-mortems aren't stuck at "exited
+        without producing output". Delegates per-file rendering to
         :func:`render_file_diagnostic` so the format stays in lockstep with
         other silent-exit diagnostics (e.g. HeadlessClaude's work-dir
         inventory).
