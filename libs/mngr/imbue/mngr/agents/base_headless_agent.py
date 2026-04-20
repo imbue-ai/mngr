@@ -4,7 +4,10 @@ from abc import abstractmethod
 from pathlib import Path
 from typing import Never
 
+from loguru import logger
+
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentConfigT
@@ -135,26 +138,31 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         command (e.g. claude exited silently). Confirms whether the redirect
         files were ever created, how big they are, and includes the tail of
         each so release-test post-mortems aren't stuck at "exited without
-        producing output". Best-effort -- returns None on any I/O failure.
+        producing output". Best-effort: filesystem / remote-host errors are
+        trace-logged and folded into the rendered line so they neither mask
+        the caller's primary error nor disappear silently.
         """
-        try:
-            stdout_path = self._get_stdout_path()
-            stderr_path = self._get_stderr_path()
-        except Exception:
-            return None
+        stdout_path = self._get_stdout_path()
+        stderr_path = self._get_stderr_path()
 
         lines: list[str] = []
         for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
             try:
                 mtime = self.host.get_file_mtime(path)
-            except Exception:
+            except (OSError, HostError) as e:
+                logger.trace("get_file_mtime({}) failed: {}", path, e)
                 mtime = None
             if mtime is None:
                 lines.append(f"{label}: {path} -- does not exist")
                 continue
             try:
                 content = self.host.read_text_file(path)
-            except Exception as e:
+            except FileNotFoundError:
+                # Raced with deletion between mtime probe and read.
+                lines.append(f"{label}: {path} -- does not exist")
+                continue
+            except (OSError, HostError) as e:
+                logger.trace("read_text_file({}) failed: {}", path, e)
                 lines.append(f"{label}: {path} -- exists, read failed: {e}")
                 continue
             size = len(content)
