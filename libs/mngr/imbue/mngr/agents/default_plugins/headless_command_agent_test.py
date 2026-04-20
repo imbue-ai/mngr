@@ -129,11 +129,13 @@ def test_stream_output_raises_when_empty_file(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
+    """Empty stdout + empty stderr raises with the always-appended [state-dir] diagnostic."""
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(agent)
 
-    with pytest.raises(MngrError, match="no details available"):
+    with pytest.raises(MngrError, match="exited without producing output") as exc_info:
         list(agent.stream_output())
+    assert "[state-dir]" in str(exc_info.value)
 
 
 @pytest.mark.tmux
@@ -144,24 +146,33 @@ def test_stream_output_raises_when_stdout_file_missing(
 ) -> None:
     """stream_output raises when the stdout file is never created (agent exits immediately).
 
-    Creates only stderr.log (empty) so the error chain falls through to
-    pane capture (which fails -- no tmux session), then hits "no details available".
+    Creates only stderr.log (empty). Stderr and the (absent) tmux pane
+    produce no content, so the raised error carries only the always-appended
+    [state-dir] diagnostic under the stable 'exited without producing output'
+    template.
     """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stderr.log").write_text("")
 
-    with pytest.raises(MngrError, match="no details available"):
+    with pytest.raises(MngrError, match="exited without producing output") as exc_info:
         list(agent.stream_output())
+    assert "[state-dir]" in str(exc_info.value)
 
 
+@pytest.mark.tmux
 def test_stream_output_surfaces_stderr_on_error(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    """When stdout is empty, stderr content appears in the error."""
+    """When stdout is empty, stderr content appears in the error.
+
+    Marked @pytest.mark.tmux because _raise_no_output_error unconditionally
+    captures the tmux pane as one of its detail sources, invoking
+    `tmux capture-pane` via the host interface.
+    """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(agent, stderr="command not found: foobar\n")
 
