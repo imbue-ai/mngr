@@ -158,9 +158,13 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
 
+    # Unconditionally (over)write the .gitconfig so the documented contract --
+    # every isolate_home() call re-establishes the safe.directory='*' exemption
+    # inside the fake HOME -- holds regardless of what a caller may have
+    # dropped into tmp_path. isolate_git() uses the same pattern and will
+    # overwrite this with its richer config when both are used together.
     gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[safe]\n\tdirectory = *\n")
+    gitconfig.write_text("[safe]\n\tdirectory = *\n")
 
 
 @contextmanager
