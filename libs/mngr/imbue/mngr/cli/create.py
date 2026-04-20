@@ -314,7 +314,7 @@ def _create_headless(
     streams its output, and destroys it when done. Driven by the agent type
     implementing StreamingHeadlessAgentMixin.
 
-    Default behaviour is to run in a fresh temporary directory on the resolved
+    Default behavior is to run in a fresh temporary directory on the resolved
     host. Passing ``--source`` switches to in-place mode: the agent runs in
     the given directory and we do not remove it on exit. In-place mode
     requires the source host to match the resolved target host, since the
