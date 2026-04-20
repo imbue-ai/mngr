@@ -11,6 +11,7 @@ import httpx
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 
@@ -67,7 +68,15 @@ class AuthBackendClient(FrozenModel):
             data = response.json()
         except ValueError as exc:
             raise AuthBackendError("Auth backend returned non-JSON response") from exc
-        return AuthResult.model_validate(data)
+        try:
+            return AuthResult.model_validate(data)
+        except ValidationError as exc:
+            # For non-2xx responses that don't match the AuthResult schema (e.g. a
+            # FastAPI default error body like ``{"detail": "..."}``), surface as
+            # AuthBackendError so callers can handle uniformly.
+            if response.status_code >= 400:
+                raise AuthBackendError(f"Auth backend returned {response.status_code}: {response.text[:200]}") from exc
+            raise
 
     def signup(self, email: str, password: str) -> AuthResult:
         """Create a new email/password account."""
