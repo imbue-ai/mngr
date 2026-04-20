@@ -85,7 +85,12 @@ def render_file_diagnostic(
     # tail slice is intentionally character-based (we're slicing decoded
     # text, not raw bytes).
     char_count = len(content)
-    if tail_chars is None:
+    # Skip the ", tail:\n..." suffix when there is nothing to tail. Emitting
+    # a dangling `tail:` with an empty body (the case for redirect files
+    # that were created but never written to) is visual noise and suggests
+    # output follows when there is none; match the no-tail-chars format so
+    # callers always see `N chars` when N is 0.
+    if tail_chars is None or char_count == 0:
         return f"{prefix}{char_count} chars"
     tail = content[-tail_chars:] if char_count > tail_chars else content
     return f"{prefix}{char_count} chars, tail:\n{tail}".rstrip()

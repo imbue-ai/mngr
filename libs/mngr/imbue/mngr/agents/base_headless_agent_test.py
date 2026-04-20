@@ -367,3 +367,28 @@ def test_raise_no_output_error_state_dir_handles_non_utf8_bytes(
     assert "[state-dir]" in message
     assert "exists, read failed" in message
     assert "exited without producing output" in message
+
+
+def test_raise_no_output_error_state_dir_omits_empty_tail_suffix(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Empty redirect files render as '0 chars' without a dangling 'tail:' suffix.
+
+    render_file_diagnostic passes tail_chars=1024 for stdout/stderr. When a
+    file exists but is empty (redirect created the file before the process
+    wrote anything), the rendered line must not end with 'tail:' followed
+    by no content -- that suggests output follows when there is none.
+    """
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="pane")
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "stdout.log").write_text("")
+    (agent_dir / "stderr.log").write_text("")
+    with pytest.raises(MngrError) as excinfo:
+        agent._raise_no_output_error()
+    message = str(excinfo.value)
+    assert "0 chars" in message
+    # No dangling `, tail:` suffix and no `tail:` followed by end-of-line.
+    assert ", tail:" not in message
