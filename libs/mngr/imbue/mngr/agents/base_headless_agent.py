@@ -178,6 +178,18 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         # `lines` is guaranteed non-empty: the loop iterates over a
         # hard-coded 2-tuple and every branch unconditionally appends.
         assert lines
+
+        # Include the current lifecycle state so we can distinguish
+        # "agent never started" from "agent exited without output" in
+        # post-mortems. DONE/STOPPED with 0-char stdout/stderr means the
+        # command ran and returned without ever producing output (e.g.
+        # claude CLI silently exiting on auth failure or TTY prompt).
+        try:
+            lifecycle = self.get_lifecycle_state()
+            lines.append(f"lifecycle: {lifecycle.value}")
+        except (OSError, HostError) as e:
+            logger.trace("get_lifecycle_state failed: {}", e)
+
         return "\n".join(lines)
 
     def _raise_no_output_error(self) -> Never:
