@@ -81,7 +81,6 @@ from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
 from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
-from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -892,20 +891,12 @@ class Host(BaseHost, OnlineHostInterface):
         if self.is_local:
             return None
 
+        assert self.ssh_auth is not None, "ssh_auth must be set for remote hosts"
         host_data = self.connector.host.data
         user = host_data.get("ssh_user", "root")
         hostname = self.connector.host.name
         port = host_data.get("ssh_port", 22)
-
-        if self.ssh_auth is not None:
-            auth = self.ssh_auth
-        else:
-            key_path_str = host_data.get("ssh_key", "")
-            assert key_path_str, "SSH key path must be set for remote hosts"
-            known_hosts_file = get_ssh_known_hosts_file(self)
-            auth = SSHKeyAuth(key_path=Path(key_path_str), known_hosts_file=known_hosts_file)
-
-        return SSHConnectionInfo(user=user, hostname=hostname, port=port, auth=auth)
+        return SSHConnectionInfo(user=user, hostname=hostname, port=port, auth=self.ssh_auth)
 
     # =========================================================================
     # Activity Times
