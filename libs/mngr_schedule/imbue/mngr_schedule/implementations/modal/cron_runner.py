@@ -227,13 +227,27 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
             text=True,
             timeout=60,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # Surface the failure so a persistently-hanging `mngr list` is
+        # visible in the container logs rather than only manifesting as a
+        # generic "timed out waiting for agent" at the end of the poll loop.
+        print(f"mngr list for agent {agent_name!r} timed out after {exc.timeout}s")
         return None
     if completed.returncode != 0:
+        # Truncate stderr so a runaway error doesn't flood the logs every
+        # poll interval; the tail is what matters for diagnostics.
+        stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
+        print(
+            f"mngr list for agent {agent_name!r} exited with code {completed.returncode}; stderr tail:\n{stderr_tail}"
+        )
         return None
     try:
         data = json.loads(completed.stdout)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        stdout_preview = completed.stdout[:2000] if completed.stdout else ""
+        print(
+            f"mngr list for agent {agent_name!r} returned non-JSON output ({exc}); stdout preview:\n{stdout_preview}"
+        )
         return None
     agents = data.get("agents", [])
     if not agents:

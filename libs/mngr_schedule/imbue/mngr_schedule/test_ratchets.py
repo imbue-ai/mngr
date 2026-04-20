@@ -42,8 +42,10 @@ def test_prevent_global_keyword() -> None:
 def test_prevent_bare_print() -> None:
     # cron_runner.py cannot import loguru (forbidden from imbue.* or 3rd-party
     # packages at module-level per the file docstring), so its result sentinel
-    # for in-container verify must go via sys.stdout.write.
-    rc.check_bare_print(_DIR, snapshot(11))
+    # for in-container verify must go via sys.stdout.write, and diagnostics
+    # for `mngr list` failures in the verify poll loop must go via bare
+    # print() calls.
+    rc.check_bare_print(_DIR, snapshot(14))
 
 
 # --- Exception handling ---
