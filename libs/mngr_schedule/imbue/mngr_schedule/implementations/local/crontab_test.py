@@ -172,6 +172,9 @@ def test_read_system_crontab_returns_empty_when_binary_missing(
 
     handler_id = logger.add(sink, level="WARNING", format="{message}")
     try:
+        # Scope the PATH override with monkeypatch.context() so it is reverted
+        # before the autouse _isolate_tmux_server fixture's teardown runs
+        # (which shells out to tmux and needs a working PATH).
         with monkeypatch.context() as m:
             m.setenv("PATH", str(tmp_path))
             assert read_system_crontab() == ""
@@ -185,6 +188,9 @@ def test_write_system_crontab_raises_schedule_deploy_error_when_binary_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the crontab binary is not on PATH, writing raises ScheduleDeployError."""
+    # Scope the PATH override with monkeypatch.context() so it is reverted
+    # before the autouse _isolate_tmux_server fixture's teardown runs
+    # (which shells out to tmux and needs a working PATH).
     with monkeypatch.context() as m:
         m.setenv("PATH", str(tmp_path))
         with pytest.raises(ScheduleDeployError, match="crontab binary not available"):
