@@ -24,9 +24,9 @@ Requires the following Modal Secrets (env vars):
 - `CLOUDFLARE_ALLOWED_IDPS` (optional): Comma-separated list of Cloudflare identity provider UUIDs to allow on Access Applications (e.g. Google OAuth, one-time PIN). When set, created Access Applications will only offer these identity providers to users. When unset, Cloudflare uses the account default.
 - `SUPERTOKENS_CONNECTION_URI` (optional): URL of the SuperTokens core. Required for the `/auth/*` endpoints.
 - `SUPERTOKENS_API_KEY` (optional): API key for the SuperTokens core. Paired with `SUPERTOKENS_CONNECTION_URI`.
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): Google OAuth credentials used by the `/auth/oauth/*` endpoints.
-- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): GitHub OAuth credentials used by the `/auth/oauth/*` endpoints.
 - `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in outbound password-reset and email-verification links. Defaults to `https://cloudflare-forwarding.modal.run`.
+
+OAuth providers (Google, GitHub, ...) are configured on the SuperTokens core itself via the SuperTokens dashboard; the SDK discovers them at runtime, so this service does not need OAuth client IDs or secrets in its env.
 
 Deploy with:
 

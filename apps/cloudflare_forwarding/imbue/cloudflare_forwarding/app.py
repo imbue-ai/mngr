@@ -60,9 +60,6 @@ from supertokens_python.recipe.session.syncio import get_session_without_request
 from supertokens_python.recipe.thirdparty.asyncio import get_provider
 from supertokens_python.recipe.thirdparty.asyncio import manually_create_or_update_user
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
-from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderInput
 from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
 from supertokens_python.syncio import get_user
 from supertokens_python.types import RecipeUserId
@@ -1707,52 +1704,15 @@ def _get_auth_website_domain() -> str:
     return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_FORWARDING_DOMAIN)
 
 
-def _build_oauth_providers() -> list[ProviderInput]:
-    """Build the OAuth provider list from env vars."""
-    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-    github_client_id = os.environ.get("GITHUB_CLIENT_ID")
-    github_client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
-
-    providers: list[ProviderInput] = []
-    if google_client_id and google_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="google",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=google_client_id,
-                            client_secret=google_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-    if github_client_id and github_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="github",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=github_client_id,
-                            client_secret=github_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-    return providers
-
-
 def _init_supertokens() -> None:
     """Initialize SuperTokens SDK with all recipes used by the minds auth flow.
 
     Includes emailpassword, thirdparty (OAuth), emailverification, and session.
     The SDK keeps its API key (``SUPERTOKENS_API_KEY``) server-side so clients
-    never see it. OAuth client credentials (``GOOGLE_CLIENT_ID``/``SECRET``,
-    ``GITHUB_CLIENT_ID``/``SECRET``) likewise live only on the server.
+    never see it. OAuth providers (Google, GitHub, ...) are configured on the
+    SuperTokens core itself (via the SuperTokens dashboard); the SDK discovers
+    them at runtime via ``get_provider(...)``, so this file never needs the
+    OAuth client IDs or secrets.
     """
     connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
     if not connection_uri:
@@ -1760,15 +1720,6 @@ def _init_supertokens() -> None:
 
     api_key = os.environ.get("SUPERTOKENS_API_KEY")
     website_domain = _get_auth_website_domain()
-    providers = _build_oauth_providers()
-
-    thirdparty_recipe_init = (
-        st_thirdparty_recipe.init(
-            sign_in_and_up_feature=st_thirdparty_recipe.SignInAndUpFeature(providers=providers),
-        )
-        if providers
-        else st_thirdparty_recipe.init()
-    )
 
     supertokens_init(
         supertokens_config=SupertokensConfig(
@@ -1786,12 +1737,12 @@ def _init_supertokens() -> None:
         recipe_list=[
             st_session_recipe.init(),
             st_emailpassword_recipe.init(),
-            thirdparty_recipe_init,
+            st_thirdparty_recipe.init(),
             st_emailverification_recipe.init(mode="REQUIRED"),
         ],
         mode="asgi",
     )
-    logger.info("SuperTokens SDK initialized (providers=%d)", len(providers))
+    logger.info("SuperTokens SDK initialized")
 
 
 @app.function(
