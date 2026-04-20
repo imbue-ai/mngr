@@ -11,9 +11,7 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-from imbue.mngr_kanpan.data_types import DataSourceConfig
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 
 
 def test_ci_status_color() -> None:
@@ -154,24 +152,24 @@ def test_kanpan_plugin_config_merge_with_section_order_none_keeps_base() -> None
 
 def test_kanpan_config_merge_with_data_sources() -> None:
     base = KanpanPluginConfig(
-        data_sources={"github": DataSourceConfig(enabled=True)},
+        data_sources={"github": {"enabled": True}},
     )
     override = KanpanPluginConfig(
-        data_sources={"github": DataSourceConfig(enabled=False)},
+        data_sources={"github": {"enabled": False}},
     )
     merged = base.merge_with(override)
-    assert merged.data_sources["github"].enabled is False
+    assert merged.data_sources["github"]["enabled"] is False
 
 
 def test_kanpan_config_merge_with_shell_commands() -> None:
     base = KanpanPluginConfig(
         shell_commands={
-            "slack": ShellCommandSourceConfig(name="Slack", header="SLACK", command="find-slack"),
+            "slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"},
         },
     )
     override = KanpanPluginConfig(
         shell_commands={
-            "jira": ShellCommandSourceConfig(name="Jira", header="JIRA", command="find-jira"),
+            "jira": {"name": "Jira", "header": "JIRA", "command": "find-jira"},
         },
     )
     merged = base.merge_with(override)

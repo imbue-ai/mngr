@@ -15,14 +15,11 @@ from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
-from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.repo_paths import _parse_github_repo_path
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import BoardSection
-from imbue.mngr_kanpan.data_types import DataSourceConfig
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 from imbue.mngr_kanpan.fetcher import _get_local_work_dir
 from imbue.mngr_kanpan.fetcher import _is_agent_muted
 from imbue.mngr_kanpan.fetcher import _run_data_sources_parallel
@@ -364,17 +361,23 @@ def test_is_source_enabled_default() -> None:
 
 
 def test_is_source_enabled_dict_disabled() -> None:
-    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
+    config = KanpanPluginConfig(data_sources={"github": {"enabled": False}})
     assert _is_source_enabled(config, "github") is False
 
 
 def test_is_source_enabled_dict_enabled() -> None:
-    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=True)})
+    config = KanpanPluginConfig(data_sources={"github": {"enabled": True}})
+    assert _is_source_enabled(config, "github") is True
+
+
+def test_is_source_enabled_dict_missing_enabled_defaults_true() -> None:
+    """A raw dict without an 'enabled' key defaults to True (source-specific fields only)."""
+    config = KanpanPluginConfig(data_sources={"github": {"pr": True}})
     assert _is_source_enabled(config, "github") is True
 
 
 def test_plugin_excludes_disabled_github() -> None:
-    config = KanpanPluginConfig(data_sources={"github": DataSourceConfig(enabled=False)})
+    config = KanpanPluginConfig(data_sources={"github": {"enabled": False}})
     ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
@@ -382,7 +385,7 @@ def test_plugin_excludes_disabled_github() -> None:
 
 
 def test_plugin_excludes_disabled_repo_paths() -> None:
-    config = KanpanPluginConfig(data_sources={"repo_paths": DataSourceConfig(enabled=False)})
+    config = KanpanPluginConfig(data_sources={"repo_paths": {"enabled": False}})
     ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
@@ -391,7 +394,7 @@ def test_plugin_excludes_disabled_repo_paths() -> None:
 
 def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
     config = KanpanPluginConfig(
-        shell_commands={"my_cmd": ShellCommandSourceConfig(name="My Command", header="CMD", command="echo hi")}
+        shell_commands={"my_cmd": {"name": "My Command", "header": "CMD", "command": "echo hi"}}
     )
     ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
@@ -401,26 +404,24 @@ def test_plugin_kanpan_data_sources_with_shell_commands() -> None:
 
 
 def test_plugin_kanpan_data_sources_with_github_config() -> None:
-    config = KanpanPluginConfig(data_sources={"github": GitHubDataSourceConfig(pr=True)})
+    config = KanpanPluginConfig(data_sources={"github": {"pr": True}})
     ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
     assert any(s.name == "github" for s in result)
 
 
-def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
-    # Shell command config as a raw dict (tests the isinstance dict branch for shell)
-    ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
-        get_plugin_config=lambda name, cls: SimpleNamespace(
-            data_sources={},
-            shell_commands={"my_cmd": {"name": "My Command", "header": "CMD", "command": "echo hi"}},
-            columns={},
-        )
+def test_plugin_kanpan_data_sources_from_loader_path() -> None:
+    """Regression: loader uses model_construct, so configs may reach the plugin via that path."""
+    config = KanpanPluginConfig.model_construct(
+        data_sources={"github": {"enabled": False}},
+        shell_commands={},
+        columns={},
     )
+    ctx = make_mngr_ctx_with_config(config)
     result = kanpan_data_sources(mngr_ctx=ctx)
     assert result is not None
-    names = [s.name for s in result]
-    assert "shell_my_cmd" in names
+    assert not any(s.name == "github" for s in result)
 
 
 # === save_field_cache / load_field_cache ===
