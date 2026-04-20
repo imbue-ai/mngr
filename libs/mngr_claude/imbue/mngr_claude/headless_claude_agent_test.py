@@ -250,30 +250,35 @@ def test_prepare_headless_work_dir_writes_prompt_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """The classmethod hook writes the initial message to .mngr-prompt."""
+    """The classmethod hook writes the initial message to .mngr-prompt and reports the path."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    HeadlessClaude.prepare_headless_work_dir(host, work_dir, "please fix the tests")
+    staged = HeadlessClaude.prepare_headless_work_dir(host, work_dir, "please fix the tests")
 
-    assert (work_dir / ".mngr-prompt").read_text() == "please fix the tests"
+    prompt_path = work_dir / ".mngr-prompt"
+    assert prompt_path.read_text() == "please fix the tests"
+    # The returned tuple signals to headless_agent_output which files to
+    # clean up on exit, preventing leaks into in-place source directories.
+    assert staged == (prompt_path,)
 
 
 def test_prepare_headless_work_dir_no_message_is_noop(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """No initial message means no file gets written."""
+    """No initial message means no file gets written and an empty tuple is returned."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    HeadlessClaude.prepare_headless_work_dir(host, work_dir, None)
+    staged = HeadlessClaude.prepare_headless_work_dir(host, work_dir, None)
 
     assert not (work_dir / ".mngr-prompt").exists()
+    assert staged == ()
 
 
 def test_assemble_command_appends_prompt_ref_when_prompt_file_exists(

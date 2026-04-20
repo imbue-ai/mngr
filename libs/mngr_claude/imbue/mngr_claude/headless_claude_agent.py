@@ -232,16 +232,23 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         host: OnlineHostInterface,
         work_dir: Path,
         initial_message: str | None,
-    ) -> None:
+    ) -> tuple[Path, ...]:
         """Persist ``initial_message`` to ``.mngr-prompt`` inside the work dir.
 
         The command assembled by ``assemble_command`` reads this file via
         ``cat`` so we can pass very long prompts without hitting tmux /
         shell arg length limits.
+
+        Returns the path to the staged prompt file (so
+        ``headless_agent_output`` can remove it on exit, preventing leaks
+        into in-place source directories), or an empty tuple when no
+        initial message was supplied.
         """
         if initial_message is None:
-            return
-        host.write_text_file(work_dir / _MNGR_PROMPT_FILE, initial_message)
+            return ()
+        prompt_path = work_dir / _MNGR_PROMPT_FILE
+        host.write_text_file(prompt_path, initial_message)
+        return (prompt_path,)
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.

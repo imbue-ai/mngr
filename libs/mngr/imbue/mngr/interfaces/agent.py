@@ -477,7 +477,7 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         host: OnlineHostInterface,
         work_dir: Path,
         initial_message: str | None,
-    ) -> None:
+    ) -> tuple[Path, ...]:
         """Write agent-type-specific files into ``work_dir`` before the agent is created.
 
         Called by ``headless_agent_output`` after ``work_dir`` exists but
@@ -486,5 +486,10 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         their command reads (prompt files, piped stdin, etc.). Default is a
         no-op; overrides are only needed when the message (or any other
         setup) must be on disk before the process starts.
+
+        Returns the tuple of file paths that were written. The caller
+        (``headless_agent_output``) removes these on exit so that agent
+        types that stage prompt files in an in-place source directory do
+        not leak them into the user's checkout.
         """
-        ...
+        return ()
