@@ -223,9 +223,12 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Isolate git from system config and provide default user config.
 
     Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
-    prevent interactive credential prompts, and writes a .gitconfig in the
-    fake HOME (set by isolate_home) with default user info and
-    ``init.defaultBranch``.
+    prevent interactive credential prompts, and (over)writes a .gitconfig in
+    the fake HOME (set by isolate_home) with default user info,
+    ``init.defaultBranch``, and ``safe.directory = *``. The .gitconfig is
+    always rewritten -- isolate_home() also writes a minimal [safe]-only
+    .gitconfig, so overwriting here ensures this function's richer contents
+    win regardless of fixture call order.
 
     Tests that create git repos should use a subdirectory of tmp_path rather
     than tmp_path itself, so that .gitconfig does not appear as an untracked
@@ -234,17 +237,21 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     for key, value in _GIT_ISOLATION_ENV.items():
         monkeypatch.setenv(key, value)
 
+    # Unconditionally (over)write the .gitconfig so this function's documented
+    # contract -- default [user] + [init] + [safe] sections in the fake HOME --
+    # holds regardless of whether isolate_home() ran first (isolate_home()
+    # writes a minimal [safe]-only .gitconfig for release-sandbox subprocess
+    # callers that don't go through isolate_git). safe.directory='*' is needed
+    # so release tests running as root against /code/mngr (owned by root in
+    # the offload sandbox) don't trip git's ownership check -- HOME points at
+    # a tmp dir set by isolate_home, so the image-time /root/.gitconfig
+    # safe.directory entry isn't visible to the subprocess.
     gitconfig = Path.home() / ".gitconfig"
-    if not gitconfig.exists():
-        # safe.directory='*' so release tests running as root against /code/mngr
-        # (owned by root in the offload sandbox) don't trip git's ownership check
-        # — HOME points at a tmp dir set by isolate_home, so the image-time
-        # /root/.gitconfig safe.directory entry isn't visible to the subprocess.
-        gitconfig.write_text(
-            "[user]\n\tname = Test User\n\temail = test@example.com\n"
-            "[init]\n\tdefaultBranch = main\n"
-            "[safe]\n\tdirectory = *\n"
-        )
+    gitconfig.write_text(
+        "[user]\n\tname = Test User\n\temail = test@example.com\n"
+        "[init]\n\tdefaultBranch = main\n"
+        "[safe]\n\tdirectory = *\n"
+    )
 
     yield
 
