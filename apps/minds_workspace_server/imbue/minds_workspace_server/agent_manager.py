@@ -2,7 +2,7 @@ import json
 import os
 import queue
 import shlex
-import sys
+import subprocess
 import threading
 import tomllib
 from pathlib import Path
@@ -18,7 +18,11 @@ from watchdog.observers import Observer as _Observer
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.concurrency_group.errors import EnvironmentStoppedError
+from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds_workspace_server.agent_discovery import discover_agents
@@ -37,6 +41,7 @@ from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
+_DEFAULT_MNGR_BINARY = "mngr"
 
 
 class _LogQueueCallback(MutableModel):
@@ -91,11 +96,19 @@ class AgentManager:
     _own_work_dir: str
     _shutdown_event: ShutdownEvent
     _observe_cg: ConcurrencyGroup | None
+    _observe_process: RunningProcess | None
     _creation_cg: ConcurrencyGroup
+    _mngr_binary: str
 
     @classmethod
-    def build(cls, broadcaster: WebSocketBroadcaster) -> "AgentManager":
-        """Build an AgentManager with the given broadcaster."""
+    def build(cls, broadcaster: WebSocketBroadcaster, mngr_binary: str = _DEFAULT_MNGR_BINARY) -> "AgentManager":
+        """Build an AgentManager with the given broadcaster.
+
+        ``mngr_binary`` is the path or name of the mngr executable used for
+        the discovery-only observe subprocess and for agent-creation commands.
+        Tests inject a stand-in (e.g. ``/usr/bin/false``) to exercise failure
+        paths without relying on a working mngr installation.
+        """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
@@ -108,8 +121,10 @@ class AgentManager:
         manager._own_work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
         manager._shutdown_event = ShutdownEvent.build_root()
         manager._observe_cg = None
+        manager._observe_process = None
         manager._creation_cg = ConcurrencyGroup(name="agent-creation")
         manager._creation_cg.__enter__()
+        manager._mngr_binary = mngr_binary
         return manager
 
     def start(self) -> None:
@@ -219,7 +234,7 @@ class AgentManager:
         new_branch = f"mngr/{name}"
 
         cmd = [
-            "mngr",
+            self._mngr_binary,
             "create",
             name,
             "--id",
@@ -281,7 +296,7 @@ class AgentManager:
             raise AgentCreationError(msg)
 
         cmd = [
-            "mngr",
+            self._mngr_binary,
             "create",
             name,
             "--id",
@@ -463,8 +478,14 @@ class AgentManager:
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Agent refresh failed")
 
-    def _start_observe(self) -> None:
-        """Start the mngr observe subprocess."""
+    def _build_observe_command(self) -> list[str]:
+        """Build the argv for the mngr observe discovery-only subprocess.
+
+        Exposed as a method so tests can assert that the first element
+        resolves to a real mngr binary (an earlier bug invoked
+        ``python -m imbue.mngr``, which has no ``__main__`` and crashed
+        silently on startup).
+        """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
             events_dir = Path(agent_state_dir) / "workspace_server" / "observe"
@@ -473,10 +494,8 @@ class AgentManager:
 
         events_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "imbue.mngr",
+        return [
+            self._mngr_binary,
             "observe",
             "--discovery-only",
             "--on-error",
@@ -485,12 +504,21 @@ class AgentManager:
             str(events_dir),
         ]
 
+    def _start_observe(self) -> None:
+        """Start the mngr observe subprocess and a watchdog for early exit."""
+        cmd = self._build_observe_command()
+
         self._observe_cg = ConcurrencyGroup(name="agent-manager-observe")
         self._observe_cg.__enter__()
 
         try:
-            self._observe_cg.run_process_in_background(
+            # Run from $HOME so mngr picks up its global config instead of any
+            # project-local .mngr/settings.toml in the current directory --
+            # in particular the monorepo's settings has is_allowed_in_pytest
+            # disabled, which would abort the observe subprocess.
+            process = self._observe_cg.run_process_in_background(
                 command=cmd,
+                cwd=Path.home(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
             )
@@ -500,11 +528,53 @@ class AgentManager:
             )
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
+            return
 
-    def _handle_observe_output_line(self, line: str, _is_stdout: bool) -> None:
-        """Parse and dispatch a single line of output from mngr observe."""
+        self._observe_process = process
+
+        # ``run_process_in_background`` returns immediately even if the spawned
+        # binary exits with a non-zero code (e.g. import failure). Attach a
+        # watchdog so a silently-dying subprocess surfaces as a loud error
+        # instead of a stale agent list.
+        self._observe_cg.start_new_thread(
+            target=self._watch_observe_process,
+            args=(process,),
+            name="observe-watchdog",
+            is_checked=False,
+        )
+
+    def _watch_observe_process(self, process: RunningProcess) -> None:
+        """Log an error if the observe subprocess exits before shutdown."""
+        try:
+            process.wait()
+        except (ProcessError, ProcessSetupError, EnvironmentStoppedError, subprocess.TimeoutExpired) as e:
+            if self._shutdown_event.is_set():
+                return
+            _loguru_logger.error("mngr observe subprocess failed: {}", e)
+            return
+
+        if self._shutdown_event.is_set():
+            return
+
+        stderr = process.read_stderr().strip()
+        _loguru_logger.error(
+            "mngr observe subprocess exited unexpectedly (returncode={}). "
+            "Agent lifecycle events will no longer be detected. stderr: {}",
+            process.returncode,
+            stderr if stderr else "(empty)",
+        )
+
+    def _handle_observe_output_line(self, line: str, is_stdout: bool) -> None:
+        """Parse and dispatch a single line of output from mngr observe.
+
+        stderr lines are surfaced as warnings so startup failures from the
+        subprocess (import errors, bad flags, etc.) are not lost.
+        """
         stripped = line.strip()
         if not stripped:
+            return
+        if not is_stdout:
+            _loguru_logger.warning("mngr observe stderr: {}", stripped)
             return
         try:
             event = parse_discovery_event_line(stripped)

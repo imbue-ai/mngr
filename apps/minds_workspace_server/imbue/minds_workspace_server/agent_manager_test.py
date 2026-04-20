@@ -2,6 +2,7 @@
 
 import json
 import queue
+import shutil
 import threading
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_until
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
@@ -639,3 +641,128 @@ def test_handle_discovery_event_dispatches_host_destroyed(
     event = _make_host_destroyed_event(host_id, [agent_id])
     agent_manager._handle_discovery_event(event)
     assert len(agent_manager.get_agents()) == 0
+
+
+def test_build_observe_command_starts_with_mngr_binary(agent_manager: AgentManager) -> None:
+    """The observe subprocess must invoke the ``mngr`` CLI, not ``python -m imbue.mngr``.
+
+    Regression test: a previous implementation used ``sys.executable -m imbue.mngr``,
+    which crashes because ``imbue.mngr`` is a package with no ``__main__``. The
+    failure was silent, leaving agents discovered after startup invisible to the
+    "+" tab menu.
+    """
+    cmd = agent_manager._build_observe_command()
+    assert cmd[0] == "mngr"
+    assert cmd[1] == "observe"
+    assert "--discovery-only" in cmd
+
+
+def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroadcaster) -> None:
+    """The ``mngr_binary`` argument to ``build()`` overrides the default binary path."""
+    manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")
+    try:
+        cmd = manager._build_observe_command()
+        assert cmd[0] == "/path/to/custom-mngr"
+    finally:
+        manager.stop()
+
+
+def test_start_observe_spawns_long_lived_subprocess(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the observe subprocess stays alive after startup.
+
+    This is the regression test for the ``python -m imbue.mngr`` bug; with the
+    old command the subprocess exited immediately (Python package has no
+    ``__main__``) and this assertion would fire.
+    """
+    if shutil.which("mngr") is None:
+        pytest.skip("mngr binary not on PATH")
+
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    try:
+        manager._start_observe()
+        assert manager._observe_process is not None
+        # If the subprocess exits within the window it's a failure (bad command,
+        # crashed on startup, etc.). A healthy observe keeps running.
+        exited = poll_until(
+            lambda: manager._observe_process is not None and manager._observe_process.poll() is not None,
+            timeout=1.5,
+            poll_interval=0.1,
+        )
+        assert not exited, (
+            "mngr observe subprocess exited within 1.5s of startup "
+            f"(returncode={manager._observe_process.returncode}); stderr: "
+            f"{manager._observe_process.read_stderr()!r}"
+        )
+    finally:
+        manager.stop()
+
+
+def test_start_observe_logs_error_when_subprocess_exits_unexpectedly(
+    broadcaster: WebSocketBroadcaster,
+    false_binary: str,
+    loguru_records: list[str],
+) -> None:
+    """If the observe subprocess exits on its own, the watchdog logs an ERROR.
+
+    Uses ``/usr/bin/false`` (or equivalent) as a stand-in mngr binary so the
+    spawned process exits immediately with a non-zero code.
+    """
+    manager = AgentManager.build(broadcaster, mngr_binary=false_binary)
+    try:
+        manager._start_observe()
+        logged_error = poll_until(
+            lambda: any(r.startswith("ERROR") and "mngr observe" in r for r in loguru_records),
+            timeout=5.0,
+            poll_interval=0.05,
+        )
+        assert logged_error, (
+            "Expected an ERROR log from the observe watchdog; got: "
+            f"{[r for r in loguru_records if r.startswith('ERROR')]}"
+        )
+    finally:
+        manager.stop()
+
+
+def test_start_observe_watchdog_stays_quiet_on_clean_shutdown(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    loguru_records: list[str],
+) -> None:
+    """Calling ``stop()`` on a healthy observe subprocess must not produce errors."""
+    if shutil.which("mngr") is None:
+        pytest.skip("mngr binary not on PATH")
+
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    manager._start_observe()
+    # Wait for the subprocess to actually be running before asking it to stop,
+    # so we exercise the "healthy subprocess shut down cleanly" path rather
+    # than a race where stop() fires before the child has started.
+    assert manager._observe_process is not None
+    poll_until(
+        lambda: manager._observe_process is not None and manager._observe_process.poll() is None,
+        timeout=2.0,
+        poll_interval=0.05,
+    )
+    manager.stop()
+
+    errors = [r for r in loguru_records if r.startswith("ERROR") and "mngr observe" in r]
+    assert errors == [], f"Watchdog logged errors during clean shutdown: {errors}"
+
+
+def test_handle_observe_output_line_logs_stderr_as_warning(
+    agent_manager: AgentManager,
+    loguru_records: list[str],
+) -> None:
+    """Stderr output from the observe subprocess is surfaced as a warning."""
+    agent_manager._handle_observe_output_line("something bad happened", is_stdout=False)
+
+    warnings = [r for r in loguru_records if r.startswith("WARNING") and "mngr observe stderr" in r]
+    assert warnings, f"Expected a stderr warning; got: {loguru_records}"
+    assert "something bad happened" in warnings[0]
