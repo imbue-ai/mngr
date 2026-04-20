@@ -24,11 +24,18 @@ register_plugin_config("kanpan", KanpanPluginConfig)
 
 
 def _is_source_enabled(config: KanpanPluginConfig, name: str) -> bool:
-    """Check if a data source is enabled in the plugin config."""
+    """Check if a data source is enabled in the plugin config.
+
+    `data_sources` values arrive as raw dicts from the TOML loader (which uses
+    ``model_construct`` and skips nested coercion) but as ``DataSourceConfig``
+    instances when built in tests or in-code. Handle both.
+    """
     source_config = config.data_sources.get(name)
-    if source_config is not None:
-        return source_config.enabled
-    return True
+    if source_config is None:
+        return True
+    if isinstance(source_config, dict):
+        return source_config.get("enabled", True)
+    return source_config.enabled
 
 
 @hookimpl

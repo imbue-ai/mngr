@@ -408,6 +408,31 @@ def test_plugin_kanpan_data_sources_with_github_config() -> None:
     assert any(s.name == "github" for s in result)
 
 
+def test_plugin_kanpan_data_sources_with_raw_dict_source_config() -> None:
+    """Regression: loader uses model_construct, so data_sources come in as raw dicts."""
+    config = KanpanPluginConfig.model_construct(
+        data_sources={"github": {"enabled": False}},
+        shell_commands={},
+        columns={},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    result = kanpan_data_sources(mngr_ctx=ctx)
+    assert result is not None
+    assert not any(s.name == "github" for s in result)
+
+
+def test_is_source_enabled_raw_dict_disabled() -> None:
+    """Regression: _is_source_enabled must handle raw dict values from the loader."""
+    config = KanpanPluginConfig.model_construct(data_sources={"github": {"enabled": False}})
+    assert _is_source_enabled(config, "github") is False
+
+
+def test_is_source_enabled_raw_dict_enabled_default() -> None:
+    """A raw dict without an 'enabled' key defaults to True."""
+    config = KanpanPluginConfig.model_construct(data_sources={"github": {"pr": True}})
+    assert _is_source_enabled(config, "github") is True
+
+
 def test_plugin_kanpan_data_sources_shell_config_as_dict() -> None:
     # Shell command config as a raw dict (tests the isinstance dict branch for shell)
     ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
