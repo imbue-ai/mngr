@@ -1,8 +1,10 @@
 """SuperTokens authentication routes for the minds desktop client.
 
-Provides routes for email/password sign-up/sign-in, OAuth (Google/GitHub),
-email verification, password reset, and session status. All routes use
-plain HTML + vanilla JS -- no SuperTokens frontend SDK.
+These routes render the sign-in / sign-up / password-reset / settings pages
+and provide JSON APIs consumed by those pages' vanilla JS. All actual
+SuperTokens operations are delegated to the `cloudflare_forwarding` backend
+via `AuthBackendClient`; the desktop client never sees the SuperTokens API
+key, OAuth client secrets, or any other server-only credential.
 """
 
 import json
@@ -13,51 +15,19 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from loguru import logger
-from supertokens_python.asyncio import list_users_by_account_info
-from supertokens_python.exceptions import SuperTokensError
-from supertokens_python.recipe.emailpassword.asyncio import consume_password_reset_token
-from supertokens_python.recipe.emailpassword.asyncio import send_reset_password_email
-from supertokens_python.recipe.emailpassword.asyncio import sign_in
-from supertokens_python.recipe.emailpassword.asyncio import sign_up
-from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
-from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
-from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
-from supertokens_python.recipe.emailpassword.interfaces import PasswordPolicyViolationError
-from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
-from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
-from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
-from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
-from supertokens_python.recipe.emailverification.asyncio import is_email_verified
-from supertokens_python.recipe.emailverification.asyncio import send_email_verification_email
-from supertokens_python.recipe.emailverification.asyncio import verify_email_using_token
-from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
-from supertokens_python.recipe.emailverification.syncio import is_email_verified as is_email_verified_sync
-from supertokens_python.recipe.emailverification.syncio import (
-    send_email_verification_email as send_email_verification_email_sync,
-)
-from supertokens_python.recipe.session.asyncio import create_new_session_without_request_response
-from supertokens_python.recipe.thirdparty.asyncio import get_provider
-from supertokens_python.recipe.thirdparty.asyncio import manually_create_or_update_user
-from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
-from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
-from supertokens_python.syncio import get_user
-from supertokens_python.types import RecipeUserId
-from supertokens_python.types.base import AccountInfoInput
 
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendError
+from imbue.minds.desktop_client.auth_backend_client import AuthResult
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
-from imbue.minds.desktop_client.templates_auth import render_reset_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
-from imbue.minds.desktop_client.templates_auth import render_verify_email_failed_page
-from imbue.minds.desktop_client.templates_auth import render_verify_email_success_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
-
-_TENANT_ID = "public"
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
@@ -69,12 +39,14 @@ def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
 
 
 def _get_session_store(request: Request) -> MultiAccountSessionStore:
-    """Return the multi-account session store from app state."""
     return request.app.state.session_store
 
 
+def _get_auth_backend(request: Request) -> AuthBackendClient:
+    return request.app.state.auth_backend_client
+
+
 def _get_latest_user_info(session_store: MultiAccountSessionStore) -> UserInfo | None:
-    """Return user info for the most recently added account, or None."""
     accounts = session_store.list_accounts()
     if not accounts:
         return None
@@ -89,28 +61,27 @@ def _get_output_format(request: Request) -> OutputFormat:
     return request.app.state.auth_output_format
 
 
-async def _store_session_from_user(
+def _store_session_from_auth_result(
     session_store: MultiAccountSessionStore,
-    user_id: str,
-    email: str,
-    display_name: str | None = None,
+    result: AuthResult,
 ) -> None:
-    """Create a SuperTokens session and store the tokens in the multi-account store."""
-    session = await create_new_session_without_request_response(
-        tenant_id=_TENANT_ID,
-        recipe_user_id=RecipeUserId(user_id),
-    )
-    tokens = session.get_all_session_tokens_dangerously()
+    """Persist the session tokens + user info from a successful auth result."""
+    assert result.user is not None and result.tokens is not None, "AuthResult missing user/tokens"
     session_store.add_or_update_session(
-        access_token=tokens["accessToken"],
-        refresh_token=tokens["refreshToken"] or None,
-        user_id=user_id,
-        email=email,
-        display_name=display_name,
+        access_token=result.tokens.access_token,
+        refresh_token=result.tokens.refresh_token,
+        user_id=result.user.user_id,
+        email=result.user.email,
+        display_name=result.user.display_name,
     )
 
 
-# -- Route handlers (module-level, accessed via request.app.state) --
+def _auth_error_response(exc: AuthBackendError) -> Response:
+    logger.warning("Auth backend unavailable: {}", exc)
+    return _json_response(
+        {"status": "ERROR", "message": "Authentication service is unavailable"},
+        502,
+    )
 
 
 def _handle_auth_page(request: Request, message: str | None = None) -> HTMLResponse:
@@ -129,6 +100,7 @@ def _handle_auth_page(request: Request, message: str | None = None) -> HTMLRespo
 async def _handle_signup_api(request: Request) -> Response:
     """Handle email/password sign-up (JSON API)."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     body = await request.json()
     email = body.get("email", "").strip()
     password = body.get("password", "")
@@ -136,35 +108,25 @@ async def _handle_signup_api(request: Request) -> Response:
     if not email or not password:
         return _json_response({"status": "FIELD_ERROR", "message": "Email and password are required"}, 400)
 
-    result = await sign_up(
-        tenant_id=_TENANT_ID,
-        email=email,
-        password=password,
+    try:
+        result = backend.signup(email=email, password=password)
+    except AuthBackendError as exc:
+        return _auth_error_response(exc)
+
+    if result.status != "OK":
+        return _json_response({"status": result.status, "message": result.message or ""})
+
+    _store_session_from_auth_result(session_store, result)
+    assert result.user is not None
+    return _json_response(
+        {"status": "OK", "userId": result.user.user_id, "needsEmailVerification": result.needs_email_verification}
     )
-
-    if isinstance(result, EmailAlreadyExistsError):
-        return _json_response(
-            {"status": "EMAIL_ALREADY_EXISTS", "message": "An account with this email already exists"}
-        )
-
-    if isinstance(result, EPSignUpOkResult):
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        await _store_session_from_user(session_store, user.id, email)
-        await send_email_verification_email(
-            tenant_id=_TENANT_ID,
-            user_id=user.id,
-            recipe_user_id=recipe_user_id,
-            email=email,
-        )
-        return _json_response({"status": "OK", "userId": user.id, "needsEmailVerification": True})
-
-    return _json_response({"status": "ERROR", "message": "Sign-up failed"}, 500)
 
 
 async def _handle_signin_api(request: Request) -> Response:
     """Handle email/password sign-in (JSON API)."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     body = await request.json()
     email = body.get("email", "").strip()
     password = body.get("password", "")
@@ -172,44 +134,30 @@ async def _handle_signin_api(request: Request) -> Response:
     if not email or not password:
         return _json_response({"status": "FIELD_ERROR", "message": "Email and password are required"}, 400)
 
-    result = await sign_in(
-        tenant_id=_TENANT_ID,
-        email=email,
-        password=password,
+    try:
+        result = backend.signin(email=email, password=password)
+    except AuthBackendError as exc:
+        return _auth_error_response(exc)
+
+    if result.status != "OK":
+        return _json_response({"status": result.status, "message": result.message or ""})
+
+    _store_session_from_auth_result(session_store, result)
+    assert result.user is not None
+    return _json_response(
+        {
+            "status": "OK",
+            "userId": result.user.user_id,
+            "needsEmailVerification": result.needs_email_verification,
+        }
     )
-
-    if isinstance(result, WrongCredentialsError):
-        return _json_response({"status": "WRONG_CREDENTIALS", "message": "Incorrect email or password"})
-
-    if isinstance(result, EPSignInOkResult):
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        verified = await is_email_verified(recipe_user_id=recipe_user_id, email=email)
-        await _store_session_from_user(session_store, user.id, email)
-        needs_verification = not verified
-        if needs_verification:
-            await send_email_verification_email(
-                tenant_id=_TENANT_ID,
-                user_id=user.id,
-                recipe_user_id=recipe_user_id,
-                email=email,
-            )
-        return _json_response(
-            {
-                "status": "OK",
-                "userId": user.id,
-                "needsEmailVerification": needs_verification,
-            }
-        )
-
-    return _json_response({"status": "ERROR", "message": "Sign-in failed"}, 500)
 
 
 async def _handle_signout_api(request: Request) -> Response:
     """Handle sign-out for a specific account.
 
-    Expects a JSON body with a ``user_id`` field identifying which account
-    to sign out. If no user_id is provided, returns an error.
+    Expects a JSON body with a ``user_id`` field identifying which account to
+    sign out. If no user_id is provided, returns an error.
     """
     session_store = _get_session_store(request)
     try:
@@ -245,37 +193,24 @@ def _handle_status_api(request: Request) -> Response:
 def _handle_email_verified_api(request: Request) -> Response:
     """Check if the current user's email is verified."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"verified": False, "signedIn": False})
-    user = get_user(str(user_info.user_id))
-    if user is None:
-        return _json_response({"verified": False, "signedIn": False})
-    recipe_user_id = (
-        user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
-    )
-    verified = is_email_verified_sync(recipe_user_id=recipe_user_id, email=user_info.email)
+    verified = backend.is_email_verified(str(user_info.user_id), user_info.email)
     return _json_response({"verified": verified, "signedIn": True})
 
 
 def _handle_resend_verification_api(request: Request) -> Response:
     """Resend the email verification email."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"status": "ERROR", "message": "Not signed in"}, 401)
-    user = get_user(str(user_info.user_id))
-    if user is None:
-        return _json_response({"status": "ERROR", "message": "User not found"}, 404)
-    recipe_user_id = (
-        user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(str(user_info.user_id))
-    )
-    send_email_verification_email_sync(
-        tenant_id=_TENANT_ID,
-        user_id=str(user_info.user_id),
-        recipe_user_id=recipe_user_id,
-        email=user_info.email,
-    )
+    ok = backend.send_verification_email(str(user_info.user_id), user_info.email)
+    if not ok:
+        return _json_response({"status": "ERROR", "message": "Failed to send verification email"}, 502)
     return _json_response({"status": "OK"})
 
 
@@ -287,90 +222,60 @@ def _handle_check_email_page(request: Request) -> HTMLResponse:
     return HTMLResponse(render_check_email_page(email=email))
 
 
-async def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
-    """Initiate OAuth by opening the system browser."""
+def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
+    """Initiate OAuth by opening the system browser at the provider-specific URL."""
+    backend = _get_auth_backend(request)
     server_port = _get_server_port(request)
-    provider = await get_provider(tenant_id=_TENANT_ID, third_party_id=provider_id)
-    if provider is None:
-        return _json_response({"error": f"Unknown provider: {provider_id}"}, 404)
-
     callback_url = f"http://127.0.0.1:{server_port}/auth/callback/{provider_id}"
-    auth_redirect = await provider.get_authorisation_redirect_url(
-        redirect_uri_on_provider_dashboard=callback_url,
-        user_context={},
-    )
+    auth_url = backend.oauth_authorize_url(provider_id=provider_id, callback_url=callback_url)
+    if auth_url is None:
+        return _json_response({"status": "ERROR", "error": f"Unknown provider: {provider_id}"}, 404)
 
-    webbrowser.open(auth_redirect.url_with_query_params)
+    webbrowser.open(auth_url)
     return _json_response({"status": "OK", "message": f"Opened {provider_id} sign-in in your browser"})
 
 
-async def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
+def _handle_oauth_callback(provider_id: str, request: Request) -> HTMLResponse:
     """Handle OAuth callback from the provider (opened in system browser)."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     output_format = _get_output_format(request)
     server_port = _get_server_port(request)
-    query_params = dict(request.query_params)
     callback_url = f"http://127.0.0.1:{server_port}/auth/callback/{provider_id}"
-
-    provider = await get_provider(tenant_id=_TENANT_ID, third_party_id=provider_id)
-    if provider is None:
-        return HTMLResponse(f"<html><body><h1>Unknown provider: {provider_id}</h1></body></html>", status_code=404)
+    query_params = dict(request.query_params)
 
     try:
-        oauth_tokens = await provider.exchange_auth_code_for_oauth_tokens(
-            redirect_uri_info=RedirectUriInfo(
-                redirect_uri_on_provider_dashboard=callback_url,
-                redirect_uri_query_params=query_params,
-                pkce_code_verifier=None,
-            ),
-            user_context={},
+        result = backend.oauth_callback(
+            provider_id=provider_id,
+            callback_url=callback_url,
+            query_params=query_params,
         )
-        user_info = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
-    except (ValueError, KeyError, OSError) as e:
-        logger.error("OAuth callback failed for {}: {}", provider_id, e)
+    except AuthBackendError as exc:
+        logger.error("OAuth callback failed for {}: {}", provider_id, exc)
         return HTMLResponse(
-            f"<html><body><h1>Authentication failed</h1><p>{e}</p></body></html>",
+            f"<html><body><h1>Authentication failed</h1><p>{exc}</p></body></html>",
+            status_code=502,
+        )
+
+    if result.status != "OK" or result.user is None or result.tokens is None:
+        message = result.message or "Sign-in failed"
+        return HTMLResponse(
+            f"<html><body><h1>Authentication failed</h1><p>{message}</p></body></html>",
             status_code=400,
         )
 
-    if user_info.email is None or user_info.email.id is None:
-        return HTMLResponse(
-            "<html><body><h1>No email provided by the OAuth provider</h1></body></html>",
-            status_code=400,
-        )
-
-    email = user_info.email.id
-    is_verified = user_info.email.is_verified
-
-    result = await manually_create_or_update_user(
-        tenant_id=_TENANT_ID,
-        third_party_id=provider_id,
-        third_party_user_id=user_info.third_party_user_id,
-        email=email,
-        is_verified=is_verified,
-    )
-
-    if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
-        return HTMLResponse(
-            "<html><body><h1>Sign-in failed</h1><p>Could not create account</p></body></html>",
-            status_code=400,
-        )
-
-    user = result.user
-    display_name: str | None = None
-    if user_info.raw_user_info_from_provider and user_info.raw_user_info_from_provider.from_user_info_api:
-        raw = user_info.raw_user_info_from_provider.from_user_info_api
-        display_name = raw.get("name") or raw.get("login") or raw.get("displayName")
-
-    await _store_session_from_user(session_store, user.id, email, display_name=display_name)
+    _store_session_from_auth_result(session_store, result)
 
     emit_event(
         "auth_success",
-        {"message": f"Signed in as {display_name or email}", "email": email},
+        {
+            "message": f"Signed in as {result.user.display_name or result.user.email}",
+            "email": result.user.email,
+        },
         output_format,
     )
 
-    return HTMLResponse(render_oauth_close_page(email=email, display_name=display_name))
+    return HTMLResponse(render_oauth_close_page(email=result.user.email, display_name=result.user.display_name))
 
 
 def _handle_forgot_password_page(request: Request) -> HTMLResponse:
@@ -380,88 +285,33 @@ def _handle_forgot_password_page(request: Request) -> HTMLResponse:
 
 async def _handle_forgot_password_api(request: Request) -> Response:
     """Send a password reset email."""
+    backend = _get_auth_backend(request)
     body = await request.json()
     email = body.get("email", "").strip()
     if not email:
         return _json_response({"status": "FIELD_ERROR", "message": "Email is required"}, 400)
-
-    # Look up the user by email. Always return a success-looking response to
-    # avoid leaking whether an account exists for the given address.
-    _success = _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
-    users = await list_users_by_account_info(
-        tenant_id=_TENANT_ID,
-        account_info=AccountInfoInput(email=email),
-    )
-    if not users:
-        return _success
-
-    user_id = users[0].id
-    result = await send_reset_password_email(
-        tenant_id=_TENANT_ID,
-        user_id=user_id,
-        email=email,
-    )
-    if result == "UNKNOWN_USER_ID_ERROR":
-        logger.warning("Failed to send password reset email for user {}", user_id)
-    return _success
+    backend.forgot_password(email)
+    return _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
 
 
-def _handle_reset_password_page(request: Request, token: str = "") -> HTMLResponse:
-    """Render the password reset page."""
-    return HTMLResponse(render_reset_password_page(token=token))
+def _handle_reset_password_redirect(request: Request) -> Response:
+    """Redirect legacy in-app reset links to the auth backend's reset page.
 
-
-async def _handle_reset_password_api(request: Request) -> Response:
-    """Process a password reset."""
-    body = await request.json()
-    token = body.get("token", "")
-    new_password = body.get("newPassword", "")
-
-    if not token or not new_password:
-        return _json_response({"status": "FIELD_ERROR", "message": "Token and new password are required"}, 400)
-
-    result = await consume_password_reset_token(
-        tenant_id=_TENANT_ID,
-        token=token,
-    )
-
-    if not isinstance(result, ConsumePasswordResetTokenOkResult):
-        return _json_response({"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"})
-
-    update_result = await update_email_or_password(
-        recipe_user_id=RecipeUserId(result.user_id),
-        password=new_password,
-    )
-
-    if isinstance(update_result, PasswordPolicyViolationError):
-        return _json_response({"status": "FIELD_ERROR", "message": update_result.failure_reason}, 400)
-
-    if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
-        return _json_response({"status": "ERROR", "message": "Failed to update password"}, 500)
-
-    return _json_response({"status": "OK", "message": "Password has been reset"})
-
-
-async def _handle_verify_email(request: Request, token: str = "", tenantId: str = "public") -> HTMLResponse:
-    """Handle email verification link click. Verifies the token and shows a result page."""
-    if not token:
-        return HTMLResponse(render_verify_email_failed_page(), status_code=400)
-
-    try:
-        result = await verify_email_using_token(tenant_id=tenantId, token=token)
-    except SuperTokensError as exc:
-        logger.error("Email verification error: {}", exc)
-        return HTMLResponse(render_verify_email_failed_page(), status_code=400)
-
-    if isinstance(result, VerifyEmailUsingTokenOkResult):
-        return HTMLResponse(render_verify_email_success_page())
-
-    return HTMLResponse(render_verify_email_failed_page(), status_code=400)
+    The reset link embedded in the reset email now points at the backend
+    directly; this redirect keeps any older links working.
+    """
+    backend = _get_auth_backend(request)
+    token = request.query_params.get("token", "")
+    target = str(backend.base_url).rstrip("/") + "/auth/reset-password"
+    if token:
+        target = f"{target}?token={token}"
+    return Response(status_code=302, headers={"Location": target})
 
 
 def _handle_settings_page(request: Request) -> HTMLResponse:
     """Render the account settings page."""
     session_store = _get_session_store(request)
+    backend = _get_auth_backend(request)
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return HTMLResponse(
@@ -469,13 +319,7 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
             headers={"Location": "/auth/login"},
         )
 
-    provider = "email"
-    user = get_user(str(user_info.user_id))
-    if user and user.login_methods:
-        for lm in user.login_methods:
-            if lm.third_party is not None:
-                provider = lm.third_party.id
-                break
+    provider = backend.get_user_provider(str(user_info.user_id))
 
     return HTMLResponse(
         render_settings_page(
@@ -488,19 +332,21 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
     )
 
 
-# -- Router factory --
-
-
 def create_supertokens_router(
     session_store: MultiAccountSessionStore,
+    auth_backend_client: AuthBackendClient,
     server_port: int,
     output_format: OutputFormat,
 ) -> APIRouter:
-    """Create a FastAPI router with SuperTokens auth routes.
+    """Create a FastAPI router with the auth routes.
 
-    Stores config in app.state for access by module-level handlers.
-    The actual state is set via a startup event registered on the router.
+    Stores dependencies in ``app.state`` so module-level handlers can access
+    them. The caller is expected to register this router on an app whose
+    ``app.state`` already has ``session_store``, ``auth_backend_client``,
+    ``auth_server_port``, and ``auth_output_format`` populated by
+    ``create_desktop_client``.
     """
+    _ = session_store, auth_backend_client, server_port, output_format
     router = APIRouter(prefix="/auth", tags=["auth"])
 
     router.get("/login")(_handle_auth_page)
@@ -515,9 +361,7 @@ def create_supertokens_router(
     router.get("/callback/{provider_id}")(_handle_oauth_callback)
     router.get("/forgot-password")(_handle_forgot_password_page)
     router.post("/api/forgot-password")(_handle_forgot_password_api)
-    router.get("/reset-password")(_handle_reset_password_page)
-    router.post("/api/reset-password")(_handle_reset_password_api)
-    router.get("/verify-email")(_handle_verify_email)
+    router.get("/reset-password")(_handle_reset_password_redirect)
     router.get("/settings")(_handle_settings_page)
 
     return router

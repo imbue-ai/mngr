@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
@@ -1813,6 +1814,7 @@ def create_desktop_client(
     minds_config: MindsConfig | None = None,
     stream_manager: MngrStreamManager | None = None,
     session_store: MultiAccountSessionStore | None = None,
+    auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
@@ -1859,6 +1861,7 @@ def create_desktop_client(
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
+    app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
@@ -1873,10 +1876,11 @@ def create_desktop_client(
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
-    # Mount the SuperTokens auth routes
-    if session_store is not None:
+    # Mount the auth routes (proxy to the cloudflare_forwarding auth backend)
+    if session_store is not None and auth_backend_client is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,
+            auth_backend_client=auth_backend_client,
             server_port=server_port,
             output_format=output_format or OutputFormat.JSONL,
         )

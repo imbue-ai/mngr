@@ -561,3 +561,61 @@ def test_authenticate_supertokens_raises_401_on_general_error(
         _authenticate_supertokens("bad-token", session_getter=_raise)
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid token"
+
+
+# -- Auth route tests --
+#
+# These are smoke tests that verify the auth routes are wired up and reject
+# calls when SuperTokens is not configured. Exercising the success paths
+# requires a real SuperTokens core and is covered by release-marked E2E tests.
+
+
+def test_auth_signup_returns_503_when_supertokens_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/signup without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/signup", json={"email": "a@b.com", "password": "password123"})
+    assert resp.status_code == 503
+
+
+def test_auth_signin_returns_503_when_supertokens_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/signin without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/signin", json={"email": "a@b.com", "password": "password123"})
+    assert resp.status_code == 503
+
+
+def test_auth_session_refresh_returns_503_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/refresh without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/refresh", json={"refresh_token": "r"})
+    assert resp.status_code == 503
+
+
+def test_auth_verify_email_missing_token_shows_failed_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verify-email endpoint renders an HTML failure page when the token is missing."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/verify-email")
+    assert resp.status_code == 400
+    assert "Verification failed" in resp.text
+
+
+def test_auth_reset_password_page_renders_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reset-password page renders an HTML form embedding the token."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/reset-password", params={"token": "tok-xyz"})
+    assert resp.status_code == 200
+    assert "tok-xyz" in resp.text
+    assert "Reset password" in resp.text

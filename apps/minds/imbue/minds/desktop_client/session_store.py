@@ -14,17 +14,16 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
-from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
-from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
-from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 
 _SESSIONS_FILENAME = "sessions.json"
 _USER_ID_PREFIX_LENGTH = 16
@@ -109,6 +108,10 @@ class MultiAccountSessionStore(MutableModel):
     """
 
     data_dir: Path = Field(frozen=True, description="Root data directory (e.g. ~/.minds)")
+    auth_backend_client: AuthBackendClient | None = Field(
+        default=None,
+        description="Backend used to refresh sessions. When omitted, expired tokens are not refreshed.",
+    )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @property
@@ -216,33 +219,26 @@ class MultiAccountSessionStore(MutableModel):
 
     def _try_refresh(self, session: AccountSession) -> str | None:
         """Attempt to refresh the access token. Returns new token on success, None on failure."""
-        if session.refresh_token is None:
+        if session.refresh_token is None or self.auth_backend_client is None:
             return None
         try:
-            new_session = refresh_session_without_request_response(
-                refresh_token=str(session.refresh_token),
-            )
-            tokens = new_session.get_all_session_tokens_dangerously()
-            new_access_token = tokens["accessToken"]
-            new_refresh_token = tokens.get("refreshToken") or str(session.refresh_token)
-            self.add_or_update_session(
-                access_token=new_access_token,
-                refresh_token=new_refresh_token,
-                user_id=str(session.user_id),
-                email=session.email,
-                display_name=session.display_name,
-            )
-            logger.info("Refreshed access token for user {}", str(session.user_id)[:8])
-            return new_access_token
-        except (ValueError, TypeError, KeyError, OSError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            tokens = self.auth_backend_client.refresh_session(refresh_token=str(session.refresh_token))
+        except httpx.HTTPError as exc:
             logger.warning("Failed to refresh session for user {}: {}", str(session.user_id)[:8], exc)
             return None
-        except (RuntimeError, AttributeError) as exc:
-            # The supertokens Querier raises bare Exception for network failures,
-            # HTTP errors from the core, and core availability issues. We catch
-            # RuntimeError/AttributeError as the most common unexpected paths.
-            logger.warning("Failed to refresh session (unexpected): {}", exc)
+        if tokens is None:
+            logger.warning("Backend rejected session refresh for user {}", str(session.user_id)[:8])
             return None
+        new_refresh_token = tokens.refresh_token or str(session.refresh_token)
+        self.add_or_update_session(
+            access_token=tokens.access_token,
+            refresh_token=new_refresh_token,
+            user_id=str(session.user_id),
+            email=session.email,
+            display_name=session.display_name,
+        )
+        logger.info("Refreshed access token for user {}", str(session.user_id)[:8])
+        return tokens.access_token
 
     def associate_workspace(self, user_id: str, agent_id: str) -> None:
         """Associate a workspace with an account."""

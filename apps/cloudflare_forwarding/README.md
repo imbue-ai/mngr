@@ -22,6 +22,11 @@ Requires the following Modal Secrets (env vars):
 - `CLOUDFLARE_DOMAIN`: Base domain for service subdomains (e.g. `example.com`)
 - `USER_CREDENTIALS`: JSON object mapping usernames to secrets (e.g. `{"alice": "secret1"}`)
 - `CLOUDFLARE_ALLOWED_IDPS` (optional): Comma-separated list of Cloudflare identity provider UUIDs to allow on Access Applications (e.g. Google OAuth, one-time PIN). When set, created Access Applications will only offer these identity providers to users. When unset, Cloudflare uses the account default.
+- `SUPERTOKENS_CONNECTION_URI` (optional): URL of the SuperTokens core. Required for the `/auth/*` endpoints.
+- `SUPERTOKENS_API_KEY` (optional): API key for the SuperTokens core. Paired with `SUPERTOKENS_CONNECTION_URI`.
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): Google OAuth credentials used by the `/auth/oauth/*` endpoints.
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): GitHub OAuth credentials used by the `/auth/oauth/*` endpoints.
+- `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in outbound password-reset and email-verification links. Defaults to `https://cloudflare-forwarding.modal.run`.
 
 Deploy with:
 
@@ -64,3 +69,20 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 - `PUT /tunnels/{tunnel_name}/services/{service_name}/auth` -- Set/override the auth policy for a specific service.
 
 When a default auth policy is set on a tunnel, new services automatically get a Cloudflare Access Application with that policy applied. Per-service overrides replace the inherited policy entirely.
+
+### Auth (unauthenticated)
+
+These endpoints front the SuperTokens core so that clients (e.g. the `minds` desktop client) never need the SuperTokens API key. They require `SUPERTOKENS_CONNECTION_URI` (and usually `SUPERTOKENS_API_KEY`) to be configured on the server; otherwise they return 503.
+
+- `POST /auth/signup` -- Body: `{email, password}`. Returns status, user info, session tokens, and whether email verification is pending.
+- `POST /auth/signin` -- Body: `{email, password}`. Returns status, user info, session tokens, and whether email verification is pending.
+- `POST /auth/session/refresh` -- Body: `{refresh_token}`. Returns a new access/refresh token pair.
+- `POST /auth/email/send-verification` -- Body: `{user_id, email}`. Resends the verification email.
+- `POST /auth/email/is-verified` -- Body: `{user_id, email}`. Returns `{verified: bool}`.
+- `GET /auth/verify-email?token=...` -- Renders an HTML result page. Used by the link inside verification emails.
+- `POST /auth/password/forgot` -- Body: `{email}`. Always returns OK (to avoid account enumeration).
+- `POST /auth/password/reset` -- Body: `{token, new_password}`. Consumes a reset token and sets a new password.
+- `GET /auth/reset-password?token=...` -- Renders an HTML form. Used by the link inside password-reset emails.
+- `POST /auth/oauth/authorize` -- Body: `{provider_id, callback_url}`. Returns the URL to redirect the user to.
+- `POST /auth/oauth/callback` -- Body: `{provider_id, callback_url, query_params}`. Exchanges OAuth params for a session.
+- `GET /auth/users/{user_id}` -- Returns basic info about a user (email, login provider).
