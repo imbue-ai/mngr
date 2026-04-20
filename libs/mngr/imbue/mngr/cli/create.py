@@ -1407,7 +1407,8 @@ def _parse_agent_opts(
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
-    # otherwise auto-generate. Shared with _create_headless.
+    # otherwise auto-generate. Runs on both interactive and headless agents
+    # since they share this pipeline.
     parsed_agent_name = _resolve_or_generate_agent_name(address, opts)
 
     # Determine transfer mode
