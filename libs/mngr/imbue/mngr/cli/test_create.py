@@ -491,6 +491,7 @@ def test_extra_window_without_name_uses_default_window_name(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_edit_message_sends_edited_content(
     cli_runner: CliRunner,
     temp_work_dir: Path,

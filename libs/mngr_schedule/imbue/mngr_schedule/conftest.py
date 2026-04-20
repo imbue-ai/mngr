@@ -68,3 +68,20 @@ def bare_temp_mngr_ctx(
 ) -> MngrContext:
     """MngrContext with no plugins loaded (bare hookspecs only)."""
     return _build_mngr_ctx(bare_plugin_manager, tmp_path)
+
+
+@pytest.fixture()
+def monorepo_root() -> Path:
+    """Get the monorepo root from this file's location.
+
+    mngr schedule add needs to package the repo, so the subprocess must run
+    from the monorepo root. We can't use cwd because isolate_home() chdir's
+    to a temp directory.
+
+    The path is derived from this file's location
+    (libs/mngr_schedule/imbue/mngr_schedule/conftest.py), mirroring the
+    pattern used in libs/mngr/imbue/mngr/conftest.py and other sibling
+    modules. Avoiding a git subprocess keeps fixtures fast and makes the
+    fixture work in non-git checkouts.
+    """
+    return Path(__file__).resolve().parents[4]
