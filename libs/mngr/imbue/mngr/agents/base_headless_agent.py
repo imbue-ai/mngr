@@ -174,7 +174,14 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
                 # Raced with deletion between mtime probe and read.
                 lines.append(f"{label}: {path} -- does not exist")
                 continue
-            except (OSError, HostError) as e:
+            except (OSError, HostError, UnicodeDecodeError) as e:
+                # UnicodeDecodeError lives here (not OSError) because
+                # read_text_file decodes the file as UTF-8 and subprocess
+                # output isn't guaranteed to be valid UTF-8. Treating it
+                # as a read failure honours the docstring contract:
+                # "filesystem / remote-host errors are trace-logged and
+                # folded into the rendered line so they neither mask the
+                # caller's primary error nor disappear silently."
                 logger.trace("read_text_file({}) failed: {}", path, e)
                 lines.append(f"{label}: {path} -- exists, read failed: {e}")
                 continue

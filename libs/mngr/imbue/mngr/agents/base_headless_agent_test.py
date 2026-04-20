@@ -334,3 +334,33 @@ def test_raise_no_output_error_state_dir_truncates_long_content_to_tail(
     assert f"{len(long_content)} chars" in message
     assert tail_marker in message
     assert head_marker not in message
+
+
+def test_raise_no_output_error_state_dir_handles_non_utf8_bytes(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Non-UTF-8 bytes in stdout/stderr should fold into 'read failed', not raise.
+
+    The diagnostic is documented as best-effort: read failures (including
+    decode errors, since read_text_file decodes as UTF-8) must not mask
+    the caller's primary "exited without producing output" error.
+    """
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="pane")
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    # 0xff is never valid as a UTF-8 leading byte, so decoding will raise
+    # UnicodeDecodeError. Writing via write_bytes() bypasses any encoding
+    # step that would otherwise silently fix up the content.
+    (agent_dir / "stdout.log").write_bytes(b"\xff\xfe garbage \xff")
+    (agent_dir / "stderr.log").write_text("")
+    with pytest.raises(MngrError) as excinfo:
+        agent._raise_no_output_error()
+    message = str(excinfo.value)
+    # The diagnostic contract: the stdout line must render as a read
+    # failure (not propagate UnicodeDecodeError, not claim "does not
+    # exist", not go missing). The caller's subject must still be present.
+    assert "[state-dir]" in message
+    assert "exists, read failed" in message
+    assert "exited without producing output" in message
