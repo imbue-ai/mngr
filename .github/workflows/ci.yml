@@ -63,6 +63,7 @@ jobs:
           restore-keys: offload-durations-${{ github.ref }}-
 
       - name: Run tests via offload
+        id: tests
         run: just test-offload
 
       - name: Save offload test durations for next run
@@ -79,13 +80,57 @@ jobs:
           uv run coverage combine .coverage.*
           uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80
 
-      - name: Report test results
+      # Detect flaky-recovered case: the test step succeeded (offload exit 0 or
+      # 2) but junit still records failing attempts. Exit 2 means offload retried
+      # flaky tests and they ultimately passed; we want a neutral (yellow) check
+      # rather than a red one in that case.
+      - name: Detect flaky-recovered tests
+        id: flaky
         if: always()
+        run: |
+          if [ "${{ steps.tests.outcome }}" = "success" ] \
+              && [ -f test-results/junit.xml ] \
+              && grep -qE '<(failure|error)[ >/]' test-results/junit.xml; then
+            echo "is_flaky_recovered=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_flaky_recovered=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report test results
+        if: always() && steps.flaky.outputs.is_flaky_recovered != 'true'
         uses: mikepenz/action-junit-report@v5
         with:
           report_paths: test-results/junit.xml
           include_passed: false
           check_name: Unit + Integration Tests
+
+      - name: Report test annotations (flaky recovered)
+        if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/junit.xml
+          include_passed: false
+          check_name: Unit + Integration Tests
+          annotate_only: true
+
+      - name: Post neutral check (flaky recovered)
+        if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          gh api --method POST "repos/${{ github.repository }}/check-runs" --input - <<EOF
+          {
+            "name": "Unit + Integration Tests",
+            "head_sha": "$sha",
+            "status": "completed",
+            "conclusion": "neutral",
+            "output": {
+              "title": "Tests passed after flaky retries",
+              "summary": "One or more tests failed on first attempt but passed on retry. See job logs and the \"Unit + Integration Tests\" annotations for details."
+            }
+          }
+          EOF
 
       - name: Upload test results
         if: always()
@@ -179,6 +224,7 @@ jobs:
           restore-keys: offload-acceptance-durations-${{ github.ref }}-
 
       - name: Run acceptance tests via offload
+        id: tests
         run: just test-offload-acceptance
 
       - name: Save offload test durations for next run
@@ -188,13 +234,54 @@ jobs:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
 
-      - name: Report test results
+      # See "Detect flaky-recovered tests" in the test-offload job for rationale.
+      - name: Detect flaky-recovered tests
+        id: flaky
         if: always()
+        run: |
+          if [ "${{ steps.tests.outcome }}" = "success" ] \
+              && [ -f test-results/junit.xml ] \
+              && grep -qE '<(failure|error)[ >/]' test-results/junit.xml; then
+            echo "is_flaky_recovered=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_flaky_recovered=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report test results
+        if: always() && steps.flaky.outputs.is_flaky_recovered != 'true'
         uses: mikepenz/action-junit-report@v5
         with:
           report_paths: test-results/junit.xml
           include_passed: false
           check_name: Acceptance Tests
+
+      - name: Report test annotations (flaky recovered)
+        if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/junit.xml
+          include_passed: false
+          check_name: Acceptance Tests
+          annotate_only: true
+
+      - name: Post neutral check (flaky recovered)
+        if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          gh api --method POST "repos/${{ github.repository }}/check-runs" --input - <<EOF
+          {
+            "name": "Acceptance Tests",
+            "head_sha": "$sha",
+            "status": "completed",
+            "conclusion": "neutral",
+            "output": {
+              "title": "Tests passed after flaky retries",
+              "summary": "One or more tests failed on first attempt but passed on retry. See job logs and the \"Acceptance Tests\" annotations for details."
+            }
+          }
+          EOF
 
       - name: Upload test results
         if: always()
