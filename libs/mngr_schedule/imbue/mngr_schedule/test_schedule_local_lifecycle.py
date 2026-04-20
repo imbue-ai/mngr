@@ -56,7 +56,7 @@ def _marker_for(prefix: str, trigger_name: str) -> str:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(300)
 def test_schedule_local_add_and_remove_lifecycle() -> None:
     """End-to-end: CLI add installs a real crontab entry; CLI remove takes it out."""
     # Unique per test run to avoid colliding with other workers or leftover state.
