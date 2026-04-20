@@ -35,6 +35,7 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import _create_environment
@@ -977,6 +978,38 @@ def test_build_provider_instance_testing_mode(
 
     # Clean up the app registry
     ModalProviderBackend.close_app("build-test")
+
+
+def test_build_provider_instance_environment_name_derived_from_prefix(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Verify that the Modal environment name is prefix + user_id.
+
+    This test is trivial but necessary for the validity of the prefix check in
+    make_modal_provider_real (conftest.py): we validate the prefix against
+    TEST_ENV_PATTERN as a proxy for the Modal environment name. That proxy is
+    only valid if environment_name == f"{prefix}{user_id}" remains the formula
+    in build_provider_instance. If this test breaks, the prefix check no longer
+    guarantees correct environment naming.
+    """
+    config = ModalProviderConfig(
+        mode=ModalMode.TESTING,
+        app_name="env-name-test",
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+    )
+    instance = ModalProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("test"),
+        config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert isinstance(instance, ModalProviderInstance)
+
+    expected_env_name = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
+    if len(expected_env_name) > MODAL_NAME_MAX_LENGTH:
+        expected_env_name = expected_env_name[:MODAL_NAME_MAX_LENGTH]
+    assert instance.environment_name == expected_env_name
+
+    ModalProviderBackend.close_app("env-name-test")
 
 
 def test_build_provider_instance_truncates_long_names(
