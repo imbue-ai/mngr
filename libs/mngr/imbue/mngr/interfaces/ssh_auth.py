@@ -31,8 +31,7 @@ class SSHAuthDeserializationError(ValueError):
     """Raised when SSHAuthMethod deserialization fails.
 
     Subclasses ValueError so Pydantic catches it in BeforeValidator and
-    converts it to a validation error. Using a custom class avoids ratchet
-    violations for builtin exception raises.
+    converts it to a validation error.
     """
 
 
@@ -185,14 +184,10 @@ def _deserialize_ssh_auth(v: Any) -> "SSHAuthMethod":
     if isinstance(v, SSHAuthMethod):
         return v
     if not isinstance(v, dict):
-        msg = f"Expected SSHAuthMethod or dict, got {type(v)}"
-        raise SSHAuthDeserializationError(msg)
-    auth_type = v.get("auth_type")
-    if auth_type is None:
-        raise SSHAuthDeserializationError("Missing auth_type discriminator in SSH auth data")
-    subcls = SSHAuthMethod._registry.get(auth_type)
+        raise SSHAuthDeserializationError(f"Expected dict, got {type(v).__name__}")
+    subcls = SSHAuthMethod._registry.get(v.get("auth_type"))
     if subcls is None:
-        raise SSHAuthDeserializationError(f"Unknown SSH auth type: {auth_type!r}")
+        raise SSHAuthDeserializationError(f"Unknown SSH auth type: {v.get('auth_type')!r}")
     return subcls.model_validate(v)
 
 
