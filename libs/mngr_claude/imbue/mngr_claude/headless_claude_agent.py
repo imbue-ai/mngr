@@ -293,12 +293,21 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         if all_extra_args:
             parts.extend(all_extra_args)
 
-        # If the caller set --message (plumbed as initial_message) and their
-        # agent_args don't already reference the prompt file, append it.
-        # Keeps `ask`-style callers (which pass the file explicitly) working
-        # and makes `mngr create --foreground --message` actually deliver
-        # the message to claude.
-        if self.get_initial_message() is not None and _MNGR_PROMPT_FILE not in " ".join(all_extra_args):
+        # If a prompt file has been staged in the work dir (by
+        # prepare_headless_work_dir, or by a caller's pre_create_setup hook)
+        # and the caller's agent_args do not already reference it, append a
+        # cat reference so claude actually receives the prompt.
+        #
+        # Gating on the file's existence -- not on get_initial_message() --
+        # is deliberate: assemble_command is called by create_agent_state
+        # BEFORE data.json is written, so get_initial_message() is always
+        # None at this point. The file, by contrast, is written earlier in
+        # the same headless_agent_output context manager, so it is visible
+        # here.
+        if (
+            _MNGR_PROMPT_FILE not in " ".join(all_extra_args)
+            and host.get_file_mtime(self.work_dir / _MNGR_PROMPT_FILE) is not None
+        ):
             parts.append(f'"$(cat "$MNGR_AGENT_WORK_DIR/{_MNGR_PROMPT_FILE}")"')
 
         cmd_str = " ".join(parts)

@@ -804,6 +804,46 @@ def test_create_headless_streams_output(
     assert "headless-test-output" in result.output
 
 
+@pytest.mark.tmux
+def test_create_headless_with_message_does_not_raise(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Passing --message on the headless path must not blow up in api_create.
+
+    Regression test: a previous revision plumbed --message onto
+    CreateAgentOptions.initial_message, which caused api_create to call
+    wait_for_ready_signal + send_message. Both raise on headless agents
+    (NotImplementedError / SendMessageError respectively), so every
+    headless create that carried a message exited non-zero. The agent
+    command here ignores the prompt file (headless_command has no prompt
+    semantics); the test is purely checking that the flow completes.
+    """
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(source_dir),
+            "--message",
+            "user message body",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    assert "headless-test-output" in result.output
+
+
 # =============================================================================
 # Tests for incompatible flag rejection on the headless path
 # =============================================================================

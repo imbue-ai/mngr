@@ -484,7 +484,7 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         before the agent instance is constructed. Agent types override this
         to materialise the caller's ``initial_message`` into whatever form
         their command reads (prompt files, piped stdin, etc.). Default is a
-        no-op; ``initial_message`` is also stored on the agent and retrievable
-        via ``get_initial_message()``, so overrides are only needed when the
-        message must be on disk before the process starts.
+        no-op; overrides are only needed when the message (or any other
+        setup) must be on disk before the process starts.
         """
+        ...

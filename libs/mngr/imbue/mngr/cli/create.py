@@ -206,10 +206,13 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("extra_provision_command", "--extra-provision-command"),
     ("upload_file", "--upload-file"),
     ("extra_window", "--extra-window/-w"),
-    # --message / --message-file are honoured on the headless path: they feed
-    # CreateAgentOptions.initial_message, and each agent type's
-    # prepare_headless_work_dir classmethod decides what to do with it
-    # (e.g. HeadlessClaude writes .mngr-prompt that its command cat's in).
+    # --message / --message-file are honoured on the headless path: they are
+    # passed to headless_agent_output, which hands them to each agent type's
+    # prepare_headless_work_dir classmethod (e.g. HeadlessClaude writes
+    # .mngr-prompt that its command cat's in). They are deliberately NOT
+    # routed through CreateAgentOptions.initial_message -- api_create treats
+    # a non-None initial_message as "call wait_for_ready_signal and then
+    # send_message", both of which raise on headless agents.
     # --edit-message is rejected because the editor session flow belongs to
     # the interactive create path; if headless grows an editor use case we
     # can revisit.
