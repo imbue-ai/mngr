@@ -631,6 +631,11 @@ def remove_modal_schedule(
         )
 
     if list_result.returncode == 0:
+        # Intentionally unguarded: a malformed JSON response from `modal app
+        # list --json` is rare enough that crashing here is preferable to a
+        # guard that would have to decide whether to treat it as "list
+        # failed" or "no apps" (see the reverted commits 51151b405 and
+        # 4212dadde for why that branching is not obviously correct).
         apps = json.loads(list_result.stdout)
         app_id: str | None = None
         for app in apps:
