@@ -165,9 +165,13 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
                 logger.trace("read_text_file({}) failed: {}", path, e)
                 lines.append(f"{label}: {path} -- exists, read failed: {e}")
                 continue
-            size = len(content)
-            tail = content[-1024:] if size > 1024 else content
-            lines.append(f"{label}: {path} -- {size} bytes, tail:\n{tail}".rstrip())
+            # `content` is a decoded str, so len() counts characters, not
+            # bytes; label accordingly so triage isn't misled on non-ASCII
+            # output. The 1024-char tail cap is intentionally character-
+            # based (we're slicing decoded text, not raw bytes).
+            char_count = len(content)
+            tail = content[-1024:] if char_count > 1024 else content
+            lines.append(f"{label}: {path} -- {char_count} chars, tail:\n{tail}".rstrip())
         return "\n".join(lines) if lines else None
 
     def _raise_no_output_error(self) -> Never:
