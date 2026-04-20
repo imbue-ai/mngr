@@ -261,13 +261,21 @@ def _destroy_agent(agent_name: str) -> tuple[int, str]:
 
     Returns (exit_code, stderr). The caller is responsible for surfacing the
     result (typically by including it in the verification result dict).
+
+    If the subprocess times out, returns a sentinel exit code of -1 with a
+    stderr message explaining the timeout, so the caller can emit the
+    structured result instead of letting TimeoutExpired propagate and
+    break the sentinel contract.
     """
-    completed = subprocess.run(
-        ["mngr", "destroy", "--force", agent_name],
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+    try:
+        completed = subprocess.run(
+            ["mngr", "destroy", "--force", agent_name],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return -1, f"`mngr destroy --force {agent_name}` timed out after {exc.timeout}s"
     return completed.returncode, completed.stderr
 
 
