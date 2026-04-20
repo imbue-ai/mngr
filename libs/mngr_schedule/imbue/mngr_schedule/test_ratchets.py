@@ -40,7 +40,10 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(10))
+    # cron_runner.py cannot import loguru (forbidden from imbue.* or 3rd-party
+    # packages at module-level per the file docstring), so its result sentinel
+    # for in-container verify must go via sys.stdout.write.
+    rc.check_bare_print(_DIR, snapshot(11))
 
 
 # --- Exception handling ---
@@ -59,7 +62,9 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(7))
+    # cron_runner.py cannot import imbue's exception types (forbidden from
+    # imbue.* imports), so its new verify-path errors must use RuntimeError.
+    rc.check_builtin_exception_raises(_DIR, snapshot(8))
 
 
 # --- Import style ---
@@ -223,7 +228,10 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(10))
+    # cron_runner.py cannot import ConcurrencyGroup (forbidden from imbue.*
+    # imports), so its new in-container verify helpers (`mngr list` lookup and
+    # `mngr destroy`) must use subprocess.run directly.
+    rc.check_direct_subprocess(_DIR, snapshot(12))
 
 
 # --- AST-based ratchets ---

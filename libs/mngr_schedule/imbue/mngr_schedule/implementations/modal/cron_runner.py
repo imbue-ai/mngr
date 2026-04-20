@@ -28,9 +28,11 @@
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +134,28 @@ app = modal.App(name=_APP_NAME, image=_image)
 
 # --- Runtime functions ---
 
+# Sentinel line prefix used to communicate a structured verification result to
+# the deploying machine. The line is written once, on its own, at the end of
+# the runtime function. The deploy-side verification parser looks for this
+# exact prefix.
+_RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
+
+# Regex that extracts the agent name from `mngr create` output. The CLI logs
+# a line like: "Starting agent <name> ..." once the agent has been created.
+_AGENT_NAME_PATTERN: re.Pattern[str] = re.compile(r"Starting agent\s+(\S+)")
+
+# Lifecycle states (as reported by `mngr list --format json`) that indicate
+# the agent is still actively running. Any other state is treated as terminal.
+_RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
+
+# How often to poll the agent's lifecycle state during full verification.
+_AGENT_POLL_INTERVAL_SECONDS: float = 10.0
+
+# Maximum time to wait for the agent to reach a terminal state during full
+# verification. Kept below the Modal function timeout so the function can
+# return the failure result instead of being killed.
+_AGENT_FINISH_TIMEOUT_SECONDS: float = 3400.0
+
 
 def _run_and_stream(
     cmd: list[str] | str,
@@ -169,27 +193,125 @@ def _run_and_stream(
     return process.returncode, full_output
 
 
+def _get_lifecycle_state(agent_name: str) -> str | None:
+    """Look up the lifecycle state of the named agent.
+
+    Shells `mngr list --provider local --include 'name == "<agent_name>"'
+    --format json` and parses the result. A transient subprocess failure
+    yields None so the caller can retry; absent agent yields "MISSING";
+    otherwise yields the state string reported by mngr.
+    """
+    # Agent names from `Starting agent <name>` are produced by mngr itself and
+    # use a restricted character set ([\w-]+), so interpolating into the CEL
+    # expression is safe. Guard against unexpected characters defensively.
+    if not re.fullmatch(r"[\w-]+", agent_name):
+        raise RuntimeError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
+    try:
+        completed = subprocess.run(
+            [
+                "mngr",
+                "list",
+                "--provider",
+                "local",
+                "--include",
+                f'name == "{agent_name}"',
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        data = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    agents = data.get("agents", [])
+    if not agents:
+        return "MISSING"
+    state = agents[0].get("state")
+    return str(state) if state is not None else None
+
+
+def _poll_until_done(
+    agent_name: str,
+    timeout_seconds: float = _AGENT_FINISH_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = _AGENT_POLL_INTERVAL_SECONDS,
+) -> str:
+    """Poll the agent's lifecycle state until it leaves the running states.
+
+    Yields the final state string. Raises RuntimeError on timeout.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        state = _get_lifecycle_state(agent_name)
+        if state is not None and state not in _RUNNING_STATES:
+            return state
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
+        time.sleep(poll_interval_seconds)
+
+
+def _destroy_agent(agent_name: str) -> tuple[int, str]:
+    """Destroy the named agent via the mngr CLI (best-effort; --force swallows not-found).
+
+    Returns (exit_code, stderr). The caller is responsible for surfacing the
+    result (typically by including it in the verification result dict).
+    """
+    completed = subprocess.run(
+        ["mngr", "destroy", "--force", agent_name],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    return completed.returncode, completed.stderr
+
+
+def _print_result_sentinel(result: dict[str, Any]) -> None:
+    """Write the structured verification result on a single line for the deploy-side parser."""
+    sys.stdout.write(f"{_RESULT_SENTINEL} {json.dumps(result)}\n")
+    sys.stdout.flush()
+
+
 @app.function(
     schedule=modal.Cron(_CRON_SCHEDULE, timezone=_CRON_TIMEZONE),
     timeout=3600,
 )
-def run_scheduled_trigger() -> str:
-    """Run the scheduled mngr command and return its output.
+def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
+    """Run the scheduled mngr command and return a structured result.
 
-    This function executes on the cron schedule and:
-    1. Checks if the trigger is enabled
-    2. Loads consolidated environment variables from the secrets env file
-    3. Sets up GitHub authentication
-    4. Builds and runs the mngr command with secrets env file
+    Scheduled (cron-driven) invocations call this with no arguments, so
+    `verify_mode` defaults to "none" and no post-create verification runs.
+    The deploy-side verifier invokes the function manually via `modal run
+    ... --verify-mode quick|full` to exercise the post-create path from
+    inside the same container that owns the agent.
 
-    Deploy files (config, settings, etc.) are already baked into $HOME and
-    WORKDIR during the image build via dockerfile_commands.
+    Steps:
+    1. Check if the trigger is enabled
+    2. Load consolidated environment variables from the secrets env file
+    3. Optionally set up GitHub authentication and auto-merge
+    4. Build and run the mngr command with secrets env file
+    5. If the command is `create` and verify_mode is not "none", extract the
+       agent name from the output and either destroy it (quick) or poll its
+       lifecycle state until it finishes (full)
+    6. Emit a sentinel line with the structured result and return the same
+       dict, so callers using either `modal run` or `fn.remote()` can inspect
+       the outcome
+
+    Raises RuntimeError if the underlying mngr command fails or the verify
+    step times out.
     """
     trigger = _deploy_config["trigger"]
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        return ""
+        result: dict[str, Any] = {"status": "disabled"}
+        _print_result_sentinel(result)
+        return result
 
     # Load consolidated env vars into the process environment so that the
     # mngr CLI and any subprocesses it spawns have access to them.
@@ -241,4 +363,38 @@ def run_scheduled_trigger() -> str:
     if exit_code != 0:
         raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nOutput:\n{full_output}")
 
-    return full_output
+    normalized_verify = verify_mode.lower()
+    if normalized_verify not in ("none", "quick", "full"):
+        raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
+
+    result: dict[str, Any] = {"status": "ok", "command": command, "verify_mode": normalized_verify}
+
+    if command != "create" or normalized_verify == "none":
+        _print_result_sentinel(result)
+        return result
+
+    match = _AGENT_NAME_PATTERN.search(full_output)
+    if match is None:
+        # No agent name to act on -- still a successful mngr create from the
+        # CLI's perspective, but we couldn't do in-container verify. Surface
+        # this so the deploy side can decide whether to fail.
+        result["verify"] = {"status": "no_agent_name"}
+        _print_result_sentinel(result)
+        return result
+
+    agent_name = match.group(1)
+    result["agent_name"] = agent_name
+
+    if normalized_verify == "quick":
+        destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
+        result["verify"] = {
+            "status": "destroyed",
+            "destroy_exit_code": destroy_exit_code,
+            "destroy_stderr": destroy_stderr,
+        }
+    else:
+        final_state = _poll_until_done(agent_name)
+        result["verify"] = {"status": "finished", "final_state": final_state}
+
+    _print_result_sentinel(result)
+    return result
