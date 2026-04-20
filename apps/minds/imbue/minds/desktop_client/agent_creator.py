@@ -114,18 +114,18 @@ def clone_git_repo(
     clone_dir: Path,
     on_output: OutputCallback | None = None,
     *,
-    is_shallow: bool = False,
+    branch: str | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
     The clone_dir must not already exist -- git clone will create it.
-    When is_shallow is True, clones with --depth 1 to skip history.
+    When branch is specified, clones that specific branch.
     Raises GitCloneError if the clone fails.
     """
     logger.debug("Cloning {} to {}", git_url, clone_dir)
     command = ["git", "clone"]
-    if is_shallow:
-        command.extend(["--depth", "1"])
+    if branch:
+        command.extend(["--branch", branch])
     command.extend([str(git_url), str(clone_dir)])
     cg = ConcurrencyGroup(name="git-clone")
     with cg:
@@ -484,7 +484,8 @@ class AgentCreator(MutableModel):
                         # Worktrees have a .git file pointing to the parent repo's
                         # .git/worktrees/ dir, which breaks when copied into Docker.
                         # Clone locally to get a standalone repo. Use file:// protocol
-                        # so --depth 1 is honored (git ignores --depth for local paths).
+                        # to force a real clone (git substitutes in hardlinks for plain
+                        # local paths, which fails across the worktree boundary).
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
@@ -492,28 +493,29 @@ class AgentCreator(MutableModel):
                         if clone_target.exists():
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
-                        clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
-                        # The shallow clone only contains committed content. Rsync
-                        # the worktree's working directory over so that uncommitted
-                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
-                        # in the Docker build context.
+                        clone_git_repo(file_url, clone_target, on_output=emit_log)
+                        # The clone only contains committed content. Rsync the
+                        # worktree's working directory over so that uncommitted
+                        # changes (e.g. a locally-rsynced vendor/mngr/) are
+                        # included in the Docker build context.
                         _rsync_worktree_over_clone(resolved_path, clone_target, on_output=emit_log)
                         workspace_dir = clone_target
                     else:
                         workspace_dir = resolved_path
                         log_queue.put(f"[minds] Using local directory: {workspace_dir}")
+                    if branch:
+                        log_queue.put("[minds] Checking out branch '{}'...".format(branch))
+                        checkout_branch(workspace_dir, GitBranch(branch), on_output=emit_log)
                 else:
                     repo_name = extract_repo_name(repo_source)
                     clone_target = Path(tempfile.gettempdir()) / f"minds-clone-{repo_name}"
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
-                    clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True)
+                    clone_git_repo(
+                        GitUrl(repo_source), clone_target, on_output=emit_log, branch=branch,
+                    )
                     workspace_dir = clone_target
-
-                if branch:
-                    log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(workspace_dir, GitBranch(branch), on_output=emit_log)
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
