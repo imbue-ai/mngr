@@ -213,6 +213,10 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
 
 
 _MNGR_PROMPT_FILE: str = ".mngr-prompt"
+# Canonical form of the "read the staged prompt" arg. Callers that build
+# the command themselves (e.g. `mngr ask`) pass this exact string in
+# agent_args so assemble_command can detect it and avoid double-feeding.
+_MNGR_PROMPT_CAT_ARG: str = f'"$(cat "$MNGR_AGENT_WORK_DIR/{_MNGR_PROMPT_FILE}")"'
 
 
 class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
@@ -311,11 +315,17 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         # None at this point. The file, by contrast, is written earlier in
         # the same headless_agent_output context manager, so it is visible
         # here.
+        #
+        # The "already referenced" check is an exact-equality membership
+        # test against all_extra_args, not a substring scan of the joined
+        # args: a substring scan would falsely match any arg containing
+        # `.mngr-prompt` (e.g. an unrelated path) and silently drop the
+        # prompt.
         if (
-            _MNGR_PROMPT_FILE not in " ".join(all_extra_args)
+            _MNGR_PROMPT_CAT_ARG not in all_extra_args
             and host.get_file_mtime(self.work_dir / _MNGR_PROMPT_FILE) is not None
         ):
-            parts.append(f'"$(cat "$MNGR_AGENT_WORK_DIR/{_MNGR_PROMPT_FILE}")"')
+            parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)
         return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
