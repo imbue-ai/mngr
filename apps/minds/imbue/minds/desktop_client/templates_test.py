@@ -40,6 +40,15 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "/forwarding/" not in html
 
 
+def test_render_landing_page_includes_restart_workspace_server_button() -> None:
+    """Each agent row offers a button that POSTs to the restart endpoint."""
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert "restartWorkspaceServer" in html
+    assert f"restartWorkspaceServer(this, '{_AGENT_A}')" in html
+    assert "/restart-workspace-server" in html
+    assert 'title="Restart workspace server"' in html
+
+
 def test_render_login_redirect_page_contains_redirect_script() -> None:
     html = render_login_redirect_page(
         one_time_code=OneTimeCode("abc123-secret-82341"),

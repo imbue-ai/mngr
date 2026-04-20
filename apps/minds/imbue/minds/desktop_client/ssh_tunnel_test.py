@@ -751,6 +751,46 @@ def test_write_api_url_to_remote_handles_ssh_exception(tmp_path: Path) -> None:
     manager.cleanup()
 
 
+# -- exec_remote_command tests --
+
+
+def test_exec_remote_command_forwards_command_and_returns_zero_exit(tmp_path: Path) -> None:
+    """exec_remote_command runs the supplied shell command via SSH and returns (0, '')."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create()
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+
+    exit_status, stderr_output = manager.exec_remote_command(ssh_info, "echo hello")
+
+    assert exit_status == 0
+    assert stderr_output == ""
+    assert fake_client._exec_calls == ["echo hello"]
+    manager.cleanup()
+
+
+def test_exec_remote_command_returns_nonzero_exit_without_raising(tmp_path: Path) -> None:
+    """A failing remote command is surfaced via the exit_status return value, not an exception."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create(exec_exit_status=2)
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+
+    exit_status, _ = manager.exec_remote_command(ssh_info, "false")
+
+    assert exit_status == 2
+    manager.cleanup()
+
+
+def test_exec_remote_command_wraps_ssh_exceptions_as_tunnel_error(tmp_path: Path) -> None:
+    """paramiko transport errors are translated to SSHTunnelError for callers to handle."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create(exec_raise=paramiko.SSHException)
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+
+    with pytest.raises(SSHTunnelError):
+        manager.exec_remote_command(ssh_info, "anything")
+    manager.cleanup()
+
+
 # -- setup_reverse_tunnel tests --
 #
 # These tests inject a FakeSSHClient directly into _connections so that

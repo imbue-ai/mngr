@@ -55,8 +55,8 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       padding: 20px 16px; font-size: 14px; color: #334155;
       border-bottom: 1px solid #f1f5f9; vertical-align: middle;
     }
-    tbody td:last-child { width: 48px; }
-    tbody td:last-child .menu-btn { float: right; }
+    tbody td:last-child { width: 80px; white-space: nowrap; text-align: right; }
+    tbody td:last-child .menu-btn + .menu-btn { margin-left: 4px; }
     .ws-name { font-weight: 500; color: #0f172a; }
     .shared-with { color: #94a3b8; }
     .menu-wrapper { position: relative; display: inline-block; }
@@ -102,6 +102,9 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
+            <button class="menu-btn" onclick="event.stopPropagation(); restartWorkspaceServer(this, '{{ agent_id }}')" title="Restart workspace server">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+            </button>
             <button class="menu-btn" onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'" title="Settings">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
@@ -110,7 +113,30 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
         {% endfor %}
       </tbody>
     </table>
-    <script></script>
+    <script>
+      async function restartWorkspaceServer(btn, agentId) {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        var originalTitle = btn.title;
+        btn.title = "Restarting workspace server...";
+        try {
+          var resp = await fetch("/api/agents/" + encodeURIComponent(agentId) + "/restart-workspace-server", { method: "POST" });
+          if (resp.ok) {
+            btn.title = "Workspace server restart requested";
+          } else {
+            var detail = "HTTP " + resp.status;
+            try { var body = await resp.json(); if (body && body.error) detail = body.error; } catch (e) {}
+            btn.title = "Restart failed: " + detail;
+            alert("Restart failed: " + detail);
+          }
+        } catch (err) {
+          btn.title = "Restart failed: " + err;
+          alert("Restart failed: " + err);
+        } finally {
+          setTimeout(function () { btn.disabled = false; btn.title = originalTitle; }, 3000);
+        }
+      }
+    </script>
     {% else %}
       {% if is_discovering %}
     <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">

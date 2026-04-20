@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, dialog, ipcMain, net, shell, app } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -1298,20 +1298,59 @@ ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
   }
 });
 
+function postRestartWorkspaceServer(agentId) {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      resolve({ ok: false, status: 0, body: 'backend not ready' });
+      return;
+    }
+    const req = net.request({
+      url: backendBaseUrl + '/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server',
+      method: 'POST',
+      useSessionCookies: true,
+    });
+    let body = '';
+    req.on('response', (response) => {
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => resolve({ ok: response.statusCode === 200, status: response.statusCode, body }));
+      response.on('error', () => resolve({ ok: false, status: 0, body: 'response error' }));
+    });
+    req.on('error', (err) => resolve({ ok: false, status: 0, body: String(err) }));
+    req.end();
+  });
+}
+
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  // "Open in new window" only makes sense for workspaces the sender is NOT already on.
+  const items = [];
+  if (bundle.currentWorkspaceId !== agentId) {
+    items.push({
       label: 'Open in new window',
       click: () => {
         openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
         closeSidebar(bundle);
       },
+    });
+    items.push({ type: 'separator' });
+  }
+  items.push({
+    label: 'Restart workspace server',
+    click: async () => {
+      const result = await postRestartWorkspaceServer(agentId);
+      if (!result.ok) {
+        let detail = 'HTTP ' + result.status;
+        try {
+          const parsed = JSON.parse(result.body);
+          if (parsed && parsed.error) detail = parsed.error;
+        } catch { /* not JSON */ }
+        dialog.showErrorBox('Restart failed', detail);
+      }
     },
-  ]);
+  });
+  if (items.length === 0) return;
+  const menu = Menu.buildFromTemplate(items);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);

@@ -3,6 +3,7 @@ import html
 import json
 import os
 import queue
+import shlex
 import socket as socket_module
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
@@ -83,6 +84,16 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Name of the bootstrap-managed service that runs the minds-workspace-server
+# uvicorn process inside each agent container.
+_WORKSPACE_SERVER_SERVICE_NAME: Final[str] = "system_interface"
+# Prefix used for the tmux session inside minds agent containers.
+_MINDS_TMUX_SESSION_PREFIX: Final[str] = "minds-"
+# Path to services.toml inside a minds agent container. `touch`-ing this file
+# bumps its mtime, which wakes bootstrap's reconcile loop and causes it to
+# re-create any svc-* windows that went missing.
+_MINDS_SERVICES_TOML_PATH: Final[str] = "/code/services.toml"
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -1139,6 +1150,107 @@ def _handle_telegram_status(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# -- Workspace server lifecycle route handlers --
+
+
+def _build_restart_workspace_server_command(workspace_name: str) -> str:
+    """Shell command that restarts the workspace server service inside a minds container.
+
+    Bootstrap's service manager (libs/bootstrap/src/bootstrap/manager.py in the
+    forever-claude-template) is a file-watch reconciler: it only reconciles
+    services when services.toml's mtime changes. Killing the tmux window
+    alone isn't enough -- we also need to touch services.toml so bootstrap's
+    next poll notices the missing service and re-creates the window.
+    """
+    session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
+    window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
+    return (
+        f"tmux kill-window -t {shlex.quote(window_target)} 2>/dev/null || true && "
+        f"touch {shlex.quote(_MINDS_SERVICES_TOML_PATH)}"
+    )
+
+
+async def _handle_restart_workspace_server(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Restart the workspace_server service inside an agent's container.
+
+    POST /api/agents/{agent_id}/restart-workspace-server
+
+    Used to recover from a wedged uvicorn process (e.g. thread-pool deadlock).
+    Kills the bootstrap-managed svc-system_interface tmux window and touches
+    services.toml; bootstrap's reconcile loop re-creates the window within
+    ~5 seconds, which spawns a fresh uvicorn.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    parsed_id = AgentId(agent_id)
+    workspace_name = backend_resolver.get_workspace_name(parsed_id)
+    if workspace_name is None:
+        return Response(
+            status_code=404,
+            content=json.dumps({"error": "Unknown agent or missing workspace label"}),
+            media_type="application/json",
+        )
+
+    ssh_info = backend_resolver.get_ssh_info(parsed_id)
+    if ssh_info is None:
+        # Local agents live in local tmux sessions with agent-specific work
+        # directories; restart is supported for remote (docker) agents only
+        # at the moment. Adding local support means resolving the agent's
+        # local services.toml path, which needs more plumbing.
+        return Response(
+            status_code=501,
+            content=json.dumps(
+                {"error": "Restart is not yet supported for local agents; only docker-hosted minds."}
+            ),
+            media_type="application/json",
+        )
+
+    tunnel_manager: SSHTunnelManager | None = request.app.state.tunnel_manager
+    if tunnel_manager is None:
+        return Response(
+            status_code=501,
+            content=json.dumps({"error": "SSH tunnel manager not configured"}),
+            media_type="application/json",
+        )
+
+    command = _build_restart_workspace_server_command(workspace_name)
+    try:
+        exit_status, stderr_output = await asyncio.to_thread(
+            tunnel_manager.exec_remote_command, ssh_info, command
+        )
+    except SSHTunnelError as e:
+        logger.warning("Restart workspace server failed for {}: {}", agent_id, e)
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": f"SSH exec failed: {e}"}),
+            media_type="application/json",
+        )
+
+    if exit_status != 0:
+        logger.warning(
+            "Restart workspace server exited {} for {}: {}", exit_status, agent_id, stderr_output
+        )
+        return Response(
+            status_code=500,
+            content=json.dumps(
+                {"error": f"Remote command failed (exit {exit_status}): {stderr_output}"}
+            ),
+            media_type="application/json",
+        )
+
+    logger.info("Restart requested for workspace_server of {}", agent_id)
+    return Response(
+        content=json.dumps({"agent_id": str(parsed_id), "status": "restarting"}),
+        media_type="application/json",
+    )
+
+
 # -- Chrome (persistent shell) route handlers --
 
 
@@ -1954,6 +2066,9 @@ def create_desktop_client(
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
+
+    # Workspace server lifecycle
+    app.post("/api/agents/{agent_id}/restart-workspace-server")(_handle_restart_workspace_server)
 
     # Proxy routes: /forwarding/{agent_id}/{server_name}/{path:path}
     app.api_route(

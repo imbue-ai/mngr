@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
@@ -6,6 +7,7 @@ from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
+from pydantic import PrivateAttr
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -1705,3 +1707,192 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
+
+
+# -- Restart workspace server endpoint tests --
+
+
+class _RestartBackendResolver(StaticBackendResolver):
+    """Static resolver that also returns ssh_info and workspace_name for tests."""
+
+    ssh_info: RemoteSSHInfo
+    workspace_name_by_agent_id: Mapping[str, str]
+
+    def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
+        if self.url_by_agent_and_server.get(str(agent_id)) is not None:
+            return self.ssh_info
+        return None
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        return self.workspace_name_by_agent_id.get(str(agent_id))
+
+
+class _RecordingTunnelManager(SSHTunnelManager):
+    """Tunnel manager that records exec_remote_command calls and returns a configurable result.
+
+    Use configure(...) to control what exec_remote_command returns or raises.
+    """
+
+    _exec_calls: list[tuple[RemoteSSHInfo, str]] = PrivateAttr(default_factory=list)
+    _exec_exit_status: int = PrivateAttr(default=0)
+    _exec_stderr: str = PrivateAttr(default="")
+    _exec_raise_type: type[Exception] | None = PrivateAttr(default=None)
+
+    def configure(
+        self,
+        exec_exit_status: int = 0,
+        exec_stderr: str = "",
+        exec_raise_type: type[Exception] | None = None,
+    ) -> None:
+        object.__setattr__(self, "_exec_exit_status", exec_exit_status)
+        object.__setattr__(self, "_exec_stderr", exec_stderr)
+        object.__setattr__(self, "_exec_raise_type", exec_raise_type)
+
+    def exec_remote_command(
+        self,
+        ssh_info: RemoteSSHInfo,
+        command: str,
+        timeout: float = 10.0,
+    ) -> tuple[int, str]:
+        self._exec_calls.append((ssh_info, command))
+        if self._exec_raise_type is not None:
+            raise self._exec_raise_type("simulated")
+        return self._exec_exit_status, self._exec_stderr
+
+
+def _setup_restart_test_server(
+    tmp_path: Path,
+    workspace_name: str = "mindtest-base",
+    with_ssh_info: bool = True,
+) -> tuple[TestClient, FileAuthStore, AgentId, _RecordingTunnelManager]:
+    """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests."""
+    agent_id = AgentId()
+    servers_map = {"system_interface": "http://127.0.0.1:8000"} if with_ssh_info else {}
+    resolver = _RestartBackendResolver(
+        url_by_agent_and_server={str(agent_id): servers_map},
+        ssh_info=_TEST_SSH_INFO,
+        workspace_name_by_agent_id={str(agent_id): workspace_name} if with_ssh_info else {},
+    )
+    tunnel_manager = _RecordingTunnelManager()
+
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        tunnel_manager=tunnel_manager,
+    )
+    client = TestClient(app)
+    _authenticate_client(client=client, auth_store=auth_store)
+    return client, auth_store, agent_id, tunnel_manager
+
+
+def test_restart_workspace_server_returns_403_when_unauthenticated(tmp_path: Path) -> None:
+    """Without a session cookie the endpoint must refuse to act."""
+    agent_id = AgentId()
+    resolver = _RestartBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"system_interface": "http://x"}},
+        ssh_info=_TEST_SSH_INFO,
+        workspace_name_by_agent_id={str(agent_id): "name"},
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        tunnel_manager=_RecordingTunnelManager(),
+    )
+    client = TestClient(app)
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 403
+
+
+def test_restart_workspace_server_returns_501_for_local_agents(tmp_path: Path) -> None:
+    """Local (non-SSH) agents aren't supported yet; the endpoint should say so clearly."""
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        tunnel_manager=_RecordingTunnelManager(),
+    )
+    client = TestClient(app)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    # StaticBackendResolver returns None for get_workspace_name by default -> 404.
+    # This test is specifically for the "no ssh_info" path, which needs a
+    # workspace_name present but ssh_info absent.
+    assert response.status_code == 404
+
+
+def test_restart_workspace_server_returns_404_when_workspace_name_missing(tmp_path: Path) -> None:
+    """If the resolver can't map the agent to a workspace label, we can't build the tmux target."""
+    agent_id = AgentId()
+    resolver = _RestartBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
+        ssh_info=_TEST_SSH_INFO,
+        workspace_name_by_agent_id={},  # no mapping
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        tunnel_manager=_RecordingTunnelManager(),
+    )
+    client = TestClient(app)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 404
+
+
+def test_restart_workspace_server_happy_path_returns_200_and_issues_command(tmp_path: Path) -> None:
+    """Authenticated restart of a remote agent must return 200 and SSH-exec the kill+touch combo."""
+    client, _, agent_id, tunnel_manager = _setup_restart_test_server(tmp_path, workspace_name="my-mind")
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_id"] == str(agent_id)
+    assert body["status"] == "restarting"
+    assert len(tunnel_manager._exec_calls) == 1
+    ssh_info_used, command_used = tunnel_manager._exec_calls[0]
+    assert ssh_info_used == _TEST_SSH_INFO
+    # The command must kill the bootstrap-managed svc-system_interface window
+    # for the container's tmux session, and touch services.toml so bootstrap
+    # reconciles it back.
+    assert "minds-my-mind:svc-system_interface" in command_used
+    assert "/code/services.toml" in command_used
+
+
+def test_restart_workspace_server_returns_502_on_ssh_failure(tmp_path: Path) -> None:
+    """Paramiko transport failures should surface as 502 so the frontend knows retrying might help."""
+    client, _, agent_id, tunnel_manager = _setup_restart_test_server(tmp_path)
+    tunnel_manager.configure(exec_raise_type=SSHTunnelError)
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 502
+
+
+def test_restart_workspace_server_returns_500_on_nonzero_exit(tmp_path: Path) -> None:
+    """A non-zero remote exit code is a server-side failure, surfaced as 500 with the stderr."""
+    client, _, agent_id, tunnel_manager = _setup_restart_test_server(tmp_path)
+    tunnel_manager.configure(exec_exit_status=1, exec_stderr="oh no")
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 500
+    assert "oh no" in response.text
