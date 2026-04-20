@@ -199,7 +199,11 @@ def _handle_email_verified_api(request: Request) -> Response:
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"verified": False, "signedIn": False})
-    verified = backend.is_email_verified(str(user_info.user_id), user_info.email)
+    try:
+        verified = backend.is_email_verified(str(user_info.user_id), user_info.email)
+    except httpx.HTTPError as exc:
+        logger.warning("Auth backend unreachable during is-email-verified: {}", exc)
+        return _json_response({"verified": False, "signedIn": True, "error": "backend_unavailable"}, 502)
     return _json_response({"verified": verified, "signedIn": True})
 
 
@@ -210,7 +214,11 @@ def _handle_resend_verification_api(request: Request) -> Response:
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"status": "ERROR", "message": "Not signed in"}, 401)
-    ok = backend.send_verification_email(str(user_info.user_id), user_info.email)
+    try:
+        ok = backend.send_verification_email(str(user_info.user_id), user_info.email)
+    except httpx.HTTPError as exc:
+        logger.warning("Auth backend unreachable during resend-verification: {}", exc)
+        return _json_response({"status": "ERROR", "message": "Authentication service is unavailable"}, 502)
     if not ok:
         return _json_response({"status": "ERROR", "message": "Failed to send verification email"}, 502)
     return _json_response({"status": "OK"})
