@@ -54,7 +54,7 @@ def browser_type(playwright: Playwright) -> BrowserType:
 
 
 @pytest.fixture
-def browser_type_launch_args(pytestconfig: Any) -> dict[str, Any]:
+def browser_type_launch_args(pytestconfig: pytest.Config) -> dict[str, Any]:
     launch_options: dict[str, Any] = {}
     headed = pytestconfig.getoption("--headed", default=False)
     if headed:
