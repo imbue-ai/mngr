@@ -98,7 +98,9 @@ You are the nightly changelog consolidation agent. Follow these steps in order:
    - git checkout -b "$BRANCH"
    - git push --set-upstream origin "$BRANCH"
 
-6. Open a PR: gh pr create --base main --title "Changelog consolidation <today's date>" --body "Automated nightly consolidation of changelog entries."
+6. Open a PR with: gh pr create --base main --title "Changelog consolidation <today's date>" --body "<body>"
+   - The body should start with "Automated nightly consolidation of changelog entries."
+   - If anything looked weird or wrong during the run (malformed entries, conflicts, unexpected consolidation output, errors you worked around, etc.), append a second paragraph with those notes so a human can review. If everything was clean, one sentence is fine.
    - Capture the PR URL from the output.
 
 7. Write status.json to the agent state directory ($MNGR_AGENT_STATE_DIR/status.json). The file must be valid JSON with keys:
