@@ -352,9 +352,9 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        result: dict[str, Any] = {"status": "disabled"}
-        _print_result_sentinel(result)
-        return result
+        disabled_result: dict[str, Any] = {"status": "disabled"}
+        _print_result_sentinel(disabled_result)
+        return disabled_result
 
     # Load consolidated env vars into the process environment so that the
     # mngr CLI and any subprocesses it spawns have access to them.
