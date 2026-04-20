@@ -277,11 +277,11 @@ def test_default_stage_initial_message_logs_warning(
 ) -> None:
     """The default stage_initial_message must not silently drop the message.
 
-    Regression test: the default implementation used to have just a
-    docstring and no body, so a user who passed --message to an agent
-    type (e.g. headless_command) that did not override
-    stage_initial_message got no indication their prompt was ignored.
-    The default now warns, naming the agent class.
+    When a StreamingHeadlessAgentMixin subclass does not override
+    stage_initial_message (so the agent type has no prompt-file
+    protocol), the default implementation cannot deliver the user's
+    --message content. It must log a warning that names the agent class
+    so the drop is audible, rather than silently discarding the prompt.
     """
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
 
