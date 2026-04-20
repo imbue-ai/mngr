@@ -491,5 +491,13 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         (``headless_agent_output``) removes these on exit so that agent
         types that stage prompt files in an in-place source directory do
         not leak them into the user's checkout.
+
+        Partial-failure contract: if an override writes more than one
+        file and a later write raises, already-written files are *not*
+        visible to the caller's cleanup (the return value never gets
+        returned). Overrides that write multiple files must therefore
+        clean up anything they have already written before re-raising --
+        otherwise those files will leak into an in-place source
+        directory.
         """
         return ()
