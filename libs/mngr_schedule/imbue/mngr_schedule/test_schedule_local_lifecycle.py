@@ -34,11 +34,18 @@ _MNGR_PREFIX = "mngr-"
 
 
 def _read_crontab() -> str:
-    """Read the current user's crontab, returning '' when unset or missing."""
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    """Read the current user's crontab, returning '' when unset or missing.
+
+    Returns '' in two cases:
+      - The `crontab` binary is not installed (FileNotFoundError from exec).
+      - The binary exits non-zero (covers 'no crontab for <user>' and
+        similar cases where there simply isn't an entry to observe).
+    """
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        return ""
     if result.returncode != 0:
-        # Treat 'no crontab for <user>' and 'crontab: command not found' alike:
-        # both mean there's no entry to observe.
         return ""
     return result.stdout
 
