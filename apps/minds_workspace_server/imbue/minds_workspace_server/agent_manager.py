@@ -2,7 +2,6 @@ import json
 import os
 import queue
 import shlex
-import subprocess
 import threading
 import tomllib
 from pathlib import Path
@@ -546,7 +545,7 @@ class AgentManager:
         """Log an error if the observe subprocess exits before shutdown."""
         try:
             process.wait()
-        except (ProcessError, ProcessSetupError, EnvironmentStoppedError, subprocess.TimeoutExpired) as e:
+        except (ProcessError, ProcessSetupError, EnvironmentStoppedError) as e:
             if self._shutdown_event.is_set():
                 return
             _loguru_logger.error("mngr observe subprocess failed: {}", e)
