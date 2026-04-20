@@ -299,7 +299,8 @@ def _create_headless(
             "On the headless path, the target host is derived from --source "
             "(the agent runs in-place with no transfer). Drop the target "
             "pinned via the address (@HOST / @.PROVIDER) or --provider; use "
-            "--source @HOST:PATH or --source @.PROVIDER:PATH instead."
+            "--source @HOST:PATH for an existing remote host, or --source "
+            "PATH for a local path, instead."
         )
     agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
     resolved_source = _resolve_source_location(opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host)

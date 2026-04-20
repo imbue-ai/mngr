@@ -1107,7 +1107,7 @@ def test_create_headless_rejects_pinned_target(
     )
 
     assert result.exit_code != 0
-    assert "--source @HOST:PATH" in result.output or "--source @.PROVIDER:PATH" in result.output
+    assert "--source @HOST:PATH" in result.output
 
 
 # =============================================================================
