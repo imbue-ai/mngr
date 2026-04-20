@@ -13,6 +13,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from imbue.mngr.utils.testing import generate_test_environment_name
+
 # Read the real home directory at import time, BEFORE any autouse fixture
 # overrides HOME. Subprocesses need the real HOME to find ~/.modal.toml,
 # git config, mngr profiles, etc.
@@ -47,25 +49,26 @@ def build_disable_plugin_args(enabled_plugins: frozenset[str]) -> list[str]:
 
 
 def build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need real Modal credentials.
+    """Build environment for subprocess calls that need Modal credentials.
 
-    Restores the real HOME so subprocesses can find ~/.modal.toml for Modal
-    authentication. Sets MNGR_ROOT_NAME to an isolated value so mngr does
-    NOT load the user's personal profile (which may contain plugin config
-    fields incompatible with the deployed mngr version). The modal backend
-    is still discoverable without user config via default backend resolution.
+    In CI/offload, Modal credentials arrive via env vars
+    (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET), so we keep the test HOME. Locally
+    we restore the real HOME so the subprocess can find ~/.modal.toml, and
+    clear test-isolation vars that would otherwise point at an empty namespace
+    with no user mngr configuration.
+
+    Sets a unique MNGR_PREFIX so the Modal backend's 'mngr_test-' guard
+    accepts it and the cleanup script can identify these environments.
     """
     env = os.environ.copy()
-    env["HOME"] = str(REAL_HOME)
-    # Use an isolated mngr config namespace so we don't load the user's
-    # personal settings (e.g. kanpan plugin config that the container
-    # mngr version may not understand).
-    env["MNGR_ROOT_NAME"] = "mngr-schedule-test"
-    # Remove other test isolation vars
-    env.pop("MNGR_HOST_DIR", None)
-    env.pop("MNGR_PREFIX", None)
+    has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
+    if not has_modal_env_creds:
+        env["HOME"] = str(REAL_HOME)
+        env.pop("MNGR_HOST_DIR", None)
+        env.pop("MNGR_ROOT_NAME", None)
     # Remove pytest marker so mngr doesn't reject the call
     env.pop("PYTEST_CURRENT_TEST", None)
+    env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
     return env
 
 
@@ -181,8 +184,6 @@ def deploy_test_trigger(
             "--full-copy",
             "--exclude-user-settings",
             "--exclude-project-settings",
-            "--pass-env",
-            "MNGR_ROOT_NAME",
             "--verify",
             "none",
             *disable_args,

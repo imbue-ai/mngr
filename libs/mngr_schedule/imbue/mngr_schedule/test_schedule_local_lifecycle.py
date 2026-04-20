@@ -53,14 +53,13 @@ def test_schedule_local_add_and_remove_lifecycle() -> None:
     # Unique per test run to avoid colliding with other workers or leftover state.
     trigger_name = f"test-local-lifecycle-{os.getpid()}-{get_short_random_string()}"
     env = build_subprocess_env()
-    # Derive the crontab prefix the same way `load_mngr_context` does:
-    # `f"{MNGR_ROOT_NAME}-"`. `build_subprocess_env` sets MNGR_ROOT_NAME
-    # to isolate the subprocess's mngr config namespace, so the marker the
-    # CLI writes is based on that value -- not the ambient default.
-    # The full marker (prefix + "schedule:" + name) is matched rather than
-    # the bare trigger name so parallel xdist workers don't false-positive
-    # on each other's entries in the shared user crontab.
-    marker = build_marker_comment(f"{env['MNGR_ROOT_NAME']}-", trigger_name)
+    # `build_subprocess_env` sets `MNGR_PREFIX` directly, which overrides the
+    # default prefix the CLI would derive from `MNGR_ROOT_NAME`. The CLI writes
+    # the marker using the effective prefix, so derive the expected marker from
+    # the same env var. The full marker (prefix + "schedule:" + name) is matched
+    # rather than the bare trigger name so parallel xdist workers don't
+    # false-positive on each other's entries in the shared user crontab.
+    marker = build_marker_comment(env["MNGR_PREFIX"], trigger_name)
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
 
     try:

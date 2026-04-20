@@ -56,8 +56,11 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
     Modal environments must be created before they can be used to scope resources
     like apps, volumes, and sandboxes.
 
-    This function is only called when the environment is known to be missing (after
-    a NotFoundError), so it does not check for existence first.
+    Called from the NotFoundError retry path and does not pre-check for existence.
+    Any failure from ``modal environment create`` -- including a concurrent
+    creation that races and causes an "already exists" response -- is surfaced
+    as a MngrError. Callers should not call this unless they have evidence the
+    environment is missing.
     """
 
     # first a quick check to make sure we're not naming things incorrectly (and making it hard to clean up these environments)
@@ -71,7 +74,7 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
             modal_interface.environment_create(environment_name)
             logger.info("Created Modal environment: {}", environment_name)
         except ModalProxyError as e:
-            logger.warning("Failed to create Modal environment: {}", e)
+            raise MngrError(f"Failed to create Modal environment '{environment_name}': {e}") from e
 
 
 def _lookup_persistent_app_with_env_retry(
@@ -484,6 +487,8 @@ Supported build arguments for the modal provider:
                 "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
                 f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
             ) from e
+        except ModalProxyError as e:
+            raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
         return ModalProviderInstance(
             name=name,
