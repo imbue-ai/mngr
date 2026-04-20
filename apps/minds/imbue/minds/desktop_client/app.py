@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -89,12 +90,15 @@ _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 # Name of the bootstrap-managed service that runs the minds-workspace-server
 # uvicorn process inside each agent container.
 _WORKSPACE_SERVER_SERVICE_NAME: Final[str] = "system_interface"
-# Prefix used for the tmux session inside minds agent containers.
+# Prefix used for the tmux session both inside minds agent containers and on
+# the local host for non-docker minds.
 _MINDS_TMUX_SESSION_PREFIX: Final[str] = "minds-"
 # Path to services.toml inside a minds agent container. `touch`-ing this file
 # bumps its mtime, which wakes bootstrap's reconcile loop and causes it to
-# re-create any svc-* windows that went missing.
-_MINDS_SERVICES_TOML_PATH: Final[str] = "/code/services.toml"
+# re-create any svc-* windows that went missing. For non-docker agents, the
+# work_dir (and therefore services.toml path) is resolved from the backend
+# resolver's DiscoveredAgent data at request time.
+_MINDS_CONTAINER_SERVICES_TOML_PATH: Final[str] = "/code/services.toml"
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -1167,20 +1171,23 @@ def _handle_telegram_status(
 # -- Workspace server lifecycle route handlers --
 
 
-def _build_restart_workspace_server_command(workspace_name: str) -> str:
-    """Shell command that restarts the workspace server service inside a minds container.
+def _build_restart_workspace_server_command(workspace_name: str, services_toml_path: str) -> str:
+    """Shell command that restarts the workspace_server service for a mind.
 
     Bootstrap's service manager (libs/bootstrap/src/bootstrap/manager.py in the
     forever-claude-template) is a file-watch reconciler: it only reconciles
     services when services.toml's mtime changes. Killing the tmux window
     alone isn't enough -- we also need to touch services.toml so bootstrap's
     next poll notices the missing service and re-creates the window.
+
+    The same shape works for docker-hosted agents (over SSH) and local agents
+    (via local subprocess) -- only the services.toml path differs.
     """
     session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
     window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
     return (
         f"tmux kill-window -t {shlex.quote(window_target)} 2>/dev/null || true && "
-        f"touch {shlex.quote(_MINDS_SERVICES_TOML_PATH)}"
+        f"touch {shlex.quote(services_toml_path)}"
     )
 
 
@@ -1213,16 +1220,10 @@ async def _handle_restart_workspace_server(
 
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
-        # Local agents live in local tmux sessions with agent-specific work
-        # directories; restart is supported for remote (docker) agents only
-        # at the moment. Adding local support means resolving the agent's
-        # local services.toml path, which needs more plumbing.
-        return Response(
-            status_code=501,
-            content=json.dumps(
-                {"error": "Restart is not yet supported for local agents; only docker-hosted minds."}
-            ),
-            media_type="application/json",
+        return await _restart_workspace_server_locally(
+            agent_id=str(parsed_id),
+            workspace_name=workspace_name,
+            backend_resolver=backend_resolver,
         )
 
     tunnel_manager: SSHTunnelManager | None = request.app.state.tunnel_manager
@@ -1233,7 +1234,7 @@ async def _handle_restart_workspace_server(
             media_type="application/json",
         )
 
-    command = _build_restart_workspace_server_command(workspace_name)
+    command = _build_restart_workspace_server_command(workspace_name, _MINDS_CONTAINER_SERVICES_TOML_PATH)
     try:
         exit_status, stderr_output = await asyncio.to_thread(
             tunnel_manager.exec_remote_command, ssh_info, command
@@ -1261,6 +1262,77 @@ async def _handle_restart_workspace_server(
     logger.info("Restart requested for workspace_server of {}", agent_id)
     return Response(
         content=json.dumps({"agent_id": str(parsed_id), "status": "restarting"}),
+        media_type="application/json",
+    )
+
+
+def _run_local_restart_commands(workspace_name: str, services_toml_path: Path) -> tuple[int, str]:
+    """Run the kill-window + touch commands locally through a ConcurrencyGroup.
+
+    tmux kill-window is allowed to fail (window may already be gone); the touch
+    must succeed. Returns (exit_status, stderr) -- 0 if the touch succeeded,
+    non-zero with stderr if the touch failed.
+    """
+    session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
+    window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
+    cg = ConcurrencyGroup(name="restart-workspace-server-local")
+    with cg:
+        # Best-effort kill; if the window doesn't exist we proceed to touch.
+        cg.run_process_to_completion(
+            command=["tmux", "kill-window", "-t", window_target],
+            timeout=10.0,
+            is_checked_after=False,
+        )
+        touch_result = cg.run_process_to_completion(
+            command=["touch", str(services_toml_path)],
+            timeout=10.0,
+            is_checked_after=False,
+        )
+    return touch_result.returncode or 0, (touch_result.stderr or "").strip()
+
+
+async def _restart_workspace_server_locally(
+    agent_id: str,
+    workspace_name: str,
+    backend_resolver: BackendResolverInterface,
+) -> Response:
+    """Restart the workspace_server service for a local (non-SSH) agent.
+
+    Resolves the agent's work_dir via the backend resolver, constructs
+    services.toml path relative to it, and runs the kill+touch commands via
+    a local ConcurrencyGroup. Returns 501 if the resolver doesn't know the
+    work_dir (e.g. a backend resolver that doesn't expose it).
+    """
+    work_dir = backend_resolver.get_work_dir(AgentId(agent_id))
+    if work_dir is None:
+        return Response(
+            status_code=501,
+            content=json.dumps(
+                {"error": "Cannot locate services.toml for local agent: work_dir unavailable"}
+            ),
+            media_type="application/json",
+        )
+
+    services_toml_path = work_dir / "services.toml"
+    exit_status, stderr_output = await asyncio.to_thread(
+        _run_local_restart_commands, workspace_name, services_toml_path
+    )
+
+    if exit_status != 0:
+        logger.warning(
+            "Local restart for {} exited {}: {}", agent_id, exit_status, stderr_output
+        )
+        return Response(
+            status_code=500,
+            content=json.dumps(
+                {"error": f"Local command failed (exit {exit_status}): {stderr_output}"}
+            ),
+            media_type="application/json",
+        )
+
+    logger.info("Restart requested for workspace_server of local agent {}", agent_id)
+    return Response(
+        content=json.dumps({"agent_id": agent_id, "status": "restarting"}),
         media_type="application/json",
     )
 

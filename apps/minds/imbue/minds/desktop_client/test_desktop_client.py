@@ -1714,18 +1714,28 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
 
 class _RestartBackendResolver(StaticBackendResolver):
-    """Static resolver that also returns ssh_info and workspace_name for tests."""
+    """Static resolver that also returns ssh_info, workspace_name, and work_dir for tests.
 
-    ssh_info: RemoteSSHInfo
+    If ssh_info is None (simulates a local mind), get_ssh_info returns None but
+    the other lookups still work from their per-agent maps.
+    """
+
+    ssh_info: RemoteSSHInfo | None = None
     workspace_name_by_agent_id: Mapping[str, str]
+    work_dir_by_agent_id: Mapping[str, Path] = {}
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
+        if self.ssh_info is None:
+            return None
         if self.url_by_agent_and_server.get(str(agent_id)) is not None:
             return self.ssh_info
         return None
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         return self.workspace_name_by_agent_id.get(str(agent_id))
+
+    def get_work_dir(self, agent_id: AgentId) -> Path | None:
+        return self.work_dir_by_agent_id.get(str(agent_id))
 
 
 class _RecordingTunnelManager(SSHTunnelManager):
@@ -1811,11 +1821,14 @@ def test_restart_workspace_server_returns_403_when_unauthenticated(tmp_path: Pat
     assert response.status_code == 403
 
 
-def test_restart_workspace_server_returns_501_for_local_agents(tmp_path: Path) -> None:
-    """Local (non-SSH) agents aren't supported yet; the endpoint should say so clearly."""
+def test_restart_workspace_server_returns_501_for_local_without_work_dir(tmp_path: Path) -> None:
+    """If the resolver exposes a workspace_name but not a work_dir, we can't find services.toml."""
     agent_id = AgentId()
-    resolver = StaticBackendResolver(
+    resolver = _RestartBackendResolver(
         url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
+        ssh_info=None,
+        workspace_name_by_agent_id={str(agent_id): "local-mind"},
+        work_dir_by_agent_id={},
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     app = create_desktop_client(
@@ -1829,10 +1842,39 @@ def test_restart_workspace_server_returns_501_for_local_agents(tmp_path: Path) -
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
-    # StaticBackendResolver returns None for get_workspace_name by default -> 404.
-    # This test is specifically for the "no ssh_info" path, which needs a
-    # workspace_name present but ssh_info absent.
-    assert response.status_code == 404
+    assert response.status_code == 501
+    assert "work_dir" in response.text
+
+
+def test_restart_workspace_server_local_happy_path_touches_services_toml(tmp_path: Path) -> None:
+    """For a local agent with a known work_dir, restart runs locally and touches services.toml."""
+    agent_id = AgentId()
+    work_dir = tmp_path / "agent-workdir"
+    work_dir.mkdir()
+    resolver = _RestartBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
+        ssh_info=None,
+        workspace_name_by_agent_id={str(agent_id): "local-mind"},
+        work_dir_by_agent_id={str(agent_id): work_dir},
+    )
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        tunnel_manager=_RecordingTunnelManager(),
+    )
+    client = TestClient(app)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "restarting"
+    # The touch command creates services.toml if it doesn't already exist.
+    # The tmux kill-window is gated by `|| true` so it's fine that no such
+    # session exists in the test environment.
+    assert (work_dir / "services.toml").exists()
 
 
 def test_restart_workspace_server_returns_404_when_workspace_name_missing(tmp_path: Path) -> None:
