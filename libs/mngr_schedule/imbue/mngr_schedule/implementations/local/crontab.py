@@ -94,15 +94,23 @@ def list_managed_trigger_names(crontab_content: str, prefix: str) -> list[str]:
 def read_system_crontab() -> str:
     """Read the current user's crontab.
 
-    Returns the crontab content as a string, or an empty string if
-    no crontab exists. Raises ScheduleDeployError for unexpected errors
-    (e.g. permission denied) to prevent silent data loss.
+    Returns the crontab content as a string, or an empty string if no
+    crontab exists or the `crontab` binary is not installed on this host.
+    Raises ScheduleDeployError for unexpected errors (e.g. permission
+    denied) to prevent silent data loss.
     """
-    result = subprocess.run(
-        ["crontab", "-l"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # `crontab` binary is not installed on this host. Treat as
+        # equivalent to "no crontab": callers that only read will see
+        # an empty crontab; callers that try to write will still fail
+        # at write_system_crontab with a clear error.
+        return ""
     if result.returncode != 0:
         if "no crontab" in result.stderr.lower():
             return ""
@@ -113,13 +121,17 @@ def read_system_crontab() -> str:
 def write_system_crontab(content: str) -> None:
     """Write content to the current user's crontab.
 
-    Raises ScheduleDeployError if the write fails.
+    Raises ScheduleDeployError if the write fails, including when the
+    `crontab` binary is not installed on this host.
     """
-    result = subprocess.run(
-        ["crontab", "-"],
-        input=content,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["crontab", "-"],
+            input=content,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ScheduleDeployError("Cannot write crontab: the `crontab` binary is not installed on this host.") from exc
     if result.returncode != 0:
         raise ScheduleDeployError(f"Failed to write crontab: {result.stderr.strip()}")
