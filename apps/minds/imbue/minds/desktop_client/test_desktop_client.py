@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
@@ -1837,10 +1838,12 @@ def test_restart_workspace_server_returns_501_for_local_agents(tmp_path: Path) -
 def test_restart_workspace_server_returns_404_when_workspace_name_missing(tmp_path: Path) -> None:
     """If the resolver can't map the agent to a workspace label, we can't build the tmux target."""
     agent_id = AgentId()
+    # Note: workspace_name_by_agent_id is empty -- the endpoint should not
+    # be able to build a tmux target without it.
     resolver = _RestartBackendResolver(
         url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
         ssh_info=_TEST_SSH_INFO,
-        workspace_name_by_agent_id={},  # no mapping
+        workspace_name_by_agent_id={},
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     app = create_desktop_client(
@@ -1896,3 +1899,55 @@ def test_restart_workspace_server_returns_500_on_nonzero_exit(tmp_path: Path) ->
 
     assert response.status_code == 500
     assert "oh no" in response.text
+
+
+# -- Workspace server health tracker integration --
+
+
+def _get_health_tracker(client: TestClient) -> WorkspaceServerHealthTracker:
+    """Retrieve the WorkspaceServerHealthTracker attached to the TestClient's app state."""
+    app = client.app
+    assert isinstance(app, FastAPI)
+    tracker = app.state.workspace_server_health_tracker
+    assert isinstance(tracker, WorkspaceServerHealthTracker)
+    return tracker
+
+
+def test_proxy_records_failure_in_health_tracker_on_backend_disconnect(tmp_path: Path) -> None:
+    """A single proxy failure shows up in the health tracker's failure log for that (agent, server)."""
+    client, _, agent_id = _setup_disconnecting_backend_server(tmp_path)
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    # Make the tracker fire stuck after 1 failure so we can assert it crosses
+    # the threshold from a single request.
+    tracker = _get_health_tracker(client)
+    object.__setattr__(tracker, "failure_threshold", 1)
+
+    response = client.get(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 502
+    stuck = tracker.snapshot_stuck()
+    assert len(stuck) == 1
+    assert stuck[0].agent_id == str(agent_id)
+    assert stuck[0].server_name == str(DEFAULT_SERVER_NAME)
+    assert stuck[0].last_error_class == "RemoteProtocolError"
+
+
+def test_proxy_records_success_clears_stuck_state(tmp_path: Path) -> None:
+    """A successful proxy response must clear the stuck marker so the toast can dismiss."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    tracker = _get_health_tracker(client)
+    # Seed the tracker as if it had previously marked this server stuck.
+    tracker.record_failure(str(agent_id), str(DEFAULT_SERVER_NAME), "TimeoutException")
+    tracker.record_failure(str(agent_id), str(DEFAULT_SERVER_NAME), "TimeoutException")
+    tracker.record_failure(str(agent_id), str(DEFAULT_SERVER_NAME), "TimeoutException")
+    assert len(tracker.snapshot_stuck()) == 1
+
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
+
+    assert response.status_code == 200
+    assert tracker.snapshot_stuck() == ()

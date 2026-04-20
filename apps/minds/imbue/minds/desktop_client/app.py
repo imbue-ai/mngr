@@ -75,6 +75,7 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -452,8 +453,9 @@ async def _forward_http_request(
     body = await request.body()
 
     active_http_client = http_client or request.app.state.http_client
+    tracker: WorkspaceServerHealthTracker = request.app.state.workspace_server_health_tracker
     try:
-        return await active_http_client.request(
+        response = await active_http_client.request(
             method=request.method,
             url=proxy_url,
             headers=headers,
@@ -461,9 +463,11 @@ async def _forward_http_request(
         )
     except httpx.ConnectError:
         logger.warning("Backend connection refused for {} server {}", agent_id, server_name)
+        tracker.record_failure(agent_id, server_name, "ConnectError")
         return Response(status_code=502, content="Backend connection refused")
     except httpx.ReadError:
         logger.warning("Backend connection lost for {} server {}", agent_id, server_name)
+        tracker.record_failure(agent_id, server_name, "ReadError")
         return Response(status_code=502, content="Backend connection lost")
     except httpx.RemoteProtocolError:
         # Raised when the SSH tunnel accepts the connection but closes it without
@@ -474,10 +478,20 @@ async def _forward_http_request(
         logger.warning(
             "Backend disconnected without response for {} server {} (likely still starting up)", agent_id, server_name
         )
+        tracker.record_failure(agent_id, server_name, "RemoteProtocolError")
         return Response(status_code=502, content="Backend disconnected without response")
     except httpx.TimeoutException:
         logger.warning("Backend request timed out for {} server {}", agent_id, server_name)
+        tracker.record_failure(agent_id, server_name, "TimeoutException")
         return Response(status_code=504, content="Backend request timed out")
+
+    # Record success on 2xx/3xx so the tracker can clear the "stuck" marker.
+    # 4xx (client errors) and 5xx (backend errors) are NOT counted as
+    # recovery -- a 500 from the workspace server is itself a sign it's
+    # unhealthy.
+    if response.status_code < 400:
+        tracker.record_success(agent_id, server_name)
+    return response
 
 
 async def _forward_http_request_streaming(
@@ -1315,15 +1329,21 @@ async def _handle_chrome_events(
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
+        health_tracker: WorkspaceServerHealthTracker = request.app.state.workspace_server_health_tracker
+        health_tracker.add_on_change_callback(_on_change)
 
         try:
-            # Send initial workspace list and request count
+            # Send initial workspace list, request count, and health status
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
             yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
+            last_stuck_servers = _snapshot_stuck_for_chrome(health_tracker)
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "workspace_server_status", "stuck": last_stuck_servers})
+            )
 
             # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
@@ -1349,9 +1369,17 @@ async def _handle_chrome_events(
                 if current_request_count != last_request_count:
                     last_request_count = current_request_count
                     yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": current_request_count}))
+
+                current_stuck_servers = _snapshot_stuck_for_chrome(health_tracker)
+                if current_stuck_servers != last_stuck_servers:
+                    last_stuck_servers = current_stuck_servers
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "workspace_server_status", "stuck": current_stuck_servers})
+                    )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
+            health_tracker.remove_on_change_callback(_on_change)
 
     return StreamingResponse(
         _event_generator(),
@@ -1362,6 +1390,29 @@ async def _handle_chrome_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _snapshot_stuck_for_chrome(
+    health_tracker: WorkspaceServerHealthTracker,
+) -> list[dict[str, str | int | float]]:
+    """Return a JSON-serializable view of currently-stuck servers for the chrome toast.
+
+    Returns a list with deterministic ordering (by agent_id then server_name) so
+    equality comparison for change detection works without set/dict churn.
+    """
+    infos = health_tracker.snapshot_stuck()
+    ordered = sorted(infos, key=lambda info: (info.agent_id, info.server_name))
+    return [
+        {
+            "agent_id": info.agent_id,
+            "server_name": info.server_name,
+            "stuck_since": info.stuck_since,
+            "failure_count": info.failure_count,
+            "last_error_class": info.last_error_class,
+            "last_error_time": info.last_error_time,
+        }
+        for info in ordered
+    ]
 
 
 def _build_workspace_list(
@@ -1980,6 +2031,7 @@ def create_desktop_client(
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
     app.state.stream_manager = stream_manager
+    app.state.workspace_server_health_tracker = WorkspaceServerHealthTracker()
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
     app.state.telegram_orchestrator = telegram_orchestrator

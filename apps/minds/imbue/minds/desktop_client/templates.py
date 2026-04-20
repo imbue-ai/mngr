@@ -989,6 +989,44 @@ h2 {
 .sidebar-empty {
   padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
 }
+
+/* Stuck-server toast */
+.stuck-toast-stack {
+  position: fixed; left: 8px; right: 8px; bottom: 8px;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  z-index: 1000;
+}
+.stuck-toast {
+  pointer-events: auto;
+  background: #1e293b; color: #e2e8f0;
+  border: 1px solid #f59e0b; border-radius: 6px;
+  padding: 10px 12px; font-size: 12px; line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.stuck-toast-title { font-weight: 600; color: #fbbf24; margin-bottom: 4px; }
+.stuck-toast-body { color: #cbd5e1; margin-bottom: 8px; }
+.stuck-toast-details {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: #94a3b8;
+  background: rgba(0,0,0,0.3); border-radius: 4px;
+  padding: 6px 8px; margin-bottom: 8px; white-space: pre-wrap;
+}
+.stuck-toast-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.stuck-toast button {
+  background: none; border: 1px solid #475569; color: #e2e8f0;
+  font-size: 12px; padding: 4px 10px; border-radius: 4px; cursor: pointer;
+  font-family: inherit;
+}
+.stuck-toast button:hover { background: rgba(255,255,255,0.08); }
+.stuck-toast button.primary { background: #b45309; border-color: #b45309; }
+.stuck-toast button.primary:hover { background: #d97706; }
+.stuck-toast button:disabled { opacity: 0.5; cursor: default; }
+.stuck-toast-disclosure {
+  background: none; border: none; color: #94a3b8; padding: 0;
+  cursor: pointer; font-size: 11px; text-decoration: underline;
+  margin-bottom: 6px;
+}
+.stuck-toast-details[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -996,6 +1034,7 @@ h2 {
 <div id="sidebar-workspaces">
   <div class="sidebar-empty">No projects</div>
 </div>
+<div id="stuck-toast-stack" class="stuck-toast-stack"></div>
 <script>
 var isElectron = !!window.minds;
 var currentWorkspaceId = null;
@@ -1098,9 +1137,138 @@ if (isElectron && window.minds.onCurrentWorkspaceChanged) {
 }
 
 function handleChromeEvent(data) {
-  if (data.type !== 'workspaces') return;
-  lastWorkspaces = data.workspaces || [];
-  renderWorkspaces(lastWorkspaces);
+  if (data.type === 'workspaces') {
+    lastWorkspaces = data.workspaces || [];
+    renderWorkspaces(lastWorkspaces);
+  } else if (data.type === 'workspace_server_status') {
+    renderStuckToasts(data.stuck || []);
+  }
+}
+
+// -- Stuck server toast --
+//
+// The backend's _handle_chrome_events endpoint pushes
+// workspace_server_status events when a (agent_id, server_name) pair crosses
+// a consecutive-failure threshold or recovers. We render a toast per stuck
+// server with a Restart button that POSTs to the same endpoint the
+// homepage/context-menu entries use.
+
+function workspaceNameForAgentId(agentId) {
+  for (var i = 0; i < lastWorkspaces.length; i += 1) {
+    if (lastWorkspaces[i].id === agentId) return lastWorkspaces[i].name || agentId;
+  }
+  return agentId;
+}
+
+function formatStuckDuration(stuckSince) {
+  var seconds = Math.max(0, Math.round(Date.now() / 1000 - stuckSince));
+  if (seconds < 60) return seconds + 's';
+  var minutes = Math.round(seconds / 60);
+  return minutes + 'm';
+}
+
+async function triggerRestart(button, agentId) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = 'Restarting...';
+  try {
+    var resp = await fetch(
+      '/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server',
+      { method: 'POST' }
+    );
+    if (resp.ok) {
+      button.textContent = 'Restart requested';
+    } else {
+      var detail = 'HTTP ' + resp.status;
+      try { var body = await resp.json(); if (body && body.error) detail = body.error; } catch (e) {}
+      button.textContent = 'Failed: ' + detail;
+    }
+  } catch (err) {
+    button.textContent = 'Failed: ' + err;
+  } finally {
+    setTimeout(function () { button.disabled = false; button.textContent = 'Restart'; }, 4000);
+  }
+}
+
+function dismissToast(toastEl) {
+  if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
+}
+
+function renderStuckToasts(stuckServers) {
+  var stack = document.getElementById('stuck-toast-stack');
+  if (!stack) return;
+  // Build a set of keys from the payload so we can reconcile in-place
+  // without blowing away user interaction state on toasts that persist.
+  var keysInPayload = {};
+  stuckServers.forEach(function (entry) {
+    keysInPayload[entry.agent_id + '|' + entry.server_name] = entry;
+  });
+
+  // Remove toasts that are no longer stuck (server recovered or was fixed).
+  Array.prototype.slice.call(stack.children).forEach(function (el) {
+    var key = el.getAttribute('data-stuck-key');
+    if (!keysInPayload[key]) dismissToast(el);
+  });
+
+  // Add toasts for newly-stuck servers.
+  stuckServers.forEach(function (entry) {
+    var key = entry.agent_id + '|' + entry.server_name;
+    if (stack.querySelector('[data-stuck-key="' + key + '"]')) return;
+    var toast = document.createElement('div');
+    toast.className = 'stuck-toast';
+    toast.setAttribute('data-stuck-key', key);
+
+    var title = document.createElement('div');
+    title.className = 'stuck-toast-title';
+    title.textContent = 'Workspace server not responding';
+    toast.appendChild(title);
+
+    var body = document.createElement('div');
+    body.className = 'stuck-toast-body';
+    body.textContent =
+      'The "' + workspaceNameForAgentId(entry.agent_id) + '" mind has had '
+      + entry.failure_count + ' failed requests over the last '
+      + formatStuckDuration(entry.stuck_since) + '. '
+      + 'Restarting the workspace server usually recovers it.';
+    toast.appendChild(body);
+
+    var disclosure = document.createElement('button');
+    disclosure.className = 'stuck-toast-disclosure';
+    disclosure.textContent = 'Show details';
+    toast.appendChild(disclosure);
+
+    var details = document.createElement('div');
+    details.className = 'stuck-toast-details';
+    details.hidden = true;
+    details.textContent =
+      'server: ' + entry.server_name + '\n'
+      + 'agent_id: ' + entry.agent_id + '\n'
+      + 'last_error: ' + entry.last_error_class + '\n'
+      + 'failure_count: ' + entry.failure_count;
+    toast.appendChild(details);
+
+    disclosure.addEventListener('click', function () {
+      details.hidden = !details.hidden;
+      disclosure.textContent = details.hidden ? 'Show details' : 'Hide details';
+    });
+
+    var actions = document.createElement('div');
+    actions.className = 'stuck-toast-actions';
+    var dismissBtn = document.createElement('button');
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', function () { dismissToast(toast); });
+    actions.appendChild(dismissBtn);
+    var restartBtn = document.createElement('button');
+    restartBtn.className = 'primary';
+    restartBtn.textContent = 'Restart';
+    restartBtn.addEventListener('click', function () {
+      triggerRestart(restartBtn, entry.agent_id);
+    });
+    actions.appendChild(restartBtn);
+    toast.appendChild(actions);
+
+    stack.appendChild(toast);
+  });
 }
 
 if (isElectron && window.minds.onChromeEvent) {

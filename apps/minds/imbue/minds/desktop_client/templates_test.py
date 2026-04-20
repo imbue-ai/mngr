@@ -49,6 +49,20 @@ def test_render_landing_page_includes_restart_workspace_server_button() -> None:
     assert 'title="Restart workspace server"' in html
 
 
+def test_render_sidebar_page_includes_stuck_toast_plumbing() -> None:
+    """The sidebar renders a toast stack and listens for workspace_server_status events.
+
+    The toast subscribes to the same /_chrome/events stream the sidebar already
+    uses, so the detection-to-surface loop is end-to-end via existing SSE.
+    """
+    html = render_sidebar_page()
+    assert 'id="stuck-toast-stack"' in html
+    assert "workspace_server_status" in html
+    assert "renderStuckToasts" in html
+    assert "/api/agents/" in html
+    assert "/restart-workspace-server" in html
+
+
 def test_render_login_redirect_page_contains_redirect_script() -> None:
     html = render_login_redirect_page(
         one_time_code=OneTimeCode("abc123-secret-82341"),
