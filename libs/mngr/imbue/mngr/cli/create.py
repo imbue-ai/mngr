@@ -182,11 +182,11 @@ def _resolve_early_agent_type(opts: CreateCliOptions) -> str | None:
 
 
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
-    # --source is intentionally NOT listed: headless accepts --source to run
-    # the agent in-place at the given path instead of creating a blank temp
-    # directory. The source host must equal the resolved target host; transfer
-    # (--transfer, --rsync, --branch) remains incompatible because the headless
-    # path always runs in-place with no cloning.
+    # --source is intentionally NOT listed: headless resolves the source the
+    # same way as the non-headless path (defaulting to the git root) and runs
+    # the agent in-place there. Transfer-related flags (--transfer, --rsync,
+    # --branch) remain incompatible because the headless path never clones or
+    # copies -- source host == target host, always.
     ("branch", "--branch"),
     ("transfer", "--transfer"),
     ("rsync", "--rsync/--no-rsync"),
@@ -240,10 +240,9 @@ def _reject_incompatible_headless_flags(
 ) -> None:
     """Raise UserInputError if any flags incompatible with the headless path were explicitly set.
 
-    The headless path skips git operations, provisioning, environment setup,
-    and connection. Source resolution is partial: ``--source`` is honored
-    (it selects the in-place work directory) but transfer-related flags
-    (``--transfer``, ``--rsync``, ``--branch``) are not. Flags for the
+    The headless path resolves ``--source`` like the non-headless path but
+    then runs the agent in-place, with no transfer, no git operations, no
+    provisioning, no environment setup, and no connection. Flags for the
     skipped features are silently ignored, which could confuse users, so
     this function catches that early.
 
@@ -269,8 +268,8 @@ def _reject_incompatible_headless_flags(
         flags_str = ", ".join(explicit_flags)
         raise UserInputError(
             f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
-            f"The headless flow runs in a fresh temporary directory (default) or "
-            f"in-place at --source, streams output, and auto-destroys. Git, transfer, "
+            f"The headless flow runs the agent in-place at the source (default: git "
+            f"root, or --source), streams output, and auto-destroys. Git, transfer, "
             f"provisioning, environment, and connection options do not apply."
         )
 
@@ -314,34 +313,24 @@ def _create_headless(
     streams its output, and destroys it when done. Driven by the agent type
     implementing StreamingHeadlessAgentMixin.
 
-    Default behavior is to run in a fresh temporary directory on the resolved
-    host. Passing ``--source`` switches to in-place mode: the agent runs in
-    the given directory and we do not remove it on exit. In-place mode
-    requires the source host to match the resolved target host, since the
-    headless path does not perform any transfer.
+    The source is resolved like the non-headless path: --source if given,
+    otherwise the current git root. The agent runs in-place at that source;
+    the headless path does not transfer or clone, so the source host is the
+    target host. Pinning a separate target (via @HOST / @.PROVIDER /
+    --provider) is therefore rejected -- pin it via --source @HOST:PATH
+    instead.
     """
-    # When --source is given, the source host doubles as the target host: the
-    # agent runs in-place there (no transfer on the headless path). Pinning a
-    # separate target via the address or --provider would require starting an
-    # unrelated host just to reject it, so we forbid that combination at the
-    # name level without touching any providers.
-    source_location: HostLocation | None
-    if opts.source is not None:
-        if address.host_name is not None or address.provider_name is not None or opts.provider is not None:
-            raise UserInputError(
-                "On the headless path, --source determines the target host (the agent "
-                "runs in-place with no transfer). Drop the target pinned via the address "
-                "(@HOST / @.PROVIDER) or --provider, or drop --source."
-            )
-        agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
-        resolved_source = _resolve_source_location(
-            opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host
+    if address.host_name is not None or address.provider_name is not None or opts.provider is not None:
+        raise UserInputError(
+            "On the headless path, the target host is derived from --source "
+            "(the agent runs in-place with no transfer). Drop the target "
+            "pinned via the address (@HOST / @.PROVIDER) or --provider; use "
+            "--source @HOST:PATH or --source @.PROVIDER:PATH instead."
         )
-        source_location = resolved_source.location
-        host = resolved_source.location.host
-    else:
-        source_location = None
-        host = _resolve_online_host(opts, address, mngr_ctx)
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    resolved_source = _resolve_source_location(opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host)
+    source_location = resolved_source.location
+    host = source_location.host
 
     # Mirror the non-headless path: apply --host-label values to the resolved
     # host. _parse_target_host only seeds host tags when creating a new host;
@@ -360,7 +349,6 @@ def _create_headless(
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
 
     with headless_agent_output(
-        host=host,
         mngr_ctx=mngr_ctx,
         agent_type=AgentTypeName(agent_type_name),
         source_location=source_location,
@@ -517,7 +505,7 @@ class _CreateCommand(click.Command):
     "--foreground",
     is_flag=True,
     default=False,
-    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Defaults to a fresh temp directory; pass --source to run in-place at an existing path",
+    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Runs in-place at the source (default: git root, or pass --source)",
 )
 @optgroup.option(
     "--auto-start/--no-auto-start",

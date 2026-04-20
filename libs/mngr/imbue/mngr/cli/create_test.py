@@ -779,20 +779,26 @@ def test_create_headless_streams_output(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag).
+    via settings.toml (since --command is not a CLI flag). Supplies --source
+    explicitly so the test is not dependent on being inside a git repo.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
     result = cli_runner.invoke(
         create,
         [
             "--type",
             "headless_command",
             "--foreground",
+            "--source",
+            str(source_dir),
         ],
         obj=plugin_manager,
         catch_exceptions=False,
@@ -1073,17 +1079,19 @@ def test_create_headless_with_source_runs_in_place(
         pytest.param(["agent@localhost"], id="host_in_address"),
     ],
 )
-def test_create_headless_rejects_source_with_pinned_target(
+def test_create_headless_rejects_pinned_target(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
     pinned_args: list[str],
 ) -> None:
-    """Headless --source cannot be combined with a pinned target.
+    """Pinning a target host on the headless path is always rejected.
 
-    On the headless path the source host doubles as the target (no transfer),
-    so pinning a different target via @HOST / @.PROVIDER / --provider is
-    ambiguous and must be rejected with a clear error.
+    The headless path never transfers, so the target host is derived from
+    the source. Pinning a different target via @HOST / @.PROVIDER /
+    --provider is therefore ambiguous regardless of whether --source was
+    passed. The rejection message should steer users to encode the host on
+    --source instead.
     """
     result = cli_runner.invoke(
         create,
@@ -1099,7 +1107,7 @@ def test_create_headless_rejects_source_with_pinned_target(
     )
 
     assert result.exit_code != 0
-    assert "--source determines the target host" in result.output
+    assert "--source @HOST:PATH" in result.output or "--source @.PROVIDER:PATH" in result.output
 
 
 # =============================================================================

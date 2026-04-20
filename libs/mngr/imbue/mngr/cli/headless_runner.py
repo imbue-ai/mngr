@@ -84,11 +84,29 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
 
 
 @contextmanager
+def ephemeral_work_location(host: OnlineHostInterface) -> Iterator[HostLocation]:
+    """Yield a fresh throwaway work directory on the host; remove it on exit.
+
+    Use this when a headless caller wants a blank scratch dir rather than an
+    existing checkout (e.g. ``mngr ask``). For the common case where the
+    caller is passing through to ``headless_agent_output``, wrap both::
+
+        with ephemeral_work_location(host) as work_location:
+            with headless_agent_output(source_location=work_location, ...):
+                ...
+    """
+    work_path = create_work_dir_on_host(host)
+    try:
+        yield HostLocation(host=host, path=work_path)
+    finally:
+        remove_work_dir_on_host(host, work_path)
+
+
+@contextmanager
 def headless_agent_output(
-    host: OnlineHostInterface,
     mngr_ctx: MngrContext,
     agent_type: AgentTypeName,
-    source_location: HostLocation | None = None,
+    source_location: HostLocation,
     agent_args: tuple[str, ...] = (),
     label_options: AgentLabelOptions | None = None,
     name: AgentName | None = None,
@@ -96,12 +114,10 @@ def headless_agent_output(
 ) -> Iterator[StreamingHeadlessAgentMixin]:
     """Create a headless agent, yield it for streaming, and destroy it on exit.
 
-    When ``source_location`` is None (the default), a fresh temporary
-    directory is created on the host as the work path and removed on exit.
-    When provided, the agent runs in-place at that location; the caller
-    owns the directory and it is not removed on exit.
-    ``source_location.host`` must be the same host as ``host`` -- callers
-    resolve the source before reaching this contextmanager.
+    The agent runs in-place at ``source_location.path`` on
+    ``source_location.host``. The caller owns the directory's lifecycle --
+    this contextmanager does not create or remove it. For a fresh throwaway
+    directory, wrap with :func:`ephemeral_work_location`.
 
     If ``pre_create_setup`` is provided, it is called with the host and work
     path before the agent is created, allowing callers to write files that the
@@ -112,42 +128,33 @@ def headless_agent_output(
     """
     check_streaming_headless_agent_type(str(agent_type))
 
-    created_temp_dir = source_location is None
-    if source_location is None:
-        work_path = create_work_dir_on_host(host)
-    elif source_location.host.id != host.id:
-        raise MngrError("source_location.host must equal host; cross-host headless runs are not supported")
-    else:
-        work_path = source_location.path
-    try:
-        if pre_create_setup is not None:
-            pre_create_setup(host, work_path)
+    host = source_location.host
+    work_path = source_location.path
 
-        api_source_location = HostLocation(host=host, path=work_path)
-        agent_options = CreateAgentOptions(
-            agent_type=agent_type,
-            agent_args=agent_args,
-            label_options=label_options or AgentLabelOptions(),
-            target_path=work_path,
-            name=name,
-        )
+    if pre_create_setup is not None:
+        pre_create_setup(host, work_path)
 
-        result = api_create(
-            source_location=api_source_location,
-            target_host=host,
-            agent_options=agent_options,
-            mngr_ctx=mngr_ctx,
-            create_work_dir=False,
-        )
+    agent_options = CreateAgentOptions(
+        agent_type=agent_type,
+        agent_args=agent_args,
+        label_options=label_options or AgentLabelOptions(),
+        target_path=work_path,
+        name=name,
+    )
 
-        agent = result.agent
-        with _destroy_on_exit(host, agent):
-            if not isinstance(agent, StreamingHeadlessAgentMixin):
-                raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
-            yield agent
-    finally:
-        if created_temp_dir:
-            remove_work_dir_on_host(host, work_path)
+    result = api_create(
+        source_location=source_location,
+        target_host=host,
+        agent_options=agent_options,
+        mngr_ctx=mngr_ctx,
+        create_work_dir=False,
+    )
+
+    agent = result.agent
+    with _destroy_on_exit(host, agent):
+        if not isinstance(agent, StreamingHeadlessAgentMixin):
+            raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
+        yield agent
 
 
 def accumulate_chunks(chunks: Iterator[str]) -> str:

@@ -18,6 +18,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.headless_runner import accumulate_chunks
+from imbue.mngr.cli.headless_runner import ephemeral_work_location
 from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.headless_runner import headless_agent_output
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
@@ -259,18 +260,21 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     mngr_ctx: MngrContext
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        # `ask` always runs in a fresh throwaway directory — nothing in the user's
-        # cwd should leak in, and our prompt files should not land in their repo.
-        with headless_agent_output(
-            host=self.host,
-            mngr_ctx=self.mngr_ctx,
-            agent_type=AgentTypeName("headless_claude"),
-            source_location=None,
-            agent_args=_HEADLESS_CLAUDE_ARGS,
-            label_options=AgentLabelOptions(labels={"internal": "ask"}),
-            name=AgentName("ask"),
-            pre_create_setup=lambda host, path: _write_claude_files(host, path, prompt, system_prompt),
-        ) as agent:
+        # `ask` always runs in a fresh throwaway directory -- nothing in the
+        # user's cwd should leak in, and our prompt files should not land in
+        # their repo.
+        with (
+            ephemeral_work_location(self.host) as work_location,
+            headless_agent_output(
+                mngr_ctx=self.mngr_ctx,
+                agent_type=AgentTypeName("headless_claude"),
+                source_location=work_location,
+                agent_args=_HEADLESS_CLAUDE_ARGS,
+                label_options=AgentLabelOptions(labels={"internal": "ask"}),
+                name=AgentName("ask"),
+                pre_create_setup=lambda host, path: _write_claude_files(host, path, prompt, system_prompt),
+            ) as agent,
+        ):
             yield from agent.stream_output()
 
 

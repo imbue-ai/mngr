@@ -95,7 +95,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create) | `False` |
 | `--update`, `--no-update` | boolean | When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
-| `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Defaults to a fresh temp directory; pass --source to run in-place at an existing path | `False` |
+| `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Runs in-place at the source (default: git root, or pass --source) | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
 | `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
 
