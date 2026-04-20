@@ -243,8 +243,10 @@ def _reject_incompatible_headless_flags(
         flags_str = ", ".join(explicit_flags)
         raise UserInputError(
             f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
-            f"The headless flow streams output and auto-destroys; flags for the "
-            f"post-create connect/attach phase do not apply."
+            f"The headless flow streams output and auto-destroys, so flags for the "
+            f"post-create connect/attach phase (e.g. --reconnect, --attach-command), "
+            f"for send-message-based delivery (--edit-message), and for long-lived "
+            f"agents (--reuse, --update, --start-on-boot) do not apply."
         )
 
 
