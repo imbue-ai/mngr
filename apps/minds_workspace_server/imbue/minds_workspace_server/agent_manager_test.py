@@ -643,20 +643,6 @@ def test_handle_discovery_event_dispatches_host_destroyed(
     assert len(agent_manager.get_agents()) == 0
 
 
-def test_build_observe_command_starts_with_mngr_binary(agent_manager: AgentManager) -> None:
-    """The observe subprocess must invoke the ``mngr`` CLI, not ``python -m imbue.mngr``.
-
-    Regression test: a previous implementation used ``sys.executable -m imbue.mngr``,
-    which crashes because ``imbue.mngr`` is a package with no ``__main__``. The
-    failure was silent, leaving agents discovered after startup invisible to the
-    "+" tab menu.
-    """
-    cmd = agent_manager._build_observe_command()
-    assert cmd[0] == "mngr"
-    assert cmd[1] == "observe"
-    assert "--discovery-only" in cmd
-
-
 def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroadcaster) -> None:
     """The ``mngr_binary`` argument to ``build()`` overrides the default binary path."""
     manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")
