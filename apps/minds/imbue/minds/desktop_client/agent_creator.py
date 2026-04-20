@@ -513,7 +513,10 @@ class AgentCreator(MutableModel):
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
                     clone_git_repo(
-                        GitUrl(repo_source), clone_target, on_output=emit_log, branch=branch,
+                        GitUrl(repo_source),
+                        clone_target,
+                        on_output=emit_log,
+                        branch=branch,
                     )
                     workspace_dir = clone_target
 

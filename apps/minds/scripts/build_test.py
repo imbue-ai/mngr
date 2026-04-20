@@ -14,7 +14,6 @@ These tests run ``uv build`` for each workspace package listed in
 both properties.
 """
 
-import io
 import re
 import subprocess
 import zipfile
@@ -52,17 +51,13 @@ def built_wheels(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
             capture_output=True,
         )
         produced = [p for p in out_dir.iterdir() if p not in before and p.suffix == ".whl"]
-        assert len(produced) == 1, (
-            f"Expected exactly one wheel for {name}, got {produced}"
-        )
+        assert len(produced) == 1, f"Expected exactly one wheel for {name}, got {produced}"
         wheels[name] = produced[0]
     return wheels
 
 
 @pytest.mark.parametrize("package_name", WORKSPACE_PACKAGES)
-def test_workspace_wheel_is_pure_python(
-    built_wheels: dict[str, Path], package_name: str
-) -> None:
+def test_workspace_wheel_is_pure_python(built_wheels: dict[str, Path], package_name: str) -> None:
     """Every workspace wheel must be tagged py3-none-any.
 
     If this ever fails, a workspace package has picked up a C extension or a
@@ -80,9 +75,7 @@ def test_workspace_wheel_is_pure_python(
 
 
 @pytest.mark.parametrize("package_name", WORKSPACE_PACKAGES)
-def test_workspace_wheel_excludes_test_files(
-    built_wheels: dict[str, Path], package_name: str
-) -> None:
+def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], package_name: str) -> None:
     """Wheels must not contain test files.
 
     If this fails, the package's ``pyproject.toml`` is missing or has wrong
@@ -93,7 +86,7 @@ def test_workspace_wheel_excludes_test_files(
         leaks = [n for n in zf.namelist() if TEST_PATTERN.search(n)]
     assert leaks == [], (
         f"{built_wheels[package_name].name} contains test files that should be excluded: {leaks}. "
-        "Add `exclude = [\"*_test.py\", \"test_*.py\", \"**/conftest.py\"]` to "
+        'Add `exclude = ["*_test.py", "test_*.py", "**/conftest.py"]` to '
         "[tool.hatch.build.targets.wheel] in the package's pyproject.toml."
     )
 

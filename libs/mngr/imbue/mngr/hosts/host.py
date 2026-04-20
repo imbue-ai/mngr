@@ -1686,10 +1686,8 @@ class Host(BaseHost, OnlineHostInterface):
                 # push can replace all branches cleanly. The `2>/dev/null`
                 # tolerates a fresh bare repo with no branch to detach from.
                 detach_cmd = (
-                    "git -C " + shlex.quote(str(target_path))
-                    + " checkout --detach HEAD 2>/dev/null;"
-                    " git -C " + shlex.quote(str(target_path))
-                    + " config receive.denyDeleteCurrent ignore"
+                    "git -C " + shlex.quote(str(target_path)) + " checkout --detach HEAD 2>/dev/null;"
+                    " git -C " + shlex.quote(str(target_path)) + " config receive.denyDeleteCurrent ignore"
                 )
                 self.execute_idempotent_command(detach_cmd)
 
