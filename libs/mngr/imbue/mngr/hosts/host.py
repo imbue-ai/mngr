@@ -1680,6 +1680,20 @@ class Host(BaseHost, OnlineHostInterface):
 
         with log_span("Pushing git repo to target: {}", git_url):
             if source_host.is_local:
+                # When re-pushing into an existing target (e.g. `mngr create
+                # --reuse --update`), the mirror push's `--prune` may try to
+                # delete the target's currently-checked-out branch. Git
+                # refuses that by default ("refusing to delete the current
+                # branch"). Detach HEAD on the target and set
+                # receive.denyDeleteCurrent=ignore so prune can replace all
+                # branches cleanly. `2>/dev/null` tolerates a fresh bare
+                # repo with no branch to detach from.
+                detach_cmd = (
+                    "git -C " + shlex.quote(str(target_path)) + " checkout --detach HEAD 2>/dev/null;"
+                    " git -C " + shlex.quote(str(target_path)) + " config receive.denyDeleteCurrent ignore"
+                )
+                self.execute_idempotent_command(detach_cmd)
+
                 command_args = [
                     "git",
                     "-C",

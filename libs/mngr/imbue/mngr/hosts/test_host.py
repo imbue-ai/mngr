@@ -1730,6 +1730,69 @@ def test_create_work_dir_copy_with_git(
 
 
 @pytest.mark.rsync
+def test_create_work_dir_idempotent_when_target_has_checked_out_work_branch(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Regression: re-running create_agent_work_dir against an existing target
+    whose current branch no longer exists on source (the case minds hits when
+    `mngr create --reuse --update` re-creates an agent that already ran work
+    branches) must not fail on `git push --prune`.
+
+    Without the detach-HEAD + `receive.denyDeleteCurrent=ignore` fix in
+    `_git_push_to_target`, the second create raises because git refuses to
+    delete the target's currently-checked-out branch.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_prune"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("initial")
+    _init_git_repo(source_path)
+
+    target_path = temp_dir / "target_prune"
+    branch_name = "mngr-regression-foo-1"
+
+    options = CreateAgentOptions(
+        name=AgentName("regression-prune"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(new_branch_name=branch_name),
+    )
+
+    # First call: sets up target with the work branch checked out.
+    first_result = host.create_agent_work_dir(host, source_path, options)
+    assert first_result.path == target_path
+    assert first_result.created_branch_name == branch_name
+
+    # Confirm the failure preconditions: target is on branch_name, source is not.
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+    target_head = subprocess.run(
+        ["git", "-C", str(target_path), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True, env=env, check=True,
+    ).stdout.strip()
+    assert target_head == branch_name
+    source_branches = subprocess.run(
+        ["git", "-C", str(source_path), "branch", "--format=%(refname:short)"],
+        capture_output=True, text=True, env=env, check=True,
+    ).stdout.split()
+    assert branch_name not in source_branches
+
+    # Second call: simulates `mngr create --reuse --update`. The `git push
+    # --prune` inside would fail without the detach-HEAD fix because it'd
+    # try to delete `branch_name`, which is the target's current branch.
+    second_result = host.create_agent_work_dir(host, source_path, options)
+    assert second_result.path == target_path
+    target_head_after = subprocess.run(
+        ["git", "-C", str(target_path), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True, env=env, check=True,
+    ).stdout.strip()
+    assert target_head_after == branch_name
+
+
+@pytest.mark.rsync
 def test_create_work_dir_copy_with_git_copies_info_exclude(
     host_with_temp_dir: tuple[Host, Path],
     setup_git_config: None,
