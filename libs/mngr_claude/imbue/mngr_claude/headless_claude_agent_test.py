@@ -411,12 +411,18 @@ def test_stream_output_combines_stderr_and_stdout_errors(
     assert "stderr-b3c4d5e6" in str(exc_info.value)
 
 
+@pytest.mark.tmux
 def test_stream_output_raises_with_stderr_content(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should surface stderr.log content in the error when stdout is empty."""
+    """stream_output should surface stderr.log content in the error when stdout is empty.
+
+    Marked @pytest.mark.tmux because _raise_no_output_error unconditionally
+    captures the tmux pane as one of its detail sources, which invokes
+    `tmux capture-pane` via the host interface.
+    """
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
