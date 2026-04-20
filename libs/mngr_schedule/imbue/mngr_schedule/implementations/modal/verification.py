@@ -18,6 +18,7 @@
 # Modal and mngr infrastructure to execute (similar to cron_runner.py).
 # It is exercised by the acceptance test in test_schedule_add.py.
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -39,6 +40,12 @@ VERIFICATION_TIMEOUT_SECONDS: Final[float] = 3600.0
 
 # Must match cron_runner._RESULT_SENTINEL exactly.
 _RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
+
+# Matches the sentinel anywhere on a line (so Modal-side log prefixes such as
+# container ids or timestamps don't defeat detection) and captures the JSON
+# payload that follows it. Greedy match up to end-of-line so that payloads
+# containing braces / quotes are captured in full.
+_SENTINEL_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_RESULT_SENTINEL) + r"\s+(\{.*\})\s*$")
 
 
 @pure
@@ -85,17 +92,19 @@ def _stream_and_capture(
             error_lines.append(stripped)
             error_event.set()
 
-        if not sentinel_holder and stripped.startswith(_RESULT_SENTINEL):
-            payload = stripped[len(_RESULT_SENTINEL) :].strip()
-            try:
-                parsed = json.loads(payload)
-            except json.JSONDecodeError:
-                logger.warning("Could not parse verify sentinel payload: {}", payload)
-                continue
-            if isinstance(parsed, dict):
-                sentinel_holder.append(parsed)
-            else:
-                logger.warning("Verify sentinel payload was not a JSON object: {}", payload)
+        if not sentinel_holder:
+            match = _SENTINEL_PATTERN.search(stripped)
+            if match is not None:
+                payload = match.group(1)
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    logger.warning("Could not parse verify sentinel payload: {}", payload)
+                    continue
+                if isinstance(parsed, dict):
+                    sentinel_holder.append(parsed)
+                else:
+                    logger.warning("Verify sentinel payload was not a JSON object: {}", payload)
 
 
 def verify_schedule_deployment(
