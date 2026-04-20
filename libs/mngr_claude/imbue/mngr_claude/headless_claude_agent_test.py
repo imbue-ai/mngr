@@ -234,6 +234,83 @@ def test_assemble_command_raises_without_command(
         agent.assemble_command(host, agent_args=(), command_override=None)
 
 
+def test_prepare_headless_work_dir_writes_prompt_file(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """The classmethod hook writes the initial message to .mngr-prompt."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    HeadlessClaude.prepare_headless_work_dir(host, work_dir, "please fix the tests")
+
+    assert (work_dir / ".mngr-prompt").read_text() == "please fix the tests"
+
+
+def test_prepare_headless_work_dir_no_message_is_noop(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """No initial message means no file gets written."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    HeadlessClaude.prepare_headless_work_dir(host, work_dir, None)
+
+    assert not (work_dir / ".mngr-prompt").exists()
+
+
+def test_assemble_command_appends_prompt_ref_when_initial_message_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When initial_message is set and agent_args do not already reference the prompt file,
+    assemble_command appends a cat of .mngr-prompt so claude actually receives the user's message.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    monkeypatch.setattr(type(agent), "get_initial_message", lambda self: "hi there")
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert ".mngr-prompt" in cmd
+    # Cat-form, not a literal — prompts may be long / contain shell metacharacters.
+    assert 'cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt"' in cmd
+
+
+def test_assemble_command_does_not_duplicate_prompt_ref(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the caller already included a .mngr-prompt reference in agent_args,
+    assemble_command must not append a second one (would double-feed the prompt).
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    monkeypatch.setattr(type(agent), "get_initial_message", lambda self: "hi there")
+
+    explicit_prompt_arg = '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"'
+    cmd = agent.assemble_command(host, agent_args=(explicit_prompt_arg,), command_override=None)
+
+    assert cmd.count(".mngr-prompt") == 1
+
+
+def test_assemble_command_no_prompt_ref_when_no_initial_message(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """No initial message = no appended prompt reference."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert ".mngr-prompt" not in cmd
+
+
 def test_assemble_command_is_posix_compatible(
     local_provider: LocalProviderInstance,
     tmp_path: Path,

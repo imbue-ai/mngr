@@ -28,8 +28,8 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
-def check_streaming_headless_agent_type(agent_type: str) -> None:
-    """Verify the given agent type implements StreamingHeadlessAgentMixin.
+def check_streaming_headless_agent_type(agent_type: str) -> type[StreamingHeadlessAgentMixin]:
+    """Verify the given agent type implements StreamingHeadlessAgentMixin and return its class.
 
     Raises MngrError if the agent type is not registered or does not
     support streaming headless output.
@@ -40,6 +40,7 @@ def check_streaming_headless_agent_type(agent_type: str) -> None:
             f"The '{agent_type}' agent type does not support streaming headless output. "
             f"Only agent types implementing StreamingHeadlessAgentMixin can be used."
         )
+    return agent_class
 
 
 def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
@@ -110,6 +111,7 @@ def headless_agent_output(
     agent_args: tuple[str, ...] = (),
     label_options: AgentLabelOptions | None = None,
     name: AgentName | None = None,
+    initial_message: str | None = None,
     pre_create_setup: Callable[[OnlineHostInterface, Path], None] | None = None,
 ) -> Iterator[StreamingHeadlessAgentMixin]:
     """Create a headless agent, yield it for streaming, and destroy it on exit.
@@ -119,18 +121,26 @@ def headless_agent_output(
     this contextmanager does not create or remove it. For a fresh throwaway
     directory, wrap with :func:`ephemeral_work_location`.
 
+    ``initial_message`` is the caller's ``--message`` content. It is both
+    stored on the agent (retrievable via ``get_initial_message()``) and
+    handed to the agent type's ``prepare_headless_work_dir`` classmethod
+    so that types that drive claude via prompt files can materialise it on
+    disk before the process starts.
+
     If ``pre_create_setup`` is provided, it is called with the host and work
-    path before the agent is created, allowing callers to write files that the
-    agent command can reference.
+    path after the initial-message hook runs but before the agent is created,
+    allowing callers to write additional files that the agent command can
+    reference.
 
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
-    check_streaming_headless_agent_type(str(agent_type))
+    agent_class = check_streaming_headless_agent_type(str(agent_type))
 
     host = source_location.host
     work_path = source_location.path
 
+    agent_class.prepare_headless_work_dir(host, work_path, initial_message)
     if pre_create_setup is not None:
         pre_create_setup(host, work_path)
 
@@ -140,6 +150,7 @@ def headless_agent_output(
         label_options=label_options or AgentLabelOptions(),
         target_path=work_path,
         name=name,
+        initial_message=initial_message,
     )
 
     result = api_create(

@@ -212,6 +212,9 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     )
 
 
+_MNGR_PROMPT_FILE: str = ".mngr-prompt"
+
+
 class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
     """Agent type for non-interactive (headless) Claude usage.
 
@@ -222,6 +225,23 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
 
     _no_output_error_subject: str = "claude"
     _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
+
+    @classmethod
+    def prepare_headless_work_dir(
+        cls,
+        host: OnlineHostInterface,
+        work_dir: Path,
+        initial_message: str | None,
+    ) -> None:
+        """Persist ``initial_message`` to ``.mngr-prompt`` inside the work dir.
+
+        The command assembled by ``assemble_command`` reads this file via
+        ``cat`` so we can pass very long prompts without hitting tmux /
+        shell arg length limits.
+        """
+        if initial_message is None:
+            return
+        host.write_text_file(work_dir / _MNGR_PROMPT_FILE, initial_message)
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.
@@ -272,6 +292,14 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         all_extra_args = self.agent_config.cli_args + agent_args
         if all_extra_args:
             parts.extend(all_extra_args)
+
+        # If the caller set --message (plumbed as initial_message) and their
+        # agent_args don't already reference the prompt file, append it.
+        # Keeps `ask`-style callers (which pass the file explicitly) working
+        # and makes `mngr create --foreground --message` actually deliver
+        # the message to claude.
+        if self.get_initial_message() is not None and _MNGR_PROMPT_FILE not in " ".join(all_extra_args):
+            parts.append(f'"$(cat "$MNGR_AGENT_WORK_DIR/{_MNGR_PROMPT_FILE}")"')
 
         cmd_str = " ".join(parts)
         return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')

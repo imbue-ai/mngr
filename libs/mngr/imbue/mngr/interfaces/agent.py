@@ -470,3 +470,21 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
     def stream_output(self) -> Iterator[str]:
         """Yield output chunks as they become available."""
         ...
+
+    @classmethod
+    def prepare_headless_work_dir(
+        cls,
+        host: OnlineHostInterface,
+        work_dir: Path,
+        initial_message: str | None,
+    ) -> None:
+        """Write agent-type-specific files into ``work_dir`` before the agent is created.
+
+        Called by ``headless_agent_output`` after ``work_dir`` exists but
+        before the agent instance is constructed. Agent types override this
+        to materialise the caller's ``initial_message`` into whatever form
+        their command reads (prompt files, piped stdin, etc.). Default is a
+        no-op; ``initial_message`` is also stored on the agent and retrievable
+        via ``get_initial_message()``, so overrides are only needed when the
+        message must be on disk before the process starts.
+        """

@@ -29,6 +29,7 @@ from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_agent_type_name
+from imbue.mngr.cli.create import _resolve_initial_message_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
 from imbue.mngr.cli.create import _split_address_and_target_path
@@ -723,6 +724,48 @@ def test_resolve_agent_type_name_all_none() -> None:
 
 
 # =============================================================================
+# Tests for _resolve_initial_message_content (shared between headless + non-headless)
+# =============================================================================
+
+
+def test_resolve_initial_message_content_from_message(default_create_cli_opts: CreateCliOptions) -> None:
+    """--message is returned verbatim."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message, "do the thing"),
+    )
+    assert _resolve_initial_message_content(opts) == "do the thing"
+
+
+def test_resolve_initial_message_content_from_file(default_create_cli_opts: CreateCliOptions, tmp_path: Path) -> None:
+    """--message-file contents are returned."""
+    message_path = tmp_path / "msg.txt"
+    message_path.write_text("from file")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message_file, str(message_path)),
+    )
+    assert _resolve_initial_message_content(opts) == "from file"
+
+
+def test_resolve_initial_message_content_none(default_create_cli_opts: CreateCliOptions) -> None:
+    """Neither flag set returns None."""
+    assert _resolve_initial_message_content(default_create_cli_opts) is None
+
+
+def test_resolve_initial_message_content_rejects_both(
+    default_create_cli_opts: CreateCliOptions, tmp_path: Path
+) -> None:
+    """--message and --message-file together raise UserInputError."""
+    message_path = tmp_path / "msg.txt"
+    message_path.write_text("from file")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().message, "inline"),
+        to_update(default_create_cli_opts.field_ref().message_file, str(message_path)),
+    )
+    with pytest.raises(UserInputError, match="Cannot provide both --message and --message-file"):
+        _resolve_initial_message_content(opts)
+
+
+# =============================================================================
 # Tests for _create_headless
 # =============================================================================
 
@@ -830,8 +873,8 @@ def test_create_headless_rejects_multiple_incompatible_flags(
             "--type",
             "headless_command",
             "--foreground",
-            "--message",
-            "hi",
+            "--grant",
+            "shell",
             "--reuse",
             "--env",
             "FOO=bar",
@@ -841,7 +884,7 @@ def test_create_headless_rejects_multiple_incompatible_flags(
 
     assert result.exit_code != 0
     assert "--env" in result.output
-    assert "--message" in result.output
+    assert "--grant" in result.output
     assert "--reuse" in result.output
 
 
@@ -978,6 +1021,35 @@ def test_create_headless_does_not_reject_source_flag(
     assert "--env" in result.output
     # --source must not be listed as incompatible (neither the flag string nor its alias).
     assert "--from/--source" not in result.output
+
+
+def test_create_headless_does_not_reject_message_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--message / --message-file are accepted on the headless path.
+
+    Pairs --message with --env so the validator runs and we can confirm the
+    incompatibility listing mentions --env but not --message / --message-file.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--message",
+            "hi",
+            "--env",
+            "FOO=bar",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--env" in result.output
+    assert "--message" not in result.output
+    assert "--message-file" not in result.output
 
 
 @pytest.mark.tmux

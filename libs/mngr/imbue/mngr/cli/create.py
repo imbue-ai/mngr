@@ -206,8 +206,13 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     ("extra_provision_command", "--extra-provision-command"),
     ("upload_file", "--upload-file"),
     ("extra_window", "--extra-window/-w"),
-    ("message", "--message"),
-    ("message_file", "--message-file"),
+    # --message / --message-file are honoured on the headless path: they feed
+    # CreateAgentOptions.initial_message, and each agent type's
+    # prepare_headless_work_dir classmethod decides what to do with it
+    # (e.g. HeadlessClaude writes .mngr-prompt that its command cat's in).
+    # --edit-message is rejected because the editor session flow belongs to
+    # the interactive create path; if headless grows an editor use case we
+    # can revisit.
     ("edit_message", "--edit-message"),
     # --no-connect is allowed (redundant but consistent — headless never connects);
     # only explicit --connect=True is rejected. Handled in the function body below.
@@ -323,6 +328,8 @@ def _create_headless(
     agent_name = _resolve_or_generate_agent_name(address, opts)
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
 
+    initial_message = _resolve_initial_message_content(opts)
+
     with headless_agent_output(
         mngr_ctx=mngr_ctx,
         agent_type=AgentTypeName(agent_type_name),
@@ -330,6 +337,7 @@ def _create_headless(
         agent_args=opts.agent_args,
         label_options=label_options,
         name=agent_name,
+        initial_message=initial_message,
     ) as agent:
         chunks = agent.stream_output()
         stream_or_accumulate_response(
@@ -774,6 +782,19 @@ class _CreateSetup(FrozenModel):
     )
 
 
+def _resolve_initial_message_content(opts: CreateCliOptions) -> str | None:
+    """Return the message content from --message / --message-file, or None.
+
+    Raises UserInputError if both flags are set. Shared between the
+    headless and non-headless create paths so they resolve the same way.
+    """
+    if opts.message is not None and opts.message_file is not None:
+        raise UserInputError("Cannot provide both --message and --message-file")
+    if opts.message_file is not None:
+        return Path(opts.message_file).read_text()
+    return opts.message
+
+
 def _setup_create(
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
@@ -784,19 +805,8 @@ def _setup_create(
     target_path: Path | None = None,
 ) -> _CreateSetup:
     """Validate options, resolve messages, start editor session, resolve source location."""
-    # Validate that both --message and --message-file are not provided
-    if opts.message is not None and opts.message_file is not None:
-        raise UserInputError("Cannot provide both --message and --message-file")
-
-    # Read message from file if --message-file is provided (used as initial content for editor if --edit-message)
-    initial_message_content: str | None
-    if opts.message_file is not None:
-        message_file_path = Path(opts.message_file)
-        initial_message_content = message_file_path.read_text()
-    elif opts.message is not None:
-        initial_message_content = opts.message
-    else:
-        initial_message_content = None
+    # Read message from --message or --message-file (used as initial content for editor if --edit-message)
+    initial_message_content: str | None = _resolve_initial_message_content(opts)
 
     # If --edit-message is set, start the editor immediately
     # The editor runs in parallel with agent creation

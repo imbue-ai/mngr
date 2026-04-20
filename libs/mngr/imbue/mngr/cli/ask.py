@@ -229,6 +229,11 @@ class ClaudeBackendInterface(MutableModel, ABC):
         """Send a prompt to claude and yield response text chunks."""
 
 
+# Extra claude CLI args for ask's stream-json tailing. The user prompt is
+# passed via initial_message (HeadlessClaude's prepare_headless_work_dir
+# writes it to .mngr-prompt and assemble_command appends the cat reference),
+# so this tuple only contains the ask-specific flags and the system-prompt
+# file reference.
 _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--system-prompt",
     '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
@@ -239,18 +244,12 @@ _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--tools",
     '""',
     "--no-session-persistence",
-    '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-prompt")"',
 )
 
 
-def _write_claude_files(host: OnlineHostInterface, work_path: Path, prompt: str, system_prompt: str) -> None:
-    """Write prompt and system prompt files to the work directory.
-
-    The headless claude agent reads these via $(cat ...) in its agent_args,
-    avoiding tmux command length limits.
-    """
+def _write_system_prompt_file(host: OnlineHostInterface, work_path: Path, system_prompt: str) -> None:
+    """Write the ask-specific system prompt to the work directory."""
     host.write_text_file(work_path / ".mngr-system-prompt", system_prompt)
-    host.write_text_file(work_path / ".mngr-prompt", prompt)
 
 
 class HeadlessClaudeBackend(ClaudeBackendInterface):
@@ -272,7 +271,8 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
                 agent_args=_HEADLESS_CLAUDE_ARGS,
                 label_options=AgentLabelOptions(labels={"internal": "ask"}),
                 name=AgentName("ask"),
-                pre_create_setup=lambda host, path: _write_claude_files(host, path, prompt, system_prompt),
+                initial_message=prompt,
+                pre_create_setup=lambda host, path: _write_system_prompt_file(host, path, system_prompt),
             ) as agent,
         ):
             yield from agent.stream_output()
