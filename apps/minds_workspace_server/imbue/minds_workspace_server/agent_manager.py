@@ -477,21 +477,26 @@ class AgentManager:
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Agent refresh failed")
 
-    def _build_observe_command(self) -> list[str]:
-        """Build the argv for the mngr observe discovery-only subprocess.
+    def _resolve_observe_events_dir(self) -> Path:
+        """Resolve (but do not create) the events directory for mngr observe.
 
-        Factored into a method so tests can assert on the command shape
-        (specifically that the first element is a real mngr binary)
-        without actually spawning the subprocess.
+        Kept separate from ``_build_observe_command`` so the command builder
+        stays pure; the directory is created only on the production start
+        path inside ``_start_observe``.
         """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
-            events_dir = Path(agent_state_dir) / "workspace_server" / "observe"
-        else:
-            events_dir = Path.home() / ".mngr" / "workspace_server" / "observe"
+            return Path(agent_state_dir) / "workspace_server" / "observe"
+        return Path.home() / ".mngr" / "workspace_server" / "observe"
 
-        events_dir.mkdir(parents=True, exist_ok=True)
+    def _build_observe_command(self) -> list[str]:
+        """Build the argv for the mngr observe discovery-only subprocess.
 
+        Pure: this method has no side effects, so tests can assert on the
+        command shape (specifically that the first element is a real mngr
+        binary) without touching the filesystem or spawning the subprocess.
+        """
+        events_dir = self._resolve_observe_events_dir()
         return [
             self._mngr_binary,
             "observe",
@@ -504,6 +509,7 @@ class AgentManager:
 
     def _start_observe(self) -> None:
         """Start the mngr observe subprocess and a watchdog for early exit."""
+        self._resolve_observe_events_dir().mkdir(parents=True, exist_ok=True)
         cmd = self._build_observe_command()
 
         self._observe_cg = ConcurrencyGroup(name="agent-manager-observe")
