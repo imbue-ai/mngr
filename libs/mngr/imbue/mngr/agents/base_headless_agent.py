@@ -12,6 +12,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.polling import poll_until
 
@@ -23,6 +24,71 @@ TAIL_POLL_TIMEOUT: float = 300.0
 # override _startup_grace_seconds to increase this (e.g. Claude needs longer
 # due to nvm resolution and node startup).
 STARTUP_GRACE_SECONDS: float = 2.0
+
+
+def render_file_diagnostic(
+    host: OnlineHostInterface,
+    path: Path,
+    label: str,
+    *,
+    tail_chars: int | None = None,
+    show_path: bool = True,
+) -> str:
+    """Render a single-file diagnostic line (for silent-exit post-mortems).
+
+    Probes existence and size of ``path`` via ``host.get_file_mtime`` +
+    ``host.read_text_file``, and returns one rendered string summarising
+    what was found. Best-effort: filesystem / remote-host errors and
+    decode errors are trace-logged and folded into the rendered line so
+    they neither mask the caller's primary error nor disappear silently.
+
+    ``label`` is used verbatim as the line prefix (the caller chooses
+    their own label / indent style). When ``show_path`` is True, the
+    rendered path is included after the label (format ``{label}: {path}
+    -- ...``); when False, the path is omitted (format ``{label}: ...``)
+    for callers that already report the directory separately. When
+    ``tail_chars`` is not None, up to that many trailing characters of
+    the decoded file are appended after a ``, tail:\\n`` separator; when
+    None, only the char count is reported.
+
+    The returned string never contains a trailing newline.
+    """
+    prefix = f"{label}: {path} -- " if show_path else f"{label}: "
+    mtime_error: str | None = None
+    try:
+        mtime = host.get_file_mtime(path)
+    except (OSError, HostError) as e:
+        logger.trace("get_file_mtime({}) failed: {}", path, e)
+        mtime = None
+        mtime_error = str(e)
+    if mtime is None:
+        # Distinguish a genuinely-missing file ("does not exist") from a
+        # probe failure so triage isn't misled by a transient filesystem /
+        # remote-host error that just happens to look like a missing file.
+        if mtime_error is not None:
+            return f"{prefix}mtime probe failed: {mtime_error}"
+        return f"{prefix}does not exist"
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
+        # Raced with deletion between mtime probe and read.
+        return f"{prefix}does not exist"
+    except (OSError, HostError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError lives here (not OSError) because read_text_file
+        # decodes the file as UTF-8 and subprocess output isn't guaranteed
+        # to be valid UTF-8. Treating it as a read failure honours the
+        # best-effort contract documented above.
+        logger.trace("read_text_file({}) failed: {}", path, e)
+        return f"{prefix}exists, read failed: {e}"
+    # `content` is a decoded str, so len() counts characters, not bytes;
+    # label accordingly so triage isn't misled on non-ASCII output. Any
+    # tail slice is intentionally character-based (we're slicing decoded
+    # text, not raw bytes).
+    char_count = len(content)
+    if tail_chars is None:
+        return f"{prefix}{char_count} chars"
+    tail = content[-tail_chars:] if char_count > tail_chars else content
+    return f"{prefix}{char_count} chars, tail:\n{tail}".rstrip()
 
 
 class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
@@ -138,63 +204,19 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         command (e.g. claude exited silently). Confirms whether the redirect
         files were ever created, how big they are, and includes the tail of
         each so release-test post-mortems aren't stuck at "exited without
-        producing output". Best-effort: filesystem / remote-host errors are
-        trace-logged and folded into the rendered line so they neither mask
-        the caller's primary error nor disappear silently.
+        producing output". Delegates per-file rendering to
+        :func:`render_file_diagnostic` so the format stays in lockstep with
+        other silent-exit diagnostics (e.g. HeadlessClaude's work-dir
+        inventory).
 
         Always returns a non-empty string -- the iterated (stdout, stderr)
-        tuple is hard-coded, so at least one rendered line is guaranteed.
+        tuple is hard-coded and every rendered line is unconditionally
+        appended, so at least one line is guaranteed.
         """
-        stdout_path = self._get_stdout_path()
-        stderr_path = self._get_stderr_path()
-
-        lines: list[str] = []
-        for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
-            mtime_error: str | None = None
-            try:
-                mtime = self.host.get_file_mtime(path)
-            except (OSError, HostError) as e:
-                logger.trace("get_file_mtime({}) failed: {}", path, e)
-                mtime = None
-                mtime_error = str(e)
-            if mtime is None:
-                # Distinguish a genuinely-missing file ("does not exist") from
-                # a probe failure so triage isn't misled by a transient
-                # filesystem / remote-host error that just happens to look
-                # like a missing file. Per the docstring, errors are folded
-                # into the rendered line rather than disappearing silently.
-                if mtime_error is not None:
-                    lines.append(f"{label}: {path} -- mtime probe failed: {mtime_error}")
-                else:
-                    lines.append(f"{label}: {path} -- does not exist")
-                continue
-            try:
-                content = self.host.read_text_file(path)
-            except FileNotFoundError:
-                # Raced with deletion between mtime probe and read.
-                lines.append(f"{label}: {path} -- does not exist")
-                continue
-            except (OSError, HostError, UnicodeDecodeError) as e:
-                # UnicodeDecodeError lives here (not OSError) because
-                # read_text_file decodes the file as UTF-8 and subprocess
-                # output isn't guaranteed to be valid UTF-8. Treating it
-                # as a read failure honours the docstring contract:
-                # "filesystem / remote-host errors are trace-logged and
-                # folded into the rendered line so they neither mask the
-                # caller's primary error nor disappear silently."
-                logger.trace("read_text_file({}) failed: {}", path, e)
-                lines.append(f"{label}: {path} -- exists, read failed: {e}")
-                continue
-            # `content` is a decoded str, so len() counts characters, not
-            # bytes; label accordingly so triage isn't misled on non-ASCII
-            # output. The 1024-char tail cap is intentionally character-
-            # based (we're slicing decoded text, not raw bytes).
-            char_count = len(content)
-            tail = content[-1024:] if char_count > 1024 else content
-            lines.append(f"{label}: {path} -- {char_count} chars, tail:\n{tail}".rstrip())
-        # `lines` is guaranteed non-empty: the loop iterates over a
-        # hard-coded 2-tuple and every branch unconditionally appends.
-        assert lines
+        lines: list[str] = [
+            render_file_diagnostic(self.host, self._get_stdout_path(), "stdout", tail_chars=1024),
+            render_file_diagnostic(self.host, self._get_stderr_path(), "stderr", tail_chars=1024),
+        ]
 
         # Include the current lifecycle state so we can distinguish
         # "agent never started" from "agent exited without output" in
@@ -206,10 +228,9 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
             lines.append(f"lifecycle: {lifecycle.value}")
         except (OSError, HostError) as e:
             logger.trace("get_lifecycle_state failed: {}", e)
-            # Fold the error into the rendered output per the docstring
-            # contract -- trace-level logging alone would effectively
-            # drop this information, which defeats the purpose of the
-            # diagnostic (triage after a silent agent exit).
+            # Fold the error into the rendered output rather than dropping
+            # it -- trace-level logging alone would effectively hide this
+            # information, defeating the purpose of the diagnostic.
             lines.append(f"lifecycle: probe failed: {e}")
 
         return "\n".join(lines)

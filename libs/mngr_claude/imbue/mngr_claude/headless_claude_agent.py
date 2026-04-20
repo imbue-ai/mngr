@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -14,9 +13,9 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
+from imbue.mngr.agents.base_headless_agent import render_file_diagnostic
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -308,34 +307,17 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     def _get_work_dir_diagnostic(self) -> str:
         """Summarize the agent's work dir for silent-exit post-mortems.
 
-        Lists the .mngr-prompt and .mngr-system-prompt files by
-        existence + char count. Same best-effort discipline as
-        BaseHeadlessAgent._get_state_dir_diagnostic: filesystem / remote-host
-        errors are trace-logged and folded into the rendered line.
+        Lists the .mngr-prompt and .mngr-system-prompt files by existence +
+        char count. Delegates per-file rendering to
+        :func:`render_file_diagnostic` so the format stays in lockstep with
+        BaseHeadlessAgent's state-dir diagnostic.
         """
         work_dir = self.work_dir
         lines: list[str] = [f"work_dir: {work_dir}"]
         for name in (".mngr-prompt", ".mngr-system-prompt"):
-            path = work_dir / name
-            try:
-                mtime = self.host.get_file_mtime(path)
-            except (OSError, HostError) as e:
-                logger.trace("get_file_mtime({}) failed: {}", path, e)
-                lines.append(f"  {name}: mtime probe failed: {e}")
-                continue
-            if mtime is None:
-                lines.append(f"  {name}: does not exist")
-                continue
-            try:
-                content = self.host.read_text_file(path)
-            except FileNotFoundError:
-                lines.append(f"  {name}: does not exist")
-                continue
-            except (OSError, HostError, UnicodeDecodeError) as e:
-                logger.trace("read_text_file({}) failed: {}", path, e)
-                lines.append(f"  {name}: exists, read failed: {e}")
-                continue
-            lines.append(f"  {name}: {len(content)} chars")
+            # show_path=False: the `work_dir:` line already reports the
+            # directory, so per-file lines only need the filename label.
+            lines.append(render_file_diagnostic(self.host, work_dir / name, f"  {name}", show_path=False))
         return "\n".join(lines)
 
     def _get_stdout_stream_json_error(self) -> str | None:
