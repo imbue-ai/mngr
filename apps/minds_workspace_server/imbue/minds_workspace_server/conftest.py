@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -116,7 +117,7 @@ def launch_browser(
     browser_type_launch_args: dict[str, Any],
     browser_type: BrowserType,
     connect_options: dict[str, Any] | None,
-) -> Any:
+) -> Callable[..., Browser]:
     # A lambda is the idiomatic way to bind the fixture values into a
     # callable here without tripping either the inline-functions ratchet
     # (which flags nested def statements) or the partial-function ratchet.
@@ -129,7 +130,7 @@ def launch_browser(
 
 
 @pytest.fixture
-def browser(launch_browser: Any) -> Generator[Browser, None, None]:
+def browser(launch_browser: Callable[..., Browser]) -> Generator[Browser, None, None]:
     browser_instance = launch_browser()
     yield browser_instance
     browser_instance.close()
