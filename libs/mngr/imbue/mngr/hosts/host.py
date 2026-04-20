@@ -1680,17 +1680,6 @@ class Host(BaseHost, OnlineHostInterface):
 
         with log_span("Pushing git repo to target: {}", git_url):
             if source_host.is_local:
-                # When updating an existing repo, the --prune flag can fail if
-                # it tries to delete the currently checked-out branch on the
-                # target. Detach HEAD and allow current branch deletion so the
-                # push can replace all branches cleanly. The `2>/dev/null`
-                # tolerates a fresh bare repo with no branch to detach from.
-                detach_cmd = (
-                    "git -C " + shlex.quote(str(target_path)) + " checkout --detach HEAD 2>/dev/null;"
-                    " git -C " + shlex.quote(str(target_path)) + " config receive.denyDeleteCurrent ignore"
-                )
-                self.execute_idempotent_command(detach_cmd)
-
                 command_args = [
                     "git",
                     "-C",
