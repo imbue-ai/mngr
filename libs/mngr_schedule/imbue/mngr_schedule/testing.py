@@ -81,8 +81,24 @@ def resolve_modal_environment(deploy_output: str) -> str | None:
     return None
 
 
-def cleanup_modal_app(app_name: str, env: dict[str, str], modal_environment: str | None) -> None:
-    """Stop and clean up a Modal app created during testing."""
+def cleanup_modal_app(
+    app_name: str,
+    env: dict[str, str],
+    modal_environment: str | None,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    """Stop and clean up a Modal app created during testing.
+
+    Both 'modal app list' and 'modal app stop' are given --env so they target
+    the per-run Modal environment that the tests deploy into. Without --env,
+    Modal queries the user's default environment and silently fails to find
+    the test app, leaking Modal resources.
+
+    ``cwd`` is passed through to the Modal subprocesses; callers that need
+    Modal to see a specific working directory (for repo context etc.) should
+    set it.
+    """
     if modal_environment is None:
         logger.warning("Cannot clean up Modal app '{}': environment unknown", app_name)
         return
@@ -93,6 +109,7 @@ def cleanup_modal_app(app_name: str, env: dict[str, str], modal_environment: str
             text=True,
             timeout=30,
             env=env,
+            cwd=cwd,
         )
         if list_result.returncode == 0:
             apps = json.loads(list_result.stdout)
@@ -105,6 +122,7 @@ def cleanup_modal_app(app_name: str, env: dict[str, str], modal_environment: str
                             capture_output=True,
                             timeout=30,
                             env=env,
+                            cwd=cwd,
                         )
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
         logger.warning("Failed to clean up Modal app '{}'", app_name)

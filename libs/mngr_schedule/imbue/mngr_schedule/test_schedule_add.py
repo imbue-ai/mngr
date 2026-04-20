@@ -13,6 +13,7 @@ import pytest
 
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
+from imbue.mngr_schedule.testing import cleanup_modal_app
 from imbue.mngr_schedule.testing import resolve_modal_environment
 
 # Read the real home directory BEFORE the autouse fixture overrides HOME.
@@ -96,8 +97,11 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
-        _cleanup_modal_app(
-            app_name, env, monorepo_root, resolve_modal_environment(result.stderr if result is not None else "")
+        cleanup_modal_app(
+            app_name,
+            env,
+            resolve_modal_environment(result.stderr if result is not None else ""),
+            cwd=monorepo_root,
         )
 
 
@@ -154,8 +158,11 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
-        _cleanup_modal_app(
-            app_name, env, monorepo_root, resolve_modal_environment(result.stderr if result is not None else "")
+        cleanup_modal_app(
+            app_name,
+            env,
+            resolve_modal_environment(result.stderr if result is not None else ""),
+            cwd=monorepo_root,
         )
 
 
@@ -241,52 +248,9 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
         assert record["working_directory"] != ""
         assert record["full_commandline"] != ""
     finally:
-        _cleanup_modal_app(
+        cleanup_modal_app(
             app_name,
             env,
-            monorepo_root,
             resolve_modal_environment(add_result.stderr if add_result is not None else ""),
-        )
-
-
-def _cleanup_modal_app(
-    app_name: str,
-    env: dict[str, str],
-    monorepo_root: Path,
-    modal_environment: str | None,
-) -> None:
-    """Stop and clean up a Modal app created during testing.
-
-    The tests deploy into a per-run Modal environment derived from MNGR_PREFIX,
-    so both 'modal app list' and 'modal app stop' must receive --env to target
-    that environment. Without --env, Modal queries the user's default env and
-    silently fails to find the test app, leaking Modal resources.
-    """
-    if modal_environment is None:
-        # No way to find the deployed app without knowing its Modal environment.
-        # This happens when 'schedule add' failed before emitting its deploy log.
-        return
-    try:
-        list_result = subprocess.run(
-            ["uv", "run", "modal", "app", "list", "--json", "--env", modal_environment],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
             cwd=monorepo_root,
         )
-        if list_result.returncode == 0:
-            apps = json.loads(list_result.stdout)
-            for app in apps:
-                if app.get("Description", "") == app_name:
-                    app_id = app.get("App ID", "")
-                    if app_id:
-                        subprocess.run(
-                            ["uv", "run", "modal", "app", "stop", app_id, "--env", modal_environment],
-                            capture_output=True,
-                            timeout=30,
-                            env=env,
-                            cwd=monorepo_root,
-                        )
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        pass
