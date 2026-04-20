@@ -732,20 +732,26 @@ def test_create_headless_streams_output(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """Creating a headless_command agent with --foreground should stream output.
 
     Registers a custom headless_command-based agent type with a specific command
-    via settings.toml (since --command is not a CLI flag).
+    via settings.toml (since --command is not a CLI flag). Supplies --source
+    explicitly so the test is not dependent on being inside a git repo.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
     result = cli_runner.invoke(
         create,
         [
             "--type",
             "headless_command",
             "--foreground",
+            "--source",
+            str(source_dir),
         ],
         obj=plugin_manager,
         catch_exceptions=False,
@@ -937,6 +943,124 @@ def test_create_foreground_without_type_is_rejected(
 
     assert result.exit_code != 0
     assert "--foreground" in result.output
+
+
+# =============================================================================
+# Tests for the --source / blank-dir orthogonality on the headless path
+# =============================================================================
+
+
+def test_create_headless_does_not_reject_source_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+) -> None:
+    """--source is accepted on the headless path (runs in-place at that path).
+
+    Pairs --source with --env (still incompatible) so the validator runs and we
+    can confirm the incompatibility listing mentions --env but not --source.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(tmp_path),
+            "--env",
+            "FOO=bar",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--env" in result.output
+    # --source must not be listed as incompatible (neither the flag string nor its alias).
+    assert "--from/--source" not in result.output
+
+
+@pytest.mark.tmux
+def test_create_headless_with_source_runs_in_place(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Headless with --source should run the agent in the given directory.
+
+    Uses a ``pwd`` command so the streamed output contains the work directory
+    path; we assert it equals the --source path rather than a fresh /tmp/ dir.
+    """
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "pwd")
+    # Use a nested dir so the source-must-not-contain-state-dir check (which
+    # scans for ``.mngr/``) does not fire against the shared pytest tmp root.
+    source_dir = tmp_path / "headless-src"
+    source_dir.mkdir()
+    # Canonicalize before asserting: on macOS `/var` is a symlink to
+    # `/private/var`, so pytest's ``tmp_path`` string and the ``pwd`` output
+    # can disagree on the ``/private`` prefix even though they reference the
+    # same directory.
+    resolved_source_dir = source_dir.resolve()
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(source_dir),
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    assert str(resolved_source_dir) in result.output
+    # ``mngr-headless-`` is the fixed prefix used by ``create_work_dir_on_host``
+    # when the headless path falls back to a fresh temp dir; matching on it is
+    # symlink-agnostic (unlike ``/tmp/mngr-headless-`` vs ``/private/tmp/...``).
+    assert "mngr-headless-" not in result.output
+
+
+@pytest.mark.parametrize(
+    "pinned_args",
+    [
+        pytest.param(["agent@.local"], id="provider_in_address"),
+        pytest.param(["agent", "--provider", "local"], id="provider_flag"),
+        pytest.param(["agent@localhost"], id="host_in_address"),
+    ],
+)
+def test_create_headless_rejects_pinned_target(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+    pinned_args: list[str],
+) -> None:
+    """Pinning a target host on the headless path is always rejected.
+
+    The headless path never transfers, so the target host is derived from
+    the source. Pinning a different target via @HOST / @.PROVIDER /
+    --provider is therefore ambiguous regardless of whether --source was
+    passed. The rejection message should steer users to encode the host on
+    --source instead.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            *pinned_args,
+            "--type",
+            "headless_command",
+            "--foreground",
+            "--source",
+            str(tmp_path),
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--source @HOST:PATH" in result.output
 
 
 # =============================================================================

@@ -28,7 +28,6 @@ from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.create import create as api_create
-from imbue.mngr.api.create import resolve_target_host as api_resolve_target_host
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
@@ -185,7 +184,11 @@ def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOption
 
 
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
-    ("source", "--from/--source"),
+    # --source is intentionally NOT listed: headless resolves the source the
+    # same way as the non-headless path (defaulting to the git root) and runs
+    # the agent in-place there. Transfer-related flags (--transfer, --rsync,
+    # --branch) remain incompatible because the headless path never clones or
+    # copies -- source host == target host, always.
     ("branch", "--branch"),
     ("transfer", "--transfer"),
     ("rsync", "--rsync/--no-rsync"),
@@ -239,9 +242,11 @@ def _reject_incompatible_headless_flags(
 ) -> None:
     """Raise UserInputError if any flags incompatible with the headless path were explicitly set.
 
-    The headless path skips source resolution, git operations, provisioning,
-    environment setup, and connection. Flags for those features are silently
-    ignored, which could confuse users. This function catches that early.
+    The headless path resolves ``--source`` like the non-headless path but
+    then runs the agent in-place, with no transfer, no git operations, no
+    provisioning, no environment setup, and no connection. Flags for the
+    skipped features are silently ignored, which could confuse users, so
+    this function catches that early.
 
     ``target_path`` is the resolved value from either the ``--target-path``
     flag or the ``:PATH`` suffix on the positional address. Both feed into
@@ -265,34 +270,10 @@ def _reject_incompatible_headless_flags(
         flags_str = ", ".join(explicit_flags)
         raise UserInputError(
             f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
-            f"The headless flow creates a temporary directory, streams output, and auto-destroys. "
-            f"Source, git, provisioning, environment, and connection options do not apply."
+            f"The headless flow runs the agent in-place at the source (default: git "
+            f"root, or --source), streams output, and auto-destroys. Git, transfer, "
+            f"provisioning, environment, and connection options do not apply."
         )
-
-
-def _resolve_online_host(
-    opts: CreateCliOptions,
-    address: AgentAddress,
-    mngr_ctx: MngrContext,
-) -> OnlineHostInterface:
-    """Resolve CLI options and address into an online host.
-
-    Consolidates the three-step host resolution chain used by both the normal
-    create path and the headless path: _parse_target_host -> _resolve_target_host
-    -> api_resolve_target_host (for NewHostOptions).
-    """
-    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
-    lifecycle = _parse_host_lifecycle_options(opts)
-    target_host = _parse_target_host(
-        opts=opts,
-        address=address,
-        agent_and_host_loader=agent_and_host_loader,
-        lifecycle=lifecycle,
-    )
-    resolved = _resolve_target_host(target_host, mngr_ctx, is_start_desired=opts.start_host)
-    if isinstance(resolved, NewHostOptions):
-        return api_resolve_target_host(resolved, mngr_ctx)
-    return resolved
 
 
 def _create_headless(
@@ -305,11 +286,29 @@ def _create_headless(
     """Run a headless agent via create, streaming output and auto-destroying.
 
     This is the headless alternative to the normal create flow. Instead of
-    creating a persistent interactive agent, it creates a temporary agent,
+    creating a persistent interactive agent, it creates a short-lived agent,
     streams its output, and destroys it when done. Driven by the agent type
     implementing StreamingHeadlessAgentMixin.
+
+    The source is resolved like the non-headless path: --source if given,
+    otherwise the current git root. The agent runs in-place at that source;
+    the headless path does not transfer or clone, so the source host is the
+    target host. Pinning a separate target (via @HOST / @.PROVIDER /
+    --provider) is therefore rejected -- pin it via --source @HOST:PATH
+    instead.
     """
-    host = _resolve_online_host(opts, address, mngr_ctx)
+    if address.host_name is not None or address.provider_name is not None or opts.provider is not None:
+        raise UserInputError(
+            "On the headless path, the target host is derived from --source "
+            "(the agent runs in-place with no transfer). Drop the target "
+            "pinned via the address (@HOST / @.PROVIDER) or --provider; use "
+            "--source @HOST:PATH for an existing remote host, or --source "
+            "PATH for a local path, instead."
+        )
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    resolved_source = _resolve_source_location(opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host)
+    source_location = resolved_source.location
+    host = source_location.host
 
     # Mirror the non-headless path: apply --host-label values to the resolved
     # host. _parse_target_host only seeds host tags when creating a new host;
@@ -325,9 +324,9 @@ def _create_headless(
     label_options = AgentLabelOptions(labels={"internal": "create-headless"})
 
     with headless_agent_output(
-        host=host,
         mngr_ctx=mngr_ctx,
         agent_type=AgentTypeName(agent_type_name),
+        source_location=source_location,
         agent_args=opts.agent_args,
         label_options=label_options,
         name=agent_name,
@@ -481,7 +480,7 @@ class _CreateCommand(click.Command):
     "--foreground",
     is_flag=True,
     default=False,
-    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types",
+    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Runs in-place at the source (default: git root, or pass --source)",
 )
 @optgroup.option(
     "--auto-start/--no-auto-start",
@@ -1823,9 +1822,10 @@ directly to the agent command.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.
-This runs the headless flow: creates a temporary directory, streams the
-agent's output to stdout, and destroys the agent when done. Source,
-provisioning, environment, and connection flags do not apply.
+This runs the headless flow: the agent runs in-place at the source
+(default: the current git root, or pass --source), streams its output to
+stdout, and is destroyed when done. No transfer, git operations,
+provisioning, environment, or connection flags apply.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
