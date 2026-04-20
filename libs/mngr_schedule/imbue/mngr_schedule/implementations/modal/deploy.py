@@ -641,7 +641,7 @@ def remove_modal_schedule(
         if app_id:
             with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
                 stop_result = cg.run_process_to_completion(
-                    ["uv", "run", "modal", "app", "stop", app_id],
+                    ["uv", "run", "modal", "app", "stop", app_id, "--env", environment_name],
                     is_checked_after=False,
                     timeout=30.0,
                 )
