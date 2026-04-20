@@ -93,7 +93,7 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
         actual prompt delivery should use an agent type that overrides
         ``stage_initial_message``.
         """
-        base_command = super().assemble_command(host, agent_args, command_override, initial_message=initial_message)
+        base_command = super().assemble_command(host, agent_args, command_override)
         return CommandString(
             f'{base_command} > "$MNGR_AGENT_STATE_DIR/stdout.log" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
         )
