@@ -149,8 +149,11 @@ def headless_agent_output(
     host = source_location.host
     work_path = source_location.path
 
-    staged_paths = agent_class.prepare_headless_work_dir(host, work_path, initial_message)
+    # Initialise before the try so the finally's cleanup loop always has a
+    # well-defined iterable, even if prepare_headless_work_dir itself raises.
+    staged_paths: tuple[Path, ...] = ()
     try:
+        staged_paths = agent_class.prepare_headless_work_dir(host, work_path, initial_message)
         if pre_create_setup is not None:
             pre_create_setup(host, work_path)
 
