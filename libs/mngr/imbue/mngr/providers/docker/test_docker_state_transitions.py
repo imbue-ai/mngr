@@ -86,6 +86,7 @@ def test_discover_host_state_running_after_restart(
 
 
 @pytest.mark.acceptance
+@pytest.mark.docker
 @pytest.mark.docker_sdk
 def test_discover_host_state_failed_for_bad_build(
     docker_provider: DockerProviderInstance,
