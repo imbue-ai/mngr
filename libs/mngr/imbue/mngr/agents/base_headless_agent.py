@@ -150,13 +150,23 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
         lines: list[str] = []
         for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+            mtime_error: str | None = None
             try:
                 mtime = self.host.get_file_mtime(path)
             except (OSError, HostError) as e:
                 logger.trace("get_file_mtime({}) failed: {}", path, e)
                 mtime = None
+                mtime_error = str(e)
             if mtime is None:
-                lines.append(f"{label}: {path} -- does not exist")
+                # Distinguish a genuinely-missing file ("does not exist") from
+                # a probe failure so triage isn't misled by a transient
+                # filesystem / remote-host error that just happens to look
+                # like a missing file. Per the docstring, errors are folded
+                # into the rendered line rather than disappearing silently.
+                if mtime_error is not None:
+                    lines.append(f"{label}: {path} -- mtime probe failed: {mtime_error}")
+                else:
+                    lines.append(f"{label}: {path} -- does not exist")
                 continue
             try:
                 content = self.host.read_text_file(path)
