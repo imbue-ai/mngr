@@ -741,15 +741,10 @@ def test_start_observe_watchdog_stays_quiet_on_clean_shutdown(
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
     manager = AgentManager.build(broadcaster)
     manager._start_observe()
-    # Wait for the subprocess to actually be running before asking it to stop,
-    # so we exercise the "healthy subprocess shut down cleanly" path rather
-    # than a race where stop() fires before the child has started.
+    # ``_start_observe`` only returns after ``run_process_in_background``
+    # has spawned the child and its RunningProcess thread has started, so the
+    # subprocess is guaranteed to be running by the time we call stop().
     assert manager._observe_process is not None
-    poll_until(
-        lambda: manager._observe_process is not None and manager._observe_process.poll() is None,
-        timeout=2.0,
-        poll_interval=0.05,
-    )
     manager.stop()
 
     errors = [r for r in loguru_records if r.startswith("ERROR") and "mngr observe" in r]
