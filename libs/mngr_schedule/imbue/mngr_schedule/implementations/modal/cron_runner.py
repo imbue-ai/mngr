@@ -367,7 +367,16 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     if normalized_verify not in ("none", "quick", "full"):
         raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
 
-    result: dict[str, Any] = {"status": "ok", "command": command, "verify_mode": normalized_verify}
+    # Include `output` so callers using fn.remote() (e.g. `mngr schedule run
+    # --provider modal`) can print the captured command output. fn.remote()
+    # does not stream container stdout to the caller, so this field is the
+    # only way that output reaches the local process.
+    result: dict[str, Any] = {
+        "status": "ok",
+        "command": command,
+        "verify_mode": normalized_verify,
+        "output": full_output,
+    }
 
     if command != "create" or normalized_verify == "none":
         _print_result_sentinel(result)

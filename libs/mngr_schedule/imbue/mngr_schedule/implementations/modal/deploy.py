@@ -588,6 +588,11 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     invokes it remotely. Returns the full captured output of the command
     (from run_scheduled_trigger's return value).
 
+    `run_scheduled_trigger` returns a dict of shape
+    `{"status": ..., "output": <captured stdout>, ...}`; we unpack the
+    "output" field so callers can display the command output. An earlier
+    branch that returned a bare string is tolerated for back-compat.
+
     Raises MngrError if the function is not found or the invocation fails.
     """
     try:
@@ -597,7 +602,6 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
             environment_name=record.environment,
         )
         result = fn.remote()
-        return result if isinstance(result, str) else ""
     except modal.exception.NotFoundError:
         raise MngrError(
             f"Modal function not found (app: {record.app_name}, env: {record.environment}). "
@@ -605,6 +609,13 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
+
+    if isinstance(result, dict):
+        output = result.get("output", "")
+        return output if isinstance(output, str) else ""
+    if isinstance(result, str):
+        return result
+    return ""
 
 
 def remove_modal_schedule(
