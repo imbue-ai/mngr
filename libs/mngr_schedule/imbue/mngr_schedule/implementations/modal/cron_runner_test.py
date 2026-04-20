@@ -1,17 +1,19 @@
 """Drift detection for cron_runner constants that duplicate imbue types.
 
 cron_runner.py is forbidden from importing `imbue.*` at module level (see
-the file-level comment in cron_runner.py), so it inlines the set of
-AgentLifecycleState running states as bare string literals. That mirror
-can silently drift from the real enum. These tests statically parse the
-cron_runner source and assert the inlined set matches the enum, and that
-the enum has not grown or shrunk without a human reconciling it.
+the file-level comment in cron_runner.py), so it inlines both the set of
+AgentLifecycleState running states and the set of valid VerifyMode values
+as bare string literals. Those mirrors can silently drift from the real
+enums. These tests statically parse the cron_runner source and assert the
+inlined sets match the enums, and that the enums have not grown or
+shrunk without a human reconciling them.
 """
 
 import ast
 from pathlib import Path
 
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr_schedule.data_types import VerifyMode
 
 _CRON_RUNNER_PATH = Path(__file__).parent / "cron_runner.py"
 
@@ -43,33 +45,39 @@ _EXPECTED_ALL_STATES: frozenset[AgentLifecycleState] = frozenset(
 )
 
 
-def _extract_running_states_literals() -> frozenset[str]:
-    """Parse cron_runner.py and return the string literals assigned to _RUNNING_STATES."""
+def _extract_string_frozenset_literal(name: str) -> frozenset[str]:
+    """Parse cron_runner.py and return the string literals of a frozenset({...}) constant.
+
+    Expects an annotated assignment of the form
+    `name: frozenset[str] = frozenset({"a", "b", ...})`. Used to statically
+    check the inlined mirrors in cron_runner.py against their imbue enums
+    without importing from imbue.* in cron_runner itself.
+    """
     tree = ast.parse(_CRON_RUNNER_PATH.read_text())
     for node in ast.walk(tree):
         if not isinstance(node, ast.AnnAssign):
             continue
         target = node.target
-        if not isinstance(target, ast.Name) or target.id != "_RUNNING_STATES":
+        if not isinstance(target, ast.Name) or target.id != name:
             continue
         value = node.value
-        assert isinstance(value, ast.Call), "_RUNNING_STATES must be assigned from frozenset(...)"
+        assert isinstance(value, ast.Call), f"{name} must be assigned from frozenset(...)"
         assert len(value.args) == 1, "frozenset(...) must take one argument"
         arg = value.args[0]
         assert isinstance(arg, ast.Set), "frozenset argument must be a set literal"
         literals: set[str] = set()
         for element in arg.elts:
             assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
-                "_RUNNING_STATES must contain only string literals"
+                f"{name} must contain only string literals"
             )
             literals.add(element.value)
         return frozenset(literals)
-    raise AssertionError("_RUNNING_STATES assignment not found in cron_runner.py")
+    raise AssertionError(f"{name} assignment not found in cron_runner.py")
 
 
 def test_cron_runner_running_states_match_enum() -> None:
     """cron_runner._RUNNING_STATES (inlined strings) must match the enum mirror."""
-    actual = _extract_running_states_literals()
+    actual = _extract_string_frozenset_literal("_RUNNING_STATES")
     expected = frozenset(state.value for state in _EXPECTED_RUNNING_STATES)
     assert actual == expected, (
         f"cron_runner._RUNNING_STATES has drifted from AgentLifecycleState: "
@@ -91,4 +99,22 @@ def test_agent_lifecycle_state_enum_is_unchanged() -> None:
         f"previously {sorted(s.value for s in _EXPECTED_ALL_STATES)}. "
         f"Update cron_runner._RUNNING_STATES and both sets in cron_runner_test.py "
         f"to reflect whether the new/removed state counts as running."
+    )
+
+
+def test_cron_runner_valid_verify_modes_match_enum() -> None:
+    """cron_runner._VALID_VERIFY_MODES (inlined strings) must match VerifyMode.
+
+    The cron_runner cannot import VerifyMode (no imbue.* imports), so the
+    accepted verify-mode strings are inlined as a frozenset. The inlined
+    mirror is compared here against the real enum values (lowercased,
+    because run_scheduled_trigger lowercases the incoming value before
+    looking it up).
+    """
+    actual = _extract_string_frozenset_literal("_VALID_VERIFY_MODES")
+    expected = frozenset(mode.value.lower() for mode in VerifyMode)
+    assert actual == expected, (
+        f"cron_runner._VALID_VERIFY_MODES has drifted from VerifyMode: "
+        f"cron_runner has {sorted(actual)}, mirror expects {sorted(expected)}. "
+        f"Update cron_runner._VALID_VERIFY_MODES and this test together."
     )

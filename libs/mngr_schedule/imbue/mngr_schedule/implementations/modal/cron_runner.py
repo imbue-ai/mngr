@@ -148,6 +148,11 @@ _AGENT_NAME_PATTERN: re.Pattern[str] = re.compile(r"Starting agent\s+(\S+)")
 # the agent is still actively running. Any other state is treated as terminal.
 _RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
 
+# Accepted values for the `verify_mode` parameter of `run_scheduled_trigger`.
+# Kept as bare strings (not the VerifyMode enum) because cron_runner.py is
+# forbidden from importing from imbue.*; see the file-level comment.
+_VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
+
 # How often to poll the agent's lifecycle state during full verification.
 _AGENT_POLL_INTERVAL_SECONDS: float = 10.0
 
@@ -318,8 +323,8 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     # created an agent, leaving it orphaned because we would raise before
     # the destroy/poll path could run.
     normalized_verify = verify_mode.lower()
-    if normalized_verify not in ("none", "quick", "full"):
-        raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
+    if normalized_verify not in _VALID_VERIFY_MODES:
+        raise RuntimeError(f"unknown verify_mode: {verify_mode!r} (expected one of {sorted(_VALID_VERIFY_MODES)})")
 
     trigger = _deploy_config["trigger"]
 
