@@ -74,8 +74,8 @@ fi
 echo "new section head:"
 echo "$NEW_SECTION" | head -5
 
-echo "invoking claude..."
-SUMMARY=$(claude --print --dangerously-skip-permissions -p "Produce a concise, human-friendly summary of these changelog entries. Group related changes, use natural language, and keep it to a few bullet points. Output ONLY the markdown bullets, no preamble:
+echo "invoking claude (uid=$(id -u), IS_SANDBOX=${IS_SANDBOX:-unset})..."
+SUMMARY=$(IS_SANDBOX=1 claude --print --dangerously-skip-permissions -p "Produce a concise, human-friendly summary of these changelog entries. Group related changes, use natural language, and keep it to a few bullet points. Output ONLY the markdown bullets, no preamble:
 
 $NEW_SECTION" 2>&1) || {
     echo "claude failed: $SUMMARY"
