@@ -103,6 +103,9 @@ jobs:
       - name: Build imbue-mngr-wait
         run: pyproject-build libs/mngr_wait -o dist/
 
+      - name: Build imbue-mngr-ssh-password-auth
+        run: pyproject-build libs/mngr_ssh_password_auth -o dist/
+
       - name: Publish packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

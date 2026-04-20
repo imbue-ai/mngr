@@ -1,14 +1,11 @@
-import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
-from unittest.mock import patch
 
 import paramiko
 import pytest
 from pydantic import SecretStr
 
-from imbue.mngr.errors import BinaryNotInstalledError
 from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
 from imbue.mngr.interfaces.ssh_auth import SSHConnectionError
 from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
@@ -112,8 +109,7 @@ def test_display_command_with_custom_port() -> None:
 
 def test_build_transport_command_uses_sshpass() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
     assert transport.command.startswith("sshpass -e ssh")
     assert "-p 22" in transport.command
     assert "-o StrictHostKeyChecking=yes" in transport.command
@@ -122,8 +118,7 @@ def test_build_transport_command_uses_sshpass() -> None:
 
 def test_build_transport_command_password_in_env() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
     assert "SSHPASS" in transport.env
     assert isinstance(transport.env["SSHPASS"], SecretStr)
     assert transport.env["SSHPASS"].get_secret_value() == "secret"
@@ -131,37 +126,26 @@ def test_build_transport_command_password_in_env() -> None:
 
 def test_build_transport_command_env_can_be_exposed() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
     exposed = expose_secrets_for_subprocess(transport.env)
     assert exposed == {"SSHPASS": "secret"}
 
 
-def test_build_transport_command_raises_without_sshpass() -> None:
-    auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value=None):
-        with pytest.raises(BinaryNotInstalledError):
-            auth.build_transport_command(port=22, known_hosts_file=None)
-
-
 def test_build_transport_command_with_known_hosts() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=Path("/tmp/known_hosts"))
+    transport = auth.build_transport_command(port=22, known_hosts_file=Path("/tmp/known_hosts"))
     assert "UserKnownHostsFile=/tmp/known_hosts" in transport.command
 
 
 def test_build_transport_command_uses_instance_known_hosts_as_fallback() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"), known_hosts_file=Path("/my/known_hosts"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
     assert "UserKnownHostsFile=/my/known_hosts" in transport.command
 
 
 def test_build_transport_command_disables_pubkey_auth() -> None:
     auth = SSHPasswordAuth(password=SecretStr("secret"))
-    with patch.object(shutil, "which", return_value="/usr/bin/sshpass"):
-        transport = auth.build_transport_command(port=22, known_hosts_file=None)
+    transport = auth.build_transport_command(port=22, known_hosts_file=None)
     assert "PreferredAuthentications=password" in transport.command
     assert "PubkeyAuthentication=no" in transport.command
 

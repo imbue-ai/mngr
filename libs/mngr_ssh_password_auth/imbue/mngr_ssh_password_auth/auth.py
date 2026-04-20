@@ -1,5 +1,4 @@
 import shlex
-import shutil
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -9,7 +8,6 @@ from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.mngr.errors import BinaryNotInstalledError
 from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
 from imbue.mngr.interfaces.ssh_auth import SSHConnectionError
 from imbue.mngr.interfaces.ssh_auth import SSHTransportCommand
@@ -51,16 +49,10 @@ class SSHPasswordAuth(SSHAuthMethod):
 
         sshpass -e reads the password from the SSHPASS environment variable,
         keeping it out of the process argument list (not visible in `ps` output).
-
-        Raises BinaryNotInstalledError if sshpass is not found on the system.
+        The caller is responsible for ensuring sshpass is installed; if it is
+        not, the subprocess will fail with a "command not found" shell error
+        when rsync/git tries to invoke it.
         """
-        if shutil.which("sshpass") is None:
-            raise BinaryNotInstalledError(
-                binary="sshpass",
-                purpose="SSH password authentication",
-                install_hint="Install with: apt-get install sshpass (Debian/Ubuntu) or brew install hudochenkov/sshpass/sshpass (macOS)",
-            )
-
         effective_known_hosts = known_hosts_file if known_hosts_file is not None else self.known_hosts_file
         ssh_parts = ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=yes"]
         if effective_known_hosts is not None:
