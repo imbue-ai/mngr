@@ -218,9 +218,14 @@ def load_config(
 
     # check whether we're in pytest
     if not final_config.is_allowed_in_pytest:
-        if "PYTEST_CURRENT_TEST" in os.environ:
+        if "PYTEST_CURRENT_TEST" in os.environ and os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. This can happen when tests are poorly written, and load the .mngr/settings.toml file from the root of the mngr project"
+                "Running mngr within pytest is not allowed by the current configuration. "
+                "This can happen when tests are poorly written, and load the .mngr/settings.toml "
+                "file from the root of the mngr project. If this test intentionally wants a real "
+                "mngr subprocess (e.g. an end-to-end release test), set MNGR_ALLOW_PYTEST=1 in the "
+                "subprocess env AND set MNGR_HOST_DIR / MNGR_PREFIX to test-scoped values so the "
+                "test cannot mutate real mngr state."
             )
 
     # Resolve project root for use as cwd in pre-command scripts.

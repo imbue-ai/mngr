@@ -1427,6 +1427,32 @@ def test_load_config_raises_when_in_pytest_and_not_allowed(
         load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
 
+def test_load_config_allows_pytest_with_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNGR_ALLOW_PYTEST=1 is the explicit opt-in for end-to-end test subprocesses
+    that intentionally want a real mngr with is_allowed_in_pytest=False in config."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+    monkeypatch.setenv("MNGR_ALLOW_PYTEST", "1")
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mngr_dir)
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text("is_allowed_in_pytest = false\n")
+
+    # Should NOT raise.
+    load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
 # =============================================================================
 # Tests for load_config with env command overrides
 # =============================================================================

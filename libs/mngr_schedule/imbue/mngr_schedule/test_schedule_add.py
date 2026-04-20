@@ -35,8 +35,11 @@ def _build_subprocess_env() -> dict[str, str]:
         env["HOME"] = str(_REAL_HOME)
         env.pop("MNGR_HOST_DIR", None)
         env.pop("MNGR_ROOT_NAME", None)
-    # Remove pytest marker so mngr doesn't reject the call
-    env.pop("PYTEST_CURRENT_TEST", None)
+    # Explicit opt-in that this is an intentional end-to-end subprocess call,
+    # so the project config's is_allowed_in_pytest=False guard does not fire.
+    # PYTEST_CURRENT_TEST stays set -- we want the guard's intent (prevent
+    # accidental real-state mutation) honored, not evaded.
+    env["MNGR_ALLOW_PYTEST"] = "1"
     # Ensure the prefix starts with mngr_test- so the Modal backend's guard
     # accepts it and the cleanup script can identify these environments.
     env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"

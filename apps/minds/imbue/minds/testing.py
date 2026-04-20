@@ -87,14 +87,23 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 
 
 def clean_env() -> dict[str, str]:
-    """Build an environment dict for subprocesses that strips pytest markers.
+    """Build an environment dict for subprocesses that opts into real-mngr mode.
 
-    mngr refuses to run when PYTEST_CURRENT_TEST is set (safety check to
-    prevent tests from accidentally using real mngr state). We strip it
-    so that our end-to-end subprocess calls work against the real system.
+    mngr refuses to run in pytest when the project config's
+    is_allowed_in_pytest is False (safety check to prevent tests from
+    accidentally using the developer's real ~/.mngr state). This helper
+    sets MNGR_ALLOW_PYTEST=1, an explicit opt-in that says "yes, this
+    subprocess is an intentional end-to-end call".
+
+    The opt-in is only safe when the surrounding fixture also sets
+    MNGR_HOST_DIR and MNGR_PREFIX to test-scoped values (see e.g. the
+    autouse _isolate_mngr_state fixture in test_desktop_client_e2e.py).
+    Without that isolation, the subprocess mngr mints a fresh uuid4
+    profile and the Modal backend creates an orphan mngr-<uuid>
+    environment on every call.
     """
     env = dict(os.environ)
-    env.pop("PYTEST_CURRENT_TEST", None)
+    env["MNGR_ALLOW_PYTEST"] = "1"
     return env
 
 
