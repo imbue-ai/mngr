@@ -213,6 +213,14 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
 
 
 _MNGR_PROMPT_FILE: str = ".mngr-prompt"
+# Canonical form of the "read the staged prompt" arg. The prompt file lives
+# in the agent's state dir ($MNGR_AGENT_STATE_DIR) so it is cleaned up
+# automatically when the agent is destroyed and never pollutes an in-place
+# source directory. assemble_command appends this string automatically when
+# an initial_message is supplied; any caller that has already injected the
+# same exact string into agent_args gets it de-duplicated rather than
+# double-fed.
+_MNGR_PROMPT_CAT_ARG: str = f'"$(cat "$MNGR_AGENT_STATE_DIR/{_MNGR_PROMPT_FILE}")"'
 
 
 class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
@@ -226,22 +234,17 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
     _no_output_error_subject: str = "claude"
     _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
 
-    @classmethod
-    def prepare_headless_work_dir(
-        cls,
-        host: OnlineHostInterface,
-        work_dir: Path,
-        initial_message: str | None,
-    ) -> None:
-        """Persist ``initial_message`` to ``.mngr-prompt`` inside the work dir.
+    def stage_initial_message(self, initial_message: str) -> None:
+        """Persist ``initial_message`` to ``.mngr-prompt`` inside the agent's state dir.
 
         The command assembled by ``assemble_command`` reads this file via
         ``cat`` so we can pass very long prompts without hitting tmux /
-        shell arg length limits.
+        shell arg length limits. Writing to the state dir (rather than the
+        work dir) means the file is cleaned up when the agent is destroyed
+        and does not leak into an in-place source directory.
         """
-        if initial_message is None:
-            return
-        host.write_text_file(work_dir / _MNGR_PROMPT_FILE, initial_message)
+        prompt_path = self._get_agent_dir() / _MNGR_PROMPT_FILE
+        self.host.write_text_file(prompt_path, initial_message)
 
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Headless agents do not accept interactive messages.
@@ -273,6 +276,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Build a simplified command for headless operation.
 
@@ -293,22 +297,25 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         if all_extra_args:
             parts.extend(all_extra_args)
 
-        # If a prompt file has been staged in the work dir (by
-        # prepare_headless_work_dir, or by a caller's pre_create_setup hook)
-        # and the caller's agent_args do not already reference it, append a
-        # cat reference so claude actually receives the prompt.
+        # When the caller supplied --message (or --message-file),
+        # stage_initial_message writes the prompt to
+        # $MNGR_AGENT_STATE_DIR/.mngr-prompt. Append a cat reference so
+        # claude reads it on startup.
         #
-        # Gating on the file's existence -- not on get_initial_message() --
-        # is deliberate: assemble_command is called by create_agent_state
-        # BEFORE data.json is written, so get_initial_message() is always
-        # None at this point. The file, by contrast, is written earlier in
-        # the same headless_agent_output context manager, so it is visible
-        # here.
-        if (
-            _MNGR_PROMPT_FILE not in " ".join(all_extra_args)
-            and host.get_file_mtime(self.work_dir / _MNGR_PROMPT_FILE) is not None
-        ):
-            parts.append(f'"$(cat "$MNGR_AGENT_WORK_DIR/{_MNGR_PROMPT_FILE}")"')
+        # ``initial_message`` is passed in by ``Host.create_agent_state``
+        # from ``CreateAgentOptions.initial_message``. We deliberately do
+        # NOT read ``self.get_initial_message()`` here: ``assemble_command``
+        # runs inside ``create_agent_state`` *before* ``data.json`` is
+        # written, so the persisted initial_message is not yet visible via
+        # ``_read_data``.
+        #
+        # The "already referenced" check is an exact-equality membership
+        # test against all_extra_args, not a substring scan of the joined
+        # args: a substring scan would falsely match any arg containing
+        # `.mngr-prompt` (e.g. an unrelated path) and silently drop the
+        # prompt.
+        if initial_message is not None and _MNGR_PROMPT_CAT_ARG not in all_extra_args:
+            parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)
         return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')

@@ -28,8 +28,8 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
-def check_streaming_headless_agent_type(agent_type: str) -> type[StreamingHeadlessAgentMixin]:
-    """Verify the given agent type implements StreamingHeadlessAgentMixin and return its class.
+def check_streaming_headless_agent_type(agent_type: str) -> None:
+    """Verify the given agent type implements StreamingHeadlessAgentMixin.
 
     Raises MngrError if the agent type is not registered or does not
     support streaming headless output.
@@ -40,7 +40,6 @@ def check_streaming_headless_agent_type(agent_type: str) -> type[StreamingHeadle
             f"The '{agent_type}' agent type does not support streaming headless output. "
             f"Only agent types implementing StreamingHeadlessAgentMixin can be used."
         )
-    return agent_class
 
 
 def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
@@ -69,7 +68,7 @@ def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
 
 
 @contextmanager
-def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterator[None]:
+def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterator[None]:
     """Stop and destroy an agent on exit, suppressing cleanup errors."""
     try:
         yield
@@ -121,30 +120,27 @@ def headless_agent_output(
     this contextmanager does not create or remove it. For a fresh throwaway
     directory, wrap with :func:`ephemeral_work_location`.
 
-    ``initial_message`` is the caller's ``--message`` content. It is handed
-    to the agent type's ``prepare_headless_work_dir`` classmethod so that
-    types that drive claude via prompt files can materialise it on disk
-    before the process starts. It is deliberately NOT plumbed onto
-    ``CreateAgentOptions.initial_message`` -- ``api_create`` treats a
-    non-None initial_message as "call ``wait_for_ready_signal`` and then
-    ``send_message``", which raises on headless agents (they have no TUI to
-    send keys to). The prompt reaches the agent via the on-disk prompt file
-    that the agent command ``cat``s, not via ``send_message``.
+    ``initial_message`` is the caller's ``--message`` content. It is stored
+    on the agent via ``CreateAgentOptions.initial_message`` like on the
+    non-headless path, and ``api_create`` dispatches it through
+    ``agent.stage_initial_message`` (which writes the prompt into the
+    agent's state dir) before starting the agent. Headless agents cannot
+    receive messages via ``send_message``, so ``api_create`` short-circuits
+    its wait-for-ready + send dance for any ``StreamingHeadlessAgentMixin``.
 
     If ``pre_create_setup`` is provided, it is called with the host and work
-    path after the initial-message hook runs but before the agent is created,
-    allowing callers to write additional files that the agent command can
-    reference.
+    path before the agent is created, allowing callers to write additional
+    files into the work dir that the agent command can reference (e.g.
+    ``mngr ask`` stages its system prompt this way).
 
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
-    agent_class = check_streaming_headless_agent_type(str(agent_type))
+    check_streaming_headless_agent_type(str(agent_type))
 
     host = source_location.host
     work_path = source_location.path
 
-    agent_class.prepare_headless_work_dir(host, work_path, initial_message)
     if pre_create_setup is not None:
         pre_create_setup(host, work_path)
 
@@ -154,6 +150,7 @@ def headless_agent_output(
         label_options=label_options or AgentLabelOptions(),
         target_path=work_path,
         name=name,
+        initial_message=initial_message,
     )
 
     result = api_create(
@@ -165,7 +162,7 @@ def headless_agent_output(
     )
 
     agent = result.agent
-    with _destroy_on_exit(host, agent):
+    with destroy_agent_on_exit(host, agent):
         if not isinstance(agent, StreamingHeadlessAgentMixin):
             raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
         yield agent

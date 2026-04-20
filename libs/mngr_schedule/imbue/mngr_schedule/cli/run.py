@@ -71,13 +71,20 @@ def schedule_run(ctx: click.Context, **kwargs: Any) -> None:
 
 
 def _emit_output(output: str, output_format: OutputFormat) -> None:
-    """Emit trigger output in the requested format."""
+    """Emit trigger output in the requested format.
+
+    JSONL tags the line with an ``event`` field, mirroring
+    ``stream_or_accumulate_response`` and ``emit_event`` so consumers can
+    dispatch on event type.
+    """
     if not output:
         return
 
     match output_format:
-        case OutputFormat.JSON | OutputFormat.JSONL:
+        case OutputFormat.JSON:
             emit_final_json({"output": output})
+        case OutputFormat.JSONL:
+            emit_final_json({"event": "output", "output": output})
         case OutputFormat.HUMAN:
             write_human_line("{}", output.rstrip("\n"))
         case _ as unreachable:

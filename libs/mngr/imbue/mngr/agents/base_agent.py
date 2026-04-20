@@ -95,11 +95,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Default: command_override or config.command or agent_type, then append cli_args and agent_args.
 
         If no explicit command is defined, falls back to using the agent_type as a command.
         This allows using arbitrary commands as agent types (e.g., 'mngr create my-agent echo').
+
+        ``initial_message`` is accepted for interface compatibility; the base
+        implementation does not use it (interactive agents deliver the message
+        via ``send_message`` after the agent is up).
         """
         if command_override is not None:
             base = str(command_override)

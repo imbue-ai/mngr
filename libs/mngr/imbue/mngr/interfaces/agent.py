@@ -13,6 +13,7 @@ from typing import Sequence
 from typing import TYPE_CHECKING
 from typing import TypeVar
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -64,8 +65,17 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Assemble the full command to execute for this agent.
+
+        ``initial_message`` is the ``CreateAgentOptions.initial_message`` value
+        (the content of ``--message`` / ``--message-file``) threaded through
+        so agent types that bake the prompt into the command line (e.g.
+        streaming headless agents that ``cat`` a staged prompt file) can make
+        that decision without reading ``data.json`` -- at assembly time,
+        inside ``Host.create_agent_state``, ``data.json`` has not been
+        written yet.
 
         May raise NoCommandDefinedError if no command is defined.
         """
@@ -471,20 +481,26 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         """Yield output chunks as they become available."""
         ...
 
-    @classmethod
-    def prepare_headless_work_dir(
-        cls,
-        host: OnlineHostInterface,
-        work_dir: Path,
-        initial_message: str | None,
-    ) -> None:
-        """Write agent-type-specific files into ``work_dir`` before the agent is created.
+    def stage_initial_message(self, initial_message: str) -> None:
+        """Materialise ``initial_message`` on disk before the agent process starts.
 
-        Called by ``headless_agent_output`` after ``work_dir`` exists but
-        before the agent instance is constructed. Agent types override this
-        to materialise the caller's ``initial_message`` into whatever form
-        their command reads (prompt files, piped stdin, etc.). Default is a
-        no-op; overrides are only needed when the message (or any other
-        setup) must be on disk before the process starts.
+        Called by ``api_create`` after ``create_agent_state`` (so the agent's
+        state dir / ``$MNGR_AGENT_STATE_DIR`` exists) but before
+        ``start_agents``. Agent types override this to write prompt files
+        that their command reads on startup, since headless agents cannot
+        receive messages via ``send_message``. Files staged under the
+        agent's state dir are removed when the agent is destroyed, so no
+        explicit cleanup is required.
+
+        The default implementation cannot deliver the message (it has no
+        prompt-file protocol), so it logs a warning naming the agent class
+        rather than silently dropping the user's ``--message`` content.
+        Agent types that ignore the initial message should override this to
+        a true no-op; agent types that expose the message some other way
+        should override to stage it where their command can read it.
         """
-        ...
+        logger.warning(
+            "Ignoring initial_message for agent type {}: this agent does not implement "
+            "stage_initial_message, so the --message content cannot be delivered.",
+            type(self).__name__,
+        )
