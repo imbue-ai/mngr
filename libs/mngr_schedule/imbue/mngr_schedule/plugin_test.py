@@ -190,16 +190,16 @@ def test_modify_env_vars_for_deploy_sets_mngr_prefix_and_user_id(tmp_path: Path)
     assert env_vars["MNGR_USER_ID"] == "deployer-uid"
 
 
-def test_modify_env_vars_for_deploy_overrides_pre_existing_values(tmp_path: Path) -> None:
-    """Hook overrides any MNGR_PREFIX / MNGR_USER_ID that --pass-env or --env-file may have set,
-    so an accidental override can't re-open the orphan-env leak."""
+def test_modify_env_vars_for_deploy_respects_pre_existing_values(tmp_path: Path) -> None:
+    """Hook leaves pre-existing MNGR_PREFIX / MNGR_USER_ID alone so an explicit
+    --pass-env or --env-file can redirect the scheduled trigger to a non-default env."""
     mngr_ctx = _make_mngr_ctx_with_config(tmp_path / "profile", prefix="mngr-")
-    env_vars: dict[str, str] = {"MNGR_PREFIX": "leaked-", "MNGR_USER_ID": "leaked-uid"}
+    env_vars: dict[str, str] = {"MNGR_PREFIX": "override-", "MNGR_USER_ID": "override-uid"}
 
     modify_env_vars_for_deploy(mngr_ctx=mngr_ctx, env_vars=env_vars)
 
-    assert env_vars["MNGR_PREFIX"] == "mngr-"
-    assert env_vars["MNGR_USER_ID"] == "deployer-uid"
+    assert env_vars["MNGR_PREFIX"] == "override-"
+    assert env_vars["MNGR_USER_ID"] == "override-uid"
 
 
 def test_modify_env_vars_for_deploy_preserves_unrelated_keys(tmp_path: Path) -> None:

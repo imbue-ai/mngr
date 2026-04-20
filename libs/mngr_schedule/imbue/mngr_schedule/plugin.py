@@ -75,9 +75,9 @@ def modify_env_vars_for_deploy(
 
     Setting both here (rather than relying solely on the baked profile files
     from get_files_for_deploy) keeps the anchor intact even when the deploy
-    is run with --exclude-user-settings, and gives the hook last-write
-    precedence over --pass-env so an accidental --pass-env MNGR_USER_ID
-    can't re-open the leak.
+    is run with --exclude-user-settings. An explicit --pass-env or
+    --env-file value wins via setdefault so the caller can still redirect
+    a scheduled trigger to a non-default Modal env if they really mean to.
     """
-    env_vars["MNGR_PREFIX"] = mngr_ctx.config.prefix
-    env_vars["MNGR_USER_ID"] = mngr_ctx.get_profile_user_id()
+    env_vars.setdefault("MNGR_PREFIX", mngr_ctx.config.prefix)
+    env_vars.setdefault("MNGR_USER_ID", mngr_ctx.get_profile_user_id())
