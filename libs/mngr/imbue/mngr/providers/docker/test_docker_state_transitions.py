@@ -68,7 +68,6 @@ def test_discover_host_state_stopped_after_stop(
 
 
 @pytest.mark.acceptance
-@pytest.mark.docker
 @pytest.mark.docker_sdk
 def test_discover_host_state_failed_for_bad_build(
     docker_provider: DockerProviderInstance,
@@ -78,8 +77,8 @@ def test_discover_host_state_failed_for_bad_build(
 
     This test does not spawn a host container -- it writes a failed host record
     directly to the host store, which is the same thing create_host does when a
-    build fails. The Docker daemon is still required because the host store is
-    backed by a Docker-named-volume state container.
+    build fails. Uses the Docker Python SDK only (for the host-store state
+    container); does not invoke the docker CLI, so only docker_sdk marker.
     """
     host_id = HostId.generate()
     docker_provider._save_failed_host_record(
