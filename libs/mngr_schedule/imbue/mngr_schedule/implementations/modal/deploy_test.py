@@ -575,27 +575,21 @@ def test_stage_consolidated_env_skips_missing_pass_env(
     mngr_ctx = bare_temp_mngr_ctx
     _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx, pass_env=["NONEXISTENT_VAR"])
 
-    # Only the baseline MNGR_* vars should be staged (NONEXISTENT_VAR was skipped).
-    parsed = dotenv_values(output_dir / ".env")
-    assert "NONEXISTENT_VAR" not in parsed
-    assert set(parsed.keys()) == {"MNGR_PREFIX", "MNGR_USER_ID"}
+    # No .env file should be created since no env vars were found and no plugins registered
+    assert not (output_dir / ".env").exists()
 
 
-def test_stage_consolidated_env_writes_only_baseline_when_no_extras(
+def test_stage_consolidated_env_creates_no_file_when_empty(
     tmp_path: Path,
     bare_temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_stage_consolidated_env always stages MNGR_PREFIX and MNGR_USER_ID so nested
-    mngr calls in the scheduled container reuse the deployer's Modal env."""
+    """_stage_consolidated_env should not create .env when no env vars are available and no plugins contribute."""
     output_dir = tmp_path / "secrets"
     output_dir.mkdir()
     mngr_ctx = bare_temp_mngr_ctx
     _stage_consolidated_env(output_dir, mngr_ctx=mngr_ctx)
 
-    parsed = dotenv_values(output_dir / ".env")
-    assert parsed["MNGR_PREFIX"] == mngr_ctx.config.prefix
-    assert parsed["MNGR_USER_ID"] == mngr_ctx.get_profile_user_id()
-    assert set(parsed.keys()) == {"MNGR_PREFIX", "MNGR_USER_ID"}
+    assert not (output_dir / ".env").exists()
 
 
 def test_stage_consolidated_env_preserves_values_with_hash(

@@ -58,3 +58,26 @@ def get_files_for_deploy(
             files[Path(str(relative))] = local_config
 
     return files
+
+
+@hookimpl
+def modify_env_vars_for_deploy(
+    mngr_ctx: MngrContext,
+    env_vars: dict[str, str],
+) -> None:
+    """Anchor the scheduled container to the deployer's Modal environment.
+
+    Scheduled triggers fire inside an ephemeral Modal container that has no
+    persistent profile. Without these vars, the nested `mngr` invocation in
+    cron_runner would mint a fresh uuid4 user_id via get_or_create_user_id
+    and the modal backend would create an orphan `mngr-<uuid>` env on every
+    fire (these orphans match no cleanup pattern and accumulate forever).
+
+    Setting both here (rather than relying solely on the baked profile files
+    from get_files_for_deploy) keeps the anchor intact even when the deploy
+    is run with --exclude-user-settings, and gives the hook last-write
+    precedence over --pass-env so an accidental --pass-env MNGR_USER_ID
+    can't re-open the leak.
+    """
+    env_vars["MNGR_PREFIX"] = mngr_ctx.config.prefix
+    env_vars["MNGR_USER_ID"] = mngr_ctx.get_profile_user_id()

@@ -475,18 +475,11 @@ def _stage_consolidated_env(
     """Consolidate env vars from multiple sources into secrets/.env.
 
     Sources are merged in order of increasing precedence:
-    0. Deploying MngrContext's prefix and user_id, so that nested mngr calls
-       inside the cron container resolve to the same Modal environment as the
-       deployer (otherwise a fresh profile in the ephemeral container mints a
-       new uuid4 user_id and creates an orphan mngr-<uuid> env on every fire).
     1. User-specified --env-file entries (in order)
     2. User-specified --pass-env variables from the current process environment
     3. Plugin mutations via the modify_env_vars_for_deploy hook
     """
-    env_dict: dict[str, str] = {
-        "MNGR_PREFIX": mngr_ctx.config.prefix,
-        "MNGR_USER_ID": mngr_ctx.get_profile_user_id(),
-    }
+    env_dict: dict[str, str] = {}
 
     # 1. User-specified env files (parsed with dotenv for correct handling
     # of quoting, comments, 'export' prefix, etc.)
