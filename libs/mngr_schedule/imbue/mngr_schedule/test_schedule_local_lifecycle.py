@@ -20,6 +20,7 @@ import subprocess
 import pytest
 
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_schedule.implementations.local.crontab import build_marker_comment
 from imbue.mngr_schedule.testing import REPO_ROOT
 from imbue.mngr_schedule.testing import build_disable_plugin_args
 from imbue.mngr_schedule.testing import build_subprocess_env
@@ -45,16 +46,6 @@ def _read_crontab() -> str:
     return result.stdout
 
 
-def _marker_for(prefix: str, trigger_name: str) -> str:
-    """Build the crontab marker comment the CLI is expected to write.
-
-    The full marker (prefix + "schedule:" + name) is matched rather than
-    the bare trigger name so parallel xdist workers don't false-positive
-    on each other's entries in the shared user crontab.
-    """
-    return f"# {prefix}schedule:{trigger_name}"
-
-
 @pytest.mark.release
 @pytest.mark.timeout(300)
 def test_schedule_local_add_and_remove_lifecycle() -> None:
@@ -66,7 +57,10 @@ def test_schedule_local_add_and_remove_lifecycle() -> None:
     # `f"{MNGR_ROOT_NAME}-"`. `build_subprocess_env` sets MNGR_ROOT_NAME
     # to isolate the subprocess's mngr config namespace, so the marker the
     # CLI writes is based on that value -- not the ambient default.
-    marker = _marker_for(f"{env['MNGR_ROOT_NAME']}-", trigger_name)
+    # The full marker (prefix + "schedule:" + name) is matched rather than
+    # the bare trigger name so parallel xdist workers don't false-positive
+    # on each other's entries in the shared user crontab.
+    marker = build_marker_comment(f"{env['MNGR_ROOT_NAME']}-", trigger_name)
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)
 
     try:
