@@ -2,7 +2,6 @@
 
 import click
 import pluggy
-import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.config.data_types import MngrContext
@@ -370,13 +369,19 @@ def test_schedule_remove_requires_provider(
     assert "Missing option" in result.output or "required" in result.output.lower()
 
 
-@pytest.mark.flaky
-def test_schedule_remove_local_with_force(
+def test_schedule_remove_local_cli_cleans_up_disk_artifacts(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Removing a deployed local trigger with --force should succeed."""
+    """CLI wiring for remove --force: trigger dir + creation record get cleaned up.
+
+    Uses fake crontab reader/writer via `_deploy_local_trigger`, so this test
+    does NOT exercise the real `crontab` binary. The crontab path is covered
+    by the unit tests in `cli/remove_test.py` (which drive `remove_local_schedule`
+    directly with captured crontab content), and by the release test that
+    exercises the full lifecycle against a real crontab.
+    """
     _deploy_local_trigger(temp_mngr_ctx, "test-remove-trigger")
 
     result = cli_runner.invoke(
