@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import os
 import queue
@@ -1456,13 +1457,21 @@ def _handle_requests_panel(
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
         event_id = str(req.event_id)
+        # Encode as JSON for safe embedding in the JS call, then HTML-escape
+        # the result so it is also safe inside the double-quoted onclick
+        # attribute. This is defense-in-depth: req.agent_id is validated as
+        # an AgentId above, but req.event_id is only required to be a
+        # non-empty string by its type, and relying on upstream validation
+        # at each interpolation site is fragile.
+        event_id_attr = html.escape(json.dumps(event_id), quote=True)
+        agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
         cards.append(
-            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\')">'
+            f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
             f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{server_name}</div></div>'
         )
 
-    html = (
+    html_content = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
         "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
         "margin:0;padding:0;overflow-y:auto;height:100vh;}"
@@ -1472,9 +1481,14 @@ def _handle_requests_panel(
         "</style></head>"
         f"<body>"
         f"<script>"
-        f"function navigateToRequest(eventId) {{"
-        f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
-        f'  else window.top.location = "/requests/" + eventId;'
+        f"function navigateToRequest(eventId, agentId) {{"
+        f"  if (window.minds && window.minds.navigateToRequest) {{"
+        f"    window.minds.navigateToRequest(agentId, eventId);"
+        f"  }} else if (window.minds) {{"
+        f'    window.minds.navigateContent("/requests/" + eventId);'
+        f"  }} else {{"
+        f'    window.top.location = "/requests/" + eventId;'
+        f"  }}"
         f"}}"
         f"</script>"
         f"<h2>Requests ({len(pending)})</h2>"
@@ -1488,7 +1502,7 @@ def _handle_requests_panel(
         f"Auto-open on new request</label></div>"
         "</body></html>"
     )
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html_content)
 
 
 async def _handle_requests_auto_open(
