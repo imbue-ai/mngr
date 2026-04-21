@@ -51,7 +51,8 @@ def render_file_diagnostic(
     the decoded file are appended after a ``, tail:\\n`` separator; when
     None, only the char count is reported.
 
-    The returned string never contains a trailing newline.
+    The returned string never contains trailing whitespace (``.rstrip()`` is
+    applied to the tail-bearing format).
     """
     prefix = f"{label}: {path} -- " if show_path else f"{label}: "
     mtime_error: str | None = None
