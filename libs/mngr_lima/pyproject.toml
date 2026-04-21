@@ -5,7 +5,7 @@ description = "Lima VM provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.2",
+    "imbue-mngr==0.2.5",
     "pyyaml>=6.0",
 ]
 

@@ -11,6 +11,7 @@ dependencies = [
     "minds>=0.1.0",
     "imbue-mngr>=0.2.0",
     "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
     "imbue-common>=0.1.0",
     "concurrency-group>=0.1.0",
@@ -22,6 +23,7 @@ dependencies = [
 minds = { path = "../../../../apps/minds", editable = true }
 imbue-mngr = { path = "../../../../libs/mngr", editable = true }
 imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
+imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }

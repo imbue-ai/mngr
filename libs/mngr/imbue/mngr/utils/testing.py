@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import selectors
 import shlex
 import shutil
@@ -55,14 +54,9 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
+from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
-
-# Prefix used for test environments
-TEST_ENV_PREFIX: Final[str] = "mngr_test-"
-
-# Pattern to match test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS
-# The name may have additional suffixes (like user_id)
-TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_test-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})")
 
 # =============================================================================
 # Resource tracking lists for cleanup verification

@@ -182,6 +182,49 @@ async function downloadUv(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] uv installed at ${uvBinary}`);
 }
 
+/**
+ * Recursively copy Apple's git libexec tree into destDir, with two
+ * transforms:
+ *   1. Skip symlinks whose target is the main git binary. Apple ships ~100
+ *      shims (git-add, git-commit, git-diff, ...) that are all symlinks to
+ *      `git` itself; git uses argv[0] to dispatch when invoked as git-add
+ *      directly. We don't need any of these because our code invokes git
+ *      via `git <subcommand>`, not `git-subcommand`. Including them would
+ *      bloat the bundle by ~1GB (each dereferenced shim = a full copy of
+ *      the 7.6MB git binary).
+ *   2. Dereference the remaining symlinks (git-remote-https -> git-remote-http
+ *      etc.) into real file copies. Keeping them as symlinks is risky for
+ *      cross-platform packaging: ToDesktop's Windows build server chokes
+ *      when 7zip encounters an absolute macOS symlink, and the original
+ *      Apple symlinks point at absolute Xcode paths which break on any
+ *      machine without Xcode at that exact path.
+ */
+function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      let realTarget;
+      try {
+        realTarget = fs.realpathSync(srcPath);
+      } catch {
+        continue; // broken symlink -- skip
+      }
+      if (path.basename(realTarget) === 'git') {
+        continue; // skip argv[0] shims pointing at the main binary
+      }
+      fs.copyFileSync(srcPath, destPath);
+      try { fs.chmodSync(destPath, 0o755); } catch {}
+    } else if (entry.isDirectory()) {
+      fs.mkdirSync(destPath, { recursive: true });
+      copyGitCoreDereferencingSymlinks(srcPath, destPath);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(srcPath, destPath);
+      try { fs.chmodSync(destPath, fs.statSync(srcPath).mode); } catch {}
+    }
+  }
+}
+
 async function downloadGit(resourcesDir, { platform }) {
   const gitDir = path.join(resourcesDir, 'git');
   if (fs.existsSync(gitDir)) fs.rmSync(gitDir, { recursive: true });
@@ -210,10 +253,16 @@ async function downloadGit(resourcesDir, { platform }) {
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
   } else if (platform === 'darwin') {
     // macOS: /usr/bin/git is the Xcode CommandLineTools *shim*, not a real
-    // binary -- copying it into the app bundle produces something macOS
-    // kills with SIGKILL the moment it runs because the shim can't find
-    // its expected Xcode paths relative to the bundle. Resolve the shim
-    // to the actual git binary via `xcrun --find git` and copy that.
+    // binary. Copying it into the app bundle produces something macOS kills
+    // with SIGKILL on invocation (the shim can't find its expected Xcode
+    // paths). Resolve the shim via `xcrun --find git` and copy the real
+    // binary instead.
+    //
+    // Git also needs its runtime helpers -- it invokes `git-remote-https`
+    // and friends from <prefix>/libexec/git-core/ via relative-to-binary
+    // lookup, and reads default templates from <prefix>/share/git-core/
+    // templates/. Copy all three into the bundle so clone works with no
+    // external dependencies on the user's machine.
     let resolvedGit;
     try {
       resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
@@ -226,10 +275,28 @@ async function downloadGit(resourcesDir, { platform }) {
     if (!resolvedGit || !fs.existsSync(resolvedGit)) {
       throw new Error(`xcrun returned a git path that does not exist: ${resolvedGit}`);
     }
+    const gitPrefix = path.dirname(path.dirname(resolvedGit));
+    const srcExecPath = path.join(gitPrefix, 'libexec', 'git-core');
+    const srcTemplates = path.join(gitPrefix, 'share', 'git-core', 'templates');
+    if (!fs.existsSync(srcExecPath)) {
+      throw new Error(`git exec-path not found at ${srcExecPath}`);
+    }
+
     const destGit = path.join(binDir, 'git');
     fs.copyFileSync(resolvedGit, destGit);
     fs.chmodSync(destGit, 0o755);
-    console.log(`[download-binaries] git copied from ${resolvedGit} to ${destGit}`);
+
+    const destExecPath = path.join(gitDir, 'libexec', 'git-core');
+    fs.mkdirSync(destExecPath, { recursive: true });
+    copyGitCoreDereferencingSymlinks(srcExecPath, destExecPath);
+
+    if (fs.existsSync(srcTemplates)) {
+      const destTemplates = path.join(gitDir, 'share', 'git-core', 'templates');
+      fs.mkdirSync(path.dirname(destTemplates), { recursive: true });
+      fs.cpSync(srcTemplates, destTemplates, { recursive: true, dereference: true });
+    }
+
+    console.log(`[download-binaries] git copied from ${gitPrefix} to ${gitDir}`);
   } else {
     // Linux: copy the system git binary (no shim indirection).
     const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
