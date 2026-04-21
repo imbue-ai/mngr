@@ -369,6 +369,11 @@ class FakeSuperTokensBackend:
     registered_providers: dict[str, FakeProvider]
     sent_verification_emails: list[tuple[str, str]]
     sent_reset_emails: list[tuple[str, str]]
+    # Error-injection hook: if a method name is a key here, the corresponding
+    # SDK fake raises the stored exception instead of producing a result. Lets
+    # tests exercise the /auth/* SDK-outage code paths through the real handler
+    # without patching module-level attributes.
+    sdk_errors_by_method: dict[str, Exception]
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """Swap every SuperTokens SDK call site on ``app_mod`` with a fake.
@@ -428,6 +433,20 @@ class FakeSuperTokensBackend:
         self.reset_tokens[token] = user_id
         return token
 
+    def raise_on(self, method_name: str, exc: Exception) -> None:
+        """Arrange for the named SDK-fake method to raise ``exc`` on its next call.
+
+        The fake SDK methods check ``sdk_errors_by_method`` at entry; this
+        helper lets tests simulate SuperTokens core outages through the real
+        handler's try/except blocks without patching module-level attributes.
+        """
+        self.sdk_errors_by_method[method_name] = exc
+
+    def _raise_if_configured(self, method_name: str) -> None:
+        exc = self.sdk_errors_by_method.get(method_name)
+        if exc is not None:
+            raise exc
+
     async def sign_up(
         self,
         *,
@@ -437,6 +456,7 @@ class FakeSuperTokensBackend:
         user_context: dict[str, Any] | None = None,
     ) -> EPSignUpOkResult | EmailAlreadyExistsError:
         del tenant_id, user_context
+        self._raise_if_configured("sign_up")
         if email in self.accounts_by_email:
             return EmailAlreadyExistsError()
         account = _make_account(
@@ -461,6 +481,7 @@ class FakeSuperTokensBackend:
         user_context: dict[str, Any] | None = None,
     ) -> EPSignInOkResult | WrongCredentialsError:
         del tenant_id, user_context
+        self._raise_if_configured("sign_in")
         account = self.accounts_by_email.get(email)
         if account is None or account.password != password:
             return WrongCredentialsError()
@@ -710,4 +731,5 @@ def make_fake_supertokens_backend() -> FakeSuperTokensBackend:
     backend.registered_providers = {}
     backend.sent_verification_emails = []
     backend.sent_reset_emails = []
+    backend.sdk_errors_by_method = {}
     return backend

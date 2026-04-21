@@ -719,12 +719,8 @@ def test_auth_signup_duplicate_email_returns_status(monkeypatch: pytest.MonkeyPa
 
 def test_auth_signup_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch) -> None:
     """A SuperTokens SDK exception in signup is surfaced as AuthResponse(status='ERROR')."""
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-
-    async def _boom(**_kwargs: object) -> None:
-        raise SuperTokensGeneralError("core down")
-
-    monkeypatch.setattr(app_mod, "ep_sign_up", _boom)
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.raise_on("sign_up", SuperTokensGeneralError("core down"))
     client = TestClient(web_app, raise_server_exceptions=False)
     resp = client.post("/auth/signup", json={"email": "x@y.com", "password": "password123"})
     assert resp.status_code == 200
@@ -779,12 +775,8 @@ def test_auth_signin_unverified_email_triggers_resend(monkeypatch: pytest.Monkey
 
 def test_auth_signin_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch) -> None:
     """A SuperTokens SDK exception in signin is surfaced as AuthResponse(status='ERROR')."""
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-
-    async def _boom(**_kwargs: object) -> None:
-        raise SuperTokensSessionError("session store down")
-
-    monkeypatch.setattr(app_mod, "ep_sign_in", _boom)
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.raise_on("sign_in", SuperTokensSessionError("session store down"))
     client = TestClient(web_app, raise_server_exceptions=False)
     resp = client.post("/auth/signin", json={"email": "x@y.com", "password": "password123"})
     assert resp.status_code == 200
