@@ -9,6 +9,7 @@ import pytest
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
+from imbue.minds_workspace_server.agent_manager import _make_applications_file_handler
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
@@ -347,6 +348,30 @@ def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
     agent_manager._start_app_watcher("watcher-test", tmp_path)
     assert runtime_dir.exists()
     agent_manager._stop_app_watcher("watcher-test")
+
+
+def test_applications_file_handler_fires_on_move(tmp_path: Path) -> None:
+    """The applications watcher must react to move/rename events, not just
+    modify events. scripts/forward_port.py writes applications.toml atomically
+    via ``tempfile.mkstemp`` + ``os.replace``, which surfaces as an
+    ``IN_MOVED_TO`` / ``FileMovedEvent`` in watchdog -- if the handler only
+    listened on ``on_modified`` every service registration after startup
+    would be silently dropped.
+    """
+    from watchdog.events import FileMovedEvent
+
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    # Simulate what os.replace(tmp, applications.toml) surfaces as.
+    handler.dispatch(
+        FileMovedEvent(
+            src_path=str(tmp_path / "applications.toml.tmp"),
+            dest_path=str(tmp_path / "applications.toml"),
+        )
+    )
+
+    assert seen == ["agent-x"]
 
 
 def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:

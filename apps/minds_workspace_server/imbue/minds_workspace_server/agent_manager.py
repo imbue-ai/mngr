@@ -10,8 +10,7 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
-from watchdog.events import DirModifiedEvent
-from watchdog.events import FileModifiedEvent
+from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
 
@@ -51,12 +50,19 @@ class _LogQueueCallback(MutableModel):
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on modifications to applications.toml."""
+    """Watchdog handler that triggers on any change to applications.toml.
+
+    Uses ``on_any_event`` rather than ``on_modified`` because scripts/forward_port.py
+    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``. Atomic replaces
+    surface through watchdog as moved/created events, not modified events, so a
+    handler that only overrides ``on_modified`` would silently miss every
+    service registration after the watcher starts.
+    """
 
     agent_id: str
     on_change: Any
 
-    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
+    def on_any_event(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             self.on_change(self.agent_id)
 

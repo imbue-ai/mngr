@@ -66,6 +66,14 @@ function connect(): void {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    // Drop any proto-agent entries carried over from a prior connection.
+    // The server re-sends its current active set as part of the initial
+    // burst below, but it emits no "completed" message for protos that
+    // finished while we were disconnected. That can happen on a Cloudflare
+    // WS idle timeout or a workspace-server restart during agent creation.
+    // Without this reset the entry sticks forever, `isProtoAgent` keeps
+    // returning true, and the chat tab is stuck on the build-log view.
+    protoAgents = [];
     connected = true;
     m.redraw();
   };
