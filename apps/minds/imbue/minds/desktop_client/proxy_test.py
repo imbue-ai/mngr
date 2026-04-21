@@ -225,25 +225,25 @@ def test_generate_backend_loading_html_no_agent_id_has_no_links() -> None:
 
 def test_generate_backend_loading_html_with_agent_id_orders_convention_links() -> None:
     # When the registered servers include names from the convention order
-    # (agent, system_interface, web, terminal), those appear first and
+    # (system_interface, agent, web, terminal), those appear first and
     # in that order regardless of the other_servers input order.
     html = generate_backend_loading_html(
         agent_id=_TEST_AGENT,
         other_servers=(
             ServerName("terminal"),
             ServerName("web"),
-            ServerName("system_interface"),
             ServerName("agent"),
+            ServerName("system_interface"),
         ),
     )
-    assert f"/forwarding/{_TEST_AGENT}/agent/" in html
     assert f"/forwarding/{_TEST_AGENT}/system_interface/" in html
+    assert f"/forwarding/{_TEST_AGENT}/agent/" in html
     assert f"/forwarding/{_TEST_AGENT}/web/" in html
     assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
-    # Order: agent -> system_interface -> web -> terminal
+    # Order: system_interface -> agent -> web -> terminal
     assert (
-        html.index("/agent/")
-        < html.index("/system_interface/")
+        html.index("/system_interface/")
+        < html.index("/agent/")
         < html.index("/web/")
         < html.index("/terminal/")
     )
@@ -257,10 +257,10 @@ def test_generate_backend_loading_html_appends_unknown_servers_after_conventions
         agent_id=_TEST_AGENT,
         other_servers=(
             ServerName("custom_dashboard"),
-            ServerName("agent"),
+            ServerName("system_interface"),
         ),
     )
-    assert html.index("/agent/") < html.index("/custom_dashboard/")
+    assert html.index("/system_interface/") < html.index("/custom_dashboard/")
 
 
 def test_generate_backend_loading_html_omits_unregistered_convention_servers() -> None:

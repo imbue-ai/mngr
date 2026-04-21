@@ -344,20 +344,18 @@ def _handle_landing_page(
 # below are the well-known conventions minds knows about. We try them
 # in order and pick the first one the agent actually registered.
 #
-# - "agent": the actual chat with the agent. ttyd-attached to the
-#   agent's tmux session where claude (or whatever cli agent) is
-#   running. This is the "talk to your agent" experience and what
-#   most users want to land on after creating an agent. Dropped by
-#   the mngr_ttyd plugin as commands/ttyd/agent.sh.
-# - "system_interface": the minds_workspace_server dashboard
-#   wrapper. Has its own web chat UI on top of the agent, plus
-#   other features; reasonable fallback if "agent" is not exposed.
+# - "system_interface": minds_workspace_server dashboard -- polished
+#   web UI with chat view, ticket tracker, agent controls. Best
+#   landing for a fresh agent create since it looks like an app.
+# - "agent": ttyd-attached to the agent's tmux session where claude
+#   is running. Raw CLI view; great for power users and debugging,
+#   but overwhelming as the default first-create experience.
 # - "web": per-template free slot for whatever web UI the template
-#   author wants (e.g. a placeholder, a custom dashboard). Last
+#   author wants (placeholder in forever-claude-template). Last
 #   resort -- routing here is better than dropping users on the
 #   servers-listing page, but content depends entirely on the
 #   template.
-_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("agent", "system_interface", "web")
+_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "agent", "web")
 
 
 def _handle_agent_default_redirect(
@@ -369,12 +367,11 @@ def _handle_agent_default_redirect(
     """Redirect to the agent's canonical primary server.
 
     Picks the first registered server name that matches
-    ``_DEFAULT_SERVER_PREFERENCE`` (currently "agent" first --
-    ttyd-attached chat with the running agent; then
-    "system_interface" -- workspace-server dashboard; then "web" --
-    template's free slot). Falls back to any registered server if
-    none match, and to the servers-listing page if the agent has no
-    servers yet.
+    ``_DEFAULT_SERVER_PREFERENCE`` (currently "system_interface"
+    first -- the workspace-server dashboard; then "agent" --
+    ttyd-attached chat; then "web" -- template's free slot). Falls
+    back to any registered server if none match, and to the
+    servers-listing page if the agent has no servers yet.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")

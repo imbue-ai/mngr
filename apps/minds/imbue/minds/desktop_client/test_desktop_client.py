@@ -261,11 +261,12 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
     assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
-def test_agent_default_page_prefers_agent_when_present(tmp_path: Path) -> None:
-    # "agent" is the actual chat with the running agent (ttyd-attached
-    # to the agent's tmux session where claude runs). We prefer it
-    # over "system_interface" (dashboard wrapper) and "web" (template
-    # free slot) so users land directly on the conversation.
+def test_agent_default_page_prefers_system_interface_when_present(tmp_path: Path) -> None:
+    # "system_interface" is the minds_workspace_server dashboard, a
+    # polished web UI with chat + agent controls. We prefer it over
+    # "agent" (raw ttyd CLI) and "web" (template free slot) so fresh
+    # users land on the app-like UI rather than a terminal or a
+    # placeholder.
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
@@ -285,18 +286,18 @@ def test_agent_default_page_prefers_agent_when_present(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/agent/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
 
 
-def test_agent_default_page_falls_back_to_system_interface(tmp_path: Path) -> None:
-    # If "agent" is not registered yet (e.g. mngr_ttyd hasn't started),
-    # we fall back to system_interface -- workspace-server's dashboard
-    # still includes a chat view, so it's a reasonable landing.
+def test_agent_default_page_falls_back_to_agent(tmp_path: Path) -> None:
+    # If "system_interface" is not registered yet (e.g. workspace-server
+    # service hasn't come up), fall back to "agent" -- the ttyd chat
+    # with the running agent still lets the user interact.
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
             str(agent_id): {
-                "system_interface": "http://test-backend:9100",
+                "agent": "http://test-backend:9000",
                 "web": "http://test-backend:9200",
             },
         },
@@ -310,7 +311,7 @@ def test_agent_default_page_falls_back_to_system_interface(tmp_path: Path) -> No
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/agent/"
 
 
 def test_agent_default_page_falls_back_to_web(tmp_path: Path) -> None:

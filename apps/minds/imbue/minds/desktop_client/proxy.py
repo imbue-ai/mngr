@@ -210,17 +210,16 @@ _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 # caller's `other_servers` (= registered) so users don't click a link
 # that routes to a server that doesn't exist and hangs on Loading...
 #
+# "system_interface" = minds_workspace_server dashboard (polished
+#   web UI with chat, ticket tracker, agent controls).
 # "agent" = ttyd attached to the agent's primary tmux session where
-#   claude is running -- the actual chat interface with the agent.
-#   Dropped by mngr_ttyd as commands/ttyd/agent.sh.
-# "system_interface" = minds_workspace_server dashboard wrapper
-#   (web UI on top of the agent).
+#   claude is running. Dropped by mngr_ttyd as commands/ttyd/agent.sh.
 # "web" = template's free slot for whatever web UI the template
 #   author wants (placeholder, custom dashboard, etc.)
 # "terminal" = ttyd raw shell into the VM (always from mngr_ttyd).
 _CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
-    ServerName("agent"),
     ServerName("system_interface"),
+    ServerName("agent"),
     ServerName("web"),
     ServerName("terminal"),
 )
@@ -240,7 +239,7 @@ def generate_backend_loading_html(
 
     When ``agent_id`` is provided, the page shows links to the other
     registered servers for that agent. The order follows
-    ``_CONVENTION_SERVER_ORDER`` (agent, system_interface, web,
+    ``_CONVENTION_SERVER_ORDER`` (system_interface, agent, web,
     terminal) for familiar names, with any remaining registered
     servers appended. We only link to servers that actually appear in
     ``other_servers`` so clicking a link never routes to a server that
