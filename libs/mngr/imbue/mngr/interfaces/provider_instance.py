@@ -141,8 +141,9 @@ def _build_agent_details_from_online_agent(
     now = datetime.now(timezone.utc)
     runtime_seconds = (now - start_time).total_seconds() if start_time else None
 
-    # idle_seconds: include host-level ssh_activity; 0.0 if no activity yet
-    idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
+    # idle_seconds: include host-level ssh_activity; None if no activity was ever recorded
+    # (distinct from 0s which would incorrectly imply fresh activity).
+    idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
     plugin_data: dict[str, Any] = {}
