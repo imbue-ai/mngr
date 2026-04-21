@@ -50,22 +50,23 @@ _AGENT_NAME = "forever"
 
 @pytest.fixture(autouse=True)
 def _override_prefix_for_real_modal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Override the shared-autouse MNGR_PREFIX so the Modal backend guard accepts
-    env names the subprocess mngr creates.
+    """Swap the shared-autouse MNGR_PREFIX for a Modal-backend-compatible value.
 
-    The shared plugin test fixtures (registered in apps/minds/conftest.py) already
-    provide the standard autouse isolation -- HOME, MNGR_HOST_DIR, MNGR_PREFIX,
-    MNGR_ROOT_NAME are all pointed at per-test temp values, so subprocess mngr
-    never sees the developer's real ~/.mngr. That handles all the desktop client's
-    in-process ConcurrencyGroup spawns of mngr.
+    The shared autouse setup_test_mngr_env (via apps/minds/conftest.py) sets
+    MNGR_PREFIX to `mngr_<hex>-` -- that isolates the test's mngr state, but
+    the specific value is incompatible with the Modal backend guard at
+    `libs/mngr_modal/imbue/mngr_modal/backend.py`, which rejects env names
+    beginning with `mngr_` unless they begin with `mngr_test-` exactly. A
+    subprocess mngr (spawned by the desktop client's in-process
+    ConcurrencyGroup, or by clean_env-based helpers in this test) that tries
+    to create a Modal env under that prefix would fail with MngrError.
 
-    The only thing we need to override is MNGR_PREFIX: the shared fixture's value
-    `mngr_<hex>-` starts with `mngr_` (underscore) which trips the Modal backend
-    guard (`libs/mngr_modal/imbue/mngr_modal/backend.py`) -- it only accepts
-    underscore-prefixed env names that begin with `mngr_test-`. Use
-    generate_test_environment_name() to produce `mngr_test-YYYY-MM-DD-HH-MM-SS-`
-    so any Modal env created by this test passes the guard AND is visible to
-    cleanup_old_modal_test_environments.py as a safety net.
+    Replace the prefix with `mngr_test-YYYY-MM-DD-HH-MM-SS-` via
+    generate_test_environment_name() so any Modal env this test creates
+    both passes the backend guard AND is visible to
+    cleanup_old_modal_test_environments.py as a safety net. The other
+    shared-autouse env vars (HOME, MNGR_HOST_DIR, MNGR_ROOT_NAME) stay as
+    they are.
     """
     monkeypatch.setenv("MNGR_PREFIX", f"{generate_test_environment_name()}-")
 
