@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileMovedEvent
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
@@ -358,8 +359,6 @@ def test_applications_file_handler_fires_on_move(tmp_path: Path) -> None:
     listened on ``on_modified`` every service registration after startup
     would be silently dropped.
     """
-    from watchdog.events import FileMovedEvent
-
     seen: list[str] = []
     handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
 
