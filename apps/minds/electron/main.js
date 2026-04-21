@@ -174,7 +174,7 @@ function updateBundleBounds(bundle) {
 
 // -- Bundle lifecycle --
 
-function createBundle() {
+function buildBundleWindowOptions() {
   const windowOptions = {
     width: 1200,
     height: 800,
@@ -190,9 +190,10 @@ function createBundle() {
   } else {
     windowOptions.frame = false;
   }
+  return windowOptions;
+}
 
-  const win = new BaseWindow(windowOptions);
-
+function createBundleWebContentsViews(win) {
   const chromeView = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -200,38 +201,19 @@ function createBundle() {
       nodeIntegration: false,
     },
   });
-
   const contentView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+  return { chromeView, contentView };
+}
 
-  const bundle = {
-    window: win,
-    chromeView,
-    contentView,
-    sidebarView: null,
-    sidebarVisible: false,
-    requestsPanelView: null,
-    requestsPanelVisible: false,
-    requestsPanelReloadTimer: null,
-    currentContentUrl: null,
-    currentWorkspaceId: null,
-    preErrorUrl: null,
-    isErrorState: false,
-    isLoadingState: true,
-    _maximizedByUs: false,
-    _boundsBeforeMaximize: null,
-  };
-  bundles.add(bundle);
-  mruWindows.unshift(bundle);
-
-  updateBundleBounds(bundle);
+function wireBundleWindowEvents(bundle) {
+  const { window: win } = bundle;
 
   win.on('focus', () => {
     const idx = mruWindows.indexOf(bundle);
@@ -276,18 +258,10 @@ function createBundle() {
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
   });
+}
 
-  // Re-push the computed title when chrome finishes (re)loading; the in-window
-  // title bar otherwise has no way to learn its own window's title.
-  chromeView.webContents.on('did-finish-load', () => {
-    updateOsTitle(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
-  });
-
-  wireContentViewEvents(bundle, contentView);
-  registerShortcutsFor(bundle, chromeView.webContents);
-  registerShortcutsFor(bundle, contentView.webContents);
-
+function wireBundleShowLogic(bundle) {
+  const { window: win, chromeView } = bundle;
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
@@ -300,6 +274,46 @@ function createBundle() {
   setTimeout(() => {
     if (!win.isDestroyed() && !win.isVisible()) win.show();
   }, 3000);
+}
+
+function createBundle() {
+  const win = new BaseWindow(buildBundleWindowOptions());
+  const { chromeView, contentView } = createBundleWebContentsViews(win);
+
+  const bundle = {
+    window: win,
+    chromeView,
+    contentView,
+    sidebarView: null,
+    sidebarVisible: false,
+    requestsPanelView: null,
+    requestsPanelVisible: false,
+    requestsPanelReloadTimer: null,
+    currentContentUrl: null,
+    currentWorkspaceId: null,
+    preErrorUrl: null,
+    isErrorState: false,
+    isLoadingState: true,
+    _maximizedByUs: false,
+    _boundsBeforeMaximize: null,
+  };
+  bundles.add(bundle);
+  mruWindows.unshift(bundle);
+
+  updateBundleBounds(bundle);
+  wireBundleWindowEvents(bundle);
+
+  // Re-push the computed title when chrome finishes (re)loading; the in-window
+  // title bar otherwise has no way to learn its own window's title.
+  chromeView.webContents.on('did-finish-load', () => {
+    updateOsTitle(bundle);
+    primeViewWithCachedChromeState(chromeView.webContents);
+  });
+
+  wireContentViewEvents(bundle, contentView);
+  registerShortcutsFor(bundle, chromeView.webContents);
+  registerShortcutsFor(bundle, contentView.webContents);
+  wireBundleShowLogic(bundle);
 
   return bundle;
 }
