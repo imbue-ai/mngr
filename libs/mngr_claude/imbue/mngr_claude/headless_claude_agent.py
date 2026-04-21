@@ -284,8 +284,24 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         diagnostic = (
             "{ "
             'echo "=== pre-claude env probe ==="; '
+            'echo "--- env (filtered) ---"; '
             'env | grep -E "^(ANTHROPIC|CLAUDE|MNGR_|PATH|HOME|SHELL|TERM)=" | '
             'sed "s/^\\(ANTHROPIC_API_KEY=\\).*/\\1<len=$(printf %s \\"$ANTHROPIC_API_KEY\\" | wc -c)>/"; '
+            'echo "--- env variable count ---"; '
+            "env | wc -l; "
+            'echo "--- direct var reads ---"; '
+            'echo "MNGR_AGENT_STATE_DIR=$MNGR_AGENT_STATE_DIR"; '
+            'echo "MNGR_AGENT_WORK_DIR=$MNGR_AGENT_WORK_DIR"; '
+            'echo "MNGR_HOST_DIR=$MNGR_HOST_DIR"; '
+            'echo "ANTHROPIC_API_KEY_set=${ANTHROPIC_API_KEY:+yes_len=${#ANTHROPIC_API_KEY}}"; '
+            'echo "--- agent env file ---"; '
+            'AGENT_ENV="$MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/env"; '
+            'echo "path: $AGENT_ENV"; '
+            'if [ -f "$AGENT_ENV" ]; then '
+            'echo "exists, size: $(wc -c < \\"$AGENT_ENV\\") bytes, keys:"; '
+            'cut -d= -f1 "$AGENT_ENV" | '
+            'sed "s/^ANTHROPIC_API_KEY\\$/ANTHROPIC_API_KEY_<length-only>/"; '
+            'else echo "MISSING"; fi; '
             'echo "=== pre-claude env probe end ==="; '
             '} > "$MNGR_AGENT_STATE_DIR/stderr.log" 2>&1'
         )
