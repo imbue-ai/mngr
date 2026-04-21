@@ -64,13 +64,12 @@ def _make_fixed_state_agent(
 
 def _start_victim_session(agent: ClaudeAgent) -> None:
     """Start a detached tmux session running the SIGINT-trapping shell."""
-    session_name = agent.session_name
     agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(_VICTIM_SHELL)}",
+        f"tmux new-session -d -s {shlex.quote(agent.session_name)} {shlex.quote(_VICTIM_SHELL)}",
         timeout_seconds=5.0,
     )
     wait_for(
-        lambda: agent._check_pane_contains(session_name, "READY"),
+        lambda: agent._check_pane_contains(agent.tmux_target, "READY"),
         timeout=5.0,
         error_message="Victim shell did not reach READY in tmux pane",
     )
@@ -91,7 +90,7 @@ def test_interrupt_current_turn_delivers_ctrl_c_to_tmux_pane(
         agent.interrupt_current_turn()
 
         wait_for(
-            lambda: agent._check_pane_contains(session_name, _INTERRUPT_MARKER),
+            lambda: agent._check_pane_contains(agent.tmux_target, _INTERRUPT_MARKER),
             timeout=5.0,
             error_message="SIGINT marker did not appear in tmux pane after interrupt_current_turn",
         )
@@ -117,7 +116,7 @@ def test_interrupt_current_turn_does_not_deliver_ctrl_c_when_idle(
         # no-op contract is upheld, the marker will never appear.
         with pytest.raises(TimeoutError):
             wait_for(
-                lambda: agent._check_pane_contains(session_name, _INTERRUPT_MARKER),
+                lambda: agent._check_pane_contains(agent.tmux_target, _INTERRUPT_MARKER),
                 timeout=1.5,
                 error_message="(expected)",
             )
