@@ -9,6 +9,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import WELCOME_INITIAL_MESSAGE
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
@@ -168,9 +169,13 @@ def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
         agent_id=AgentId(),
     )
     assert "--message" in cmd
-    # The welcome message is sent as the very first user prompt so a /welcome
-    # skill can produce a greeting without any other user interaction.
-    assert cmd[cmd.index("--message") + 1] == "/welcome"
+    # The welcome message is sent as the very first user prompt so the agent
+    # introduces itself without any other user interaction. Must be plain text
+    # -- a slash command like "/welcome" is intercepted by Claude Code before
+    # reaching the model, never fires the UserPromptSubmit hook that mngr's
+    # send_message waits on, and therefore hangs until timeout.
+    assert cmd[cmd.index("--message") + 1] == WELCOME_INITIAL_MESSAGE
+    assert not cmd[cmd.index("--message") + 1].startswith("/")
 
 
 def test_build_mngr_create_command_with_host_env_file(tmp_path: Path) -> None:

@@ -222,7 +222,7 @@ def _make_host_name(agent_name: AgentName) -> str:
     return f"{agent_name}-host"
 
 
-WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
+WELCOME_INITIAL_MESSAGE: Final[str] = "Hello! Please briefly introduce yourself and describe what you can help with."
 
 
 def _build_mngr_create_command(
