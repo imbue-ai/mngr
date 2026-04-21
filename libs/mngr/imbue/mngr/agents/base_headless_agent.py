@@ -199,8 +199,7 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
         Subclasses can override to check additional error sources (e.g.
         stdout JSON error results). Called by _raise_no_output_error after
-        stderr is checked and before the tmux pane capture; the pane is
-        now captured unconditionally (not as a fallback).
+        stderr is checked and before the tmux pane capture.
         """
         return []
 
