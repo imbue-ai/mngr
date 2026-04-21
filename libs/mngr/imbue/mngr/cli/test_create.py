@@ -27,7 +27,6 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 from imbue.mngr.utils.testing import wait_for_agent_session
@@ -41,7 +40,6 @@ def test_cli_create_via_subprocess(
     mngr_test_root_name: str,
 ) -> None:
     """Test calling the mngr create command via subprocess."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100012")
     agent_name = f"test-subprocess-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     env = os.environ.copy()
@@ -62,7 +60,7 @@ def test_cli_create_via_subprocess(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -73,6 +71,9 @@ def test_cli_create_via_subprocess(
                 "modal",
                 "--disable-plugin",
                 "docker",
+                "--",
+                "sleep",
+                "130001",
             ],
             capture_output=True,
             text=True,
@@ -103,7 +104,6 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_mngr_ctx: MngrContext,
     mngr_test_prefix: str,
     default_create_cli_opts: CreateCliOptions,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --connect flag results in connection options that would attach to the tmux session.
 
@@ -111,17 +111,17 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     can verify the agent was created and the returned options indicate a connect should happen,
     without actually calling os.execvp to attach to tmux.
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100013")
     agent_name = f"test-connect-local-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     address = parse_agent_address(agent_name)
 
     opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().type, test_sleep_agent_type),
+        to_update(default_create_cli_opts.field_ref().type, "command"),
         to_update(default_create_cli_opts.field_ref().source, str(temp_work_dir)),
         to_update(default_create_cli_opts.field_ref().transfer, "none"),
         to_update(default_create_cli_opts.field_ref().connect, True),
         to_update(default_create_cli_opts.field_ref().ensure_clean, False),
+        to_update(default_create_cli_opts.field_ref().agent_args, ("sleep", "100013")),
     )
 
     output_opts = OutputOptions()
@@ -150,7 +150,6 @@ def test_no_connect_flag_skips_tmux_attach(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --no-connect flag skips attaching to the tmux session.
 
@@ -158,7 +157,6 @@ def test_no_connect_flag_skips_tmux_attach(
     to the caller (not exec into tmux attach). We verify this by checking that
     the CLI completes and returns a result.
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100014")
     agent_name = f"test-no-connect-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -169,12 +167,15 @@ def test_no_connect_flag_skips_tmux_attach(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130002",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -382,10 +383,8 @@ def test_extra_window_with_named_window(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that -w with name=command syntax creates a tmux window with the specified name."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100015")
     agent_name = f"test-named-window-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -396,7 +395,7 @@ def test_extra_window_with_named_window(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "-w",
                 'myserver="sleep 847192"',
                 "--source",
@@ -404,6 +403,9 @@ def test_extra_window_with_named_window(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -439,10 +441,8 @@ def test_extra_window_without_name_uses_default_window_name(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that -w without name prefix creates a tmux window with default name (cmd-N)."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100016")
     agent_name = f"test-default-window-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -453,7 +453,7 @@ def test_extra_window_without_name_uses_default_window_name(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "-w",
                 "sleep 719283",
                 "--source",
@@ -461,6 +461,9 @@ def test_extra_window_without_name_uses_default_window_name(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130004",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -618,7 +621,6 @@ def test_edit_message_with_initial_content(
 def test_edit_message_empty_content_does_not_send(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
@@ -629,10 +631,6 @@ def test_edit_message_empty_content_does_not_send(
     agent_name = f"test-edit-empty-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     marker_text = "AGENT_READY_MARKER"
-
-    # Mint an agent type that emits the marker and then waits on stdin so we
-    # can confirm the agent is ready before checking editor behavior.
-    marker_type = make_test_sleep_agent_type(temp_host_dir, f"echo '{marker_text}' && cat")
 
     # Create a script that clears the file (simulating user saving empty file)
     editor_script = tmp_path / "test_editor.sh"
@@ -649,13 +647,17 @@ def test_edit_message_empty_content_does_not_send(
                 "--name",
                 agent_name,
                 "--type",
-                marker_type,
+                "command",
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                "sh",
+                "-c",
+                f"echo '{marker_text}' && cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -682,14 +684,12 @@ def test_edit_message_empty_content_does_not_send(
 def test_template_applies_values_from_config(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
 ) -> None:
     """Test that --template applies values from the config file."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100017")
     agent_name = f"test-template-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -711,13 +711,16 @@ ensure_clean = false
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--template",
                 "mytemplate",
+                "--",
+                "sleep",
+                "130005",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -737,7 +740,6 @@ ensure_clean = false
 def test_template_cli_args_take_precedence(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
@@ -803,10 +805,8 @@ def test_template_unknown_template_raises_error(
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
-    temp_host_dir: Path,
 ) -> None:
     """Test that using an unknown template raises an error."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100018")
     agent_name = f"test-unknown-template-{int(time.time())}"
 
     # Create a config with one template (using test root name)
@@ -826,13 +826,16 @@ ensure_clean = false
             "--name",
             agent_name,
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
             "--template",
             "nonexistent",
+            "--",
+            "sleep",
+            "130006",
         ],
         obj=plugin_manager,
         env={"MNGR_PROJECT_DIR": str(mngr_dir)},
@@ -852,10 +855,8 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Creating an agent from a dirty git repo fails when ensure-clean is enabled (the default)."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100019")
     # Make the repo dirty by creating an untracked file
     (temp_git_repo / "dirty.txt").write_text("uncommitted change")
 
@@ -865,10 +866,13 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
             "--name",
             "test-dirty",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_git_repo),
             "--no-connect",
+            "--",
+            "sleep",
+            "130007",
         ],
         obj=plugin_manager,
     )
@@ -881,12 +885,10 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
 def test_ensure_clean_skipped_with_explicit_base_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Creating an agent with an explicit base branch skips the ensure-clean check."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100020")
     # Create a second branch to use as base
     subprocess.run(
         ["git", "branch", "other-branch"],
@@ -908,12 +910,15 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--branch",
                 "other-branch:mngr/*",
                 "--no-connect",
+                "--",
+                "sleep",
+                "130008",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -930,12 +935,10 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
 def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Ensure-clean check is skipped with an explicit base branch even in git-mirror mode (not just worktree)."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100021")
     # Create a second branch to use as base
     subprocess.run(
         ["git", "branch", "other-branch"],
@@ -957,7 +960,7 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--branch",
@@ -965,6 +968,9 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
                 "--transfer",
                 "git-mirror",
                 "--no-connect",
+                "--",
+                "sleep",
+                "130009",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -986,23 +992,24 @@ def test_transfer_rsync_rejected_for_git_repo(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=rsync should be rejected when the source is a git repo."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100022")
     result = cli_runner.invoke(
         create,
         [
             "--name",
             "test-rsync-git",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_git_repo),
             "--transfer",
             "rsync",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130010",
         ],
         obj=plugin_manager,
     )
@@ -1015,23 +1022,24 @@ def test_transfer_git_mirror_rejected_for_non_git(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=git-mirror should be rejected when the source is not a git repo."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100023")
     result = cli_runner.invoke(
         create,
         [
             "--name",
             "test-mirror-no-git",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "git-mirror",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130011",
         ],
         obj=plugin_manager,
     )
@@ -1044,23 +1052,24 @@ def test_transfer_git_worktree_rejected_for_non_git(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=git-worktree should be rejected when the source is not a git repo."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100024")
     result = cli_runner.invoke(
         create,
         [
             "--name",
             "test-worktree-no-git",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "git-worktree",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130012",
         ],
         obj=plugin_manager,
     )
@@ -1074,10 +1083,8 @@ def test_transfer_none_with_different_target_path_rejected(
     temp_work_dir: Path,
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=none with :PATH pointing to a different directory should be rejected."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100025")
     different_dir = tmp_path / "different_target"
     different_dir.mkdir()
 
@@ -1086,13 +1093,16 @@ def test_transfer_none_with_different_target_path_rejected(
         [
             f"test-none-diff-target:{different_dir}",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130013",
         ],
         obj=plugin_manager,
     )
@@ -1106,10 +1116,8 @@ def test_conflicting_target_path_in_address_and_flag_rejected(
     temp_work_dir: Path,
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Specifying different :PATH in address and --target-path should be rejected."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100026")
     dir_a = tmp_path / "dir_a"
     dir_a.mkdir()
     dir_b = tmp_path / "dir_b"
@@ -1122,11 +1130,14 @@ def test_conflicting_target_path_in_address_and_flag_rejected(
             "--target-path",
             str(dir_b),
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--source",
             str(temp_work_dir),
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130014",
         ],
         obj=plugin_manager,
     )
@@ -1141,10 +1152,8 @@ def test_same_target_path_in_address_and_flag_accepted(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Specifying the same path in :PATH and --target-path should not conflict."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100027")
     agent_name = f"test-same-tp-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -1156,12 +1165,15 @@ def test_same_target_path_in_address_and_flag_accepted(
                 "--target-path",
                 str(temp_work_dir),
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130015",
             ],
             obj=plugin_manager,
         )
@@ -1175,10 +1187,8 @@ def test_target_path_flag_works_standalone(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--target-path without :PATH in the address should still work."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100028")
     agent_name = f"test-standalone-tp-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -1190,12 +1200,15 @@ def test_target_path_flag_works_standalone(
                 "--target-path",
                 str(temp_work_dir),
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130016",
             ],
             obj=plugin_manager,
         )
@@ -1253,17 +1266,15 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """mngr create with --idle-timeout on local provider should fail with a clear error."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100029")
     result = cli_runner.invoke(
         create,
         [
             "--name",
             "test-idle-local",
             "--type",
-            test_sleep_agent_type,
+            "command",
             "--idle-timeout",
             "60",
             "--source",
@@ -1271,6 +1282,9 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130017",
         ],
         obj=plugin_manager,
         catch_exceptions=True,

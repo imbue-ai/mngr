@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import os
 import queue
@@ -33,10 +34,11 @@ from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -362,7 +364,7 @@ async def _handle_agent_servers_page(
 
     server_names = backend_resolver.list_servers_for_agent(parsed_id)
 
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
     cf_services: dict[str, str] | None = None
     if cf_client is not None:
         cf_services = await asyncio.get_running_loop().run_in_executor(None, cf_client.list_services, parsed_id)
@@ -1455,13 +1457,21 @@ def _handle_requests_panel(
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
         event_id = str(req.event_id)
+        # Encode as JSON for safe embedding in the JS call, then HTML-escape
+        # the result so it is also safe inside the double-quoted onclick
+        # attribute. This is defense-in-depth: req.agent_id is validated as
+        # an AgentId above, but req.event_id is only required to be a
+        # non-empty string by its type, and relying on upstream validation
+        # at each interpolation site is fragile.
+        event_id_attr = html.escape(json.dumps(event_id), quote=True)
+        agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
         cards.append(
-            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\')">'
+            f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
             f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{server_name}</div></div>'
         )
 
-    html = (
+    html_content = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
         "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
         "margin:0;padding:0;overflow-y:auto;height:100vh;}"
@@ -1471,9 +1481,14 @@ def _handle_requests_panel(
         "</style></head>"
         f"<body>"
         f"<script>"
-        f"function navigateToRequest(eventId) {{"
-        f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
-        f'  else window.top.location = "/requests/" + eventId;'
+        f"function navigateToRequest(eventId, agentId) {{"
+        f"  if (window.minds && window.minds.navigateToRequest) {{"
+        f"    window.minds.navigateToRequest(agentId, eventId);"
+        f"  }} else if (window.minds) {{"
+        f'    window.minds.navigateContent("/requests/" + eventId);'
+        f"  }} else {{"
+        f'    window.top.location = "/requests/" + eventId;'
+        f"  }}"
         f"}}"
         f"</script>"
         f"<h2>Requests ({len(pending)})</h2>"
@@ -1487,7 +1502,7 @@ def _handle_requests_panel(
         f"Auto-open on new request</label></div>"
         "</body></html>"
     )
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html_content)
 
 
 async def _handle_requests_auto_open(
@@ -1806,13 +1821,14 @@ def create_desktop_client(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
-    cloudflare_client: CloudflareForwardingClient | None = None,
+    cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
     stream_manager: MngrStreamManager | None = None,
     session_store: MultiAccountSessionStore | None = None,
+    auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
@@ -1859,6 +1875,7 @@ def create_desktop_client(
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
+    app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
@@ -1873,10 +1890,11 @@ def create_desktop_client(
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
-    # Mount the SuperTokens auth routes
-    if session_store is not None:
+    # Mount the auth routes (proxy to the remote_service_connector auth backend)
+    if session_store is not None and auth_backend_client is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,
+            auth_backend_client=auth_backend_client,
             server_port=server_port,
             output_format=output_format or OutputFormat.JSONL,
         )
