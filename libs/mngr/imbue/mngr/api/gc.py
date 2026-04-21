@@ -350,6 +350,14 @@ def _gc_single_host(
             logger.warning("Cannot determine last activity of host {} during GC, skipping: {}", host.id, e)
             return
         min_age_seconds = provider.get_min_online_host_age_seconds()
+        if seconds_since_activity is not None and seconds_since_activity < min_age_seconds:
+            logger.trace(
+                "Skipped GC for host {} (last activity {:.0f}s ago < minimum {:.0f}s)",
+                host.id,
+                seconds_since_activity,
+                min_age_seconds,
+            )
+            return
         if seconds_since_activity is None:
             # No activity recorded -- typically means the host crashed before
             # anything had a chance to write an activity file.  Fall back to
@@ -381,15 +389,7 @@ def _gc_single_host(
                     state,
                 )
                 return
-            # Past grace period, no activity, in terminal state -- destroy
-        elif seconds_since_activity < min_age_seconds:
-            logger.trace(
-                "Skipped GC for host {} (last activity {:.0f}s ago < minimum {:.0f}s)",
-                host.id,
-                seconds_since_activity,
-                min_age_seconds,
-            )
-            return
+            # Past grace period, no activity, in terminal state -- fall through to destroy.
 
         if not dry_run:
             mngr_ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=mngr_ctx)
