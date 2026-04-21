@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -1070,6 +1071,21 @@ def _cf_result(result: object, *, total_count: int | None = None) -> dict[str, o
     return body
 
 
+def _build_http_ops_with_handler(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> HttpCloudflareOps:
+    """Construct an HttpCloudflareOps whose client is wired to a MockTransport.
+
+    Closes the real httpx.Client that HttpCloudflareOps opens during __init__
+    before reassigning ``ops.client`` to the mock-backed client, so tests
+    don't leak a connection pool per invocation.
+    """
+    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
+    ops.client.close()
+    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    return ops
+
+
 def _build_http_ops_with_routes(
     routes: dict[tuple[str, str], httpx.Response],
 ) -> HttpCloudflareOps:
@@ -1087,9 +1103,7 @@ def _build_http_ops_with_routes(
                 return response
         raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
-    return ops
+    return _build_http_ops_with_handler(handler)
 
 
 def test_http_ops_tunnel_roundtrip() -> None:
@@ -1144,8 +1158,7 @@ def test_http_ops_tunnel_config_roundtrip() -> None:
             return httpx.Response(200, json=_cf_result(None))
         raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    ops = _build_http_ops_with_handler(handler)
     config = ops.get_tunnel_config("t1")
     assert "config" in config
     ops.put_tunnel_config("t1", {"config": {"ingress": [{"service": "http_status:404"}]}})
@@ -1169,8 +1182,7 @@ def test_http_ops_dns_record_roundtrip() -> None:
             return httpx.Response(200, json=_cf_result(None))
         raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    ops = _build_http_ops_with_handler(handler)
     record = ops.create_cname("x.example.com", "target.example.com")
     assert record["id"] == "r1"
     assert created[0]["type"] == "CNAME"
@@ -1209,8 +1221,7 @@ def test_http_ops_access_app_and_policies_roundtrip() -> None:
             return httpx.Response(200, json=_cf_result(policies[0]))
         raise AssertionError(f"Unexpected request: {request.method} {path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    ops = _build_http_ops_with_handler(handler)
     ops.create_access_app("x.example.com", "My App", allowed_idps=["idp-1"])
     assert created_apps[0]["allowed_idps"] == ["idp-1"]
     by_domain = ops.get_access_app_by_domain("x.example.com")
@@ -1249,8 +1260,7 @@ def test_http_ops_kv_namespace_create_when_missing() -> None:
                 return httpx.Response(200, json=_cf_result(None))
         raise AssertionError(f"Unexpected request: {request.method} {path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    ops = _build_http_ops_with_handler(handler)
     assert ops.kv_get("missing") is None
     ops.kv_put("alice--a1", '{"default": "allow"}')
     assert ops.kv_get("alice--a1") == '{"default": "allow"}'
@@ -1277,8 +1287,7 @@ def test_http_ops_kv_namespace_reuses_existing() -> None:
             return httpx.Response(200, json=_cf_result(None))
         raise AssertionError(f"Unexpected request: {request.method} {path}")
 
-    ops = HttpCloudflareOps(api_token="token", account_id="acc", zone_id="zone")
-    ops.client = httpx.Client(base_url="https://api.cloudflare.com/client/v4", transport=httpx.MockTransport(handler))
+    ops = _build_http_ops_with_handler(handler)
     ops.kv_put("k", "v")
     assert create_calls == 0
 
