@@ -1,4 +1,5 @@
 import contextlib
+import os
 from contextlib import AbstractContextManager
 from io import StringIO
 from pathlib import Path
@@ -29,6 +30,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
+from imbue.mngr.utils.testing import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
@@ -67,6 +69,23 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
     if environment_name.startswith("mngr_") and not environment_name.startswith("mngr_test-"):
         raise MngrError(
             f"Refusing to create Modal environment with name {environment_name}: test environments should start with 'mngr_test-' and should be explicitly configured using generate_test_environment_name() so that they can be easily identified and cleaned up."
+        )
+
+    # Second line of defense: when running under pytest, require the env name to
+    # match the timestamped `mngr_test-YYYY-MM-DD-HH-MM-SS` pattern (same
+    # TEST_ENV_PATTERN used by cleanup_old_modal_test_environments.py and
+    # modal_mngr_ctx). Without this, a test that spawns `mngr` via a non-obvious
+    # code path (e.g. an in-process ConcurrencyGroup.run_process that inherits
+    # os.environ) and forgets to override MNGR_PREFIX would silently create a
+    # default-prefixed env that no CI cleanup script recognizes. The earlier
+    # guard only catches `mngr_` underscore -- this one also catches dash-
+    # prefixed default names like `mngr-<uuid>`.
+    if "PYTEST_CURRENT_TEST" in os.environ and not TEST_ENV_PATTERN.match(environment_name):
+        raise MngrError(
+            f"Refusing to create Modal environment {environment_name!r} during pytest: "
+            "test Modal envs must match the mngr_test-YYYY-MM-DD-HH-MM-SS pattern so the "
+            "CI cleanup script can find them. Set MNGR_PREFIX via "
+            "generate_test_environment_name()."
         )
 
     with log_span("Creating Modal environment: {}", environment_name):

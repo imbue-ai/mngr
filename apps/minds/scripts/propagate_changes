@@ -13,6 +13,11 @@
 #   # Local (non-container agent):
 #   propagate_changes --target /path/to/agent/workdir
 #
+# Agent name resolution (first non-empty wins):
+#   --agent NAME  (CLI flag)
+#   MINDS_WORKSPACE_NAME  (env var)
+#   auto-discovery: if exactly one agent is present under MNGR_HOST_DIR, use it
+#
 
 set -euo pipefail
 
@@ -31,11 +36,14 @@ if [[ ! -d "${TEMPLATE_DIR}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Agent name
+# Point mngr at the minds host_dir so list/stop/start find minds agents,
+# not mngr's default ~/.mngr agents. Mirrors imbue.minds.bootstrap.
 # ---------------------------------------------------------------------------
 
-AGENT_NAME="${MINDS_WORKSPACE_NAME:-mindtest}"
-export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
+MINDS_ROOT_NAME="${MINDS_ROOT_NAME:-minds}"
+export MINDS_ROOT_NAME
+export MNGR_HOST_DIR="${MNGR_HOST_DIR:-${HOME}/.${MINDS_ROOT_NAME}/mngr}"
+export MNGR_PREFIX="${MNGR_PREFIX:-${MINDS_ROOT_NAME}-}"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -46,21 +54,56 @@ SSH_HOST=""
 SSH_PORT=""
 SSH_KEY=""
 LOCAL_TARGET=""
+AGENT_NAME_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --user)  SSH_USER="$2";  shift 2 ;;
-        --host)  SSH_HOST="$2";  shift 2 ;;
-        --port)  SSH_PORT="$2";  shift 2 ;;
-        --key)   SSH_KEY="$2";   shift 2 ;;
+        --user)   SSH_USER="$2";  shift 2 ;;
+        --host)   SSH_HOST="$2";  shift 2 ;;
+        --port)   SSH_PORT="$2";  shift 2 ;;
+        --key)    SSH_KEY="$2";   shift 2 ;;
         --target) LOCAL_TARGET="$2"; shift 2 ;;
+        --agent)  AGENT_NAME_ARG="$2"; shift 2 ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
-            echo "Usage: propagate_changes [--user USER --host HOST --port PORT --key KEY | --target PATH]" >&2
+            echo "Usage: propagate_changes [--agent NAME] [--user USER --host HOST --port PORT --key KEY | --target PATH]" >&2
             exit 1
             ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# Agent name resolution
+# ---------------------------------------------------------------------------
+
+list_mngr_agent_names() {
+    # Print one agent name per line. Empty output means no agents found.
+    uv run --directory "${MNGR_REPO_ROOT}" mngr list --format json 2>/dev/null \
+        | python3 -c 'import json,sys; [print(a["name"]) for a in json.load(sys.stdin).get("agents", [])]' \
+        || true
+}
+
+if [[ -n "${AGENT_NAME_ARG}" ]]; then
+    AGENT_NAME="${AGENT_NAME_ARG}"
+elif [[ -n "${MINDS_WORKSPACE_NAME:-}" ]]; then
+    AGENT_NAME="${MINDS_WORKSPACE_NAME}"
+else
+    echo "[auto] No --agent flag or MINDS_WORKSPACE_NAME set; discovering agents..."
+    CANDIDATES=$(list_mngr_agent_names)
+    CANDIDATE_COUNT=$(printf '%s\n' "${CANDIDATES}" | grep -c . || true)
+    if [[ "${CANDIDATE_COUNT}" -eq 0 ]]; then
+        echo "ERROR: No mngr agents found. Specify one with --agent NAME or set MINDS_WORKSPACE_NAME." >&2
+        exit 1
+    elif [[ "${CANDIDATE_COUNT}" -eq 1 ]]; then
+        AGENT_NAME="${CANDIDATES}"
+        echo "       Using sole agent: ${AGENT_NAME}"
+    else
+        echo "ERROR: Multiple agents found; cannot auto-select. Pass --agent NAME. Candidates:" >&2
+        printf '  %s\n' ${CANDIDATES} >&2
+        exit 1
+    fi
+fi
+export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
 # Validate: need either SSH details or a local target
 if [[ -n "${SSH_HOST}" ]]; then
@@ -118,7 +161,12 @@ ELECTRON_PID=""
 # --- Track A: Agent stop -> sync -> frontend build -> start ---
 agent_update() {
     echo "[2/4] Stopping agent '${AGENT_NAME}'..."
-    uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1 || echo "      (agent may not have been running)"
+    if ! uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1; then
+        echo "ERROR: Failed to stop agent '${AGENT_NAME}'. Known agents:" >&2
+        printf '  %s\n' $(list_mngr_agent_names) >&2
+        echo "       Re-run with --agent NAME to target one of the above." >&2
+        return 1
+    fi
 
     echo "[3/4] Syncing template into agent work_dir..."
     if [[ "${MODE}" == "remote" ]]; then
