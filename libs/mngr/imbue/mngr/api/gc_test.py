@@ -2127,6 +2127,23 @@ class _ActivityTimeAuthErrorHost(_RemoteHost):
         raise HostAuthenticationError("simulated auth error reading activity time from test")
 
 
+class _GetStateAuthErrorHost(_RemoteHost):
+    """Remote host where get_state raises HostAuthenticationError after the first call.
+
+    The mock provider's ``discover_hosts`` calls ``get_state`` once to build the
+    DiscoveredHost record, so we let that first call through (returning RUNNING)
+    and raise on the internal call made by ``_gc_single_host``.
+    """
+
+    _get_state_call_count: int = 0
+
+    def get_state(self) -> HostState:
+        self._get_state_call_count += 1
+        if self._get_state_call_count == 1:
+            return HostState.RUNNING
+        raise HostAuthenticationError("simulated auth error reading state from test")
+
+
 class _DestroyableProvider(MockProviderInstance):
     """MockProviderInstance that supports destroy_host."""
 
@@ -2377,6 +2394,31 @@ def test_gc_machines_skips_old_running_host_with_no_activity(
     )
     provider, result = _run_gc_on_remote_host(
         host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-running-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_when_get_state_unreadable(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts where get_state fails (cannot determine terminal state).
+
+    Reaches the no-activity branch past the grace period, then fails to read
+    state.  Must not destroy: without a terminal state we cannot distinguish a
+    crashed host from a healthy one.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        host_cls=_GetStateAuthErrorHost,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-state-auth-error"
     )
 
     assert len(result.machines_destroyed) == 0
