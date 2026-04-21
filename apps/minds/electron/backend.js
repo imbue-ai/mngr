@@ -126,9 +126,20 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           '--no-browser',
         ];
         cwd = pyprojectDir;
+        // LaunchServices-started apps inherit a minimal PATH without
+        // /opt/homebrew/bin or /usr/local/bin, so user-installed tools
+        // like limactl cannot be resolved. Prepend the common macOS
+        // Homebrew bin dirs so mngr's lima provider can find them.
+        const systemPath = process.env.PATH || '';
+        const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
+          (p) => !systemPath.split(':').includes(p)
+        ).join(':');
+        const augmentedSystemPath = homebrewPaths
+          ? `${systemPath}:${homebrewPaths}`
+          : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
