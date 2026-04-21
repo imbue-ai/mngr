@@ -128,29 +128,14 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         """
         return []
 
-    def _diagnose_output_files(self) -> str:
-        """Summarize stdout/stderr file state (missing / empty / N bytes).
-
-        Useful when both files are empty: at least we know whether shell
-        redirects ran (files exist but empty) vs never ran (files missing).
-        """
-
-        def describe(path: Path) -> str:
-            try:
-                content = self.host.read_text_file(path)
-            except FileNotFoundError:
-                return f"{path.name}: missing"
-            return f"{path.name}: {len(content)} bytes"
-
-        return f"{describe(self._get_stdout_path())}; {describe(self._get_stderr_path())}"
-
     def _raise_no_output_error(self) -> Never:
         """Raise MngrError collecting all available error detail.
 
         Checks stderr, then subclass-specific extra sources, then falls
-        back to tmux pane capture as a last resort. Always appends a
-        file-size + lifecycle diagnostic so silent failures are never
-        truly silent (e.g. "stdout.jsonl: 0 bytes; stderr.log: missing").
+        back to tmux pane capture as a last resort. The pane capture is
+        always attempted when no other details are found, regardless of
+        whether redirect files exist -- shell redirects create empty files
+        even when the process fails immediately.
         """
         parts: list[str] = []
 
@@ -160,21 +145,13 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
         parts.extend(self._get_extra_error_sources())
 
-        # Tmux pane capture is a last-resort fallback only (we skip it if
-        # we already have stderr or subclass-provided detail, since pane
-        # capture invokes tmux and tests marked @pytest.mark.tmux gate
-        # that resource).
         if not parts:
             pane_error = self._get_pane_error_message()
             if pane_error:
                 parts.append(f"[tmux pane]\n{pane_error}")
 
-        # Always include the file-size and lifecycle diagnostic so the
-        # error has some forensic value even when every other source is
-        # empty.
-        parts.append(f"[files] {self._diagnose_output_files()}")
-        parts.append(f"[lifecycle] {self.get_lifecycle_state().value}")
-
         subject = self._no_output_error_subject
-        detail = "\n".join(parts)
-        raise MngrError(f"{subject} exited without producing output:\n{detail}")
+        if parts:
+            detail = "\n".join(parts)
+            raise MngrError(f"{subject} exited without producing output:\n{detail}")
+        raise MngrError(f"{subject} exited without producing output (no details available)")
