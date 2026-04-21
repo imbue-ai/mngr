@@ -289,7 +289,7 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
         if (s.signedIn) {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          window.location.href = '/';
+          window.location.href = '/accounts';
         }
       } catch (e) { /* transient -- keep polling */ }
     }, 2000);
