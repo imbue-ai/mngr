@@ -130,6 +130,13 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
+# The non-zero count covers the session-scoped dockerd-startup fixture in conftest.py,
+# which is autouse and fires for tests without @pytest.mark.docker, so it must bypass
+# the PATH wrapper (which would otherwise block the docker invocation).
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(2))
+
+
 # --- Naming conventions ---
 
 

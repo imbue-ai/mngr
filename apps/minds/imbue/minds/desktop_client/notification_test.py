@@ -5,14 +5,16 @@ from typing import Any
 
 import pytest
 
+from imbue.minds.desktop_client.notification import DispatchChannel
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.notification import _build_osascript_notification
 from imbue.minds.desktop_client.notification import _build_toast_widgets
 from imbue.minds.desktop_client.notification import _dispatch_electron_notification
-from imbue.minds.desktop_client.notification import _dispatch_macos_notification
 from imbue.minds.desktop_client.notification import _position_toast_window
 from imbue.minds.desktop_client.notification import _run_tkinter_toast
+from imbue.minds.desktop_client.notification import _select_dispatch_channel
 from imbue.minds.desktop_client.notification import _show_tkinter_toast
 
 
@@ -203,8 +205,13 @@ def test_show_tkinter_toast_with_no_tkinter_does_not_raise() -> None:
 
 
 def test_dispatch_non_electron_does_not_raise() -> None:
-    """The non-Electron dispatch path starts a background toast and does not raise."""
-    dispatcher = NotificationDispatcher.create(is_electron=False, tkinter_module=None)
+    """The non-Electron/non-macOS dispatch path starts a background toast and does not raise.
+
+    is_macos is forced to False so the test exercises the tkinter branch regardless
+    of the host platform (and does not fire a real macOS Notification Center banner
+    when the suite runs on a developer's Mac).
+    """
+    dispatcher = NotificationDispatcher.create(is_electron=False, is_macos=False, tkinter_module=None)
     request = NotificationRequest(message="background toast")
     dispatcher.dispatch(request, "agent-y")
 
@@ -240,35 +247,39 @@ def test_dispatcher_default_constructor_resolves_tkinter() -> None:
 # -- macOS notification tests --
 
 
-def test_dispatch_macos_notification_does_not_raise() -> None:
-    """On non-macOS, osascript won't exist, but the function should not raise."""
-    request = NotificationRequest(
-        message="test macOS notification",
-        title="Test Title",
-        urgency=NotificationUrgency.CRITICAL,
-    )
-    # Should not raise even if osascript is not available (caught internally)
-    _dispatch_macos_notification(request, "agent-mac")
-
-
-def test_dispatch_macos_notification_handles_quotes() -> None:
-    """Verify double quotes in title/message are escaped for AppleScript."""
+def test_build_osascript_notification_escapes_double_quotes() -> None:
+    """Double quotes in title, message, and subtitle must be escaped to \\" so the
+    AppleScript string literals are syntactically valid."""
     request = NotificationRequest(
         message='He said "hello"',
         title='Title with "quotes"',
         urgency=NotificationUrgency.NORMAL,
     )
-    # Should not raise
-    _dispatch_macos_notification(request, "agent-quotes")
+
+    script = _build_osascript_notification(request, "agent-quotes")
+
+    # Escaped quotes (\") must be present for message and title contents.
+    assert 'He said \\"hello\\"' in script
+    assert 'Title with \\"quotes\\"' in script
+    # Raw unescaped quoted payload must not appear as a bare substring between
+    # AppleScript string delimiters -- the contents must be escaped, not just
+    # textually present from the surrounding AppleScript syntax.
+    assert '"He said "hello""' not in script
+    assert '"Title with "quotes""' not in script
 
 
-def test_dispatcher_routes_to_macos_when_is_macos() -> None:
-    """Verify dispatch routes to macOS native notifications when is_macos=True."""
-    dispatcher = NotificationDispatcher.create(is_electron=False, is_macos=True, tkinter_module=None)
-    assert dispatcher.is_macos is True
-    request = NotificationRequest(message="macos dispatch test")
-    # Should not raise -- osascript may fail on Linux but error is caught
-    dispatcher.dispatch(request, "agent-mac-dispatch")
+@pytest.mark.parametrize(
+    "is_electron,is_macos,expected",
+    [
+        (True, True, DispatchChannel.ELECTRON),
+        (True, False, DispatchChannel.ELECTRON),
+        (False, True, DispatchChannel.MACOS),
+        (False, False, DispatchChannel.TKINTER),
+    ],
+)
+def test_select_dispatch_channel(is_electron: bool, is_macos: bool, expected: DispatchChannel) -> None:
+    """Electron wins when set; macOS takes over when not in Electron; tkinter otherwise."""
+    assert _select_dispatch_channel(is_electron=is_electron, is_macos=is_macos) == expected
 
 
 def test_dispatcher_prefers_electron_over_macos(capsys: pytest.CaptureFixture[str]) -> None:

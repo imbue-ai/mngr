@@ -15,6 +15,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_migrate_clones_and_destroys_source(
     cli_runner: CliRunner,
     create_test_agent,

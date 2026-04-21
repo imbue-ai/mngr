@@ -1,5 +1,7 @@
 """Tests for the agent event queues."""
 
+import threading
+
 from imbue.minds_workspace_server.event_queues import AgentEventQueues
 from imbue.minds_workspace_server.events import BufferBehavior
 
@@ -80,3 +82,39 @@ def test_register_after_shutdown_returns_closed_queue() -> None:
     queues.shutdown()
     q = queues.register("agent-1")
     assert q.get_nowait() is None
+
+
+def test_register_tolerates_reentrant_unregister_from_same_thread() -> None:
+    """register() runs arbitrary allocations inside its critical section
+    (the put_nowait loop that replays buffered events). CPython can fire a
+    GC cycle at any of those allocation points, and if GC finalizes an
+    abandoned SSE event_generator the generator's `finally` block calls
+    unregister() synchronously on the same thread. The registry's lock
+    must be reentrant so that re-entrance does not self-deadlock.
+
+    We simulate the re-entrance deterministically by installing a
+    buffered-events list whose __iter__ calls unregister. If the lock is
+    non-reentrant, register() deadlocks on itself and the wait times out.
+    """
+    queues = AgentEventQueues()
+    existing_queue = queues.register("agent-1")
+
+    class ReentrantOnIter(list[dict[str, object]]):
+        def __iter__(self):
+            queues.unregister("agent-1", existing_queue)
+            return super().__iter__()
+
+    queues._event_buffers["agent-1"] = ReentrantOnIter([{"type": "event"}])
+
+    finished = threading.Event()
+
+    def run_register() -> None:
+        queues.register("agent-1")
+        finished.set()
+
+    worker = threading.Thread(target=run_register, daemon=True)
+    worker.start()
+    assert finished.wait(timeout=2.0), (
+        "register() deadlocked; the lock must be reentrant so finalizers "
+        "that call back into AgentEventQueues from the same thread succeed"
+    )

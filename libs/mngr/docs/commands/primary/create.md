@@ -264,7 +264,7 @@ Provider: ssh
 Provider: vultr
   VPS-specific args (consumed by provider, not passed to docker):
     --vps-region=REGION  Vultr region (default: ewr)
-    --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
+    --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
     --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
     --git-depth=N        Shallow-clone build context to depth N before upload
 

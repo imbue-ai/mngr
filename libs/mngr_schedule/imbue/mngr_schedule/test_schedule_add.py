@@ -5,42 +5,13 @@ with @pytest.mark.acceptance and @pytest.mark.timeout(600).
 """
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
-
-# Read the real home directory BEFORE the autouse fixture overrides HOME.
-# When running locally, the subprocess needs the real HOME to find
-# ~/.modal.toml. In CI/offload, credentials come from env vars instead.
-_REAL_HOME = Path.home()
-
-
-def _build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need Modal credentials.
-
-    In CI/offload: Modal credentials come from env vars
-    (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET), so we keep the test HOME.
-    Locally: we restore the real HOME so the subprocess can find
-    ~/.modal.toml, and remove test isolation vars so it uses the
-    real mngr configuration.
-    """
-    env = os.environ.copy()
-    has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
-    if not has_modal_env_creds:
-        env["HOME"] = str(_REAL_HOME)
-        env.pop("MNGR_HOST_DIR", None)
-        env.pop("MNGR_ROOT_NAME", None)
-    # Remove pytest marker so mngr doesn't reject the call
-    env.pop("PYTEST_CURRENT_TEST", None)
-    # Ensure the prefix starts with mngr_test- so the Modal backend's guard
-    # accepts it and the cleanup script can identify these environments.
-    env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
-    return env
+from imbue.mngr_schedule.testing import build_subprocess_env
 
 
 @pytest.mark.release
@@ -56,7 +27,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-add"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     try:
         result = subprocess.run(
@@ -111,7 +82,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-verify"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     try:
         result = subprocess.run(
@@ -164,7 +135,7 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
     """
     trigger_name = "test-schedule-list"
     app_name = get_modal_app_name(trigger_name)
-    env = _build_subprocess_env()
+    env = build_subprocess_env()
 
     try:
         # Deploy a schedule
