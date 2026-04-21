@@ -10,6 +10,7 @@ via get_log_queue().
 """
 
 import os
+import platform
 import queue
 import shutil
 import tempfile
@@ -42,6 +43,11 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_SHA256_AARCH64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_SHA256_X86_64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
+from imbue.mngr_lima.image_cache import wait_for_image_ready
 
 OutputCallback = Callable[[str, bool], None]
 
@@ -222,7 +228,7 @@ def _make_host_name(agent_name: AgentName) -> str:
     return f"{agent_name}-host"
 
 
-WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
+WELCOME_INITIAL_MESSAGE: Final[str] = "Hello! Please briefly introduce yourself and describe what you can help with."
 
 
 def _build_mngr_create_command(
@@ -331,6 +337,42 @@ def _remote_host_env_flags() -> list[str]:
     ]
 
 
+LIMA_IMAGE_PREFETCH_TIMEOUT_SECONDS: Final[float] = 1800.0
+
+
+def _wait_for_lima_image_if_digest_pinned() -> None:
+    """Block until the Lima base image is present in Lima's cache.
+
+    Only waits when a digest is pinned in mngr_lima.constants -- otherwise
+    there's no published image to prefetch and we let limactl download
+    whatever the Lima config points at. Timeout failures fall through
+    silently so a slow/absent prefetch never blocks agent creation
+    permanently.
+    """
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64"):
+        image_url = DEFAULT_IMAGE_URL_AARCH64
+        expected_sha256 = DEFAULT_IMAGE_SHA256_AARCH64
+    else:
+        image_url = DEFAULT_IMAGE_URL_X86_64
+        expected_sha256 = DEFAULT_IMAGE_SHA256_X86_64
+    if not expected_sha256:
+        return
+
+    logger.info("Waiting for Lima image prefetch to finish before mngr create (up to {}s)...", LIMA_IMAGE_PREFETCH_TIMEOUT_SECONDS)
+    ready = wait_for_image_ready(
+        image_url=image_url,
+        expected_sha256=expected_sha256,
+        timeout_seconds=LIMA_IMAGE_PREFETCH_TIMEOUT_SECONDS,
+    )
+    if ready:
+        logger.info("Lima image prefetch is ready.")
+    else:
+        logger.warning(
+            "Lima image prefetch did not finish within timeout; limactl will download it itself."
+        )
+
+
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path,
@@ -344,10 +386,16 @@ def run_mngr_create(
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
     environment variables, and all other configuration.
 
+    For LIMA mode, blocks on the background image prefetch so the first agent
+    creation doesn't race Lima's own download.
+
     Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
     mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id, host_env_file=host_env_file)
+
+    if launch_mode is LaunchMode.LIMA:
+        _wait_for_lima_image_if_digest_pinned()
 
     logger.info("Running: {}", " ".join(mngr_command))
 

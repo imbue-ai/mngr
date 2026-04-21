@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1996,6 +1996,7 @@ dependencies = [
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-lima" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "loguru" },
@@ -2020,6 +2021,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-lima", editable = "libs/mngr_lima" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },

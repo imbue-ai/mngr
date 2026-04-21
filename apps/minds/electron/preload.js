@@ -41,4 +41,10 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
+
+  // Lima VM image prefetch (background download on app launch)
+  getImagePrefetchState: () => ipcRenderer.invoke('image-prefetch:get-state'),
+  onImagePrefetchUpdate: (callback) => {
+    ipcRenderer.on('image-prefetch:update', (_event, state) => callback(state));
+  },
 });

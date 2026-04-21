@@ -7,6 +7,8 @@ import yaml
 from loguru import logger
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_SHA256_AARCH64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_SHA256_X86_64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 
@@ -26,6 +28,20 @@ def _get_default_image_url(
     return config_image_url_x86_64 or DEFAULT_IMAGE_URL_X86_64
 
 
+def _get_default_image_sha256(
+    config_image_sha256_aarch64: str | None = None,
+    config_image_sha256_x86_64: str | None = None,
+) -> str | None:
+    """Get the default image SHA256 digest for the current architecture.
+
+    Returns None when no digest is configured (Lima skips verification).
+    """
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64"):
+        return config_image_sha256_aarch64 or DEFAULT_IMAGE_SHA256_AARCH64
+    return config_image_sha256_x86_64 or DEFAULT_IMAGE_SHA256_X86_64
+
+
 def _get_arch_string() -> str:
     """Get the Lima-compatible architecture string."""
     machine = platform.machine().lower()
@@ -40,6 +56,9 @@ def generate_default_lima_yaml(
     custom_image_url: str | None = None,
     config_image_url_aarch64: str | None = None,
     config_image_url_x86_64: str | None = None,
+    custom_image_sha256: str | None = None,
+    config_image_sha256_aarch64: str | None = None,
+    config_image_sha256_x86_64: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -49,17 +68,30 @@ def generate_default_lima_yaml(
         custom_image_url: Optional override for the image URL (takes highest priority).
         config_image_url_aarch64: Config-level override for aarch64 image URL.
         config_image_url_x86_64: Config-level override for x86_64 image URL.
+        custom_image_sha256: Optional override for the image digest (paired with custom_image_url).
+        config_image_sha256_aarch64: Config-level override for aarch64 image digest.
+        config_image_sha256_x86_64: Config-level override for x86_64 image digest.
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
 
+    # Only pair a digest with a URL when the caller supplied one for that URL.
+    # When custom_image_url is provided, only use custom_image_sha256 (never the
+    # config defaults, which refer to the default URL).
+    if custom_image_url is not None:
+        image_sha256 = custom_image_sha256
+    else:
+        image_sha256 = _get_default_image_sha256(config_image_sha256_aarch64, config_image_sha256_x86_64)
+
+    image_entry: dict = {
+        "location": image_url,
+        "arch": arch,
+    }
+    if image_sha256:
+        image_entry["digest"] = f"sha256:{image_sha256}"
+
     config: dict = {
-        "images": [
-            {
-                "location": image_url,
-                "arch": arch,
-            },
-        ],
+        "images": [image_entry],
         "mounts": [
             {
                 "location": str(volume_host_path),

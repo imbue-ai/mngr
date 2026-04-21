@@ -42,6 +42,54 @@ def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
     )
 
     assert config["images"][0]["location"] == "https://example.com/custom.qcow2"
+    assert "digest" not in config["images"][0]
+
+
+def test_generate_default_lima_yaml_custom_image_with_digest(tmp_path: Path) -> None:
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        custom_image_url="https://example.com/custom.qcow2",
+        custom_image_sha256="abc123",
+    )
+
+    assert config["images"][0]["location"] == "https://example.com/custom.qcow2"
+    assert config["images"][0]["digest"] == "sha256:abc123"
+
+
+def test_generate_default_lima_yaml_config_digest_ignored_for_custom_url(tmp_path: Path) -> None:
+    # A config-level digest refers to the default URL, not a user-supplied one.
+    # Mixing them would attach the wrong digest to the custom image.
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        custom_image_url="https://example.com/custom.qcow2",
+        config_image_sha256_aarch64="wrong_digest",
+        config_image_sha256_x86_64="wrong_digest",
+    )
+
+    assert "digest" not in config["images"][0]
+
+
+def test_generate_default_lima_yaml_default_digest(tmp_path: Path) -> None:
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        config_image_sha256_aarch64="aarch_digest",
+        config_image_sha256_x86_64="x86_digest",
+    )
+
+    digest = config["images"][0]["digest"]
+    assert digest in ("sha256:aarch_digest", "sha256:x86_digest")
 
 
 def test_write_lima_yaml(tmp_path: Path) -> None:

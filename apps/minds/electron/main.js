@@ -5,6 +5,7 @@ const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const imagePrefetch = require('./image-prefetch');
 
 todesktop.init({
   updateReadyAction: {
@@ -46,7 +47,23 @@ async function onReady() {
 
   createWindow();
   registerShortcuts();
+  startImagePrefetch();
   await runStartupSequence();
+}
+
+function startImagePrefetch() {
+  imagePrefetch.subscribe((state) => {
+    for (const view of [chromeView, contentView]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.send('image-prefetch:update', state);
+      }
+    }
+  });
+  // Fire and forget -- prefetch failures must not block app startup or agent
+  // creation. The Python side falls through to letting Lima download.
+  imagePrefetch.start().catch((err) => {
+    console.error('[image-prefetch] unhandled error:', err);
+  });
 }
 
 function createWindow() {
@@ -408,6 +425,8 @@ function readLastLogLines(lineCount) {
 }
 
 // -- IPC handlers --
+
+ipcMain.handle('image-prefetch:get-state', () => imagePrefetch.getState());
 
 ipcMain.on('go-home', () => {
   if (contentView && !contentView.webContents.isDestroyed() && backendBaseUrl) {

@@ -29,6 +29,14 @@ class LimaProviderConfig(ProviderInstanceConfig):
         default=None,
         description="Default qcow2 image URL for x86_64. None uses the mngr default.",
     )
+    default_image_sha256_aarch64: str | None = Field(
+        default=None,
+        description="Expected sha256 digest of the aarch64 image. None disables verification.",
+    )
+    default_image_sha256_x86_64: str | None = Field(
+        default=None,
+        description="Expected sha256 digest of the x86_64 image. None disables verification.",
+    )
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default limactl start arguments applied to all VMs",

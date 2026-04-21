@@ -404,6 +404,8 @@ sudo poweroff
                 host_dir=str(self.host_dir),
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                config_image_sha256_aarch64=self.config.default_image_sha256_aarch64,
+                config_image_sha256_x86_64=self.config.default_image_sha256_x86_64,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -414,6 +416,8 @@ sudo poweroff
                 custom_image_url=image_url,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                config_image_sha256_aarch64=self.config.default_image_sha256_aarch64,
+                config_image_sha256_x86_64=self.config.default_image_sha256_x86_64,
             )
 
         # Write the YAML config to a temp file

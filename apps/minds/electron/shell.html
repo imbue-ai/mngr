@@ -107,6 +107,16 @@
       user-select: text;
     }
     .details.visible { display: block; }
+
+    /* Lima image prefetch status -- only shown when actively downloading. */
+    #prefetch-status {
+      display: none;
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 16px;
+      min-height: 16px;
+    }
+    #prefetch-status.visible { display: block; }
   </style>
 </head>
 <body>
@@ -124,6 +134,7 @@
     <h1>Minds</h1>
     <p class="status" id="status-text">Starting...</p>
     <div class="spinner"></div>
+    <p id="prefetch-status"></p>
   </div>
 
   <div id="error-view">
@@ -163,6 +174,31 @@
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
       });
+
+      function formatMB(bytes) {
+        return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
+      }
+      function renderPrefetch(state) {
+        var el = document.getElementById('prefetch-status');
+        if (!el) return;
+        if (state.status === 'downloading') {
+          var msg = 'Downloading VM image -- ' + (state.percent || 0) + '%';
+          if (state.totalBytes) {
+            msg += ' (' + formatMB(state.bytesDownloaded) + ' / ' + formatMB(state.totalBytes) + ')';
+          }
+          el.textContent = msg;
+          el.classList.add('visible');
+        } else if (state.status === 'error') {
+          el.textContent = 'VM image download failed: ' + (state.error || 'unknown error') + ' (will retry at agent creation)';
+          el.classList.add('visible');
+        } else {
+          el.classList.remove('visible');
+        }
+      }
+      window.minds.onImagePrefetchUpdate(renderPrefetch);
+      if (window.minds.getImagePrefetchState) {
+        window.minds.getImagePrefetchState().then(renderPrefetch).catch(function() {});
+      }
     }
   </script>
 </body>
