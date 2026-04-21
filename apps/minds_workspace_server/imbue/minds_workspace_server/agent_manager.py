@@ -455,6 +455,15 @@ class AgentManager:
                         work_dir=str(work_dir),
                     )
         except Exception as e:
+            # Force-demote success: the happy path sets success=True before
+            # constructing AgentStateItem, so if pydantic validation (or
+            # anything else after the subprocess returned 0) raises, success
+            # would still be True while _agents was never populated. That
+            # would broadcast a contradictory proto_agent_completed(success=
+            # True, error="Unexpected ..."). The catch-all's contract is
+            # "something unexpected happened, surface it as a clean
+            # failure", so force success=False regardless of prior state.
+            success = False
             error = f"Unexpected {type(e).__name__}: {e}"
             _loguru_logger.exception("Unexpected error creating agent {}", agent_id)
             # The proto-agent entry may still be sitting in _proto_agents if
