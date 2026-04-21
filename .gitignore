@@ -236,6 +236,9 @@
 # so the user can make their own notification script
 **/scripts/notify_user.local.sh
 
+# Local-only throwaway scripts (e.g. one-off test harnesses).
+**/scripts/*.local.sh
+
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
 
