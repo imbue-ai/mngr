@@ -21,6 +21,7 @@ from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -2004,7 +2005,12 @@ def create_desktop_client(
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
         logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
-        return Response(status_code=500, content=f"Internal Server Error: {exc}")
+        # Return JSON so fetch callers (e.g. OAuth buttons that do `res.json()`)
+        # surface the real error instead of a JSON-parse error on plain text.
+        return JSONResponse(
+            status_code=500,
+            content={"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"},
+        )
 
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver

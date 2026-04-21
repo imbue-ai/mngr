@@ -230,9 +230,16 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
   async function oauthSignIn(provider) {
     try {
       var res = await fetch('/auth/oauth/' + provider);
-      var data = await res.json();
+      var text = await res.text();
+      var data;
+      try {
+        data = JSON.parse(text);
+      } catch (parseErr) {
+        alert('Failed to start OAuth (HTTP ' + res.status + '): ' + text.slice(0, 500));
+        return;
+      }
       if (data.status !== 'OK') {
-        alert('Failed to start OAuth: ' + (data.error || data.message));
+        alert('Failed to start OAuth: ' + (data.error || data.message || ('HTTP ' + res.status)));
       }
     } catch (err) {
       alert('Failed to start OAuth: ' + err.message);
