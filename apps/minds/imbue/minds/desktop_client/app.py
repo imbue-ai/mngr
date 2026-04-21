@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import os
 import queue
@@ -1852,13 +1853,14 @@ async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, server_na
 
 
 def _log_refresh_dispatch_result(
-    future: "asyncio.Future[None]", agent_id_str: str, server_name: str
+    future: concurrent.futures.Future[None], agent_id_str: str, server_name: str
 ) -> None:
     """Surface any exception stashed on a scheduled refresh-dispatch future.
 
-    ``run_coroutine_threadsafe`` stores exceptions on the returned Future; if
-    nothing calls ``.exception()`` they are never logged. This callback runs
-    when the coroutine finishes and logs anything other than cancellation.
+    ``run_coroutine_threadsafe`` stores exceptions on the returned
+    ``concurrent.futures.Future``; if nothing calls ``.exception()`` they are
+    never logged. This callback runs when the coroutine finishes and logs
+    anything other than cancellation.
     """
     try:
         exc = future.exception()
