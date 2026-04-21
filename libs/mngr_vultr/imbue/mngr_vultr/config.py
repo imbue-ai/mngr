@@ -23,8 +23,8 @@ class VultrProviderConfig(VpsDockerProviderConfig):
         description="Default Vultr region (e.g., 'ewr' for New Jersey)",
     )
     default_plan: str = Field(
-        default="vc2-1c-1gb",
-        description="Default Vultr plan (e.g., 'vc2-1c-1gb' for 1 CPU, 1GB RAM)",
+        default="vc2-2c-4gb",
+        description="Default Vultr plan (e.g., 'vc2-2c-4gb' for 2 CPU, 4GB RAM)",
     )
     default_os_id: int = Field(
         default=2136,

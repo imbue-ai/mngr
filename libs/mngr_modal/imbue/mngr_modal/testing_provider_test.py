@@ -35,6 +35,7 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
@@ -1875,8 +1876,9 @@ def test_parse_build_args_unknown_arg_raises(
 
 def test_create_environment(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    _create_environment("test-env", modal)
-    assert "test-env" in modal._environments
+    name = f"{generate_test_environment_name()}-happy-path"
+    _create_environment(name, modal)
+    assert name in modal._environments
 
 
 def test_create_environment_rejects_bad_mngr_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -1887,8 +1889,26 @@ def test_create_environment_rejects_bad_mngr_prefix(tmp_path: Path, cg: Concurre
 
 def test_create_environment_allows_mngr_test_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    _create_environment("mngr_test-good-name", modal)
-    assert "mngr_test-good-name" in modal._environments
+    name = f"{generate_test_environment_name()}-good-name"
+    _create_environment(name, modal)
+    assert name in modal._environments
+
+
+def test_create_environment_rejects_non_test_prefix_during_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Second-line guard: under pytest, reject env names that don't match the
+    mngr_test-YYYY-MM-DD-HH-MM-SS pattern. Protects against in-process mngr
+    spawns that forget MNGR_PREFIX (the earlier guard only catches `mngr_`
+    underscore; this one also catches dash-prefixed default names like
+    `mngr-<uuid>` and any ad-hoc custom name)."""
+    modal = make_testing_modal_interface(tmp_path, cg)
+    # PYTEST_CURRENT_TEST is set by pytest itself; no monkeypatch needed.
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("mngr-abc123", modal)
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("custom-env", modal)
+    # Even a mngr_test- prefix without the timestamp shape fails.
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("mngr_test-not-a-timestamp", modal)
 
 
 def test_lookup_persistent_app_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:

@@ -9,7 +9,7 @@ from imbue.mngr_vultr.config import VultrProviderConfig
 def test_default_config_values() -> None:
     config = VultrProviderConfig()
     assert config.default_region == "ewr"
-    assert config.default_plan == "vc2-1c-1gb"
+    assert config.default_plan == "vc2-2c-4gb"
     assert config.default_os_id == 2136
     assert config.api_key is None
 
