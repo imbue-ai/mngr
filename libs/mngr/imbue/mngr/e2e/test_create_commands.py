@@ -10,7 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_runs_agent_types_configured_command(e2e: E2eSession) -> None:
+def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -> None:
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
     e2e.write_tutorial_block("""
@@ -47,10 +47,12 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
     # Idle timeout requires a remote provider (local provider rejects it).
-    # Use Modal to exercise the real idle timeout path.
+    # Use Modal to exercise the real idle timeout path. The `--idle-*` and
+    # `--no-connect` options must precede `--`, otherwise they are consumed
+    # as agent_args and never reach mngr create.
     result = e2e.run(
-        "mngr create my-task --provider modal --type command --no-ensure-clean -- sleep 100077"
-        " --idle-mode run --idle-timeout 60 --no-connect",
+        "mngr create my-task --provider modal --type command --no-ensure-clean"
+        " --idle-mode run --idle-timeout 60 --no-connect -- sleep 100077",
         comment="idle timeout requires a remote provider",
         timeout=120.0,
     )

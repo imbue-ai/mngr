@@ -655,8 +655,6 @@ def test_edit_message_empty_content_does_not_send(
                 "--connect",
                 "--no-ensure-clean",
                 "--",
-                "sh",
-                "-c",
                 f"echo '{marker_text}' && cat",
             ],
             obj=plugin_manager,

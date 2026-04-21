@@ -9,6 +9,7 @@ import pytest
 from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.agents.default_plugins.command_agent import CommandAgentConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -70,7 +71,7 @@ def test_assemble_command_raises_when_no_args_and_no_override(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    """Empty agent_args with no override produces a helpful ValueError."""
+    """Empty agent_args with no override produces a helpful UserInputError."""
     agent = _make_command_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(ValueError, match=r"--type command requires a command after"):
+    with pytest.raises(UserInputError, match=r"--type command requires a command after"):
         agent.assemble_command(local_host, agent_args=(), command_override=None)

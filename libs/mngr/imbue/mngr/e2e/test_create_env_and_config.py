@@ -27,7 +27,7 @@ def test_create_with_env(e2e: E2eSession) -> None:
     expect(
         e2e.run(
             f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type command --no-ensure-clean"
-            " -- 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100091'",
+            " -- 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100116'",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()

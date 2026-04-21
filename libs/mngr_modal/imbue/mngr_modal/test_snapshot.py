@@ -86,7 +86,7 @@ def test_snapshot_create_then_list_on_modal(
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 300005")
+    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400005")
     try:
         # Create a snapshot
         with log_span("Creating snapshot for Modal agent", agent_name=agent_name):
@@ -141,7 +141,7 @@ def test_snapshot_destroy_then_list_on_modal(
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 300006")
+    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400006")
     try:
         # Destroy all
         with log_span("Destroying snapshots for Modal agent", agent_name=agent_name):

@@ -43,8 +43,10 @@ Bare type names must be alphanumeric (with dashes/underscores). For anything tha
 
 ```bash
 mngr create my-task --type command -- sleep 3600
-mngr create my-task --type command -- sh -c "npm run dev | tee logs"
+mngr create my-task --type command -- 'npm run dev | tee logs'
 ```
+
+The arguments after `--` are joined with plain spaces to form the agent's command, so shell metacharacters (`&&`, `|`, `;`) must be inside a single quoted argument to survive intact.
 
 See [`mngr create`](../commands/primary/create.md) for all available options.
 

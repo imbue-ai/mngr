@@ -159,9 +159,9 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     # Create an agent with:
     # - Very short idle timeout (15 seconds) so it shuts down quickly
     # - Short sandbox timeout (120 seconds) with buffer time for clean shutdown
-    # - A long-running sleep as the agent command (from the test-sleep agent
-    #   type). idle-mode=boot only checks BOOT activity, which flips off once
-    #   the host finishes booting, so the sleep running indefinitely is fine.
+    # - A long-running sleep as the command-agent's command.
+    #   idle-mode=boot only checks BOOT activity, which flips off once the
+    #   host finishes booting, so the sleep running indefinitely is fine.
     # - idle-mode=boot (not PROCESS, which keeps updating while the tmux bash
     #   shell is alive and would prevent the host from ever looking idle)
     result = subprocess.run(
