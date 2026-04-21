@@ -209,10 +209,19 @@ _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 # a promise that these are always registered -- we intersect with the
 # caller's `other_servers` (= registered) so users don't click a link
 # that routes to a server that doesn't exist and hangs on Loading...
+#
+# "web" = the template's primary web UI (chat in forever-claude-template,
+#   whatever the template author chooses elsewhere)
+# "terminal" = ttyd raw shell (always from mngr_ttyd plugin)
+# "agent" = ttyd attached to the agent's primary tmux session
+#   (dropped by mngr_ttyd as commands/ttyd/agent.sh)
+# "system_interface" = alternate template's primary web UI
+#   (docker/local templates that don't use "web")
 _CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
     ServerName("web"),
     ServerName("terminal"),
     ServerName("agent"),
+    ServerName("system_interface"),
 )
 
 

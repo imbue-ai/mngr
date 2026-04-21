@@ -340,11 +340,21 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
-# Order matters. "web" (the workspace_server chat UI) comes first so
-# new users land on the chat interface -- the primary thing they want
-# to interact with after creating an agent. "system_interface" stays as
-# a fallback for legacy local/docker templates that still register it
-# as their main server.
+# Order matters. Each template picks its own server name(s); the names
+# below are the well-known conventions minds knows about. We try them
+# in order and pick the first one the agent actually registered.
+#
+# - "web": per-template primary web UI. In forever-claude-template
+#   this is the minds_workspace_server chat frontend; in another
+#   template it could be anything else the user exposes under that
+#   name.
+# - "system_interface": what docker/local templates register as their
+#   primary web UI. Separate convention from "web"; not every template
+#   has one.
+#
+# If neither is registered (e.g. an early template that only has
+# "terminal" + "agent"), _handle_agent_default_redirect falls back to
+# the first-any-registered + then to the servers-listing page.
 _DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("web", "system_interface")
 
 
@@ -356,10 +366,12 @@ def _handle_agent_default_redirect(
 ) -> Response:
     """Redirect to the agent's canonical primary server.
 
-    Picks the first registered server name that matches our preference list
-    ("system_interface" -- legacy local/docker templates, or "web" -- current
-    forever-claude-template). Falls back to any registered server if neither
-    is present, and to the servers-listing page if the agent has none yet.
+    Picks the first registered server name that matches
+    ``_DEFAULT_SERVER_PREFERENCE`` (currently "web" then
+    "system_interface" -- each template chooses which name to register
+    its primary web UI under). Falls back to any registered server if
+    neither is present, and to the servers-listing page if the agent
+    has none yet.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
