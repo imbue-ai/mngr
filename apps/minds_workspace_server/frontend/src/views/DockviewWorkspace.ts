@@ -733,9 +733,10 @@ function initializeDockview(parentElement: HTMLElement): void {
     panelParams.delete(panel.id);
   });
 
-  // Agent-triggered refresh: reload every open iframe tab whose title matches
-  // the server_name the agent named. This arrives over the existing workspace
-  // server WebSocket as {type: "refresh_service", server_name}.
+  // Agent-triggered refresh: reload every open iframe tab whose
+  // data-server-name attribute matches the server_name the agent named. This
+  // arrives over the existing workspace server WebSocket as
+  // {type: "refresh_service", server_name}.
   _refreshServiceListener = (serverName: string) => {
     reloadIframesForServer(serverName);
   };
