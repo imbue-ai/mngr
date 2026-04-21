@@ -239,6 +239,9 @@ def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
 
 
 def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
+    # forever-claude-template registers its primary server as "web" via
+    # services.toml + forward_port.py. System_interface is absent, so the
+    # default redirect should fall through to "web".
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
@@ -254,7 +257,52 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+
+
+def test_agent_default_page_prefers_system_interface_when_present(tmp_path: Path) -> None:
+    # Legacy local / docker templates register "system_interface" directly;
+    # we prefer that name over "web" when both are present.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {
+                "system_interface": "http://test-backend:9100",
+                "web": "http://test-backend:9200",
+            },
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
     assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
+
+
+def test_agent_default_page_falls_back_to_servers_list_when_no_known_servers(tmp_path: Path) -> None:
+    # During the tiny window between agent-creation success and the first
+    # discovery cycle populating the server map, we have nothing to redirect
+    # to; send the user to the servers list page which renders its own
+    # loading state instead of a dead-end 307.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/servers/"
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:

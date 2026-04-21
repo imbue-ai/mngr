@@ -336,16 +336,43 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
+_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "web")
+
+
 def _handle_agent_default_redirect(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Redirect to the agent's system_interface server by default."""
+    """Redirect to the agent's canonical primary server.
+
+    Picks the first registered server name that matches our preference list
+    ("system_interface" -- legacy local/docker templates, or "web" -- current
+    forever-claude-template). Falls back to any registered server if neither
+    is present, and to the servers-listing page if the agent has none yet.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/system_interface/"})
+    parsed_id = AgentId(agent_id)
+    known_servers = backend_resolver.list_servers_for_agent(parsed_id)
+    known_server_names = {str(s) for s in known_servers}
+
+    preferred: str | None = None
+    for candidate in _DEFAULT_SERVER_PREFERENCE:
+        if candidate in known_server_names:
+            preferred = candidate
+            break
+    if preferred is None and known_servers:
+        preferred = str(known_servers[0])
+
+    if preferred is None:
+        # Nothing registered yet; send the user to the servers-listing page
+        # which itself renders a loading state until discovery catches up.
+        return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/servers/"})
+
+    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/{preferred}/"})
 
 
 async def _handle_agent_servers_page(
@@ -608,6 +635,17 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
+        # Diagnostics: nothing in the logs today tells us *why* we fell into
+        # the loading page. Surface which agent/server missed and what the
+        # resolver actually knows about.
+        known_servers = backend_resolver.list_servers_for_agent(parsed_id)
+        logger.warning(
+            "Proxy loading-page fallback: agent_id={} server={} not resolvable. known_servers={} path={}",
+            agent_id,
+            server_name,
+            known_servers,
+            path,
+        )
         # Return immediately instead of holding the connection open.
         # For HTML-accepting requests, return a loading page that retries
         # client-side after a short delay. This avoids saturating the
