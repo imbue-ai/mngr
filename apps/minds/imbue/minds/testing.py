@@ -87,15 +87,17 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 
 
 def clean_env() -> dict[str, str]:
-    """Build an environment dict for subprocesses that strips pytest markers.
+    """Build an environment dict for subprocesses.
 
-    mngr refuses to run when PYTEST_CURRENT_TEST is set (safety check to
-    prevent tests from accidentally using real mngr state). We strip it
-    so that our end-to-end subprocess calls work against the real system.
+    Returns a copy of os.environ. The shared plugin test fixtures
+    (registered in apps/minds/conftest.py via register_plugin_test_fixtures)
+    already set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
+    tmp values, so the subprocess inherits proper isolation. With
+    MNGR_ROOT_NAME set to `mngr-test-<id>`, the subprocess does not load
+    the repo's .mngr/settings.toml, so the is_allowed_in_pytest=false
+    guard there does not fire and no explicit opt-in is needed.
     """
-    env = dict(os.environ)
-    env.pop("PYTEST_CURRENT_TEST", None)
-    return env
+    return dict(os.environ)
 
 
 def run_mngr(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
