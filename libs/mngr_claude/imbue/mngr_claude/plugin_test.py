@@ -21,10 +21,13 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import InterruptAgentError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import InterruptibleAgentMixin
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -687,6 +690,65 @@ def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     ):
         with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
             assert agent.get_lifecycle_state() == state
+
+
+def test_claude_agent_advertises_interruptible_capability() -> None:
+    """ClaudeAgent must declare itself as InterruptibleAgentMixin so callers can dispatch on isinstance."""
+    assert issubclass(ClaudeAgent, InterruptibleAgentMixin)
+
+
+def test_interrupt_current_turn_is_noop_when_not_running(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """interrupt_current_turn must not issue any command unless the agent is actively RUNNING a turn."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    for state in (
+        AgentLifecycleState.STOPPED,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        AgentLifecycleState.DONE,
+    ):
+        with patch.object(ClaudeAgent, "get_lifecycle_state", return_value=state):
+            with patch.object(Host, "execute_stateful_command") as mock_exec:
+                agent.interrupt_current_turn()
+                mock_exec.assert_not_called()
+
+
+def test_interrupt_current_turn_sends_ctrl_c_when_running(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When RUNNING, interrupt_current_turn issues `tmux send-keys -t <target> C-c` exactly once."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    expected_target = agent.tmux_target
+    with patch.object(ClaudeAgent, "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
+        with patch.object(
+            Host,
+            "execute_stateful_command",
+            return_value=CommandResult(success=True, stdout="", stderr=""),
+        ) as mock_exec:
+            agent.interrupt_current_turn()
+
+    mock_exec.assert_called_once()
+    sent_cmd = mock_exec.call_args[0][0]
+    assert "tmux send-keys" in sent_cmd
+    assert f"-t '{expected_target}'" in sent_cmd
+    assert sent_cmd.rstrip().endswith("C-c")
+
+
+def test_interrupt_current_turn_raises_on_tmux_failure(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A failing tmux command surfaces as InterruptAgentError, not a silent swallow."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    with patch.object(ClaudeAgent, "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
+        with patch.object(
+            Host,
+            "execute_stateful_command",
+            return_value=CommandResult(success=False, stdout="", stderr="no session"),
+        ):
+            with pytest.raises(InterruptAgentError, match="no session"):
+                agent.interrupt_current_turn()
 
 
 def test_agent_field_generators_returns_correct_structure() -> None:
