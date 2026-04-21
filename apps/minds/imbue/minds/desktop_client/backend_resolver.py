@@ -775,10 +775,10 @@ class MngrStreamManager(MutableModel):
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
         """Handle a line of output from mngr events --follow for a specific agent.
 
-        Differentiates between server events and request events by checking
-        the ``source`` field in the event envelope. Server events are handled
-        by updating the resolver's server map. Request events are forwarded
-        to registered request callbacks.
+        Dispatches based on the ``source`` field in the event envelope:
+        server events update the resolver's server map, request events are
+        forwarded to registered request callbacks, and refresh events are
+        forwarded to registered refresh callbacks.
         """
         if not is_stdout:
             stripped = line.strip()
