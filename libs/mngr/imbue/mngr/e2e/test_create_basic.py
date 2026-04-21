@@ -133,8 +133,12 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     mngr create my-task -- --model opus
     # that command launches claude with the "opus" model instead of the default
     """)
+    # `--` is consumed by _CreateCommand.parse_args the first time it appears,
+    # so everything after it becomes agent_args. Put the sleep first so GNU
+    # sleep still runs (on Modal, Linux) -- extra operands are summed -- and
+    # the pinned sleep value lives in ps for leak traceability.
     result = e2e.run(
-        "mngr create my-task --type command --no-ensure-clean -- --model opus -- sleep 100073",
+        "mngr create my-task --type command --no-ensure-clean -- sleep 100073 --model opus",
         comment="you can specify the arguments to the *agent* by using `--` to separate the agent arguments",
     )
     expect(result).to_succeed()
@@ -145,6 +149,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
+    assert "sleep 100073" in matching[0]["command"]
     assert "--model opus" in matching[0]["command"]
 
 
