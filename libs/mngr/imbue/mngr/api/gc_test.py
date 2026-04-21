@@ -2326,7 +2326,7 @@ def test_gc_machines_skips_young_host_with_no_activity(
     host = _make_remote_host(
         local_provider,
         last_activity_seconds_ago=None,
-        created_seconds_ago=60,  # young, under 10min grace
+        created_seconds_ago=60,
     )
     provider, result = _run_gc_on_remote_host(
         host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-young-no-activity"
