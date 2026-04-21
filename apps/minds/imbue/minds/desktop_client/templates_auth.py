@@ -227,16 +227,72 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
     return false;
   }
 
+  var oauthPollInterval = null;
+  var oauthPollDeadline = 0;
+
+  function oauthShowWaiting(provider) {
+    var nameMap = { google: 'Google', github: 'GitHub' };
+    var providerLabel = nameMap[provider] || provider;
+    // Disable both tabs' OAuth buttons while we wait so the user can't re-trigger.
+    var buttons = document.querySelectorAll('.oauth-btn');
+    for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = true; }
+    // Surface progress in both tabs' info bars so it shows up wherever the user is.
+    var msg = 'Waiting for you to finish signing in with ' + providerLabel + ' in the browser...';
+    var banners = [
+      document.getElementById('signup-error'),
+      document.getElementById('signin-error'),
+    ];
+    for (var j = 0; j < banners.length; j++) {
+      var el = banners[j];
+      if (!el) continue;
+      el.textContent = msg;
+      el.style.color = '#1e40af';
+      el.style.background = '#eff6ff';
+      el.style.display = 'block';
+    }
+  }
+
   async function oauthSignIn(provider) {
+    var startBtn = event && event.target;
+    if (startBtn && startBtn.disabled) return;
     try {
       var res = await fetch('/auth/oauth/' + provider);
       var data = await res.json();
       if (data.status !== 'OK') {
         alert('Failed to start OAuth: ' + (data.error || data.message));
+        return;
       }
     } catch (err) {
       alert('Failed to start OAuth: ' + err.message);
+      return;
     }
+
+    // Session is created server-side by the OAuth callback in the system
+    // browser; poll /auth/api/status until it flips to signedIn=true, then
+    // leave the sign-in page. Time out after 3 minutes so an abandoned OAuth
+    // attempt doesn't leave the page stuck forever.
+    oauthShowWaiting(provider);
+    if (oauthPollInterval) clearInterval(oauthPollInterval);
+    oauthPollDeadline = Date.now() + 3 * 60 * 1000;
+    oauthPollInterval = setInterval(async function () {
+      if (Date.now() > oauthPollDeadline) {
+        clearInterval(oauthPollInterval);
+        oauthPollInterval = null;
+        var buttons = document.querySelectorAll('.oauth-btn');
+        for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = false; }
+        alert('Sign-in timed out. Try again.');
+        return;
+      }
+      try {
+        var r = await fetch('/auth/api/status');
+        var s = await r.json();
+        if (s.signedIn) {
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          window.location.href = '/';
+        }
+      } catch (e) { /* transient -- keep polling */ }
+    }, 2000);
   }
   </script>
 </body>
