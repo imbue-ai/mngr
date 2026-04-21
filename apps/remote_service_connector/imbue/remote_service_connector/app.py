@@ -1,4 +1,9 @@
-"""Cloudflare tunnel management service, deployed as a Modal function.
+"""Remote service connector, deployed as a Modal function.
+
+Exposes authenticated HTTP endpoints for managing remote services used by the
+minds desktop client: Cloudflare tunnels (`/tunnels/*`) and SuperTokens-backed
+authentication (`/auth/*`). More remote-service capabilities (e.g. creating
+remote hosts on behalf of users) will be added here over time.
 
 This file is entirely self-contained -- it has NO imports from the monorepo.
 Only stdlib and 3rd-party packages (installed in the Modal image) are used.
@@ -1754,21 +1759,21 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
 image = modal.Image.debian_slim().pip_install("fastapi[standard]", "httpx", "supertokens-python")
-app = modal.App(name=f"cloudflare-forwarding-{_DEPLOY_ENV}", image=image)
+app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
 
 
 # Modal URLs follow ``{workspace}--{app-name}-{function-name}.modal.run``, with
 # underscores in identifiers normalized to hyphens. For this deployment that's
-# ``joshalbrecht--cloudflare-forwarding-<env>-fastapi-app.modal.run``. This
+# ``joshalbrecht--remote-service-connector-<env>-fastapi-app.modal.run``. This
 # fallback is only used when AUTH_WEBSITE_DOMAIN is not set in the secret; in
 # practice we set it explicitly from ``.minds/<env>/supertokens.sh``.
 _MODAL_WORKSPACE = "joshalbrecht"
-_DEFAULT_FORWARDING_DOMAIN = f"https://{_MODAL_WORKSPACE}--cloudflare-forwarding-{_DEPLOY_ENV}-fastapi-app.modal.run"
+_DEFAULT_CONNECTOR_DOMAIN = f"https://{_MODAL_WORKSPACE}--remote-service-connector-{_DEPLOY_ENV}-fastapi-app.modal.run"
 
 
 def _get_auth_website_domain() -> str:
     """Return the public URL used in outbound email links (verification, reset)."""
-    return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_FORWARDING_DOMAIN)
+    return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_CONNECTOR_DOMAIN)
 
 
 def _build_oauth_providers() -> list[ProviderInput]:

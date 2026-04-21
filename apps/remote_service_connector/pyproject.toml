@@ -1,7 +1,7 @@
 [project]
-name = "cloudflare-forwarding"
+name = "remote-service-connector"
 version = "0.1.0"
-description = "Modal-deployed shim for managing Cloudflare tunnels via authenticated HTTP endpoints"
+description = "Modal-deployed connector for managing remote services (Cloudflare tunnels, SuperTokens auth) via authenticated HTTP endpoints"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -39,7 +39,7 @@ testpaths = ["."]
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.cloudflare_forwarding",
+  "--cov=imbue.remote_service_connector",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
