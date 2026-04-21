@@ -39,7 +39,7 @@ mngr create my-agent python -- -m http.server 8080   # Run python with args
 mngr create my-agent my-script -- --flag             # Run a custom script
 ```
 
-The type name must be alphanumeric (with dashes/underscores allowed in the middle) -- it's reused as a filesystem and tmux identifier -- so paths like `./script.sh` and names with dots (`python3.12`) don't work as bare type names. To run a literal shell command (spaces, pipes, or other metacharacters), use the built-in `command` agent type and pass the command after `--`:
+Bare type names must be alphanumeric (with dashes/underscores). For anything that isn't -- paths, names with dots, or full shell commands with pipes / metacharacters -- use the built-in `command` agent type:
 
 ```bash
 mngr create my-task --type command -- sleep 3600

@@ -28,7 +28,7 @@ When you run `mngr create my-agent <type>` (or `mngr create my-agent --type <typ
 
 1. **Custom type lookup**: If you defined `<type>` in your config, use that configuration
 2. **Plugin lookup**: If a plugin registered `<type>` as an agent type, use its configuration
-3. **Direct command**: Otherwise, treat `<type>` as a command to run (use `--type command -- <shell command>` for commands with spaces or metacharacters)
+3. **Direct command**: Otherwise, treat `<type>` as a command to run
 
 This fallback lets you run any program as an agent without needing a plugin or custom type.
 
@@ -53,7 +53,7 @@ mngr create my-agent my_claude
 
 Custom types can be scoped to a project by using `mngr config edit --scope project`. This is useful for project-specific configurations that shouldn't apply globally.
 
-To run a literal shell command (with spaces, pipes, or other shell metacharacters), set `command` on a custom type and omit `parent_type`:
+For a reusable shortcut that runs a fixed shell command (instead of repeating `--type command -- ...` each time), set `command` on a custom type and omit `parent_type`:
 
 ```toml
 [agent_types.my_server]
@@ -66,7 +66,7 @@ mngr create my-task my_server
 
 ### Available Settings
 
-- `command`: literal shell command to run as the agent. When set on a type without a `parent_type`, this defines a standalone command-based agent type; when set alongside `parent_type`, it overrides the command inherited from the parent type.
+- `command`: literal shell command to run as the agent. When set without a `parent_type`, defines a standalone command-based type; when set alongside `parent_type`, overrides the command inherited from the parent.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
