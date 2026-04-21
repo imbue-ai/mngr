@@ -364,7 +364,14 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        disabled_result: dict[str, Any] = {"status": "disabled"}
+        # Include an empty `output` field so callers that extract
+        # result["output"] (e.g. invoke_modal_trigger_function, which powers
+        # `mngr schedule run --provider modal`) see the same dict shape they
+        # get for a successful run. `mngr schedule run` deliberately invokes
+        # disabled triggers with a warning; without this field, that call
+        # would fail the result-shape check and raise a misleading
+        # "re-deploy" error.
+        disabled_result: dict[str, Any] = {"status": "disabled", "output": ""}
         _print_result_sentinel(disabled_result)
         return disabled_result
 
