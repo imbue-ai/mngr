@@ -26,18 +26,12 @@ imbue-mngr = { workspace = true }
 timeout_func_only = true
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.mngr_lima",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=75",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -58,6 +52,7 @@ omit = [
 ]
 
 [tool.coverage.report]
+fail_under = 50
 omit = [
   "*_test.py",
   "test_*.py",

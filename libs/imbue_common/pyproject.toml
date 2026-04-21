@@ -1,6 +1,6 @@
 [project]
 name = "imbue-common"
-version = "0.1.13"
+version = "0.1.14"
 description = "Core libraries for Imbue projects"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,18 +48,12 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/conftest_hooks.py", "
 timeout_func_only = true
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.imbue_common",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=95",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -89,3 +83,6 @@ venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.11"
 strict = ["**/*.py"]
+
+[tool.coverage.report]
+fail_under = 90

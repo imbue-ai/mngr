@@ -286,12 +286,16 @@ def test_random_name_endpoint(client: TestClient) -> None:
     assert len(data["name"]) > 0
 
 
-def test_create_chat_agent_missing_parent(client: TestClient) -> None:
-    """Creating a chat agent with an unknown parent returns 400."""
-    response = client.post(
-        "/api/agents/create-chat",
-        json={"name": "test-chat", "parent_agent_id": "nonexistent"},
-    )
+def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a chat agent without a primary agent work dir returns 400."""
+    monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
+    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
+    test_app = create_application()
+    with TestClient(test_app) as test_client:
+        response = test_client.post(
+            "/api/agents/create-chat",
+            json={"name": "test-chat"},
+        )
     assert response.status_code == 400
 
 

@@ -14,6 +14,7 @@ import pluggy
 import psutil
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mngr.main
@@ -36,6 +37,8 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.register_guards_docker import register_docker_cli_guard
+from imbue.mngr.register_guards_docker import register_docker_sdk_guard
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -43,6 +46,16 @@ from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
+from imbue.resource_guards.resource_guards import register_resource_guard
+
+# Register resource guards so that projects inheriting this conftest via
+# pytest_plugins (e.g. mngr_claude) get guards registered at import time.
+register_resource_guard("tmux")
+register_resource_guard("rsync")
+register_resource_guard("unison")
+register_resource_guard("modal")
+register_docker_cli_guard()
+register_docker_sdk_guard()
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -362,7 +375,7 @@ _WORKSPACE_PACKAGES = (
 
 
 @pytest.fixture
-def isolated_mngr_venv(tmp_path: Path) -> Path:
+def isolated_mngr_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a temporary venv with mngr installed for subprocess-based tests.
 
     Returns the venv directory. Use ``venv / "bin" / "mngr"`` to run mngr
@@ -387,6 +400,11 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
 
     python_path = str(venv_dir / "bin" / "python")
 
+    # Undo the autouse fixture's UV_OFFLINE/UV_FROZEN so uv can fetch
+    # packages into the fresh venv from its local cache.
+    monkeypatch.delenv("UV_OFFLINE", raising=False)
+    monkeypatch.delenv("UV_FROZEN", raising=False)
+
     cg = ConcurrencyGroup(name="isolated-venv-setup")
     with cg:
         # Export mngr's pinned transitive deps from the lockfile (no editable/comment lines)
@@ -404,11 +422,11 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
         cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
         # Install pinned deps from cache (no resolution or network needed)
         cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file))
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file)),
         )
         # Install workspace packages as editable (no-deps since deps are already installed)
         cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args),
         )
 
     # Write a uv-receipt.toml so plugin add/remove recognise this as a
@@ -657,6 +675,43 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
                 pass
     finally:
         client.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_dockerd_for_release() -> None:
+    """Start the Docker daemon if running inside a release test sandbox.
+
+    The Dockerfile.release installs Docker static binaries and /start-dockerd.sh.
+    The sandbox CMD also runs /start-dockerd.sh at launch, but this fixture
+    is a belt-and-suspenders fallback for sessions where the CMD path didn't
+    run (e.g. offload sandboxes that exec a different entrypoint) so that
+    tests using the Docker Python SDK can connect to the socket directly.
+
+    Uses /usr/local/bin/docker directly to bypass the resource guard PATH
+    wrapper (which would block docker commands outside @pytest.mark.docker tests).
+    """
+    start_script = Path("/start-dockerd.sh")
+    docker_bin = Path("/usr/local/bin/docker")
+    if not start_script.exists() or not docker_bin.exists():
+        return
+    cg = ConcurrencyGroup(name="ensure-dockerd")
+    with cg:
+        result = cg.run_process_to_completion(
+            [str(docker_bin), "info"],
+            is_checked_after=False,
+        )
+        if result.returncode != 0:
+            start_result = cg.run_process_to_completion(
+                [str(start_script)],
+                is_checked_after=False,
+            )
+            if start_result.returncode != 0:
+                logger.error(
+                    "Docker daemon failed to start (exit {}). stdout: {} stderr: {}",
+                    start_result.returncode,
+                    start_result.stdout,
+                    start_result.stderr,
+                )
 
 
 @pytest.fixture(scope="session", autouse=True)

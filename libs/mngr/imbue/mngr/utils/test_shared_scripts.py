@@ -24,6 +24,7 @@ _RAW_URL_BASE = "https://raw.githubusercontent.com/imbue-ai/code-guardian/main/p
 
 
 @pytest.mark.acceptance
+@pytest.mark.flaky
 @pytest.mark.parametrize("script", _SHARED_SCRIPTS)
 def test_shared_script_matches_code_guardian(script: str) -> None:
     local_path = _REPO_ROOT / "scripts" / script

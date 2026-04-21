@@ -1,18 +1,14 @@
-from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from io import StringIO
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import pluggy
 import pytest
-from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -64,6 +60,7 @@ from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.testing import capture_loguru
 
 # =============================================================================
 # Helpers
@@ -118,17 +115,6 @@ def _make_discovered_agent(host_id: HostId, provider_name: str = "modal") -> Dis
     )
 
 
-@contextmanager
-def _capture_loguru_warnings() -> Iterator[StringIO]:
-    """Capture loguru WARNING-level output into a StringIO buffer."""
-    log_output = StringIO()
-    sink_id = logger.add(log_output, level="WARNING", format="{message}")
-    try:
-        yield log_output
-    finally:
-        logger.remove(sink_id)
-
-
 def test_warn_on_duplicate_host_names_no_warning_for_unique_names() -> None:
     """warn_on_duplicate_host_names should not warn when all host names are unique."""
     ref_alpha = _make_discovered_host("host-alpha")
@@ -140,7 +126,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_unique_names() -> None:
         ref_gamma: [_make_discovered_agent(ref_gamma.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -157,7 +143,7 @@ def test_warn_on_duplicate_host_names_warns_on_duplicate_within_same_provider() 
         ref_unique: [_make_discovered_agent(ref_unique.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     output = log_output.getvalue()
@@ -175,7 +161,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_same_name_on_different_prov
         ref_docker: [_make_discovered_agent(ref_docker.host_id, "docker")],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -183,7 +169,7 @@ def test_warn_on_duplicate_host_names_no_warning_for_same_name_on_different_prov
 
 def test_warn_on_duplicate_host_names_empty_input() -> None:
     """warn_on_duplicate_host_names should not warn with an empty input."""
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names({})
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -198,7 +184,7 @@ def test_warn_on_duplicate_host_names_no_warning_when_destroyed_host_shares_name
         ref_active: [_make_discovered_agent(ref_active.host_id)],
     }
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
@@ -1177,21 +1163,23 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
 ) -> None:
     """_maybe_write_full_discovery_snapshot logs a warning when OSError occurs.
 
-    Makes the discovery events file read-only so that the write attempt
-    fails with PermissionError (a subclass of OSError). The function should
-    log the warning and return normally rather than propagating the error.
+    Makes the discovery events path a directory so that the write attempt
+    fails with IsADirectoryError (a subclass of OSError). This works
+    regardless of whether the process runs as root, unlike chmod-based
+    approaches. The function should log the warning and return normally
+    rather than propagating the error.
     """
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text("")
-    events_path.chmod(0o444)
+    # Make the events path a directory -- writing to a directory raises IsADirectoryError
+    events_path.mkdir(exist_ok=True)
 
     host_details = _make_host_details()
     agent = _make_agent_details("oserror-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    with _capture_loguru_warnings() as log_output:
+    with capture_loguru(level="WARNING") as log_output:
         _maybe_write_full_discovery_snapshot(
             mngr_ctx=temp_mngr_ctx,
             result=result,
@@ -1199,8 +1187,6 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
             include_filters=(),
             exclude_filters=(),
         )
-
-    events_path.chmod(0o644)
 
     output = log_output.getvalue()
     assert "Failed to write full discovery snapshot" in output

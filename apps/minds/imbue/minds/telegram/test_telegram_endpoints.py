@@ -154,16 +154,16 @@ def _create_test_server_with_two_agents(
     return client, auth_store, telegram_orchestrator, agent_id_1, agent_id_2
 
 
-def test_landing_page_shows_telegram_buttons_when_orchestrator_configured(tmp_path: Path) -> None:
+def test_workspace_settings_shows_telegram_setup_when_orchestrator_configured(tmp_path: Path) -> None:
     client, auth_store, _, agent_id_1, agent_id_2 = _create_test_server_with_two_agents(tmp_path)
     _authenticate(client, auth_store)
 
-    response = client.get("/", follow_redirects=False)
+    response = client.get(f"/workspace/{agent_id_1}/settings", follow_redirects=False)
     assert response.status_code == 200
     assert "Setup Telegram" in response.text
 
 
-def test_landing_page_shows_telegram_active_when_bot_exists(tmp_path: Path) -> None:
+def test_workspace_settings_shows_telegram_active_when_bot_exists(tmp_path: Path) -> None:
     client, auth_store, orchestrator, agent_id_1, agent_id_2 = _create_test_server_with_two_agents(tmp_path)
     _authenticate(client, auth_store)
 
@@ -177,8 +177,6 @@ def test_landing_page_shows_telegram_active_when_bot_exists(tmp_path: Path) -> N
         ),
     )
 
-    response = client.get("/", follow_redirects=False)
+    response = client.get(f"/workspace/{agent_id_1}/settings", follow_redirects=False)
     assert response.status_code == 200
-    assert "Telegram active" in response.text
-    # The other agent should still show the setup button
-    assert "Setup Telegram" in response.text
+    assert "Telegram is active" in response.text

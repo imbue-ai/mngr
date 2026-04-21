@@ -1,12 +1,10 @@
 /**
  * Unified WebSocket-based agent and application state manager.
- * Replaces the REST-based agent fetching with a persistent WebSocket
- * that receives real-time updates for agents, applications, and proto-agents.
+ * Receives real-time updates for agents, applications, and proto-agents.
  */
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import { selectAgent, getSelectedAgentId } from "../navigation";
 
 export interface AgentState {
   id: string;
@@ -30,12 +28,18 @@ export interface ProtoAgent {
 
 type WsEvent =
   | { type: "agents_updated"; agents: AgentState[] }
-  | { type: "applications_updated"; applications: Record<string, ApplicationEntry[]> }
-  | { type: "proto_agent_created"; agent_id: string; name: string; creation_type: string; parent_agent_id: string | null }
+  | { type: "applications_updated"; applications: ApplicationEntry[] }
+  | {
+      type: "proto_agent_created";
+      agent_id: string;
+      name: string;
+      creation_type: string;
+      parent_agent_id: string | null;
+    }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null };
 
 let agents: AgentState[] = [];
-let applications: Record<string, ApplicationEntry[]> = {};
+let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -98,12 +102,6 @@ function handleEvent(event: WsEvent): void {
   switch (event.type) {
     case "agents_updated":
       agents = event.agents;
-      if (!getSelectedAgentId() && agents.length > 0) {
-        const sidebarAgents = agents.filter((a) => !a.labels.chat_parent_id);
-        if (sidebarAgents.length > 0) {
-          selectAgent(sidebarAgents[0].id);
-        }
-      }
       break;
 
     case "applications_updated":
@@ -138,35 +136,18 @@ export function getAgents(): AgentState[] {
   return agents;
 }
 
-export function getSidebarAgents(): AgentState[] {
-  return agents.filter((a) => !a.labels.chat_parent_id);
-}
-
 export function getAgentById(id: string): AgentState | undefined {
   return agents.find((a) => a.id === id);
 }
 
 export function removeAgentLocally(agentId: string): void {
   agents = agents.filter((a) => a.id !== agentId);
-  delete applications[agentId];
 }
 
-export function getApplicationsForAgent(agentId: string): ApplicationEntry[] {
-  return applications[agentId] ?? [];
-}
-
-export function getChatAgentsForParent(parentId: string): AgentState[] {
-  return agents.filter((a) => a.labels.chat_parent_id === parentId);
+export function getApplications(): ApplicationEntry[] {
+  return applications;
 }
 
 export function getProtoAgents(): ProtoAgent[] {
   return protoAgents;
-}
-
-export function getWorktreeProtoAgents(): ProtoAgent[] {
-  return protoAgents.filter((p) => p.creation_type === "worktree");
-}
-
-export function getChatProtoAgentsForParent(parentId: string): ProtoAgent[] {
-  return protoAgents.filter((p) => p.creation_type === "chat" && p.parent_agent_id === parentId);
 }

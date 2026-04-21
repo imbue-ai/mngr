@@ -13,12 +13,15 @@ dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 [framework]
 type = "pytest"
 command = "uv run pytest"
-run_args = "--no-cov -p no:xdist -o addopts="
+run_args = "--cov-fail-under=0 -p no:xdist"
 
 [groups.all]
 retry_count = 0
-# Exclude acceptance and release tests
-filters = "-m 'not acceptance and not release'"
+filters = "-m 'not acceptance and not release and not flaky'"
+
+[groups.flaky]
+retry_count = 10
+filters = "-m 'flaky and not acceptance and not release'"
 
 [checkpoint]
 build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile", "uv.lock"]
@@ -27,4 +30,4 @@ build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile", "uv.lock"]
 output_dir = "test-results"
 junit = true
 junit_file = "junit.xml"
-download_globs = [".test_output/**"]
+download_globs = [".test_output/**", ".coverage*"]

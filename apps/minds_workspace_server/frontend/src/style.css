@@ -56,259 +56,6 @@ body {
   pointer-events: none;
 }
 
-/* ── Sidebar ── */
-.app-sidebar {
-  width: var(--width-sidebar);
-  min-width: var(--width-sidebar);
-  transition:
-    width var(--duration-sidebar-transition) ease-in-out,
-    min-width var(--duration-sidebar-transition) ease-in-out;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  background: var(--color-bg-sidebar);
-  border-right: 1px solid var(--color-border);
-}
-
-.app-sidebar.app-sidebar--collapsed {
-  width: var(--width-sidebar-collapsed);
-  min-width: var(--width-sidebar-collapsed);
-  padding: 0.5rem;
-}
-
-.sidebar-expanded-content {
-  min-width: calc(var(--width-sidebar) - 2rem);
-}
-
-.app-sidebar--collapsed .sidebar-expanded-content {
-  display: none;
-}
-
-.sidebar-collapsed-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.app-sidebar:not(.app-sidebar--collapsed) .sidebar-collapsed-content {
-  display: none;
-}
-
-/* ── Collapsed icon button – chromeless ── */
-.sidebar-collapsed-icon-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-base);
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition:
-    background 100ms,
-    color 100ms;
-}
-
-.sidebar-collapsed-icon-button:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.sidebar-collapsed-icon-button:active {
-  background: var(--color-bg-active);
-}
-
-.sidebar-collapsed-icon-button svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* ── Sidebar branding row ── */
-.sidebar-branding-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 12px 8px 20px;
-}
-
-.sidebar-branding-title {
-  font-family: var(--font-family-heading);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-/* ── Inline icon button (branding row collapse toggle) ── */
-.sidebar-inline-icon-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-base);
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition:
-    background 100ms,
-    color 100ms;
-  flex-shrink: 0;
-}
-
-.sidebar-inline-icon-button:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.sidebar-inline-icon-button:active {
-  background: var(--color-bg-active);
-}
-
-.sidebar-inline-icon-button svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* ── Sidebar action rows (registered items + new conversation) ── */
-.sidebar-action-rows {
-  display: flex;
-  flex-direction: column;
-  padding: 2px 8px 6px;
-  gap: 1px;
-}
-
-.sidebar-action-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: var(--radius-base);
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  text-decoration: none;
-  cursor: pointer;
-  transition:
-    background 100ms,
-    color 100ms;
-}
-
-.sidebar-action-row:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.sidebar-action-row:active {
-  background: var(--color-bg-active);
-}
-
-.sidebar-action-row-icon {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  color: inherit;
-}
-
-.sidebar-action-row-label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ── Agents header ── */
-.sidebar-agents-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 20px 4px;
-}
-
-.sidebar-agents-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-faint);
-}
-
-.sidebar-agents-add-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: none;
-  background: none;
-  color: var(--color-text-faint);
-  font-size: 16px;
-  font-weight: 300;
-  cursor: pointer;
-  border-radius: var(--radius-base);
-  transition:
-    background 100ms,
-    color 100ms;
-}
-
-.sidebar-agents-add-button:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-/* ── Conversation list ── */
-.conversation-selector-list {
-  list-style: none;
-  padding: 0 8px;
-  margin: 0;
-}
-
-.conversation-selector-item {
-  padding: 10px 12px;
-  border-radius: var(--radius-base);
-  cursor: pointer;
-  transition: background 100ms;
-  margin-bottom: 2px;
-}
-
-.conversation-selector-item:hover {
-  background: var(--color-bg-hover);
-}
-
-.conversation-selector-item.conversation-selector-item--active {
-  background: var(--color-bg-active);
-}
-
-.conversation-selector-item-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 3px;
-}
-
-.conversation-selector-item-meta {
-  font-size: 11px;
-  color: var(--color-text-faint);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.conversation-selector-item-model {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.conversation-selector-item-time {
-  flex-shrink: 0;
-}
-
 /* ── Title bar ── */
 .app-header {
   padding: 14px 32px;
@@ -382,6 +129,28 @@ body {
   flex-shrink: 0;
   background: var(--color-bg);
   border: none;
+}
+
+.chat-agent-terminal-link {
+  margin-top: 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--color-text-muted, #94a3b8);
+}
+
+.chat-agent-terminal-link button {
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.chat-agent-terminal-link button:hover {
+  opacity: 1;
+  text-decoration: underline;
 }
 
 .message-input {
@@ -935,19 +704,6 @@ body {
   background: var(--color-text-faint);
 }
 
-.conversation-selector-list-wrapper::-webkit-scrollbar {
-  width: 4px;
-}
-
-.conversation-selector-list-wrapper::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.conversation-selector-list-wrapper::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 2px;
-}
-
 /* ── Structured tool call blocks (non-markdown) ── */
 .tool-call-block {
   margin-top: 0.25em;
@@ -1335,7 +1091,9 @@ body {
   color: var(--color-text-secondary);
   cursor: pointer;
   border-radius: 3px;
-  transition: background 80ms, color 80ms;
+  transition:
+    background 80ms,
+    color 80ms;
   flex-shrink: 0;
 }
 

@@ -7,7 +7,6 @@ that the desktop client is working correctly.
 Reads the PORT environment variable (default: 9100).
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -16,6 +15,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from urllib.parse import unquote
+from uuid import uuid4
 
 _DEFAULT_PORT = 9100
 
@@ -172,7 +172,7 @@ def _write_server_log(port: int) -> None:
     url = "http://127.0.0.1:{}".format(port)
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + "{:09d}Z".format(now.microsecond * 1000)
-    event_id = "evt-" + hashlib.sha256("web:{}".format(url).encode()).hexdigest()[:32]
+    event_id = "evt-{}".format(uuid4().hex)
     record = {
         "timestamp": timestamp,
         "type": "server_registered",

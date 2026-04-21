@@ -28,18 +28,12 @@ imbue-common = { workspace = true }
 timeout_func_only = true
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.skitwright",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=95",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -65,3 +59,6 @@ venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.11"
 strict = ["**/*.py"]
+
+[tool.coverage.report]
+fail_under = 95

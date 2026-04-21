@@ -182,7 +182,7 @@ export class ConversationNotFoundError extends Error {
   }
 }
 
-export function getResponsesForConversation(agentId: string): ResponseItem[] {
+export function getResponsesForConversation(_agentId: string): ResponseItem[] {
   return [];
 }
 
