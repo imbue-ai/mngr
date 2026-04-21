@@ -1664,12 +1664,17 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
-def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr events stream triggers a POST to the agent's
-    workspace server broadcast endpoint with the correct server_name."""
-    agent_id = AgentId()
-    server_name = "web"
+def _build_refresh_test_app(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+) -> tuple[FastAPI, list[httpx.Request]]:
+    """Wire a desktop client app for refresh-event tests.
 
+    Returns the app and a ``received`` list that captures every
+    ``httpx.Request`` the app's http_client sees. The caller is
+    responsible for entering the TestClient context (or deliberately
+    skipping it to exercise the pre-lifespan code path).
+    """
     received: list[httpx.Request] = []
 
     async def _capture(request: httpx.Request) -> httpx.Response:
@@ -1678,24 +1683,29 @@ def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> No
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
 
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=http_client,
+        session_store=MultiAccountSessionStore(data_dir=tmp_path),
+        minds_config=MindsConfig(data_dir=tmp_path),
+        request_inbox=RequestInbox(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+    return app, received
+
+
+def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
+    """A refresh event on the mngr events stream triggers a POST to the agent's
+    workspace server broadcast endpoint with the correct server_name."""
+    agent_id = AgentId()
+    server_name = "web"
+
     resolver = make_resolver_with_data(
         agents_json=make_agents_json(agent_id),
         server_logs={str(agent_id): make_server_log("system_interface", "http://ws-backend:9000")},
     )
-
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
-    minds_config = MindsConfig(data_dir=tmp_path)
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=http_client,
-        session_store=session_store,
-        minds_config=minds_config,
-        request_inbox=RequestInbox(),
-        paths=WorkspacePaths(data_dir=tmp_path),
-    )
+    app, received = _build_refresh_test_app(tmp_path, resolver)
 
     with TestClient(app):
         raw_line = json.dumps(
@@ -1719,30 +1729,9 @@ def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) 
     """A refresh event for an agent whose system_interface URL isn't known does nothing."""
     agent_id = AgentId()
 
-    received: list[httpx.Request] = []
-
-    async def _capture(request: httpx.Request) -> httpx.Response:
-        received.append(request)
-        return httpx.Response(200)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
-
     # Resolver knows about the agent but not a system_interface server.
     resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id))
-
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
-    minds_config = MindsConfig(data_dir=tmp_path)
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=http_client,
-        session_store=session_store,
-        minds_config=minds_config,
-        request_inbox=RequestInbox(),
-        paths=WorkspacePaths(data_dir=tmp_path),
-    )
+    app, received = _build_refresh_test_app(tmp_path, resolver)
 
     with TestClient(app):
         raw_line = json.dumps({"source": "refresh", "server_name": "web"})
@@ -1765,32 +1754,11 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     """
     agent_id = AgentId()
 
-    received: list[httpx.Request] = []
-
-    async def _capture(request: httpx.Request) -> httpx.Response:
-        received.append(request)
-        return httpx.Response(200)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
-
     resolver = make_resolver_with_data(
         agents_json=make_agents_json(agent_id),
         server_logs={str(agent_id): make_server_log("system_interface", "http://ws-backend:9000")},
     )
-
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
-    minds_config = MindsConfig(data_dir=tmp_path)
-
-    create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=http_client,
-        session_store=session_store,
-        minds_config=minds_config,
-        request_inbox=RequestInbox(),
-        paths=WorkspacePaths(data_dir=tmp_path),
-    )
+    _app, received = _build_refresh_test_app(tmp_path, resolver)
 
     # Deliberately do NOT enter a TestClient context -- the lifespan has never
     # fired, so app.state.event_loop is still None.
