@@ -4,6 +4,12 @@
 # https://modal.com/docs/guide/docker-in-sandboxes
 #
 # This script is idempotent: if dockerd is already running, it exits early.
+#
+# Cache-busting marker 2026-04-21-force-rebuild: editing this line bumps
+# the checkpoint image's build_inputs hash so offload rebuilds the image
+# and picks up the in-flight diagnostic probe + modify_env_vars fix in
+# the mngr_claude Python code. Remove once the diagnostic experiment is
+# complete.
 set -euo pipefail
 set -x
 
