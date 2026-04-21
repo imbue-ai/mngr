@@ -184,7 +184,16 @@ async def _handle_signout_api(request: Request) -> Response:
     if not user_id:
         return _json_response({"status": "ERROR", "message": "user_id is required"}, 400)
 
-    backend.revoke_all_sessions(str(user_id))
+    # The backend derives the user_id from the access token we send, so an
+    # attacker cannot revoke a different user's sessions by POSTing here.
+    # If the token cannot be refreshed (e.g. offline), skip the backend call
+    # -- we still honor the local sign-out intent, and any stolen token from
+    # this machine will expire naturally.
+    access_token = session_store.get_access_token(str(user_id))
+    if access_token is not None:
+        backend.revoke_all_sessions(access_token)
+    else:
+        logger.warning("No usable access token for user {}; skipping backend revoke", str(user_id)[:8])
     session_store.remove_session(str(user_id))
     return _json_response({"status": "OK"})
 

@@ -119,8 +119,13 @@ class AuthBackendClient(FrozenModel):
             return None
         return SessionTokens.model_validate(tokens_raw)
 
-    def revoke_all_sessions(self, user_id: str) -> bool:
-        """Revoke every SuperTokens session for a user on the backend.
+    def revoke_all_sessions(self, access_token: str) -> bool:
+        """Revoke every SuperTokens session for the caller's user on the backend.
+
+        The backend authenticates the caller via the passed access token and
+        derives the user_id from the session -- we deliberately do NOT send
+        the user_id separately, because an unauthenticated body-only request
+        would let anyone revoke arbitrary users' sessions.
 
         Returns True if the backend accepted the request. Callers pair this
         with their own local session deletion so that sign-out actually ends
@@ -129,7 +134,7 @@ class AuthBackendClient(FrozenModel):
         try:
             response = httpx.post(
                 self._url("/auth/session/revoke"),
-                json={"user_id": user_id},
+                headers={"Authorization": f"Bearer {access_token}"},
                 timeout=self.timeout_seconds,
             )
         except httpx.HTTPError as exc:

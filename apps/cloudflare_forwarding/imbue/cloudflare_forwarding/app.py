@@ -1088,6 +1088,23 @@ def _authenticate_supertokens(
     return AdminAuth(username=user_id_prefix)
 
 
+def _get_user_id_from_access_token(token: str) -> str:
+    """Validate a SuperTokens JWT and return the full user_id (not just the prefix).
+
+    Raises ``HTTPException(401)`` on any validation failure. Used by auth-proxy
+    endpoints that need the full user_id to drive an API call (e.g. revoke).
+    """
+    if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+        raise HTTPException(status_code=401, detail="SuperTokens not configured")
+    try:
+        session = get_session_without_request_response(access_token=token, anti_csrf_check=False)
+    except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
+    return session.get_user_id()
+
+
 def require_admin(auth: AuthResult) -> AdminAuth:
     """Require admin auth. Raises 403 if agent auth."""
     if isinstance(auth, AgentAuth):
@@ -1336,10 +1353,6 @@ class RefreshSessionResponse(BaseModel):
     message: str | None = Field(default=None, description="Error detail if status is not OK")
 
 
-class RevokeSessionsRequest(BaseModel):
-    user_id: str = Field(description="SuperTokens user ID whose sessions should be revoked")
-
-
 class SendVerificationEmailRequest(BaseModel):
     user_id: str = Field(description="SuperTokens user ID")
     email: str = Field(description="Email address to send verification to")
@@ -1487,15 +1500,26 @@ async def auth_refresh_session(body: RefreshSessionRequest) -> RefreshSessionRes
 
 
 @web_app.post("/auth/session/revoke")
-async def auth_revoke_sessions(body: RevokeSessionsRequest) -> dict[str, object]:
-    """Revoke every SuperTokens session for the given user ID.
+async def auth_revoke_sessions(request: Request) -> dict[str, object]:
+    """Revoke every SuperTokens session for the caller's user.
+
+    Authentication: the caller must send their own SuperTokens access token as
+    ``Authorization: Bearer <access_token>``. The user_id is derived from that
+    session, not trusted from the request body -- otherwise an anonymous
+    attacker could terminate arbitrary users' sessions just by guessing /
+    learning their user_id UUID.
 
     Called by the minds client on sign-out so the access/refresh tokens stored
     on the user's machine become useless even if copied off-box. Idempotent --
-    no-op when the user has no active sessions.
+    no-op when the caller has no other active sessions.
     """
     _require_supertokens_configured()
-    revoked = await revoke_all_sessions_for_user(user_id=body.user_id)
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+    user_id = _get_user_id_from_access_token(auth_header[7:])
+    revoked = await revoke_all_sessions_for_user(user_id=user_id)
+    logger.info("Revoked %d sessions for user %s...", len(revoked), user_id[:8])
     return {"status": "OK", "revoked_count": len(revoked)}
 
 

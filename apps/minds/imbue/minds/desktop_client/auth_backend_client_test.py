@@ -81,4 +81,4 @@ def test_revoke_all_sessions_returns_false_on_connection_error() -> None:
     """revoke_all_sessions swallows connection errors and returns False, so a
     network failure on sign-out does not block the local session removal."""
     client = _make_client()
-    assert client.revoke_all_sessions(user_id="u1") is False
+    assert client.revoke_all_sessions(access_token="fake-access-token") is False

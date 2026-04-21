@@ -627,8 +627,22 @@ def test_auth_session_revoke_returns_503_when_not_configured(
     """Calling /auth/session/revoke without SUPERTOKENS_CONNECTION_URI returns 503."""
     monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
     client = TestClient(web_app)
-    resp = client.post("/auth/session/revoke", json={"user_id": "u1"})
+    resp = client.post("/auth/session/revoke", headers={"Authorization": "Bearer any-token"})
     assert resp.status_code == 503
+
+
+def test_auth_session_revoke_requires_bearer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/revoke without a Bearer access token returns 401.
+
+    This guards against an anonymous caller terminating arbitrary users'
+    sessions just by knowing (or guessing) their user_id.
+    """
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/revoke")
+    assert resp.status_code == 401
 
 
 def test_auth_verify_email_missing_token_shows_failed_page(
