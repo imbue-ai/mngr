@@ -12,7 +12,6 @@ from click.testing import CliRunner
 from imbue.mngr.cli.create import create
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import wait_for_agent_session
 
@@ -55,10 +54,8 @@ def test_list_command_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command shows created agent."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100040")
     agent_name = f"test-list-cli-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -70,12 +67,15 @@ def test_list_command_with_agent(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110001",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -101,10 +101,8 @@ def test_list_command_json_format_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with JSON format shows agent data."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100041")
     agent_name = f"test-list-json-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -116,12 +114,15 @@ def test_list_command_json_format_with_agent(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110002",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -148,10 +149,8 @@ def test_list_command_jsonl_format_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with JSONL format streams agent data."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100042")
     agent_name = f"test-list-jsonl-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -163,12 +162,15 @@ def test_list_command_jsonl_format_with_agent(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -195,10 +197,8 @@ def test_list_command_with_include_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with include filter."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100043")
     agent_name = f"test-list-filter-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -210,12 +210,15 @@ def test_list_command_with_include_filter(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110004",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -241,10 +244,8 @@ def test_list_command_with_exclude_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with exclude filter."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100044")
     agent_name = f"test-list-exclude-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -256,12 +257,15 @@ def test_list_command_with_exclude_filter(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110005",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -287,14 +291,12 @@ def test_list_command_with_host_provider_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.provider CEL filter.
 
     This test verifies that the standard CEL dot notation 'host.provider' works correctly.
     Nested dictionaries are automatically converted to CEL-compatible objects via json_to_cel().
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100045")
     agent_name = f"test-list-host-provider-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -306,12 +308,15 @@ def test_list_command_with_host_provider_filter(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110006",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -348,13 +353,11 @@ def test_list_command_with_host_name_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.name CEL filter.
 
     Verifies that the standard CEL dot notation 'host.name' works in CEL filters.
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100046")
     agent_name = f"test-list-host-name-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -366,12 +369,15 @@ def test_list_command_with_host_name_filter(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110007",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -427,10 +433,8 @@ def test_list_command_with_basic_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with basic field selection."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100047")
     agent_name = f"test-list-fields-basic-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -442,12 +446,15 @@ def test_list_command_with_basic_fields(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110008",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -478,10 +485,8 @@ def test_list_command_with_nested_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with nested field selection."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100048")
     agent_name = f"test-list-fields-nested-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -493,12 +498,15 @@ def test_list_command_with_nested_fields(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110009",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -528,10 +536,8 @@ def test_list_command_with_host_and_provider_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.name and host.provider_name fields."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100049")
     agent_name = f"test-list-fields-host-provider-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -543,12 +549,15 @@ def test_list_command_with_host_and_provider_fields(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110010",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -581,10 +590,8 @@ def test_list_command_with_invalid_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with invalid field shows empty column."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100050")
     agent_name = f"test-list-fields-invalid-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -596,12 +603,15 @@ def test_list_command_with_invalid_fields(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110011",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -630,10 +640,8 @@ def test_list_command_with_running_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --running filter alias."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100051")
     agent_name = f"test-list-running-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -645,12 +653,15 @@ def test_list_command_with_running_filter_alias(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110012",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -710,10 +721,8 @@ def test_list_command_with_local_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --local filter alias."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100052")
     agent_name = f"test-list-local-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -725,12 +734,15 @@ def test_list_command_with_local_filter_alias(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110013",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -756,10 +768,8 @@ def test_list_command_with_remote_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --remote filter alias (excludes local agents)."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100053")
     agent_name = f"test-list-remote-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -771,12 +781,15 @@ def test_list_command_with_remote_filter_alias(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110014",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -802,14 +815,12 @@ def test_list_command_with_limit(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --limit option.
 
     Note: The limit is applied after fetching all results from providers.
     This test verifies that only the specified number of agents are displayed.
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100054")
     agent_name_1 = f"test-list-limit-1-{int(time.time())}"
     agent_name_2 = f"test-list-limit-2-{int(time.time())}"
     session_name_1 = f"{mngr_test_prefix}{agent_name_1}"
@@ -824,12 +835,15 @@ def test_list_command_with_limit(
                     "--name",
                     agent_name_1,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110015",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -844,12 +858,15 @@ def test_list_command_with_limit(
                     "--name",
                     agent_name_2,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110016",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -878,10 +895,8 @@ def test_list_command_with_limit_json_format(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --limit option in JSON format."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100055")
     agent_name = f"test-list-limit-json-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -893,12 +908,15 @@ def test_list_command_with_limit_json_format(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110017",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -924,10 +942,8 @@ def test_list_command_with_sort_by_name(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --sort option by name."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100056")
     agent_name_a = f"aaa-list-sort-{int(time.time())}"
     agent_name_z = f"zzz-list-sort-{int(time.time())}"
     session_name_a = f"{mngr_test_prefix}{agent_name_a}"
@@ -942,12 +958,15 @@ def test_list_command_with_sort_by_name(
                     "--name",
                     agent_name_z,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110018",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -961,12 +980,15 @@ def test_list_command_with_sort_by_name(
                     "--name",
                     agent_name_a,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110019",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -997,10 +1019,8 @@ def test_list_command_with_sort_descending(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --sort option in descending order."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100057")
     agent_name_a = f"aaa-list-desc-{int(time.time())}"
     agent_name_z = f"zzz-list-desc-{int(time.time())}"
     session_name_a = f"{mngr_test_prefix}{agent_name_a}"
@@ -1015,12 +1035,15 @@ def test_list_command_with_sort_descending(
                     "--name",
                     agent_name_a,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110020",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -1034,12 +1057,15 @@ def test_list_command_with_sort_descending(
                     "--name",
                     agent_name_z,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110021",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -1070,10 +1096,8 @@ def test_list_command_with_provider_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --provider filter."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100058")
     agent_name = f"test-list-provider-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -1085,12 +1109,15 @@ def test_list_command_with_provider_filter(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110022",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -1145,10 +1172,8 @@ def test_list_command_format_template_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --format template shows template-expanded output."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100059")
     agent_name = f"test-list-template-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -1160,12 +1185,15 @@ def test_list_command_format_template_with_agent(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "110023",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

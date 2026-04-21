@@ -20,7 +20,6 @@ import pytest
 from imbue.mngr import resources
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 
 
 @pytest.mark.acceptance
@@ -313,7 +312,6 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
     Note: The actual file transfer logic is verified by unit tests in test_host.py.
     This acceptance test verifies the end-to-end flow works on Modal.
     """
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100109")
     agent_name = f"test-modal-git-{get_short_random_string()}"
     unique_marker = f"git-transfer-test-{get_short_random_string()}"
 
@@ -328,12 +326,16 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            modal_test_sleep_agent_type,
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
+            "--",
+            "sleep",
+            "100310",
         ],
         capture_output=True,
         text=True,
@@ -357,7 +359,6 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
     1. All local branches and tags are pushed via git
     2. A new branch is created with the specified prefix
     """
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100110")
     agent_name = f"test-modal-branch-{get_short_random_string()}"
 
     result = subprocess.run(
@@ -367,12 +368,16 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            modal_test_sleep_agent_type,
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
+            "--",
+            "sleep",
+            "100311",
         ],
         capture_output=True,
         text=True,
@@ -409,13 +414,15 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 
     This test is marked as release since it takes longer due to the image build.
     """
-    # The agent-type command runs the tool-existence checks before sleeping, so
-    # if the Dockerfile is missing uv or claude the agent exits non-zero and the
-    # `result.returncode == 0` assertion below catches it. The trailing sleep
-    # keeps the agent alive long enough for mngr create to report success.
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(
-        modal_subprocess_env.host_dir, "which uv && which claude && sleep 30"
-    )
+    # The agent command runs `which uv && which claude && sleep <N>`. The
+    # whole chain is passed as a single quoted arg after `--` so that `&&`
+    # survives the command agent's plain-space join and is interpreted by
+    # the agent's outer shell. Note that mngr create returns as soon as
+    # the agent is launched in its detached tmux session; the assertion
+    # below on `result.returncode == 0` only checks that `mngr create`
+    # itself succeeded, not that the agent's shell command succeeded. The
+    # trailing sleep just keeps the agent alive long enough for the
+    # create to finish reporting success.
     agent_name = f"test-modal-default-df-{get_short_random_string()}"
 
     dockerfile_path = _get_mngr_default_dockerfile_path()
@@ -447,7 +454,8 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal:/code/mngr",
-            modal_test_sleep_agent_type,
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -457,6 +465,8 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             f"--file={dockerfile_path}",
             "-b",
             f"context-dir={temp_dir_with_tar}",
+            "--",
+            "which uv && which claude && sleep 100312",
         ],
         capture_output=True,
         text=True,

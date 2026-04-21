@@ -35,21 +35,12 @@ After creation, the agent is accessible at:
 
 ## Environment variables and config
 
-`CLOUDFLARE_FORWARDING_URL` and `SUPERTOKENS_CONNECTION_URI` come from `MindsConfig`: defaults are baked in pointing at the current dev-deployed servers, and you can override either via `~/.<MINDS_ROOT_NAME>/config.toml` (file) or environment variable (env overrides file). So no env-var setup is required for default operation.
+`REMOTE_SERVICE_CONNECTOR_URL` comes from `MindsConfig`: a default is baked in pointing at the current dev-deployed server, and you can override it via `~/.<MINDS_ROOT_NAME>/config.toml` (file) or environment variable (env overrides file). That URL hosts both the Cloudflare tunnel API and the `/auth/*` routes the desktop client uses for sign-in, so no env-var setup is required for default operation. All Cloudflare tunnel requests authenticate with the signed-in user's SuperTokens session, and the session's email is used as the default Cloudflare Access policy -- so no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. SuperTokens credentials (API key, OAuth client secrets) live on the backend server and never need to be set on the client.
 
-For Cloudflare Basic-auth credentials (overriding the SuperTokens path), set these before starting the desktop client:
-
-```bash
-export CLOUDFLARE_FORWARDING_USERNAME=your-username
-export CLOUDFLARE_FORWARDING_SECRET=your-secret
-export OWNER_EMAIL=you@example.com
-```
-
-To pin either URL explicitly:
+To pin the remote service connector URL explicitly:
 
 ```bash
-export CLOUDFLARE_FORWARDING_URL=https://your-modal-endpoint.modal.run
-export SUPERTOKENS_CONNECTION_URI=https://your-supertokens-core.example.com
+export REMOTE_SERVICE_CONNECTOR_URL=https://your-modal-endpoint.modal.run
 ```
 
 To run an isolated dev copy alongside an installed minds:

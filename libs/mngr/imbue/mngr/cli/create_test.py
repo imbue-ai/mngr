@@ -1242,6 +1242,30 @@ def test_parse_agent_opts_agent_id_none_by_default(
     assert result.agent_id is None
 
 
+def test_parse_agent_opts_conflicting_type_and_positional_raises(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Specifying both --type and positional agent type with different values should raise."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().type, "claude"),
+        to_update(default_create_cli_opts.field_ref().positional_agent_type, "codex"),
+    )
+
+    with pytest.raises(UserInputError, match="Conflicting agent types"):
+        _parse_agent_opts(
+            opts=opts,
+            address=AgentAddress(),
+            initial_message=None,
+            source_location=source_location,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
 def test_parse_agent_opts_matching_type_and_positional_ok(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
@@ -1561,7 +1585,7 @@ def test_create_rejects_update_without_reuse(
     """--update without --reuse should fail with a clear error."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--update", "--type", "true", "--no-connect"],
+        ["my-agent", "--update", "--command", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1581,7 +1605,7 @@ def test_create_rejects_positional_and_name_together(
     """Providing both a positional address and --name should fail."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect"],
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1601,7 +1625,7 @@ def test_create_edit_message_error_not_swallowed(
     """
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect", "--edit-message"],
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
         obj=plugin_manager,
     )
 
@@ -1622,7 +1646,7 @@ def test_create_accepts_name_flag_alone(
         [
             "--name",
             "@.local",
-            "--type",
+            "--command",
             "true",
             "--no-connect",
             "--transfer=none",
@@ -1653,7 +1677,7 @@ def test_create_provider_flag_sets_provider(
             "my-agent",
             "--provider",
             "local",
-            "--type",
+            "--command",
             "true",
             "--no-connect",
             "--transfer=none",
@@ -1673,7 +1697,7 @@ def test_create_provider_flag_conflicts_with_address_provider(
     """--provider that conflicts with the address provider should abort."""
     result = cli_runner.invoke(
         create,
-        ["my-agent@.modal", "--provider", "docker", "--type", "true", "--no-connect"],
+        ["my-agent@.modal", "--provider", "docker", "--command", "true", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1694,7 +1718,7 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "my-agent@.local",
             "--provider",
             "local",
-            "--type",
+            "--command",
             "true",
             "--no-connect",
             "--transfer=none",

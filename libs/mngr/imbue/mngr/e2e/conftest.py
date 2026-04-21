@@ -22,7 +22,6 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import make_test_sleep_agent_type_at
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -34,14 +33,12 @@ class E2eSession(Session):
     """
 
     output_dir: Path
-    settings_local_path: Path
 
     @classmethod
-    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path, settings_local_path: Path) -> "E2eSession":
+    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path) -> "E2eSession":
         """Create an E2eSession with the given output directory."""
         session = cls(env=env, cwd=cwd)
         session.output_dir = output_dir
-        session.settings_local_path = settings_local_path
         return session
 
     def collect_remote_diagnostics(self, agent_name: str) -> str:
@@ -91,18 +88,6 @@ class E2eSession(Session):
         """
         cleaned = textwrap.dedent(block).strip() + "\n"
         (self.output_dir / "tutorial_block.txt").write_text(cleaned)
-
-    def make_sleep_agent_type(self, command: str) -> str:
-        """Declare a long-running placeholder agent type in settings.local.toml and return its name.
-
-        Replaces the removed ``--command`` flag for e2e (subprocess) tests.
-        ``command`` is a required pinned shell command (typically
-        ``"sleep <N>"`` with a value hand-picked to be distinguishable in
-        ``ps`` output) -- the pinned value is the traceability identifier
-        back to the specific test. Pass the returned name to ``mngr`` as
-        ``--type <name>``.
-        """
-        return make_test_sleep_agent_type_at(self.settings_local_path, command=command)
 
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -423,10 +408,6 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
-    #
-    # Tests that need a long-running placeholder agent (formerly the job of
-    # the removed ``--command`` flag) mint per-test agent types via
-    # ``E2eSession.make_sleep_agent_type``, which appends to this same file.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -444,9 +425,7 @@ def e2e(
         gitignore_path.write_text(".claude/settings.local.json\n")
         run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
-    session = E2eSession.create(
-        env=env, cwd=temp_git_repo, output_dir=test_output_dir, settings_local_path=settings_path
-    )
+    session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
 
     yield session
 

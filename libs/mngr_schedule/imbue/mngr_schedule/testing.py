@@ -51,23 +51,26 @@ def build_disable_plugin_args(enabled_plugins: frozenset[str]) -> list[str]:
 def build_subprocess_env() -> dict[str, str]:
     """Build environment for subprocess calls that need Modal credentials.
 
-    In CI/offload, Modal credentials arrive via env vars
-    (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET), so we keep the test HOME. Locally
-    we restore the real HOME so the subprocess can find ~/.modal.toml, and
-    clear test-isolation vars that would otherwise point at an empty namespace
-    with no user mngr configuration.
+    In CI/offload: Modal credentials come from env vars
+    (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET), so we keep the test HOME.
+    Locally: we restore the real HOME so the subprocess can find
+    ~/.modal.toml. We keep the autouse-set MNGR_HOST_DIR / MNGR_ROOT_NAME
+    so the subprocess mngr operates on an isolated tmp profile and does
+    not load the repo's .mngr/settings.toml (which would trip the
+    is_allowed_in_pytest=false guard). The Modal SSH key will be
+    auto-generated on first use inside the tmp profile.
 
-    Sets a unique MNGR_PREFIX so the Modal backend's 'mngr_test-' guard
-    accepts it and the cleanup script can identify these environments.
+    We deliberately do NOT strip PYTEST_CURRENT_TEST: the Modal backend's
+    TEST_ENV_PATTERN guard and the config is_allowed_in_pytest check rely
+    on that marker, and evading them has leaked un-sweepable Modal envs
+    in the past.
     """
     env = os.environ.copy()
     has_modal_env_creds = "MODAL_TOKEN_ID" in env and "MODAL_TOKEN_SECRET" in env
     if not has_modal_env_creds:
         env["HOME"] = str(REAL_HOME)
-        env.pop("MNGR_HOST_DIR", None)
-        env.pop("MNGR_ROOT_NAME", None)
-    # Remove pytest marker so mngr doesn't reject the call
-    env.pop("PYTEST_CURRENT_TEST", None)
+    # Ensure the prefix starts with mngr_test- so the Modal backend's guard
+    # accepts it and the cleanup script can identify these environments.
     env["MNGR_PREFIX"] = f"{generate_test_environment_name()}-"
     return env
 

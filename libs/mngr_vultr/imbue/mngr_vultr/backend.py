@@ -174,7 +174,7 @@ class VultrProviderBackend(ProviderBackendInterface):
         return (
             "VPS-specific args (consumed by provider, not passed to docker):\n"
             "  --vps-region=REGION  Vultr region (default: ewr)\n"
-            "  --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)\n"
+            "  --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
             "  --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)\n"
             "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
             "\n"
