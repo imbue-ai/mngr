@@ -19,7 +19,6 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
-let backendPort = null;
 let workspaceList = []; // [{id, name, account}]
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
@@ -1088,7 +1087,6 @@ async function startBackendWithRetry() {
     );
 
     backendBaseUrl = `http://127.0.0.1:${port}`;
-    backendPort = port;
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
@@ -1213,8 +1211,8 @@ function handleAuthEvent(event) {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
-    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendPort) {
-      const authUrl = `http://127.0.0.1:${backendPort}/auth/login?message=` +
+    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendBaseUrl) {
+      const authUrl = `${backendBaseUrl}/auth/login?message=` +
         encodeURIComponent('You need to sign in to Imbue in order to share');
       mru.contentView.webContents.loadURL(authUrl);
     }
