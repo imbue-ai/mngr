@@ -222,11 +222,9 @@ def load_config(
         if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
                 "Running mngr within pytest is not allowed by the current configuration. "
-                "This can happen when tests are poorly written, and load the .mngr/settings.toml "
-                "file from the root of the mngr project. If this test intentionally wants a real "
-                "mngr subprocess (e.g. an end-to-end release test), set MNGR_ALLOW_PYTEST=1 in the "
-                "subprocess env AND set MNGR_HOST_DIR / MNGR_PREFIX to test-scoped values so the "
-                "test cannot mutate real mngr state."
+                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1 and point "
+                "MNGR_HOST_DIR at a tmp directory so the subprocess cannot mutate real "
+                "mngr state."
             )
         # MNGR_ALLOW_PYTEST=1 is the explicit opt-in, but it's only safe if the test
         # has also isolated MNGR_HOST_DIR to a temp directory. Otherwise the opt-in
