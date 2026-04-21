@@ -1349,7 +1349,6 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       }
     },
   });
-  if (items.length === 0) return;
   const menu = Menu.buildFromTemplate(items);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
