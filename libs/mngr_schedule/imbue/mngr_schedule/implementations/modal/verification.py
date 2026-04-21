@@ -195,12 +195,17 @@ def verify_schedule_deployment(
             f"{process_timeout_seconds}s. The modal run process was killed."
         ) from None
 
-    if error_event.is_set():
-        error_detail = "\n".join(error_lines) if error_lines else "See output above"
-        raise ScheduleDeployError(
-            f"Error detected during deployment verification of schedule '{trigger_name}':\n{error_detail}"
-        )
-
+    # Precedence: the sentinel is the authoritative structured result emitted
+    # by the runner. If we have a sentinel AND the process exited cleanly,
+    # trust the sentinel and ignore the error-keyword heuristic -- the runner's
+    # own diagnostic prints (e.g. stderr tails from a transient `mngr list`
+    # failure in the poll loop) may legitimately contain "exception" or
+    # "traceback" substrings, which would otherwise cause a spurious
+    # ScheduleDeployError despite the runner reporting success.
+    #
+    # If there is no sentinel, the runner crashed or was killed before emitting
+    # one; fall back to the heuristic: prefer the collected error lines if any
+    # were seen, otherwise report "no sentinel".
     if exit_code != 0:
         raise ScheduleDeployError(
             f"Deployment verification of schedule '{trigger_name}' failed "
@@ -208,6 +213,11 @@ def verify_schedule_deployment(
         )
 
     if not sentinel_holder:
+        if error_event.is_set():
+            error_detail = "\n".join(error_lines) if error_lines else "See output above"
+            raise ScheduleDeployError(
+                f"Error detected during deployment verification of schedule '{trigger_name}':\n{error_detail}"
+            )
         raise ScheduleDeployError(
             f"Deployment verification of schedule '{trigger_name}' did not emit a result sentinel. "
             "The cron function may have exited before the verify step completed."
