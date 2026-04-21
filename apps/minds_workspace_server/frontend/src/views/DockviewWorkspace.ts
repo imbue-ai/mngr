@@ -57,9 +57,6 @@ const SVG_TRASH =
   '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
 const SVG_SHARE =
   '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
-// "Pop-out" / open-in-new-window icon (arrow out of a framed square).
-const SVG_OPEN_EXTERNAL =
-  '<path d="M10 6H5v13h13v-5"/><polyline points="14 3 21 3 21 10"/><line x1="21" y1="3" x2="12" y2="12"/>';
 
 function getApplicationUrl(appName: string, rawUrl: string): string {
   const hostname = window.location.hostname;
@@ -236,28 +233,6 @@ function createCustomTab(options: { id: string; name: string }): {
             m.redraw();
           }),
         );
-
-        // Open-in-new-window escape hatch. When we're viewed via Cloudflare
-        // forwarded URLs, every service hostname (`terminal--...`, `web--...`,
-        // etc.) is a separate Cloudflare Access application with its own
-        // session cookie. The iframe's first request has no cookie yet, so
-        // Cloudflare 302s to `*.cloudflareaccess.com`, which ships
-        // `X-Frame-Options: DENY` and breaks the iframe ("Firefox Can't Open
-        // This Page"). Opening the same URL in a top-level window lets the
-        // user complete the Access handshake; after that the cookie exists
-        // and the embedded iframe loads normally.
-        const iframeUrl = pp?.url;
-        if (iframeUrl) {
-          actions.appendChild(
-            createTabActionButton(
-              "Open in new window (use this if Cloudflare Access blocks the inline iframe)",
-              SVG_OPEN_EXTERNAL,
-              () => {
-                window.open(iframeUrl, "_blank", "noopener,noreferrer");
-              },
-            ),
-          );
-        }
       }
 
       // Destroy button -- on chat/agent tabs (except the primary agent)
