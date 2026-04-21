@@ -438,15 +438,16 @@ def test_stream_output_raises_with_stderr_content(
 
 
 @pytest.mark.tmux
-def test_stream_output_falls_back_to_pane_capture(
+def test_stream_output_surfaces_pane_capture_when_files_missing(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should fall back to pane capture when no redirect files exist.
+    """stream_output should surface pane capture content when no redirect files exist.
 
     Creates a real tmux session with error text visible in the pane, then
-    verifies the fallback chain reaches pane capture and surfaces that text.
+    verifies the pane capture runs and its text is surfaced in the raised
+    error. The pane is captured unconditionally by ``_raise_no_output_error``.
     """
     _patch_agent_as_stopped(monkeypatch)
     agent, _host = _make_headless_agent(local_provider, tmp_path)

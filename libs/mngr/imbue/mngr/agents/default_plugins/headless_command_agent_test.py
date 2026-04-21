@@ -181,17 +181,17 @@ def test_stream_output_surfaces_stderr_on_error(
 
 
 @pytest.mark.tmux
-def test_stream_output_falls_back_to_pane_capture(
+def test_stream_output_surfaces_pane_capture_when_files_missing(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
     """The tmux pane content surfaces in the error when stdout/stderr files do not exist.
 
-    The pane is captured unconditionally by ``_raise_no_output_error`` (not as a
-    fallback); in this test no other sources contribute content, so the pane
-    text is the only thing that distinguishes the raised error from a generic
-    'exited without producing output' message.
+    The pane is captured unconditionally by ``_raise_no_output_error``; in this
+    test no other sources contribute content, so the pane text is the only
+    thing that distinguishes the raised error from a generic 'exited without
+    producing output' message.
     """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     session = agent.session_name
