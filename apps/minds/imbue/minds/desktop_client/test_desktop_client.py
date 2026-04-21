@@ -1755,9 +1755,9 @@ class _RecordingTunnelManager(SSHTunnelManager):
         exec_stderr: str = "",
         exec_raise_type: type[Exception] | None = None,
     ) -> None:
-        object.__setattr__(self, "_exec_exit_status", exec_exit_status)
-        object.__setattr__(self, "_exec_stderr", exec_stderr)
-        object.__setattr__(self, "_exec_raise_type", exec_raise_type)
+        self._exec_exit_status = exec_exit_status
+        self._exec_stderr = exec_stderr
+        self._exec_raise_type = exec_raise_type
 
     def exec_remote_command(
         self,
@@ -1962,7 +1962,7 @@ def test_proxy_records_failure_in_health_tracker_on_backend_disconnect(tmp_path:
     # Make the tracker fire stuck after 1 failure so we can assert it crosses
     # the threshold from a single request.
     tracker = _get_health_tracker(client)
-    object.__setattr__(tracker, "failure_threshold", 1)
+    tracker.failure_threshold = 1
 
     response = client.get(
         f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
