@@ -109,6 +109,7 @@ These endpoints front the SuperTokens core so that clients (e.g. the `minds` des
 - `POST /auth/signup` -- Body: `{email, password}`. Returns status, user info, session tokens, and whether email verification is pending.
 - `POST /auth/signin` -- Body: `{email, password}`. Returns status, user info, session tokens, and whether email verification is pending.
 - `POST /auth/session/refresh` -- Body: `{refresh_token}`. Returns a new access/refresh token pair.
+- `POST /auth/session/revoke` -- Body: `{user_id}`. Revokes every SuperTokens session for the user. Called on sign-out so that access/refresh tokens stored on the client's machine become useless even if copied off-box.
 - `POST /auth/email/send-verification` -- Body: `{user_id, email}`. Resends the verification email.
 - `POST /auth/email/is-verified` -- Body: `{user_id, email}`. Returns `{verified: bool}`.
 - `GET /auth/verify-email?token=...` -- Renders an HTML result page. Used by the link inside verification emails.
