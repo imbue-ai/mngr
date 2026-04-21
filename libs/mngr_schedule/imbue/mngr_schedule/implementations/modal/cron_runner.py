@@ -9,6 +9,13 @@
 # We simply want to call into the mngr command, which can then use those other packages if necessary.
 # This avoids modal needing to package or load any additional dependencies.
 #
+# The one narrow exception is `cron_runner_constants`, a sibling stdlib-only
+# module that defines mirrored enum values. Importing it triggers zero
+# 3rd-party code because the ancestor __init__.py files are all empty and
+# the module itself imports nothing. A drift test
+# (cron_runner_constants_test.py) keeps the mirrors honest against the real
+# imbue enums (AgentLifecycleState, VerifyMode).
+#
 # Image building strategy:
 # 1. Base image: built from the mngr Dockerfile, which provides a complete
 #    environment with system deps, Python, uv, Claude Code, and mngr installed.
@@ -37,6 +44,10 @@ from pathlib import Path
 from typing import Any
 
 import modal
+
+from imbue.mngr_schedule.implementations.modal.cron_runner_constants import AGENT_MISSING_STATE
+from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RUNNING_STATES
+from imbue.mngr_schedule.implementations.modal.cron_runner_constants import VALID_VERIFY_MODES
 
 # --- Deploy-time configuration ---
 # At deploy time (modal.is_local() == True), we read configuration from a
@@ -155,17 +166,6 @@ _RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
 # a line like: "Starting agent <name> ..." once the agent has been created.
 _AGENT_NAME_PATTERN: re.Pattern[str] = re.compile(r"Starting agent\s+(\S+)")
 
-# Lifecycle states (as reported by `mngr list --format json`) that indicate
-# the agent is still actively running. Any other state is treated as terminal.
-_RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
-
-# Private sentinel returned by `_get_lifecycle_state` when the named agent is
-# not present in `mngr list` output. Deliberately distinct from any real
-# AgentLifecycleState value so the deploy-side verifier can tell "agent
-# vanished" apart from "agent reached an unexpected terminal state". The
-# value must be kept in sync with the matching constant in verification.py.
-_AGENT_MISSING_STATE: str = "MISSING"
-
 # How often to poll the agent's lifecycle state during full verification.
 _AGENT_POLL_INTERVAL_SECONDS: float = 10.0
 
@@ -222,7 +222,7 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
     Shells `mngr list --provider local --include 'name == "<agent_name>"'
     --format json` and parses the result. A transient subprocess failure
     yields None so the caller can retry; an absent agent yields
-    `_AGENT_MISSING_STATE`; otherwise yields the state string reported by
+    `AGENT_MISSING_STATE`; otherwise yields the state string reported by
     mngr.
     """
     # Agent names from `Starting agent <name>` are produced by mngr itself and
@@ -270,7 +270,7 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
         return None
     agents = data.get("agents", [])
     if not agents:
-        return _AGENT_MISSING_STATE
+        return AGENT_MISSING_STATE
     state = agents[0].get("state")
     return str(state) if state is not None else None
 
@@ -287,7 +287,7 @@ def _poll_until_done(
     deadline = time.monotonic() + timeout_seconds
     while True:
         state = _get_lifecycle_state(agent_name)
-        if state is not None and state not in _RUNNING_STATES:
+        if state is not None and state not in RUNNING_STATES:
             return state
         if time.monotonic() >= deadline:
             raise CronRunnerError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
@@ -357,7 +357,7 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     # created an agent, leaving it orphaned because we would raise before
     # the destroy/poll path could run.
     normalized_verify = verify_mode.lower()
-    if normalized_verify not in ("none", "quick", "full"):
+    if normalized_verify not in VALID_VERIFY_MODES:
         raise CronRunnerError(f"unknown verify_mode: {verify_mode!r}")
 
     trigger = _deploy_config["trigger"]
