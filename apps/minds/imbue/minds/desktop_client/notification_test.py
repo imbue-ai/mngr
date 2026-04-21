@@ -9,39 +9,35 @@ import pytest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.notification import _build_osascript_notification
 from imbue.minds.desktop_client.notification import _build_toast_widgets
 from imbue.minds.desktop_client.notification import _dispatch_electron_notification
-from imbue.minds.desktop_client.notification import _dispatch_macos_notification
 from imbue.minds.desktop_client.notification import _position_toast_window
 from imbue.minds.desktop_client.notification import _run_macos_notification_subprocess
 from imbue.minds.desktop_client.notification import _run_tkinter_toast
 from imbue.minds.desktop_client.notification import _show_tkinter_toast
 
-# Short timeout used when joining the background daemon thread spawned by
-# _dispatch_macos_notification. The fake runners used below are synchronous
-# and return almost immediately, so a few seconds is plenty of slack for CI.
-_MACOS_DISPATCH_JOIN_TIMEOUT_SECONDS: float = 5.0
+# Short timeout for waiting on the background daemon thread spawned by
+# _dispatch_macos_notification to call the injected runner. The runner is
+# synchronous and returns almost immediately, so a few seconds is ample.
+_MACOS_DISPATCH_WAIT_TIMEOUT_SECONDS: float = 5.0
 
 
 class _RecordingMacOSRunner:
-    """Fake MacOSNotificationRunner that records the scripts it is called with.
+    """Fake MacOSNotificationRunner that records scripts it is called with.
 
-    A threading.Event is set once the runner has been invoked, so tests can wait
-    for the background daemon thread spawned by _dispatch_macos_notification to
-    reach the call site without polling. If side_effect is provided, the runner
-    raises it after recording the script (used to simulate osascript missing).
+    Sets call_done once invoked, so a test can wait on the background daemon
+    thread spawned by _dispatch_macos_notification to reach the call site
+    without polling.
     """
 
-    def __init__(self, side_effect: Exception | None = None) -> None:
+    def __init__(self) -> None:
         self.scripts: list[str] = []
         self.call_done = threading.Event()
-        self._side_effect = side_effect
 
     def __call__(self, script: str) -> None:
         try:
             self.scripts.append(script)
-            if self._side_effect is not None:
-                raise self._side_effect
         finally:
             self.call_done.set()
 
@@ -275,66 +271,44 @@ def test_dispatcher_default_constructor_resolves_tkinter() -> None:
 # -- macOS notification tests --
 
 
-def test_dispatch_macos_notification_swallows_osascript_oserror() -> None:
-    """When osascript is missing (OSError from the command runner), the real
-    _run_macos_notification_subprocess must catch it and the dispatch daemon
-    thread must terminate cleanly without propagating the error.
+def test_run_macos_notification_subprocess_swallows_osascript_oserror() -> None:
+    """_run_macos_notification_subprocess must catch OSError from the command
+    runner (e.g. osascript missing from PATH) without re-raising.
 
-    This exercises the real "except (OSError, ExceptionGroup)" branch inside
-    _run_macos_notification_subprocess by injecting at the command-runner level
-    (not replacing _run_macos_notification_subprocess wholesale), so the error
-    is caught inside the function under test rather than by the daemon thread's
-    default exception hook.
+    Exercises the real "except (OSError, ExceptionGroup)" branch synchronously,
+    without involving daemon threads -- the branch is a pure concern of the
+    subprocess function, not of dispatch().
     """
     captured_commands: list[list[str]] = []
-    command_done = threading.Event()
 
     def raising_command_runner(command: list[str]) -> None:
         captured_commands.append(command)
-        try:
-            raise OSError("osascript not found")
-        finally:
-            command_done.set()
+        raise OSError("osascript not found")
 
-    # Wrap the real _run_macos_notification_subprocess with the raising command
-    # runner bound in, so the real try/except executes inside the daemon thread.
-    def runner(script: str) -> None:
-        _run_macos_notification_subprocess(script, command_runner=raising_command_runner)
+    request = NotificationRequest(message="hi", title="Test Title")
+    script = _build_osascript_notification(request, "agent-mac")
 
-    request = NotificationRequest(
-        message="test macOS notification",
-        title="Test Title",
-        urgency=NotificationUrgency.CRITICAL,
-    )
-    thread = _dispatch_macos_notification(request, "agent-mac", runner=runner)
-    thread.join(timeout=_MACOS_DISPATCH_JOIN_TIMEOUT_SECONDS)
+    # Must not raise.
+    _run_macos_notification_subprocess(script, command_runner=raising_command_runner)
 
-    # The command runner was invoked (proving the thread actually reached it),
-    # and the thread terminated cleanly -- the real function caught the OSError.
-    assert command_done.is_set()
     assert len(captured_commands) == 1
     assert captured_commands[0][0] == "osascript"
     assert captured_commands[0][1] == "-e"
-    assert not thread.is_alive()
 
 
-def test_dispatch_macos_notification_escapes_double_quotes_in_script() -> None:
+def test_build_osascript_notification_escapes_double_quotes() -> None:
     """Double quotes in title, message, and subtitle must be escaped to \\" so the
-    AppleScript string literals are syntactically valid.
+    AppleScript string literals are syntactically valid. Tested as a pure function
+    so the assertion is decoupled from subprocess/threading concerns.
     """
-    runner = _RecordingMacOSRunner()
-
     request = NotificationRequest(
         message='He said "hello"',
         title='Title with "quotes"',
         urgency=NotificationUrgency.NORMAL,
     )
-    thread = _dispatch_macos_notification(request, "agent-quotes", runner=runner)
-    thread.join(timeout=_MACOS_DISPATCH_JOIN_TIMEOUT_SECONDS)
 
-    assert runner.call_done.is_set()
-    assert len(runner.scripts) == 1
-    script = runner.scripts[0]
+    script = _build_osascript_notification(request, "agent-quotes")
+
     # Escaped quotes (\") must be present for message and title contents.
     assert 'He said \\"hello\\"' in script
     assert 'Title with \\"quotes\\"' in script
@@ -360,7 +334,7 @@ def test_dispatcher_routes_to_macos_when_is_macos() -> None:
     request = NotificationRequest(message="macos dispatch test")
     dispatcher.dispatch(request, "agent-mac-dispatch")
 
-    assert runner.call_done.wait(timeout=_MACOS_DISPATCH_JOIN_TIMEOUT_SECONDS), (
+    assert runner.call_done.wait(timeout=_MACOS_DISPATCH_WAIT_TIMEOUT_SECONDS), (
         "macOS runner was never called; dispatch did not route to the macOS path"
     )
     # Exactly one dispatch means exactly one runner invocation.

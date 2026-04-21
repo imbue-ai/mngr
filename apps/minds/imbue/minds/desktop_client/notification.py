@@ -242,21 +242,30 @@ def _run_macos_notification_subprocess(
         logger.warning("Failed to show macOS notification: {}", e)
 
 
-def _dispatch_macos_notification(
+def _build_osascript_notification(
     request: NotificationRequest,
     agent_display_name: str,
-    runner: MacOSNotificationRunner = _run_macos_notification_subprocess,
-) -> threading.Thread:
-    """Display a native macOS notification via osascript on a background thread.
+) -> str:
+    """Build the AppleScript command that displays a native macOS notification.
 
-    Returns the spawned daemon thread so callers (notably tests) can join it.
+    Extracted so the quote-escaping behavior is trivially testable as a pure
+    function, independent of subprocess or threading concerns.
     """
     display_title = request.title or f"Notification from {agent_display_name}"
     # Escape double quotes for AppleScript string literals
     escaped_title = display_title.replace('"', '\\"')
     escaped_message = request.message.replace('"', '\\"')
     escaped_subtitle = f"From: {agent_display_name}".replace('"', '\\"')
-    script = f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
+    return f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
+
+
+def _dispatch_macos_notification(
+    request: NotificationRequest,
+    agent_display_name: str,
+    runner: MacOSNotificationRunner = _run_macos_notification_subprocess,
+) -> None:
+    """Display a native macOS notification via osascript on a background thread."""
+    script = _build_osascript_notification(request, agent_display_name)
     thread = threading.Thread(
         target=runner,
         args=(script,),
@@ -264,7 +273,6 @@ def _dispatch_macos_notification(
         name="macos-notification",
     )
     thread.start()
-    return thread
 
 
 class NotificationDispatcher(FrozenModel):
