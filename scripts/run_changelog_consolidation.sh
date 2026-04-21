@@ -151,9 +151,15 @@ BRANCH="mngr/changelog-consolidation-$(date -u +%Y-%m-%d-%H-%M-%S)"
 git checkout -b "$BRANCH"
 git push --set-upstream origin "$BRANCH"
 
-PR_OUT=$(gh pr create --base main --title "Changelog consolidation $DATE_STR" --body "Automated nightly consolidation of changelog entries." 2>&1)
-echo "$PR_OUT"
-PR_URL=$(echo "$PR_OUT" | grep -oE 'https://github.com/[^ ]+')
+# =============================================================================
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# TODO(BEFORE MERGE): re-enable real PR creation. Currently disabled while
+# iterating on the deploy + trigger flow so we don't spam the repo with test
+# consolidation PRs. Restore the original `gh pr create ...` block below.
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# =============================================================================
+echo "!!! PR creation is disabled (testing). Would have run: gh pr create --base main --title \"Changelog consolidation $DATE_STR\""
+PR_URL="(pr-creation-disabled-for-testing)"
 
-write_status "done" "'$PR_URL'" "Opened PR for $DATE_STR"
-echo "=== done: $PR_URL ==="
+write_status "done" "'$PR_URL'" "Dry-run only: PR creation disabled. Would have opened PR for $DATE_STR (branch already pushed: $BRANCH)"
+echo "=== done (dry-run): branch $BRANCH pushed; PR creation skipped ==="
