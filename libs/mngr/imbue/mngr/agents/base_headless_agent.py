@@ -186,7 +186,7 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         return stripped if stripped else None
 
     def _get_pane_error_message(self) -> str | None:
-        """Capture the tmux pane content as a last-resort error source."""
+        """Capture the tmux pane content as one of the no-output error detail sources."""
         content = self.capture_pane_content()
         if content is None:
             return None
