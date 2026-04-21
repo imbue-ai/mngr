@@ -18,7 +18,6 @@ from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathsDataSource
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
-from imbue.mngr_kanpan.data_types import ShellCommandSourceConfig
 
 register_plugin_config("kanpan", KanpanPluginConfig)
 
@@ -26,9 +25,9 @@ register_plugin_config("kanpan", KanpanPluginConfig)
 def _is_source_enabled(config: KanpanPluginConfig, name: str) -> bool:
     """Check if a data source is enabled in the plugin config."""
     source_config = config.data_sources.get(name)
-    if source_config is not None:
-        return source_config.enabled
-    return True
+    if source_config is None:
+        return True
+    return source_config.get("enabled", True)
 
 
 @hookimpl
@@ -60,21 +59,14 @@ def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
         sources.append(GitInfoDataSource())
 
     if _is_source_enabled(config, "github"):
-        github_config_raw = config.data_sources.get("github")
-        if isinstance(github_config_raw, dict):
-            github_ds_config = GitHubDataSourceConfig(**github_config_raw)
-        else:
-            github_ds_config = GitHubDataSourceConfig()
-        sources.append(GitHubDataSource(config=github_ds_config))
+        github_raw = config.data_sources.get("github") or {}
+        sources.append(GitHubDataSource(config=GitHubDataSourceConfig(**github_raw)))
 
     # Label-backed columns from config
     for field_key, col_config in config.columns.items():
-        if isinstance(col_config, dict):
-            header = col_config.get("header", field_key.upper())
-            colors = col_config.get("colors", {})
-            label_key = col_config.get("label_key", field_key)
-        else:
-            continue
+        header = col_config.get("header", field_key.upper())
+        colors = col_config.get("colors", {})
+        label_key = col_config.get("label_key", field_key)
         sources.append(
             LabelsDataSource(
                 field_key=field_key,
@@ -84,16 +76,6 @@ def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
 
     # Shell command data sources from config
     for field_key, shell_config in config.shell_commands.items():
-        if isinstance(shell_config, ShellCommandSourceConfig):
-            sc = ShellCommandConfig(
-                name=shell_config.name,
-                header=shell_config.header,
-                command=shell_config.command,
-            )
-        elif isinstance(shell_config, dict):
-            sc = ShellCommandConfig(**shell_config)
-        else:
-            continue
-        sources.append(ShellCommandDataSource(field_key=field_key, config=sc))
+        sources.append(ShellCommandDataSource(field_key=field_key, config=ShellCommandConfig(**shell_config)))
 
     return sources
