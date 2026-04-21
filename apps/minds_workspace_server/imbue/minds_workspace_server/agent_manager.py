@@ -40,6 +40,22 @@ _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
 _APPLICATIONS_TOML_BASENAME = "applications.toml"
 
 
+def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Non-blocking put for a creation-log queue.
+
+    The creation thread must never block on log delivery. If the WebSocket
+    client streaming proto-agent logs disconnects mid-creation, nothing is
+    draining the queue, and a blocking ``put`` would hang the thread at the
+    next log line -- which in turn prevents ``proto_agent_completed`` from
+    ever firing. We drop log lines on a full queue (logs are best-effort;
+    the completion signals below are not).
+    """
+    try:
+        log_queue.put_nowait(message)
+    except queue.Full:
+        _loguru_logger.trace("Creation log queue full; dropping line")
+
+
 class _LogQueueCallback(MutableModel):
     """Callable that appends process output lines as JSON to a queue."""
 
@@ -48,7 +64,7 @@ class _LogQueueCallback(MutableModel):
     log_queue: queue.Queue[str | None] = Field(description="Queue to write log lines into")
 
     def __call__(self, line: str, _is_stdout: bool) -> None:
-        self.log_queue.put(json.dumps({"line": line.rstrip("\n")}))
+        _safe_log_put(self.log_queue, json.dumps({"line": line.rstrip("\n")}))
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
@@ -388,49 +404,74 @@ class AgentManager:
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
     ) -> None:
-        """Run mngr create in the background and capture output."""
-        cmd_str = shlex.join(cmd)
-        header_line = f"[cwd: {work_dir}] {cmd_str}"
-        log_queue.put(json.dumps({"line": header_line}))
+        """Run mngr create in the background, capture output, and always emit completion.
 
+        This thread is started with ``is_checked=False``, so any exception
+        that escaped here was silently swallowed -- which left the client's
+        ChatPanel stuck on "Creating agent..." forever, because neither the
+        log stream's ``{done: true}`` sentinel nor the WS
+        ``proto_agent_completed`` broadcast fired.
+
+        The whole body runs inside a single catch-all so that *no matter
+        what* the subprocess, its callbacks, or the pydantic / broadcaster
+        calls below throw, the proto-agent entry is always cleared on the
+        client and any error is surfaced as a string to the UI. The
+        catch-all is intentional belt-and-suspenders: see
+        ``test_prevent_broad_exception_catch``'s snapshot bump.
+        """
         success = False
         error: str | None = None
 
         try:
-            result = run_local_command_modern_version(
-                command=cmd,
-                cwd=work_dir,
-                is_checked=False,
-                trace_output=True,
-                trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
-                shutdown_event=self._shutdown_event,
-            )
-            success = result.returncode == 0
-            if not success:
-                error = f"mngr create exited with code {result.returncode}"
-        except (OSError, ConcurrencyGroupError) as e:
-            error = str(e)
-            _loguru_logger.exception("Error creating agent {}", agent_id)
+            cmd_str = shlex.join(cmd)
+            header_line = f"[cwd: {work_dir}] {cmd_str}"
+            _safe_log_put(log_queue, json.dumps({"line": header_line}))
 
-        log_queue.put(json.dumps({"done": True, "success": success, "error": error}))
-        log_queue.put(None)
-
-        with self._lock:
-            self._proto_agents.pop(agent_id, None)
-            self._log_queues.pop(agent_id, None)
-
-            if success:
-                self._agents[agent_id] = AgentStateItem(
-                    id=agent_id,
-                    name=agent_name,
-                    state="RUNNING",
-                    labels=labels,
-                    work_dir=str(work_dir),
+            try:
+                result = run_local_command_modern_version(
+                    command=cmd,
+                    cwd=work_dir,
+                    is_checked=False,
+                    trace_output=True,
+                    trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
+                    shutdown_event=self._shutdown_event,
                 )
+                success = result.returncode == 0
+                if not success:
+                    error = f"mngr create exited with code {result.returncode}"
+            except (OSError, ConcurrencyGroupError) as e:
+                error = str(e)
+                _loguru_logger.exception("Error creating agent {}", agent_id)
+
+            with self._lock:
+                self._proto_agents.pop(agent_id, None)
+                self._log_queues.pop(agent_id, None)
+                if success:
+                    self._agents[agent_id] = AgentStateItem(
+                        id=agent_id,
+                        name=agent_name,
+                        state="RUNNING",
+                        labels=labels,
+                        work_dir=str(work_dir),
+                    )
+        except Exception as e:
+            error = f"Unexpected {type(e).__name__}: {e}"
+            _loguru_logger.exception("Unexpected error creating agent {}", agent_id)
+            # The proto-agent entry may still be sitting in _proto_agents if
+            # the exception fired before the cleanup block. Try once more,
+            # safely, before we broadcast completion.
+            try:
+                with self._lock:
+                    self._proto_agents.pop(agent_id, None)
+                    self._log_queues.pop(agent_id, None)
+            except (OSError, RuntimeError):
+                _loguru_logger.exception("Failed to clean proto-agent entry for {}", agent_id)
+
+        _safe_log_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
+        _safe_log_put(log_queue, None)
 
         if success:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
         self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
     def _initial_discover(self) -> None:
