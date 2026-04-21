@@ -227,7 +227,7 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
     logger.info("Waiting for server discovery (up to {}s)...", timeout_seconds)
     for i in range(timeout_seconds):
         resp = client.get(f"/agents/{agent_id}/servers/")
-        if resp.status_code == 200 and "web" in resp.text:
+        if resp.status_code == 200 and "system_interface" in resp.text:
             logger.info("Web server discovered after {} seconds", i)
             break
         if i % 10 == 0 and i > 0:
@@ -238,7 +238,7 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
         logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
         pytest.fail(f"Web server not discovered within {timeout_seconds} seconds")
 
-    resp = client.get(f"/agents/{agent_id}/web/", follow_redirects=True)
+    resp = client.get(f"/agents/{agent_id}/system_interface/", follow_redirects=True)
     assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
     logger.info("Web server accessible via proxy (status {})", resp.status_code)
 

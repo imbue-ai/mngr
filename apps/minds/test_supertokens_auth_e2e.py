@@ -21,12 +21,15 @@ import httpx
 import pytest
 import uvicorn
 from loguru import logger
+from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.runner import _init_supertokens
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 
@@ -98,12 +101,8 @@ class AuthTestFixture:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        session_store = _init_supertokens(
-            data_directory=self.tmp_dir,
-            host=self.host,
-            port=self.port,
-        )
-        if session_store is None:
+        connection_uri = os.environ.get("SUPERTOKENS_CONNECTION_URI")
+        if not connection_uri:
             pytest.skip("SuperTokens not configured (SUPERTOKENS_CONNECTION_URI not set)")
 
         paths = WorkspacePaths(data_dir=self.tmp_dir)
@@ -111,13 +110,21 @@ class AuthTestFixture:
         code = OneTimeCode("test-code-auth-e2e")
         auth_store.add_one_time_code(code=code)
 
+        minds_config = MindsConfig(data_dir=self.tmp_dir)
+        auth_backend_client = AuthBackendClient(base_url=AnyUrl(str(minds_config.remote_service_connector_url)))
+
+        session_store = MultiAccountSessionStore(
+            data_dir=self.tmp_dir,
+            auth_backend_client=auth_backend_client,
+        )
         backend_resolver = MngrCliBackendResolver()
 
         app = create_desktop_client(
             auth_store=auth_store,
             backend_resolver=backend_resolver,
             http_client=None,
-            supertokens_session_store=session_store,
+            session_store=session_store,
+            auth_backend_client=auth_backend_client,
             server_port=self.port,
             output_format=OutputFormat.JSONL,
         )

@@ -1,6 +1,6 @@
 from click.testing import CliRunner
 
-from imbue.minds.main import cli
+from imbue.minds.cli_entry import cli
 
 
 def test_cli_shows_help() -> None:

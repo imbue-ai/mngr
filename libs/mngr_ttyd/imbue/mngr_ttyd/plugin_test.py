@@ -185,6 +185,32 @@ def test_on_after_provisioning_writes_agent_script(tmp_path: Path) -> None:
     assert b"tmux attach" in content
 
 
+def test_agent_script_honors_target_agent_name_arg(tmp_path: Path) -> None:
+    """Verify that the ttyd agent.sh routes to a named agent's tmux session when $1 is set.
+
+    The frontend passes the agent name as a second URL arg (?arg=agent&arg=<name>).
+    The dispatch script must attach to the session "${MNGR_PREFIX}<name>" so that
+    users can deep-link to a sub-agent's terminal rather than always landing on
+    the primary agent's session where ttyd itself runs.
+    """
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    host = _FakeTtydHost(host_dir)
+
+    on_after_provisioning(
+        agent=cast(Any, SimpleNamespace(id="a1")), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
+    )
+
+    _, content, _ = host.written_files[0]
+    script = content.decode()
+    # Honors $1 as target agent name.
+    assert '_TARGET_AGENT="${1:-}"' in script
+    # Uses MNGR_PREFIX when building the session name.
+    assert "MNGR_PREFIX" in script
+    # Falls back to the ambient session when $1 is empty.
+    assert "display-message -p '#{session_name}'" in script
+
+
 def test_on_after_provisioning_creates_ttyd_directory(tmp_path: Path) -> None:
     """Verify that on_after_provisioning creates the commands/ttyd/ directory."""
     host_dir = tmp_path / "host"

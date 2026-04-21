@@ -5,10 +5,18 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 from imbue.mngr.providers.docker.testing import remove_all_containers_by_prefix
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import run_mngr_subprocess
+
+
+@pytest.fixture
+def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
+    yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
 @pytest.fixture

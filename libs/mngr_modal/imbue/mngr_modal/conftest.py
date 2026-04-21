@@ -21,6 +21,7 @@ from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
+from imbue.mngr.utils.testing import TEST_ENV_PATTERN
 from imbue.mngr.utils.testing import TEST_ENV_PREFIX
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
@@ -57,6 +58,14 @@ def make_modal_provider_real(
     an initial snapshot. Tests that specifically need to test initial snapshot
     behavior should pass is_snapshotted_after_create=True.
     """
+    prefix = mngr_ctx.config.prefix
+    if not TEST_ENV_PATTERN.match(prefix):
+        raise ConfigStructureError(
+            f"Modal test prefix '{prefix}' does not match the required pattern "
+            f"'mngr_test-YYYY-MM-DD-HH-MM-SS-*'. Use the modal_mngr_ctx fixture "
+            f"(not temp_mngr_ctx) when creating real Modal providers, so that "
+            f"test environments can be identified and cleaned up by CI."
+        )
     config = ModalProviderConfig(
         app_name=app_name,
         host_dir=Path("/mngr"),

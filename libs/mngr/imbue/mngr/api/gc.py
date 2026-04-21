@@ -358,8 +358,13 @@ def gc_snapshots(
 ) -> None:
     """Garbage collect snapshots from destroyed hosts.
 
-    Only deletes snapshots from hosts that are in DESTROYED state -- these
-    snapshots serve no purpose because the host can never be resumed.
+    Only deletes snapshots from hosts that were in DESTROYED state at
+    discovery time -- these snapshots serve no purpose because the host
+    can never be resumed.
+
+    Uses the host_state from the pre-computed discovery results rather than
+    calling get_host(), because gc_machines may have already destroyed the
+    host (and its record) earlier in the same GC run.
 
     Snapshots on RUNNING, PAUSED, and STOPPED hosts are never deleted:
     - PAUSED/STOPPED hosts need their snapshots for resumption
@@ -373,13 +378,11 @@ def gc_snapshots(
         try:
             for host_ref in host_refs:
                 try:
-                    host = provider.get_host(host_ref.host_id)
-                    host_state = host.get_state()
-                    if host_state != HostState.DESTROYED:
+                    if host_ref.host_state != HostState.DESTROYED:
                         logger.trace(
                             "Skipped snapshot GC for host {} (state: {})",
                             host_ref.host_id,
-                            host_state,
+                            host_ref.host_state,
                         )
                         continue
 

@@ -129,6 +129,10 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
+
+
 # --- Naming conventions ---
 
 

@@ -1,12 +1,11 @@
 /**
  * Proto-agent log viewer. Opens a WebSocket to stream creation logs
  * from a proto-agent (agent being created via mngr create).
- * On completion, navigates to the chat view for that agent.
+ * On completion, redraws so the parent component can switch to the chat view.
  */
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import { selectAgent } from "../navigation";
 
 interface ProtoAgentLogViewAttrs {
   agentId: string;
@@ -53,14 +52,6 @@ export function ProtoAgentLogView(): m.Component<ProtoAgentLogViewAttrs> {
         done = true;
         success = data.success;
         error = data.error;
-
-        if (success && currentAgentId) {
-          setTimeout(() => {
-            if (currentAgentId) {
-              selectAgent(currentAgentId);
-            }
-          }, 500);
-        }
       }
       m.redraw();
     };
@@ -104,19 +95,30 @@ export function ProtoAgentLogView(): m.Component<ProtoAgentLogViewAttrs> {
     view(vnode) {
       const agentId = vnode.attrs.agentId;
 
-      return m("div.proto-agent-log-view", { style: "display: flex; flex-direction: column; height: 100%; padding: 16px;" }, [
-        m("div", { style: "font-weight: 600; margin-bottom: 8px; font-size: 0.9em; color: #666;" },
-          done
-            ? (success ? `Agent ${agentId} created successfully` : `Agent creation failed`)
-            : `Creating agent ${agentId}...`
-        ),
-        error ? m("div", { style: "color: red; margin-bottom: 8px; font-size: 0.85em;" }, error) : null,
-        m("div.proto-agent-log-lines", {
-          style: "flex: 1; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8em; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all;",
-        }, lines.map((line, i) =>
-          m("div", { key: i, style: "line-height: 1.5;" }, line),
-        )),
-      ]);
+      return m(
+        "div.proto-agent-log-view",
+        { style: "display: flex; flex-direction: column; height: 100%; padding: 16px;" },
+        [
+          m(
+            "div",
+            { style: "font-weight: 600; margin-bottom: 8px; font-size: 0.9em; color: #666;" },
+            done
+              ? success
+                ? `Agent ${agentId} created successfully`
+                : `Agent creation failed`
+              : `Creating agent ${agentId}...`,
+          ),
+          error ? m("div", { style: "color: red; margin-bottom: 8px; font-size: 0.85em;" }, error) : null,
+          m(
+            "div.proto-agent-log-lines",
+            {
+              style:
+                "flex: 1; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.8em; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all;",
+            },
+            lines.map((line, i) => m("div", { key: i, style: "line-height: 1.5;" }, line)),
+          ),
+        ],
+      );
     },
   };
 }

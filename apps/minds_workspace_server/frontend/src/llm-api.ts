@@ -8,9 +8,7 @@ import { claimSlot } from "./slots";
 import type { SlotRenderCallback } from "./slots";
 import type { RouteRenderCallback, PluginRouteHandler } from "./plugin-routes";
 import { registerPluginRoute } from "./plugin-routes";
-import type { SidebarItemDefinition } from "./sidebar-items";
-import { registerSidebarItem } from "./sidebar-items";
-import { getSelectedAgentId } from "./navigation";
+import { getPrimaryAgentId } from "./base-path";
 import { openIframeTabForAgent, openSubagentTab } from "./views/DockviewWorkspace";
 
 interface OpenTabOptions {
@@ -27,7 +25,6 @@ interface LlmApi {
   getConversations(): Conversation[];
   getConversation(conversationId: string): Conversation | null;
   insertResponse(conversationId: string, responseItem: ResponseItem): Promise<void>;
-  registerSidebarItem(definition: SidebarItemDefinition): void;
   on<K extends HookName>(eventName: K, callback: HookCallback<HookDataMap[K]>): void;
   openTab(options: OpenTabOptions): void;
 }
@@ -65,16 +62,12 @@ const llmApi: LlmApi = {
     await insertResponseItem();
   },
 
-  registerSidebarItem(definition: SidebarItemDefinition): void {
-    registerSidebarItem(definition);
-  },
-
   on<K extends HookName>(eventName: K, callback: HookCallback<HookDataMap[K]>): void {
     registerHook(eventName, callback);
   },
 
   openTab(options: OpenTabOptions): void {
-    const agentId = getSelectedAgentId();
+    const agentId = getPrimaryAgentId();
     if (!agentId) return;
 
     if (options.type === "subagent" && options.subagentSessionId) {

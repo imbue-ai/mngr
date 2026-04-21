@@ -11,10 +11,11 @@ Provides common test infrastructure:
 - Test profiles: branch-name-based selective testing (see test_profiles.toml)
 
 Environment variables:
-- PYTEST_NUMPROCESSES: Override the number of xdist workers (default: 4, set in
-  pyproject.toml addopts). Set to e.g. 16 on machines with many cores, or 0 to
-  disable xdist. This overrides the -n value from pyproject.toml but NOT an
-  explicit -n passed on the command line.
+- PYTEST_NUMPROCESSES: Override the number of xdist workers. Only effective when
+  xdist is active but no explicit -n is on the command line (e.g. a developer
+  running `uv run pytest` from a subpackage after setting up xdist through some
+  other mechanism). The canonical local entry points are the `just test-*`
+  recipes, which pass -n explicitly and therefore ignore this variable.
 - PYTEST_MAX_DURATION_SECONDS: Override the maximum allowed test suite duration in seconds.
   Without this, defaults are chosen based on test type and environment (see
   _compute_max_duration for details).
@@ -50,6 +51,7 @@ from coverage.exceptions import CoverageException
 
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
+from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -123,6 +125,7 @@ _registered: bool = False
 _SHARED_MARKERS: Final[list[str]] = [
     "acceptance: marks tests as requiring network access, Modal credentials, etc. These are required to pass in CI",
     "release: marks tests as being required for release (but not for merging PRs)",
+    "flaky: marks tests as known-flaky (retried by offload with a separate retry count)",
 ]
 
 # Additional markers registered by projects via register_marker().
@@ -598,6 +601,9 @@ def _pytest_configure(config: pytest.Config) -> None:
     for marker in _SHARED_MARKERS + _registered_markers:
         config.addinivalue_line("markers", marker)
 
+    # Register marks for guarded resources (see libs/resource_guards/README.md).
+    register_guarded_resource_markers(config)
+
     # Register shared filterwarnings
     for warning_filter in _SHARED_FILTER_WARNINGS:
         config.addinivalue_line("filterwarnings", warning_filter)
@@ -619,8 +625,9 @@ def _pytest_configure(config: pytest.Config) -> None:
 
     # Suppress coverage terminal output when redirecting to file
     if coverage_to_file:
-        # Remove term-missing from cov_report options to suppress terminal output
-        # but keep html and xml reports
+        # Remove term-missing from cov_report options to suppress terminal output.
+        # Any non-terminal reports (e.g. xml, html) stay in place so they are still
+        # written to disk.
         cov_report = getattr(config.option, "cov_report", None)
         if cov_report is not None and isinstance(cov_report, dict):
             cov_report.pop("term-missing", None)
@@ -637,12 +644,10 @@ def _pytest_configure(config: pytest.Config) -> None:
                     controller_cov_report.pop("term-missing", None)
                     controller_cov_report.pop("term", None)
 
-    # Override xdist worker count from PYTEST_NUMPROCESSES env var.
-    # pyproject.toml sets -n 4 as the default (which is needed to activate xdist's
-    # DSession plugin during its pytest_configure, which runs before conftest hooks).
-    # This override lets different environments (local, CI, Modal) use different
-    # parallelism without changing pyproject.toml or passing -n on every invocation.
-    # An explicit -n on the command line takes priority over the env var.
+    # Override xdist worker count from PYTEST_NUMPROCESSES env var when there is
+    # no explicit -n on the command line. xdist must already be active for this
+    # to take effect, since pytest-xdist's DSession is wired up at pytest_configure
+    # (which runs before conftest hooks).
     numprocesses_env = os.environ.get("PYTEST_NUMPROCESSES")
     if numprocesses_env is not None:
         cli_has_n_flag = any(arg == "-n" or arg.startswith("-n") for arg in sys.argv[1:])
