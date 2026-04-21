@@ -7,6 +7,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
+from imbue.mngr.utils.testing import TEST_ENV_PREFIX
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -109,9 +110,9 @@ def clean_env() -> dict[str, str]:
         "test fixtures (register_plugin_test_fixtures in apps/minds/conftest.py) to "
         "have populated it via the autouse setup_test_mngr_env fixture."
     )
-    assert prefix.startswith("mngr_test-"), (
-        f"clean_env() requires MNGR_PREFIX to start with 'mngr_test-' so any leaked "
-        f"Modal env is visible to the CI cleanup script; got {prefix!r}. The "
+    assert prefix.startswith(TEST_ENV_PREFIX), (
+        f"clean_env() requires MNGR_PREFIX to start with {TEST_ENV_PREFIX!r} so any "
+        f"leaked Modal env is visible to the CI cleanup script; got {prefix!r}. The "
         f"apps/minds/conftest.py override points this at generate_test_environment_name()."
     )
     assert root_name.startswith("mngr-test-"), (
