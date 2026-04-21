@@ -112,13 +112,14 @@ def test_interrupt_current_turn_does_not_deliver_ctrl_c_when_idle(
 
         agent.interrupt_current_turn()
 
-        # Give any (erroneous) interrupt a chance to reach the pane. If the
-        # no-op contract is upheld, the marker will never appear.
-        with pytest.raises(TimeoutError):
-            wait_for(
-                lambda: agent._check_pane_contains(agent.tmux_target, _INTERRUPT_MARKER),
-                timeout=1.5,
-                error_message="(expected)",
-            )
+        # interrupt_current_turn is synchronous and must be a no-op when state
+        # != RUNNING, so checking the pane immediately after the call returns
+        # is sufficient: there is no production code path that could deliver
+        # SIGINT asynchronously later.
+        pane_content = agent.capture_pane_content()
+        assert pane_content is not None
+        assert _INTERRUPT_MARKER not in pane_content, (
+            f"Idle interrupt unexpectedly delivered SIGINT; pane:\n{pane_content}"
+        )
     finally:
         cleanup_tmux_session(session_name)
