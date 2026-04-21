@@ -661,7 +661,7 @@ async def _refresh_service_request_endpoint(server_name: str) -> JSONResponse:
     try:
         await run_in_threadpool(write_refresh_request, server_name)
         return JSONResponse(content={"ok": True})
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=500)
 
