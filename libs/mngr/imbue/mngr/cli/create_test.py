@@ -8,6 +8,7 @@ from typing import cast
 import click
 import pluggy
 import pytest
+import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
@@ -59,7 +60,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
-from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -739,7 +739,13 @@ def test_create_headless_streams_output(
     via settings.toml (since --command is not a CLI flag).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    settings_path = profile_dir / "settings.toml"
+    settings_doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
+    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    type_table = tomlkit.table()
+    type_table["command"] = "echo headless-test-output"
+    agent_types["headless_command"] = type_table
+    settings_path.write_text(tomlkit.dumps(settings_doc))
     result = cli_runner.invoke(
         create,
         [
