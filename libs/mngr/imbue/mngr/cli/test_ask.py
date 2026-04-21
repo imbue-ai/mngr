@@ -25,6 +25,9 @@ pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code C
 def test_ask_simple_query(temp_git_repo: Path) -> None:
     """mngr ask should return a non-empty response from Claude."""
     env = setup_claude_trust_config_for_subprocess([temp_git_repo])
+    # DIAGNOSTIC HACK (revert before merging): A/B whether the 110KB
+    # mega tutorial is what's silently killing claude in offload sandboxes.
+    env["MNGR_ASK_SKIP_MEGA_TUTORIAL"] = "1"
     result = run_mngr_subprocess(
         "ask",
         "just say hi",

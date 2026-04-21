@@ -1,4 +1,5 @@
 import importlib.resources
+import os
 import shlex
 import subprocess
 import sys
@@ -377,7 +378,15 @@ def _accumulate_chunks(chunks: Iterator[str]) -> str:
 
 
 def _load_mega_tutorial() -> str:
-    """Load the mega_tutorial.sh resource file."""
+    """Load the mega_tutorial.sh resource file.
+
+    DIAGNOSTIC HACK (revert before merging): MNGR_ASK_SKIP_MEGA_TUTORIAL=1
+    short-circuits to an empty string so we can A/B whether the 110KB tutorial
+    is what's making test_ask_simple_query exit silently in offload sandboxes
+    while passing locally.
+    """
+    if os.environ.get("MNGR_ASK_SKIP_MEGA_TUTORIAL") == "1":
+        return ""
     return importlib.resources.files(mngr_resources).joinpath("mega_tutorial.sh").read_text()
 
 
