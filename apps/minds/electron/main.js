@@ -101,6 +101,16 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // Auto-open DevTools when MINDS_OPEN_DEVTOOLS=1 is set. The built-in
+  // ⌘+⌥+I shortcut hits an Electron menu handler that assumes a
+  // BrowserWindow (we use BaseWindow + WebContentsViews) and crashes;
+  // this env var is the escape hatch for dev-time inspection.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    contentView.webContents.once('did-finish-load', () => {
+      contentView.webContents.openDevTools({ mode: 'detach' });
+    });
+  }
+
   // BaseWindow may not fire ready-to-show since it has no built-in web contents.
   // Show the window immediately after a short delay as a fallback.
   setTimeout(() => {

@@ -1487,7 +1487,7 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
   function submitDeleteWorkspace() {
     // mngr destroy is not reversible: the Lima VM, host record, agent
     // state, and mngr/<name> git branch all go away. Confirm hard.
-    if (!confirm("Permanently delete this workspace?\n\n" +
+    if (!confirm("Permanently delete this workspace?\\n\\n" +
                  "This destroys the VM, removes the agent, and deletes the " +
                  "mngr/<name> branch. It cannot be undone.")) {
       return;
