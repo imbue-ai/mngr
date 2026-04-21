@@ -12,11 +12,10 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_multiple_agents_coexist(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100101")
     for name in ["agent-a", "agent-b", "agent-c"]:
         expect(
             e2e.run(
-                f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
+                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep 100101",
                 comment=f"Create {name}",
             )
         ).to_succeed()
@@ -40,11 +39,10 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100102")
     for name in ["agent-x", "agent-y"]:
         expect(
             e2e.run(
-                f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
+                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep 100102",
                 comment=f"Create {name}",
             )
         ).to_succeed()
@@ -70,11 +68,10 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_list_filter_by_state(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100103")
     for name in ["running-agent", "stopped-agent"]:
         expect(
             e2e.run(
-                f"mngr create {name} --type {sleep_agent_type} --no-ensure-clean --no-connect",
+                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep 100103",
                 comment=f"Create {name}",
             )
         ).to_succeed()

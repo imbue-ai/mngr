@@ -8,7 +8,11 @@ mngr create my-agent codex         # "codex" is the agent type
 mngr create my-agent my-script     # any command on PATH whose name is a plain identifier
 ```
 
-To run a literal command with spaces or shell metacharacters, define a [custom agent type](#custom-agent-types) with that command.
+To run a literal shell command (with spaces, pipes, or other shell metacharacters), use the built-in `command` agent type and pass the command after `--`:
+
+```bash
+mngr create my-task --type command -- python -m http.server 8080
+```
 
 Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
 
@@ -24,7 +28,7 @@ When you run `mngr create my-agent <type>` (or `mngr create my-agent --type <typ
 
 1. **Custom type lookup**: If you defined `<type>` in your config, use that configuration
 2. **Plugin lookup**: If a plugin registered `<type>` as an agent type, use its configuration
-3. **Direct command**: Otherwise, treat `<type>` as a command to run
+3. **Direct command**: Otherwise, treat `<type>` as a command to run (use `--type command -- <shell command>` for commands with spaces or metacharacters)
 
 This fallback lets you run any program as an agent without needing a plugin or custom type.
 

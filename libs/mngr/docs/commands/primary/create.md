@@ -28,7 +28,9 @@ to create a new one.
 
 The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
-directly to the agent command.
+directly to the agent command. To run a shell command with spaces or
+metacharacters, use the built-in 'command' agent type:
+`mngr create my-task --type command -- sleep 3600`.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred

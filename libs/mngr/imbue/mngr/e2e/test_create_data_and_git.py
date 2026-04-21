@@ -14,7 +14,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.modal
 @pytest.mark.rsync
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100082")
     e2e.write_tutorial_block("""
     # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
     mngr create my-task --from /path/to/some/other/project
@@ -25,7 +24,7 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --from {source_dir} --type {sleep_agent_type} --no-ensure-clean",
+            f"mngr create my-task --from {source_dir} --type command --no-ensure-clean -- sleep 100082",
             comment="the agent uses the data from its current git repo (if any) or folder, but you can specify a different source",
         )
     ).to_succeed()
@@ -39,14 +38,13 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_project_label(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100083")
     e2e.write_tutorial_block("""
     # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
     mngr create my-task --project my-project
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --project my-project --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --project my-project --type command --no-ensure-clean -- sleep 100083",
             comment="by default the agent is tagged with a project label that matches the name of the current git repo (or folder), but you can specify a different project",
         )
     ).to_succeed()
@@ -65,7 +63,6 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.rsync
 def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100084")
     e2e.write_tutorial_block("""
     # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
@@ -78,7 +75,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
 
     expect(
         e2e.run(
-            f"mngr create my-task --from {source_dir} --type {sleep_agent_type} --no-ensure-clean",
+            f"mngr create my-task --from {source_dir} --type command --no-ensure-clean -- sleep 100084",
             comment="mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder",
         )
     ).to_succeed()
@@ -91,7 +88,6 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_default_branch(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100085")
     e2e.write_tutorial_block("""
     # however, if you do use git, mngr makes that convenient
     # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -100,7 +96,7 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --type command --no-ensure-clean -- sleep 100085",
             comment="by default, it creates a new git branch for each agent",
         )
     ).to_succeed()
@@ -113,7 +109,6 @@ def test_create_default_branch(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100086")
     e2e.write_tutorial_block("""
     # --branch controls branch creation. the default is :mngr/* which creates a new branch named mngr/{agent_name}
     # you can change the pattern (the * is replaced by the agent name):
@@ -122,7 +117,7 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --branch ':feature/*' --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --branch ':feature/*' --type command --no-ensure-clean -- sleep 100086",
             comment="you can change the pattern (the * is replaced by the agent name)",
         )
     ).to_succeed()
@@ -135,7 +130,6 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_base_branch(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100087")
     e2e.write_tutorial_block("""
     # you can also specify a different base branch (instead of the current branch):
     mngr create my-task --branch "main:mngr/*"
@@ -152,7 +146,7 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --branch '{current_branch}:mngr/*' --type {sleep_agent_type} --no-ensure-clean",
+            f"mngr create my-task --branch '{current_branch}:mngr/*' --type command --no-ensure-clean -- sleep 100087",
             comment="you can also specify a different base branch (instead of the current branch)",
         )
     ).to_succeed()
@@ -165,14 +159,13 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100088")
     e2e.write_tutorial_block("""
     # or set the new branch name explicitly:
     mngr create my-task --branch ":feature/my-task"
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --branch ':feature/my-task' --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --branch ':feature/my-task' --type command --no-ensure-clean -- sleep 100088",
             comment="or set the new branch name explicitly",
         )
     ).to_succeed()
@@ -187,7 +180,6 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.rsync
 def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100089")
     e2e.write_tutorial_block("""
     # you can create a git mirror instead of a worktree:
     mngr create my-task --transfer=git-mirror
@@ -195,7 +187,7 @@ def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --transfer=git-mirror --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --transfer=git-mirror --type command --no-ensure-clean -- sleep 100089",
             comment="you can create a git mirror instead of a worktree",
         )
     ).to_succeed()
@@ -210,7 +202,6 @@ def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.rsync
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100090")
     e2e.write_tutorial_block("""
     # you can disable new branch creation entirely by omitting the :NEW part (requires --transfer=none or --transfer=git-mirror due to how worktrees work, and --transfer=none implies no new branch):
     mngr create my-task --transfer=git-mirror --branch main
@@ -224,7 +215,7 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            f"mngr create my-task --transfer=git-mirror --branch {current_branch} --type {sleep_agent_type} --no-ensure-clean",
+            f"mngr create my-task --transfer=git-mirror --branch {current_branch} --type command --no-ensure-clean -- sleep 100090",
             comment="you can disable new branch creation entirely by omitting the :NEW part",
         )
     ).to_succeed()
@@ -238,14 +229,13 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_transfer_none(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100091")
     e2e.write_tutorial_block("""
     # you can run the agent in-place (directly in your source directory) without any transfer:
     mngr create my-task --transfer=none
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --transfer=none --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100091",
             comment="you can run the agent in-place without any transfer",
         )
     ).to_succeed()
@@ -259,7 +249,6 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_from_another_agent(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100092")
     e2e.write_tutorial_block("""
     # you can clone from an existing agent's work directory:
     mngr create my-task --from other-agent
@@ -267,14 +256,14 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create other-agent --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create other-agent --type command --no-ensure-clean -- sleep 100092",
             comment="Create source agent to clone from",
         )
     ).to_succeed()
 
     expect(
         e2e.run(
-            f"mngr create my-task --from other-agent --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --from other-agent --type command --no-ensure-clean -- sleep 100092",
             comment="you can clone from an existing agent's work directory",
         )
     ).to_succeed()

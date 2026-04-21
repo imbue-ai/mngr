@@ -9,7 +9,6 @@ from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -109,7 +108,6 @@ def test_provision_preserves_existing_env_vars(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that provisioning preserves existing environment variables."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100061")
     agent_name = f"test-prov-env-preserve-{get_short_random_string()}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -121,7 +119,7 @@ def test_provision_preserves_existing_env_vars(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -129,6 +127,9 @@ def test_provision_preserves_existing_env_vars(
                 "--no-ensure-clean",
                 "--env",
                 "INITIAL_VAR=original_value",
+                "--",
+                "sleep",
+                "847295",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

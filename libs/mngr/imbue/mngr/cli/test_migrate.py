@@ -9,7 +9,6 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -22,13 +21,33 @@ def test_migrate_clones_and_destroys_source(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that migrate creates a new agent and destroys the source."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100060")
     source_name = f"test-migrate-source-{uuid4().hex}"
     target_name = f"test-migrate-target-{uuid4().hex}"
     source_session = create_test_agent(source_name, "sleep 300002")
     target_session = f"{mngr_test_prefix}{target_name}"
+
+    # CliRunner does not update sys.argv, but migrate's --/create delegation
+    # inspects sys.argv to detect the `--` end-of-options separator. Patch it
+    # so the real argv layout is visible during the invoke.
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "mngr",
+            "migrate",
+            source_name,
+            target_name,
+            "--type",
+            "command",
+            "--transfer=none",
+            "--no-connect",
+            "--",
+            "sleep",
+            "300003",
+        ],
+    )
 
     # Target session is created by migrate, not by create_test_agent, so clean it up separately
     with tmux_session_cleanup(target_session):
@@ -39,9 +58,12 @@ def test_migrate_clones_and_destroys_source(
                 source_name,
                 target_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--transfer=none",
                 "--no-connect",
+                "--",
+                "sleep",
+                "300003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
