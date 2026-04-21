@@ -1271,7 +1271,7 @@ def _run_local_restart_commands(workspace_name: str, services_toml_path: Path) -
 
     tmux kill-window is allowed to fail (window may already be gone); the touch
     must succeed. Returns (exit_status, stderr) -- 0 if the touch succeeded,
-    non-zero with stderr if the touch failed.
+    non-zero with stderr if the touch failed or timed out.
     """
     session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
     window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
@@ -1288,7 +1288,14 @@ def _run_local_restart_commands(workspace_name: str, services_toml_path: Path) -
             timeout=10.0,
             is_checked_after=False,
         )
-    return touch_result.returncode or 0, (touch_result.stderr or "").strip()
+    # A timed-out process has returncode=None and is_timed_out=True; surface
+    # it as a non-zero exit so the caller reports a 5xx instead of silently
+    # claiming success. 124 is the conventional exit code for timeouts.
+    if touch_result.is_timed_out:
+        return 124, f"touch {services_toml_path}: timed out after 10s"
+    if touch_result.returncode is None:
+        return 1, (touch_result.stderr or "touch: unknown failure").strip()
+    return touch_result.returncode, (touch_result.stderr or "").strip()
 
 
 async def _restart_workspace_server_locally(
