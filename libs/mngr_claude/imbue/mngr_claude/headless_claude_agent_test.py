@@ -398,14 +398,16 @@ def test_stream_output_raises_when_empty_file(
 
     Creates both stdout.jsonl (empty) and stderr.log (empty). The error
     fallback chain reaches pane capture (which returns None -- no tmux
-    session for the test agent), then falls through to "no details available".
+    session for the test agent). The file-diagnostic line still reports
+    both files as 0 bytes plus the lifecycle state so the error is never
+    truly silent.
     """
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
     _write_fake_agent_output(host, agent)
 
-    with pytest.raises(MngrError, match="no details available"):
+    with pytest.raises(MngrError, match=r"\[files\].*stdout\.jsonl: 0 bytes.*stderr\.log: 0 bytes"):
         list(agent.stream_output())
 
 

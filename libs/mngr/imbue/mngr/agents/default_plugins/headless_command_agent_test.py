@@ -132,7 +132,9 @@ def test_stream_output_raises_when_empty_file(
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     _write_fake_agent_output(agent)
 
-    with pytest.raises(MngrError, match="no details available"):
+    # The error always carries file diagnostics and lifecycle state so callers
+    # never see a truly silent failure.
+    with pytest.raises(MngrError, match=r"\[files\].*stderr\.log: 0 bytes"):
         list(agent.stream_output())
 
 
@@ -142,17 +144,17 @@ def test_stream_output_raises_when_stdout_file_missing(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    """stream_output raises when the stdout file is never created (agent exits immediately).
+    """stream_output raises with file diagnostic when stdout.log is missing.
 
-    Creates only stderr.log (empty) so the error chain falls through to
-    pane capture (which fails -- no tmux session), then hits "no details available".
+    Creates only stderr.log (empty). The fallback diagnostic reports
+    stdout.log as missing, stderr.log as 0 bytes, plus lifecycle state.
     """
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "stderr.log").write_text("")
 
-    with pytest.raises(MngrError, match="no details available"):
+    with pytest.raises(MngrError, match=r"stdout\.log: missing"):
         list(agent.stream_output())
 
 
