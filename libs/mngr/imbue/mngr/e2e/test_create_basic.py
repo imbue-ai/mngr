@@ -71,8 +71,8 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     mngr create my-task claude
     mngr c my-task
     """)
-    # Test "mngr create <name>" form. --type test_sleep stands in for the real
-    # claude agent so the test doesn't need claude installed.
+    # Test "mngr create <name>" form. --type command -- sleep <N> stands in
+    # for the real claude agent so the test doesn't need claude installed.
     result_full = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100072",
         comment="you can use a short form for most commands (like create) as well",
