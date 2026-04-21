@@ -261,15 +261,41 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
     assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
-def test_agent_default_page_prefers_system_interface_when_present(tmp_path: Path) -> None:
-    # Legacy local / docker templates register "system_interface" directly;
-    # we prefer that name over "web" when both are present.
+def test_agent_default_page_prefers_web_when_present(tmp_path: Path) -> None:
+    # forever-claude-template registers "web" (the workspace-server chat UI)
+    # as its primary interface; we prefer that over "system_interface" so
+    # users land on chat rather than a legacy server. "system_interface"
+    # remains a fallback for legacy local/docker templates that only
+    # register it (see test_agent_default_page_falls_back_to_system_interface).
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
             str(agent_id): {
                 "system_interface": "http://test-backend:9100",
                 "web": "http://test-backend:9200",
+            },
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+
+
+def test_agent_default_page_falls_back_to_system_interface(tmp_path: Path) -> None:
+    # Legacy local/docker templates that only register "system_interface"
+    # (no "web") still get routed there.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {
+                "system_interface": "http://test-backend:9100",
             },
         },
     )
@@ -496,11 +522,11 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
     assert response.status_code == 200
     assert "Loading..." in response.text
     assert "location.reload()" in response.text
-    # Convention links (terminal and agent) are always shown, even before those
-    # servers have registered with the backend resolver.
-    assert f"/forwarding/{agent_id}/terminal/" in response.text
-    assert f"/forwarding/{agent_id}/agent/" in response.text
-    assert 'target="_top"' in response.text
+    # Before any servers register, there are no links to show. Linking to
+    # an unregistered server would route users to the same dead-end
+    # Loading... page on the other side (see proxy_test.py::
+    # test_generate_backend_loading_html_omits_unregistered_convention_servers).
+    assert f"/forwarding/{agent_id}/" not in response.text
 
 
 def test_agent_proxy_returns_502_for_unknown_backend_non_html(tmp_path: Path) -> None:

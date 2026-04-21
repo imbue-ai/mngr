@@ -340,7 +340,12 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
-_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "web")
+# Order matters. "web" (the workspace_server chat UI) comes first so
+# new users land on the chat interface -- the primary thing they want
+# to interact with after creating an agent. "system_interface" stays as
+# a fallback for legacy local/docker templates that still register it
+# as their main server.
+_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("web", "system_interface")
 
 
 def _handle_agent_default_redirect(

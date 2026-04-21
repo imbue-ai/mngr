@@ -205,7 +205,12 @@ def _inject_into_head(html_content: str, injection: str) -> str:
 _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 
 
-_CONVENTION_SERVERS: Final[tuple[ServerName, ...]] = (
+# Preferred display order for known servers on the loading page. Not
+# a promise that these are always registered -- we intersect with the
+# caller's `other_servers` (= registered) so users don't click a link
+# that routes to a server that doesn't exist and hangs on Loading...
+_CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
+    ServerName("web"),
     ServerName("terminal"),
     ServerName("agent"),
 )
@@ -223,19 +228,20 @@ def generate_backend_loading_html(
     "Loading..." message and uses JavaScript to reload the page after 1 second,
     which will either succeed (backend is now up) or return this page again.
 
-    When ``agent_id`` is provided, the page unconditionally includes links to
-    the terminal and agent servers (convention-based, always present) plus any
-    additional servers from ``other_servers``. These links go through the
-    desktop client proxy, so clicking one before the target server is ready
-    simply shows that server's own auto-retrying loading page.
+    When ``agent_id`` is provided, the page shows links to the other
+    registered servers for that agent. The order follows
+    ``_CONVENTION_SERVER_ORDER`` for familiar names (web, terminal,
+    agent) with any remaining registered servers appended. We only
+    link to servers that actually appear in ``other_servers`` so
+    clicking a link never routes to a server that does not exist
+    (which would hang forever on this same Loading... page).
     """
     links_html = ""
     if agent_id is not None:
-        # Build the set of servers to link: convention-based servers
-        # (always shown) plus any additional registered servers.
+        registered = {s for s in other_servers if s != current_server}
         servers_to_show: list[ServerName] = []
-        for s in _CONVENTION_SERVERS:
-            if s != current_server:
+        for s in _CONVENTION_SERVER_ORDER:
+            if s in registered and s not in servers_to_show:
                 servers_to_show.append(s)
         for s in other_servers:
             if s != current_server and s not in servers_to_show:
