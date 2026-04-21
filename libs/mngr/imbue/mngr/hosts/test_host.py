@@ -1838,6 +1838,7 @@ def test_create_work_dir_copy_with_untracked_files(
 
 
 @pytest.mark.rsync
+@pytest.mark.timeout(60)
 def test_create_work_dir_copy_with_gitignored_files(
     host_with_temp_dir: tuple[Host, Path],
     setup_git_config: None,

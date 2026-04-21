@@ -1,6 +1,5 @@
 """Integration tests for the migrate CLI command."""
 
-from pathlib import Path
 from uuid import uuid4
 
 import pluggy
@@ -9,21 +8,19 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_migrate_clones_and_destroys_source(
     cli_runner: CliRunner,
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that migrate creates a new agent and destroys the source."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100060")
     source_name = f"test-migrate-source-{uuid4().hex}"
     target_name = f"test-migrate-target-{uuid4().hex}"
     source_session = create_test_agent(source_name, "sleep 300002")
@@ -38,9 +35,12 @@ def test_migrate_clones_and_destroys_source(
                 source_name,
                 target_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--transfer=none",
                 "--no-connect",
+                "--",
+                "sleep",
+                "300003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

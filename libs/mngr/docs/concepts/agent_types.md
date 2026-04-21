@@ -8,7 +8,11 @@ mngr create my-agent codex         # "codex" is the agent type
 mngr create my-agent my-script     # any command on PATH whose name is a plain identifier
 ```
 
-To run a literal command with spaces or shell metacharacters, define a [custom agent type](#custom-agent-types) with that command.
+To run a literal shell command (with spaces, pipes, or other shell metacharacters), use the built-in `command` agent type and pass the command after `--`:
+
+```bash
+mngr create my-task --type command -- python -m http.server 8080
+```
 
 Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
 
@@ -49,7 +53,7 @@ mngr create my-agent my_claude
 
 Custom types can be scoped to a project by using `mngr config edit --scope project`. This is useful for project-specific configurations that shouldn't apply globally.
 
-To run a literal shell command (with spaces, pipes, or other shell metacharacters), set `command` on a custom type and omit `parent_type`:
+For a reusable shortcut that runs a fixed shell command (instead of repeating `--type command -- ...` each time), set `command` on a custom type and omit `parent_type`:
 
 ```toml
 [agent_types.my_server]
@@ -62,7 +66,7 @@ mngr create my-task my_server
 
 ### Available Settings
 
-- `command`: literal shell command to run as the agent. When set on a type without a `parent_type`, this defines a standalone command-based agent type; when set alongside `parent_type`, it overrides the command inherited from the parent type.
+- `command`: literal shell command to run as the agent. When set without a `parent_type`, defines a standalone command-based type; when set alongside `parent_type`, overrides the command inherited from the parent.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
