@@ -210,18 +210,18 @@ _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 # caller's `other_servers` (= registered) so users don't click a link
 # that routes to a server that doesn't exist and hangs on Loading...
 #
-# "web" = the template's primary web UI (chat in forever-claude-template,
-#   whatever the template author chooses elsewhere)
+# "system_interface" = the canonical minds chat UI
+#   (minds_workspace_server, the thing users actually want to talk to)
+# "web" = the template's free slot for whatever web UI the template
+#   author wants (e.g. a custom dashboard or example server)
 # "terminal" = ttyd raw shell (always from mngr_ttyd plugin)
 # "agent" = ttyd attached to the agent's primary tmux session
 #   (dropped by mngr_ttyd as commands/ttyd/agent.sh)
-# "system_interface" = another name some templates use for a web UI,
-#   separate from "web" (a single agent can register both at once)
 _CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
+    ServerName("system_interface"),
     ServerName("web"),
     ServerName("terminal"),
     ServerName("agent"),
-    ServerName("system_interface"),
 )
 
 
@@ -239,12 +239,12 @@ def generate_backend_loading_html(
 
     When ``agent_id`` is provided, the page shows links to the other
     registered servers for that agent. The order follows
-    ``_CONVENTION_SERVER_ORDER`` (web, terminal, agent,
-    system_interface) for familiar names, with any remaining
-    registered servers appended. We only link to servers that actually
-    appear in ``other_servers`` so clicking a link never routes to a
-    server that does not exist (which would hang forever on this same
-    Loading... page).
+    ``_CONVENTION_SERVER_ORDER`` (system_interface, web, terminal,
+    agent) for familiar names, with any remaining registered servers
+    appended. We only link to servers that actually appear in
+    ``other_servers`` so clicking a link never routes to a server that
+    does not exist (which would hang forever on this same Loading...
+    page).
     """
     links_html = ""
     if agent_id is not None:

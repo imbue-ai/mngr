@@ -261,12 +261,11 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
     assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
-def test_agent_default_page_prefers_web_when_present(tmp_path: Path) -> None:
-    # forever-claude-template registers "web" (the workspace-server chat UI)
-    # as its primary interface; we prefer that over "system_interface" so
-    # users land on chat rather than a legacy server. "system_interface"
-    # remains a fallback for legacy local/docker templates that only
-    # register it (see test_agent_default_page_falls_back_to_system_interface).
+def test_agent_default_page_prefers_system_interface_when_present(tmp_path: Path) -> None:
+    # "system_interface" is the canonical chat UI server
+    # (minds_workspace_server) -- we prefer that over "web" (a
+    # template-specific free slot that may hold e.g. a placeholder
+    # web-server example) so users land on chat after create.
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
@@ -285,17 +284,19 @@ def test_agent_default_page_prefers_web_when_present(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
 
 
-def test_agent_default_page_falls_back_to_system_interface(tmp_path: Path) -> None:
-    # Legacy local/docker templates that only register "system_interface"
-    # (no "web") still get routed there.
+def test_agent_default_page_falls_back_to_web(tmp_path: Path) -> None:
+    # If a template only exposes "web" (no "system_interface" for the
+    # chat UI), still route there rather than dropping to the
+    # servers-listing page -- a web UI is a better user landing than
+    # a raw server list.
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
             str(agent_id): {
-                "system_interface": "http://test-backend:9100",
+                "web": "http://test-backend:9200",
             },
         },
     )
@@ -308,7 +309,7 @@ def test_agent_default_page_falls_back_to_system_interface(tmp_path: Path) -> No
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
 def test_agent_default_page_falls_back_to_servers_list_when_no_known_servers(tmp_path: Path) -> None:

@@ -344,18 +344,20 @@ def _handle_landing_page(
 # below are the well-known conventions minds knows about. We try them
 # in order and pick the first one the agent actually registered.
 #
-# - "web": per-template primary web UI. In forever-claude-template
-#   this is the minds_workspace_server chat frontend; in another
-#   template it could be anything else the user exposes under that
-#   name.
-# - "system_interface": what docker/local templates register as their
-#   primary web UI. Separate convention from "web"; not every template
-#   has one.
+# - "system_interface": the canonical "minds-provided agent chat UI"
+#   server. In forever-claude-template this is minds_workspace_server
+#   (the chat frontend you want users to land on). Comes first so new
+#   agents default to the chat.
+# - "web": per-template free slot for whatever web UI the template
+#   author wants. In forever-claude-template this is a customizable
+#   placeholder (libs/web_server/). Falls back to it only if
+#   system_interface is not registered -- then at least we route to
+#   *some* web UI rather than the servers-listing page.
 #
-# If neither is registered (e.g. an early template that only has
-# "terminal" + "agent"), _handle_agent_default_redirect falls back to
-# the first-any-registered + then to the servers-listing page.
-_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("web", "system_interface")
+# If neither is registered (e.g. template only exposes "terminal" +
+# "agent"), _handle_agent_default_redirect falls back to the
+# first-any-registered server, then to the servers-listing page.
+_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "web")
 
 
 def _handle_agent_default_redirect(
@@ -367,11 +369,11 @@ def _handle_agent_default_redirect(
     """Redirect to the agent's canonical primary server.
 
     Picks the first registered server name that matches
-    ``_DEFAULT_SERVER_PREFERENCE`` (currently "web" then
-    "system_interface" -- each template chooses which name to register
-    its primary web UI under). Falls back to any registered server if
-    neither is present, and to the servers-listing page if the agent
-    has none yet.
+    ``_DEFAULT_SERVER_PREFERENCE`` (currently "system_interface" then
+    "web" -- "system_interface" is the canonical chat UI;
+    "web" is the template's free slot). Falls back to any registered
+    server if neither is present, and to the servers-listing page if
+    the agent has none yet.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
