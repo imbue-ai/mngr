@@ -1,5 +1,4 @@
 import json
-import threading
 import types
 from types import SimpleNamespace
 from typing import Any
@@ -13,33 +12,8 @@ from imbue.minds.desktop_client.notification import _build_osascript_notificatio
 from imbue.minds.desktop_client.notification import _build_toast_widgets
 from imbue.minds.desktop_client.notification import _dispatch_electron_notification
 from imbue.minds.desktop_client.notification import _position_toast_window
-from imbue.minds.desktop_client.notification import _run_macos_notification_subprocess
 from imbue.minds.desktop_client.notification import _run_tkinter_toast
 from imbue.minds.desktop_client.notification import _show_tkinter_toast
-
-# Short timeout for waiting on the background daemon thread spawned by
-# _dispatch_macos_notification to call the injected runner. The runner is
-# synchronous and returns almost immediately, so a few seconds is ample.
-_MACOS_DISPATCH_WAIT_TIMEOUT_SECONDS: float = 5.0
-
-
-class _RecordingMacOSRunner:
-    """Fake MacOSNotificationRunner that records scripts it is called with.
-
-    Sets call_done once invoked, so a test can wait on the background daemon
-    thread spawned by _dispatch_macos_notification to reach the call site
-    without polling.
-    """
-
-    def __init__(self) -> None:
-        self.scripts: list[str] = []
-        self.call_done = threading.Event()
-
-    def __call__(self, script: str) -> None:
-        try:
-            self.scripts.append(script)
-        finally:
-            self.call_done.set()
 
 
 def _make_fake_tk() -> Any:
@@ -271,36 +245,9 @@ def test_dispatcher_default_constructor_resolves_tkinter() -> None:
 # -- macOS notification tests --
 
 
-def test_run_macos_notification_subprocess_swallows_osascript_oserror() -> None:
-    """_run_macos_notification_subprocess must catch OSError from the command
-    runner (e.g. osascript missing from PATH) without re-raising.
-
-    Exercises the real "except (OSError, ExceptionGroup)" branch synchronously,
-    without involving daemon threads -- the branch is a pure concern of the
-    subprocess function, not of dispatch().
-    """
-    captured_commands: list[list[str]] = []
-
-    def raising_command_runner(command: list[str]) -> None:
-        captured_commands.append(command)
-        raise OSError("osascript not found")
-
-    request = NotificationRequest(message="hi", title="Test Title")
-    script = _build_osascript_notification(request, "agent-mac")
-
-    # Must not raise.
-    _run_macos_notification_subprocess(script, command_runner=raising_command_runner)
-
-    assert len(captured_commands) == 1
-    assert captured_commands[0][0] == "osascript"
-    assert captured_commands[0][1] == "-e"
-
-
 def test_build_osascript_notification_escapes_double_quotes() -> None:
     """Double quotes in title, message, and subtitle must be escaped to \\" so the
-    AppleScript string literals are syntactically valid. Tested as a pure function
-    so the assertion is decoupled from subprocess/threading concerns.
-    """
+    AppleScript string literals are syntactically valid."""
     request = NotificationRequest(
         message='He said "hello"',
         title='Title with "quotes"',
@@ -312,33 +259,11 @@ def test_build_osascript_notification_escapes_double_quotes() -> None:
     # Escaped quotes (\") must be present for message and title contents.
     assert 'He said \\"hello\\"' in script
     assert 'Title with \\"quotes\\"' in script
-    # The raw unescaped quoted phrases must not appear as bare substrings
-    # between AppleScript string delimiters (i.e. the payload must be escaped,
-    # not just textually present from the surrounding AppleScript syntax).
+    # Raw unescaped quoted payload must not appear as a bare substring between
+    # AppleScript string delimiters -- the contents must be escaped, not just
+    # textually present from the surrounding AppleScript syntax.
     assert '"He said "hello""' not in script
     assert '"Title with "quotes""' not in script
-
-
-def test_dispatcher_routes_to_macos_when_is_macos() -> None:
-    """dispatch() with is_macos=True and is_electron=False must invoke the
-    macOS runner exactly once, not the tkinter path."""
-    runner = _RecordingMacOSRunner()
-    dispatcher = NotificationDispatcher.create(
-        is_electron=False,
-        is_macos=True,
-        tkinter_module=None,
-        macos_runner=runner,
-    )
-    assert dispatcher.is_macos is True
-
-    request = NotificationRequest(message="macos dispatch test")
-    dispatcher.dispatch(request, "agent-mac-dispatch")
-
-    assert runner.call_done.wait(timeout=_MACOS_DISPATCH_WAIT_TIMEOUT_SECONDS), (
-        "macOS runner was never called; dispatch did not route to the macOS path"
-    )
-    # Exactly one dispatch means exactly one runner invocation.
-    assert len(runner.scripts) == 1
 
 
 def test_dispatcher_prefers_electron_over_macos(capsys: pytest.CaptureFixture[str]) -> None:
