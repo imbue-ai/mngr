@@ -13,6 +13,11 @@ from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.server import create_application
 
+# Placeholder client-side port used by the refresh-service broadcast tests.
+# Only the host portion of the TestClient ``client`` tuple is inspected by the
+# endpoint (it enforces loopback), so any fixed value works here.
+_TEST_CLIENT_PORT = 12345
+
 
 @pytest.fixture
 def config() -> Config:
@@ -349,7 +354,7 @@ def test_refresh_service_request_without_agent_state_dir(
 @pytest.mark.timeout(10)
 def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
     """POST /api/refresh-service/{server_name}/broadcast sends a refresh_service WS message."""
-    with TestClient(app, client=("127.0.0.1", 40000)) as loopback_client:
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         with loopback_client.websocket_connect("/api/ws") as ws:
             # Drain the initial snapshot messages.
             json.loads(ws.receive_text())
@@ -364,6 +369,6 @@ def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
 
 def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     """The broadcast endpoint refuses requests whose client host isn't loopback."""
-    with TestClient(app, client=("10.0.0.1", 50000)) as remote_client:
+    with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
