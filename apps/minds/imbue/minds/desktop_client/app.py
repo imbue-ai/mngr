@@ -1171,6 +1171,16 @@ def _handle_telegram_status(
 # -- Workspace server lifecycle route handlers --
 
 
+def _tmux_window_target_for_workspace_server(workspace_name: str) -> str:
+    """Return the tmux ``session:window`` target for a mind's workspace_server.
+
+    Shared by the remote-over-SSH and local restart paths so the session/window
+    naming scheme lives in exactly one place.
+    """
+    session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
+    return f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
+
+
 def _build_restart_workspace_server_command(workspace_name: str, services_toml_path: str) -> str:
     """Shell command that restarts the workspace_server service for a mind.
 
@@ -1183,8 +1193,7 @@ def _build_restart_workspace_server_command(workspace_name: str, services_toml_p
     The same shape works for docker-hosted agents (over SSH) and local agents
     (via local subprocess) -- only the services.toml path differs.
     """
-    session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
-    window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
+    window_target = _tmux_window_target_for_workspace_server(workspace_name)
     return (
         f"tmux kill-window -t {shlex.quote(window_target)} 2>/dev/null || true && "
         f"touch {shlex.quote(services_toml_path)}"
@@ -1273,8 +1282,7 @@ def _run_local_restart_commands(workspace_name: str, services_toml_path: Path) -
     must succeed. Returns (exit_status, stderr) -- 0 if the touch succeeded,
     non-zero with stderr if the touch failed or timed out.
     """
-    session_name = f"{_MINDS_TMUX_SESSION_PREFIX}{workspace_name}"
-    window_target = f"{session_name}:svc-{_WORKSPACE_SERVER_SERVICE_NAME}"
+    window_target = _tmux_window_target_for_workspace_server(workspace_name)
     cg = ConcurrencyGroup(name="restart-workspace-server-local")
     with cg:
         # Best-effort kill; if the window doesn't exist we proceed to touch.
