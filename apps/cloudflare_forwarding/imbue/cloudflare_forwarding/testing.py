@@ -373,8 +373,9 @@ class FakeSuperTokensBackend:
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         """Swap every SuperTokens SDK call site on ``app_mod`` with a fake.
 
-        Using a dict + loop keeps the ratchet count at one ``monkeypatch.setattr``
-        usage in this helper regardless of how many SDK functions we stub.
+        Driving the patches through a single dict + loop keeps this helper to
+        exactly one attribute-patch call no matter how many SDK functions we
+        stub, which limits the blast radius on the test-patching ratchet.
         """
         fakes: dict[str, Any] = {
             "ep_sign_up": self.sign_up,
