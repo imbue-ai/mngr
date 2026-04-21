@@ -89,14 +89,36 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 def clean_env() -> dict[str, str]:
     """Build an environment dict for subprocesses.
 
-    Returns a copy of os.environ. The shared plugin test fixtures
+    Returns a copy of os.environ. Relies on the shared plugin test fixtures
     (registered in apps/minds/conftest.py via register_plugin_test_fixtures)
-    already set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
+    having set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
     tmp values, so the subprocess inherits proper isolation. With
     MNGR_ROOT_NAME set to `mngr-test-<id>`, the subprocess does not load
     the repo's .mngr/settings.toml, so the is_allowed_in_pytest=false
     guard there does not fire and no explicit opt-in is needed.
+
+    Asserts that the expected isolation is in place so a future test that
+    forgets to register the shared fixtures gets a loud failure instead of
+    a silent orphan-env leak.
     """
+    host_dir = os.environ.get("MNGR_HOST_DIR")
+    prefix = os.environ.get("MNGR_PREFIX", "")
+    root_name = os.environ.get("MNGR_ROOT_NAME", "")
+    assert host_dir is not None, (
+        "clean_env() requires MNGR_HOST_DIR to be set -- expected the shared plugin "
+        "test fixtures (register_plugin_test_fixtures in apps/minds/conftest.py) to "
+        "have populated it via the autouse setup_test_mngr_env fixture."
+    )
+    assert prefix.startswith("mngr_test-"), (
+        f"clean_env() requires MNGR_PREFIX to start with 'mngr_test-' so any leaked "
+        f"Modal env is visible to the CI cleanup script; got {prefix!r}. The "
+        f"apps/minds/conftest.py override points this at generate_test_environment_name()."
+    )
+    assert root_name.startswith("mngr-test-"), (
+        f"clean_env() requires MNGR_ROOT_NAME to start with 'mngr-test-' so the "
+        f"subprocess mngr does not load the repo's .mngr/settings.toml; got "
+        f"{root_name!r}. The autouse setup_test_mngr_env fixture sets this."
+    )
     return dict(os.environ)
 
 
