@@ -28,13 +28,6 @@ test-offload args="":
     # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
     offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
 
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
-
 # Run acceptance tests on Modal via Offload
 test-offload-acceptance args="":
     #!/bin/bash
