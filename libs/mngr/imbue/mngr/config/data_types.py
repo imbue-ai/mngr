@@ -534,7 +534,21 @@ class MngrConfig(FrozenModel):
     )
     is_allowed_in_pytest: bool = Field(
         default=True,
-        description="Set this to False to prevent loading this config in pytest runs",
+        description=(
+            "Set this to False to prevent loading this config in pytest runs. "
+            "If you are hitting the associated ConfigParseError ('Running mngr "
+            "within pytest is not allowed by the current configuration'), that "
+            "almost certainly means your test's subprocess mngr is loading the "
+            "wrong config -- most commonly because MNGR_ROOT_NAME / MNGR_HOST_DIR "
+            "aren't scoped to a tmp directory and the subprocess is picking up "
+            "the repo's .mngr/settings.toml. Fix the test setup (shared plugin "
+            "fixtures via register_plugin_test_fixtures typically handle this); "
+            "do NOT strip PYTEST_CURRENT_TEST from the subprocess env to dodge "
+            "the check, and do NOT set this field to True in the repo config. "
+            "If the test genuinely must run with is_allowed_in_pytest=False "
+            "loaded, set MNGR_ALLOW_PYTEST=1 in the subprocess env -- that's "
+            "the explicit opt-in."
+        ),
     )
     default_destroyed_host_persisted_seconds: float = Field(
         default=_DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS,

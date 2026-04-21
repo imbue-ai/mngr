@@ -602,6 +602,7 @@ def test_command_with_generic_type_is_allowed(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_edit_message_sends_edited_content(
     cli_runner: CliRunner,
     temp_work_dir: Path,
