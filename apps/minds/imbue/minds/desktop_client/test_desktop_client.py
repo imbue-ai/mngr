@@ -1751,3 +1751,49 @@ def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) 
         poll_until(lambda: len(received) > 0, timeout=0.2, poll_interval=0.02)
 
     assert received == []
+
+
+def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
+    """A refresh event that fires before the app's lifespan has run does not crash.
+
+    Reproduces the startup-ordering race: in production, stream_manager.start()
+    runs before uvicorn.run(app), so refresh events can arrive in the window
+    between create_desktop_client (which registers the callback) and the
+    lifespan startup (which captures the event loop). The callback must drop
+    the event rather than raising AttributeError on app.state.event_loop.
+    """
+    agent_id = AgentId()
+
+    received: list[httpx.Request] = []
+
+    async def _capture(request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        return httpx.Response(200)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
+
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        server_logs={str(agent_id): make_server_log("system_interface", "http://ws-backend:9000")},
+    )
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+
+    create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=http_client,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=RequestInbox(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+
+    # Deliberately do NOT enter a TestClient context -- the lifespan has never
+    # fired, so app.state.event_loop is still None.
+    raw_line = json.dumps({"source": "refresh", "server_name": "web"})
+    resolver._fire_on_refresh(str(agent_id), raw_line)
+
+    assert received == []

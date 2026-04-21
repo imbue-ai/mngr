@@ -1859,10 +1859,20 @@ def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
         return
     agent_id = AgentId(agent_id_str)
     for app in _refresh_event_apps.values():
-        # app.state.event_loop is set by _managed_lifespan on startup. The mngr
-        # events stream is started from CLI code after the app is running, so
-        # this attribute is always present when callbacks fire.
-        loop: asyncio.AbstractEventLoop = app.state.event_loop
+        # event_loop is set to None in create_desktop_client and populated by
+        # _managed_lifespan on startup. In production, stream_manager.start()
+        # (which feeds this callback) runs before uvicorn.run(app) starts the
+        # lifespan, so there is a brief window during which refresh events
+        # can arrive before the loop is captured. Drop such events rather
+        # than crashing the reader thread with AttributeError.
+        loop: asyncio.AbstractEventLoop | None = app.state.event_loop
+        if loop is None:
+            logger.debug(
+                "Dropping refresh for agent {} server {}: app event loop not yet started",
+                agent_id_str,
+                server_name,
+            )
+            continue
         asyncio.run_coroutine_threadsafe(
             _dispatch_refresh_broadcast(app, agent_id, server_name), loop
         )
@@ -1935,6 +1945,11 @@ def create_desktop_client(
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    # Populated with the running loop by _managed_lifespan on startup. Defined
+    # up-front as None so background callbacks fired before startup (e.g. mngr
+    # events produced between stream_manager.start() and uvicorn.run()) see a
+    # valid attribute and can choose to drop the event instead of crashing.
+    app.state.event_loop = None
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
