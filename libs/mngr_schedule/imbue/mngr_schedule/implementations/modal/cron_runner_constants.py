@@ -35,3 +35,10 @@ VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
 # Must not collide with any AgentLifecycleState value; enforced by the drift
 # test.
 AGENT_MISSING_STATE: str = "MISSING"
+
+# Sentinel line prefix used by cron_runner.run_scheduled_trigger to emit a
+# single-line JSON result at the end of a verify invocation, and matched by
+# verification._SENTINEL_PATTERN to parse that result back on the deploying
+# machine. Both sides must use the exact same literal; sharing the constant
+# here eliminates the risk of silent drift between the emitter and the parser.
+RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"

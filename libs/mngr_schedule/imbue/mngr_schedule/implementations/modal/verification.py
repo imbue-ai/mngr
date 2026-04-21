@@ -34,6 +34,7 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
 from imbue.mngr_schedule.implementations.modal.cron_runner_constants import AGENT_MISSING_STATE
+from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RESULT_SENTINEL
 
 # Three timers stack for full-verify:
 #   1. cron_runner._AGENT_FINISH_TIMEOUT_SECONDS (~3000s) -- inner poll.
@@ -51,9 +52,6 @@ _MODAL_FUNCTION_TIMEOUT_SECONDS: Final[float] = 3600.0
 _CLIENT_HEADROOM_SECONDS: Final[float] = 300.0
 VERIFICATION_TIMEOUT_SECONDS: Final[float] = _MODAL_FUNCTION_TIMEOUT_SECONDS + _CLIENT_HEADROOM_SECONDS
 
-# Must match cron_runner._RESULT_SENTINEL exactly.
-_RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
-
 # Terminal states we accept as a successful full-verify outcome. Built from
 # the AgentLifecycleState enum so that adding a new state (or renaming one)
 # is caught at import time rather than silently treating the new state as a
@@ -66,7 +64,7 @@ _TERMINAL_SUCCESS_STATES: Final[frozenset[str]] = frozenset(
 # container ids or timestamps don't defeat detection) and captures the JSON
 # payload that follows it. Greedy match up to end-of-line so that payloads
 # containing braces / quotes are captured in full.
-_SENTINEL_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_RESULT_SENTINEL) + r"\s+(\{.*\})\s*$")
+_SENTINEL_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(RESULT_SENTINEL) + r"\s+(\{.*\})\s*$")
 
 
 @pure

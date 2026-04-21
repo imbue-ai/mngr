@@ -46,6 +46,7 @@ from typing import Any
 import modal
 
 from imbue.mngr_schedule.implementations.modal.cron_runner_constants import AGENT_MISSING_STATE
+from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RESULT_SENTINEL
 from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RUNNING_STATES
 from imbue.mngr_schedule.implementations.modal.cron_runner_constants import VALID_VERIFY_MODES
 
@@ -155,12 +156,6 @@ class CronRunnerError(Exception):
     without violating the import policy.
     """
 
-
-# Sentinel line prefix used to communicate a structured verification result to
-# the deploying machine. The line is written once, on its own, at the end of
-# the runtime function. The deploy-side verification parser looks for this
-# exact prefix.
-_RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
 
 # Regex that extracts the agent name from `mngr create` output. The CLI logs
 # a line like: "Starting agent <name> ..." once the agent has been created.
@@ -319,7 +314,7 @@ def _destroy_agent(agent_name: str) -> tuple[int, str]:
 
 def _print_result_sentinel(result: dict[str, Any]) -> None:
     """Write the structured verification result on a single line for the deploy-side parser."""
-    sys.stdout.write(f"{_RESULT_SENTINEL} {json.dumps(result)}\n")
+    sys.stdout.write(f"{RESULT_SENTINEL} {json.dumps(result)}\n")
     sys.stdout.flush()
 
 
