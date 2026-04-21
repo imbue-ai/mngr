@@ -1774,16 +1774,37 @@ class _RecordingTunnelManager(SSHTunnelManager):
 
 def _setup_restart_test_server(
     tmp_path: Path,
-    workspace_name: str = "mindtest-base",
+    workspace_name: str | None = "mindtest-base",
     with_ssh_info: bool = True,
+    work_dir: Path | None = None,
+    authenticate: bool = True,
 ) -> tuple[TestClient, FileAuthStore, AgentId, _RecordingTunnelManager]:
-    """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests."""
+    """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests.
+
+    Args:
+        workspace_name: If None, leave workspace_name_by_agent_id empty so
+            ``get_workspace_name`` returns None (exercises the 404 path).
+        with_ssh_info: If False, ``get_ssh_info`` returns None so the
+            handler falls through to the local-restart path.
+        work_dir: If provided, seed ``work_dir_by_agent_id`` so the local
+            path can locate services.toml. When omitted, the local path
+            will 500 (work_dir unavailable).
+        authenticate: If False, skip the auth-cookie setup so the handler
+            returns 403.
+    """
     agent_id = AgentId()
-    servers_map = {"system_interface": "http://127.0.0.1:8000"} if with_ssh_info else {}
+    servers_map = {"system_interface": "http://127.0.0.1:8000"}
+    workspace_name_by_agent_id: dict[str, str] = (
+        {str(agent_id): workspace_name} if workspace_name is not None else {}
+    )
+    work_dir_by_agent_id: dict[str, Path] = (
+        {str(agent_id): work_dir} if work_dir is not None else {}
+    )
     resolver = _RestartBackendResolver(
         url_by_agent_and_server={str(agent_id): servers_map},
-        ssh_info=_TEST_SSH_INFO,
-        workspace_name_by_agent_id={str(agent_id): workspace_name} if with_ssh_info else {},
+        ssh_info=_TEST_SSH_INFO if with_ssh_info else None,
+        workspace_name_by_agent_id=workspace_name_by_agent_id,
+        work_dir_by_agent_id=work_dir_by_agent_id,
     )
     tunnel_manager = _RecordingTunnelManager()
 
@@ -1796,26 +1817,14 @@ def _setup_restart_test_server(
         tunnel_manager=tunnel_manager,
     )
     client = TestClient(app)
-    _authenticate_client(client=client, auth_store=auth_store)
+    if authenticate:
+        _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_id, tunnel_manager
 
 
 def test_restart_workspace_server_returns_403_when_unauthenticated(tmp_path: Path) -> None:
     """Without a session cookie the endpoint must refuse to act."""
-    agent_id = AgentId()
-    resolver = _RestartBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"system_interface": "http://x"}},
-        ssh_info=_TEST_SSH_INFO,
-        workspace_name_by_agent_id={str(agent_id): "name"},
-    )
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=None,
-        tunnel_manager=_RecordingTunnelManager(),
-    )
-    client = TestClient(app)
+    client, _, agent_id, _ = _setup_restart_test_server(tmp_path, authenticate=False)
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
@@ -1824,22 +1833,12 @@ def test_restart_workspace_server_returns_403_when_unauthenticated(tmp_path: Pat
 
 def test_restart_workspace_server_returns_500_for_local_without_work_dir(tmp_path: Path) -> None:
     """If the resolver exposes a workspace_name but not a work_dir, we can't find services.toml."""
-    agent_id = AgentId()
-    resolver = _RestartBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
-        ssh_info=None,
-        workspace_name_by_agent_id={str(agent_id): "local-mind"},
-        work_dir_by_agent_id={},
+    client, _, agent_id, _ = _setup_restart_test_server(
+        tmp_path,
+        workspace_name="local-mind",
+        with_ssh_info=False,
+        work_dir=None,
     )
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=None,
-        tunnel_manager=_RecordingTunnelManager(),
-    )
-    client = TestClient(app)
-    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
@@ -1849,24 +1848,14 @@ def test_restart_workspace_server_returns_500_for_local_without_work_dir(tmp_pat
 
 def test_restart_workspace_server_local_happy_path_touches_services_toml(tmp_path: Path) -> None:
     """For a local agent with a known work_dir, restart runs locally and touches services.toml."""
-    agent_id = AgentId()
     work_dir = tmp_path / "agent-workdir"
     work_dir.mkdir()
-    resolver = _RestartBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
-        ssh_info=None,
-        workspace_name_by_agent_id={str(agent_id): "local-mind"},
-        work_dir_by_agent_id={str(agent_id): work_dir},
+    client, _, agent_id, _ = _setup_restart_test_server(
+        tmp_path,
+        workspace_name="local-mind",
+        with_ssh_info=False,
+        work_dir=work_dir,
     )
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=None,
-        tunnel_manager=_RecordingTunnelManager(),
-    )
-    client = TestClient(app)
-    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
@@ -1880,23 +1869,9 @@ def test_restart_workspace_server_local_happy_path_touches_services_toml(tmp_pat
 
 def test_restart_workspace_server_returns_404_when_workspace_name_missing(tmp_path: Path) -> None:
     """If the resolver can't map the agent to a workspace label, we can't build the tmux target."""
-    agent_id = AgentId()
-    # Note: workspace_name_by_agent_id is empty -- the endpoint should not
-    # be able to build a tmux target without it.
-    resolver = _RestartBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"system_interface": "http://127.0.0.1:8000"}},
-        ssh_info=_TEST_SSH_INFO,
-        workspace_name_by_agent_id={},
-    )
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=None,
-        tunnel_manager=_RecordingTunnelManager(),
-    )
-    client = TestClient(app)
-    _authenticate_client(client=client, auth_store=auth_store)
+    # workspace_name=None leaves workspace_name_by_agent_id empty -- the
+    # endpoint should not be able to build a tmux target without it.
+    client, _, agent_id, _ = _setup_restart_test_server(tmp_path, workspace_name=None)
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
