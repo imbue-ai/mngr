@@ -1774,24 +1774,19 @@ class _RecordingTunnelManager(SSHTunnelManager):
 
 def _setup_restart_test_server(
     tmp_path: Path,
+    # workspace_name=None leaves workspace_name_by_agent_id empty so
+    # get_workspace_name() returns None (exercises the 404 path).
     workspace_name: str | None = "mindtest-base",
+    # with_ssh_info=False makes get_ssh_info() return None so the handler
+    # falls through to the local-restart path.
     with_ssh_info: bool = True,
+    # work_dir=None skips seeding work_dir_by_agent_id so the local path
+    # 500s with "work_dir unavailable"; pass a Path to exercise the happy path.
     work_dir: Path | None = None,
+    # authenticate=False skips the auth-cookie setup so the handler returns 403.
     authenticate: bool = True,
 ) -> tuple[TestClient, FileAuthStore, AgentId, _RecordingTunnelManager]:
-    """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests.
-
-    Args:
-        workspace_name: If None, leave workspace_name_by_agent_id empty so
-            ``get_workspace_name`` returns None (exercises the 404 path).
-        with_ssh_info: If False, ``get_ssh_info`` returns None so the
-            handler falls through to the local-restart path.
-        work_dir: If provided, seed ``work_dir_by_agent_id`` so the local
-            path can locate services.toml. When omitted, the local path
-            will 500 (work_dir unavailable).
-        authenticate: If False, skip the auth-cookie setup so the handler
-            returns 403.
-    """
+    """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests."""
     agent_id = AgentId()
     servers_map = {"system_interface": "http://127.0.0.1:8000"}
     workspace_name_by_agent_id: dict[str, str] = (
