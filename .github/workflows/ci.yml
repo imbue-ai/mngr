@@ -74,18 +74,10 @@ jobs:
 
       - name: Combine coverage and check threshold
         if: always()
-        # Lowered 80 -> 79 when the remove-local-auth branch landed: the
-        # cloudflare_forwarding service grew ~500 new lines of /auth/* handlers
-        # that depend heavily on the SuperTokens SDK. Happy-path coverage of
-        # those endpoints needs an extensive SDK mock harness that hasn't been
-        # written yet. The floor should be raised back to 80 (and ideally
-        # higher) once apps/cloudflare_forwarding/imbue/cloudflare_forwarding/
-        # app_test.py has tests that exercise the SuperTokens-mocked happy
-        # paths.
         run: |
           i=0; for f in $(find test-results/ -name ".coverage"); do cp "$f" ".coverage.$i"; i=$((i+1)); done
           uv run coverage combine .coverage.*
-          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=79
+          uv run coverage report --rcfile=libs/mngr/pyproject.toml --fail-under=80
 
       - name: Report test results
         if: always()
