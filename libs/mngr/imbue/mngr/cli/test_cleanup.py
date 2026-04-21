@@ -207,7 +207,6 @@ def test_cleanup_destroy_single_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that cleanup --yes destroys a real agent."""
     agent_name = f"test-cleanup-destroy-{int(time.time())}"
@@ -239,7 +238,6 @@ def test_cleanup_dry_run_with_real_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that cleanup --dry-run --yes lists agents but does not destroy them."""
     agent_name = f"test-cleanup-dryrun-{int(time.time())}"
@@ -273,7 +271,6 @@ def test_cleanup_stop_action_with_real_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that cleanup --stop --yes stops a running agent."""
     agent_name = f"test-cleanup-stop-{int(time.time())}"
@@ -300,7 +297,6 @@ def test_cleanup_destroy_multiple_agents(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that cleanup --yes destroys multiple agents at once."""
     timestamp = int(time.time())
@@ -343,7 +339,6 @@ def test_cleanup_destroy_with_provider_filter_matches(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --provider local matches and destroys local agents."""
     agent_name = f"test-cleanup-provfilt-{int(time.time())}"
@@ -375,7 +370,6 @@ def test_cleanup_destroy_with_provider_filter_excludes(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --provider nonexistent does not destroy local agents."""
     agent_name = f"test-cleanup-provexcl-{int(time.time())}"
@@ -405,7 +399,6 @@ def test_cleanup_destroy_json_output_with_real_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that cleanup --yes --format json outputs structured result with real agent."""
     agent_name = f"test-cleanup-json-{int(time.time())}"

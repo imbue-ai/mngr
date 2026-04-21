@@ -104,7 +104,6 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_mngr_ctx: MngrContext,
     mngr_test_prefix: str,
     default_create_cli_opts: CreateCliOptions,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --connect flag results in connection options that would attach to the tmux session.
 
@@ -151,7 +150,6 @@ def test_no_connect_flag_skips_tmux_attach(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --no-connect flag skips attaching to the tmux session.
 
@@ -385,7 +383,6 @@ def test_extra_window_with_named_window(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that -w with name=command syntax creates a tmux window with the specified name."""
     agent_name = f"test-named-window-{int(time.time())}"
@@ -444,7 +441,6 @@ def test_extra_window_without_name_uses_default_window_name(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that -w without name prefix creates a tmux window with default name (cmd-N)."""
     agent_name = f"test-default-window-{int(time.time())}"
@@ -625,7 +621,6 @@ def test_edit_message_with_initial_content(
 def test_edit_message_empty_content_does_not_send(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
@@ -689,7 +684,6 @@ def test_edit_message_empty_content_does_not_send(
 def test_template_applies_values_from_config(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
@@ -746,7 +740,6 @@ ensure_clean = false
 def test_template_cli_args_take_precedence(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
@@ -812,7 +805,6 @@ def test_template_unknown_template_raises_error(
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
-    temp_host_dir: Path,
 ) -> None:
     """Test that using an unknown template raises an error."""
     agent_name = f"test-unknown-template-{int(time.time())}"
@@ -863,7 +855,6 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Creating an agent from a dirty git repo fails when ensure-clean is enabled (the default)."""
     # Make the repo dirty by creating an untracked file
@@ -894,7 +885,6 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
 def test_ensure_clean_skipped_with_explicit_base_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
@@ -945,7 +935,6 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
 def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
@@ -1003,7 +992,6 @@ def test_transfer_rsync_rejected_for_git_repo(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=rsync should be rejected when the source is a git repo."""
     result = cli_runner.invoke(
@@ -1034,7 +1022,6 @@ def test_transfer_git_mirror_rejected_for_non_git(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=git-mirror should be rejected when the source is not a git repo."""
     result = cli_runner.invoke(
@@ -1065,7 +1052,6 @@ def test_transfer_git_worktree_rejected_for_non_git(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=git-worktree should be rejected when the source is not a git repo."""
     result = cli_runner.invoke(
@@ -1097,7 +1083,6 @@ def test_transfer_none_with_different_target_path_rejected(
     temp_work_dir: Path,
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--transfer=none with :PATH pointing to a different directory should be rejected."""
     different_dir = tmp_path / "different_target"
@@ -1131,7 +1116,6 @@ def test_conflicting_target_path_in_address_and_flag_rejected(
     temp_work_dir: Path,
     tmp_path: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Specifying different :PATH in address and --target-path should be rejected."""
     dir_a = tmp_path / "dir_a"
@@ -1168,7 +1152,6 @@ def test_same_target_path_in_address_and_flag_accepted(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Specifying the same path in :PATH and --target-path should not conflict."""
     agent_name = f"test-same-tp-{int(time.time())}"
@@ -1204,7 +1187,6 @@ def test_target_path_flag_works_standalone(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """--target-path without :PATH in the address should still work."""
     agent_name = f"test-standalone-tp-{int(time.time())}"
@@ -1284,7 +1266,6 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """mngr create with --idle-timeout on local provider should fail with a clear error."""
     result = cli_runner.invoke(

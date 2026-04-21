@@ -152,7 +152,6 @@ def intercepted_execvp_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str,
 def _create_and_track_test_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     created_sessions: list[str],
@@ -163,7 +162,6 @@ def _create_and_track_test_agent(
     session_name = create_test_agent_via_cli(
         cli_runner,
         temp_work_dir,
-        temp_host_dir,
         mngr_test_prefix,
         plugin_manager,
         agent_name,
@@ -177,7 +175,6 @@ def _create_and_track_test_agent(
 def create_test_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> Generator[Callable[[str, str], str], None, None]:
@@ -201,7 +198,6 @@ def create_test_agent(
     yield lambda agent_name, agent_cmd: _create_and_track_test_agent(
         cli_runner,
         temp_work_dir,
-        temp_host_dir,
         mngr_test_prefix,
         plugin_manager,
         created_sessions,

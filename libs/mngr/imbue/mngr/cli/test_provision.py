@@ -102,7 +102,6 @@ def test_provision_with_env_var(
 def test_provision_preserves_existing_env_vars(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     per_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,

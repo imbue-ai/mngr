@@ -1,6 +1,5 @@
 """Integration tests for the clone CLI command."""
 
-from pathlib import Path
 from uuid import uuid4
 
 import pluggy
@@ -20,7 +19,6 @@ def test_clone_creates_agent_from_source(
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that clone creates a new agent by delegating to create --from."""
     source_name = f"test-clone-source-{uuid4().hex}"

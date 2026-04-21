@@ -598,7 +598,6 @@ def tmux_session_exists(session_name: str) -> bool:
 def create_test_agent_via_cli(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     agent_name: str,

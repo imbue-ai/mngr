@@ -54,7 +54,6 @@ def test_list_command_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command shows created agent."""
     agent_name = f"test-list-cli-{int(time.time())}"
@@ -102,7 +101,6 @@ def test_list_command_json_format_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with JSON format shows agent data."""
     agent_name = f"test-list-json-{int(time.time())}"
@@ -151,7 +149,6 @@ def test_list_command_jsonl_format_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with JSONL format streams agent data."""
     agent_name = f"test-list-jsonl-{int(time.time())}"
@@ -200,7 +197,6 @@ def test_list_command_with_include_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with include filter."""
     agent_name = f"test-list-filter-{int(time.time())}"
@@ -248,7 +244,6 @@ def test_list_command_with_exclude_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with exclude filter."""
     agent_name = f"test-list-exclude-{int(time.time())}"
@@ -296,7 +291,6 @@ def test_list_command_with_host_provider_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.provider CEL filter.
 
@@ -359,7 +353,6 @@ def test_list_command_with_host_name_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.name CEL filter.
 
@@ -440,7 +433,6 @@ def test_list_command_with_basic_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with basic field selection."""
     agent_name = f"test-list-fields-basic-{int(time.time())}"
@@ -493,7 +485,6 @@ def test_list_command_with_nested_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with nested field selection."""
     agent_name = f"test-list-fields-nested-{int(time.time())}"
@@ -545,7 +536,6 @@ def test_list_command_with_host_and_provider_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with host.name and host.provider_name fields."""
     agent_name = f"test-list-fields-host-provider-{int(time.time())}"
@@ -600,7 +590,6 @@ def test_list_command_with_invalid_fields(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with invalid field shows empty column."""
     agent_name = f"test-list-fields-invalid-{int(time.time())}"
@@ -651,7 +640,6 @@ def test_list_command_with_running_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --running filter alias."""
     agent_name = f"test-list-running-{int(time.time())}"
@@ -733,7 +721,6 @@ def test_list_command_with_local_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --local filter alias."""
     agent_name = f"test-list-local-{int(time.time())}"
@@ -781,7 +768,6 @@ def test_list_command_with_remote_filter_alias(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --remote filter alias (excludes local agents)."""
     agent_name = f"test-list-remote-{int(time.time())}"
@@ -829,7 +815,6 @@ def test_list_command_with_limit(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --limit option.
 
@@ -910,7 +895,6 @@ def test_list_command_with_limit_json_format(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --limit option in JSON format."""
     agent_name = f"test-list-limit-json-{int(time.time())}"
@@ -958,7 +942,6 @@ def test_list_command_with_sort_by_name(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --sort option by name."""
     agent_name_a = f"aaa-list-sort-{int(time.time())}"
@@ -1036,7 +1019,6 @@ def test_list_command_with_sort_descending(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --sort option in descending order."""
     agent_name_a = f"aaa-list-desc-{int(time.time())}"
@@ -1114,7 +1096,6 @@ def test_list_command_with_provider_filter(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --provider filter."""
     agent_name = f"test-list-provider-{int(time.time())}"
@@ -1191,7 +1172,6 @@ def test_list_command_format_template_with_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test list command with --format template shows template-expanded output."""
     agent_name = f"test-list-template-{int(time.time())}"

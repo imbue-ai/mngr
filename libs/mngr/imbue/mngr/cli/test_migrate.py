@@ -1,6 +1,5 @@
 """Integration tests for the migrate CLI command."""
 
-from pathlib import Path
 from uuid import uuid4
 
 import pluggy
@@ -20,7 +19,6 @@ def test_migrate_clones_and_destroys_source(
     create_test_agent,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that migrate creates a new agent and destroys the source."""
     source_name = f"test-migrate-source-{uuid4().hex}"
