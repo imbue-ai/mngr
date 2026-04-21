@@ -12,13 +12,21 @@ import {
   type SerializedDockview,
 } from "dockview-core";
 import { ChatPanel } from "./ChatPanel";
-import { IframePanel } from "./IframePanel";
+import { IframePanel, reloadIframesForServer } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
-import { getAgentById, getAgents, getApplications, getProtoAgents, removeAgentLocally } from "../models/AgentManager";
+import {
+  addRefreshServiceListener,
+  getAgentById,
+  getAgents,
+  getApplications,
+  getProtoAgents,
+  removeAgentLocally,
+  type RefreshServiceListener,
+} from "../models/AgentManager";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
@@ -57,6 +65,8 @@ const SVG_TRASH =
   '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
 const SVG_SHARE =
   '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
+const SVG_REFRESH =
+  '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>';
 
 function getApplicationUrl(appName: string, rawUrl: string): string {
   const hostname = window.location.hostname;
@@ -136,6 +146,7 @@ let dockviewContainer: HTMLElement | null = null;
 const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let _layoutChangeDisposable: { dispose: () => void } | null = null;
+let _refreshServiceListener: RefreshServiceListener | null = null;
 let initialized = false;
 
 function createMithrilRenderer(
@@ -223,9 +234,14 @@ function createCustomTab(options: { id: string; name: string }): {
       const pp = panelParams.get(options.id);
       const panelType = pp?.panelType ?? "chat";
 
-      // Share button -- only on iframe/application tabs
+      // Share and Refresh buttons -- only on iframe/application tabs
       if (panelType === "iframe") {
         const serverName = pp?.title ?? "web";
+        actions.appendChild(
+          createTabActionButton("Refresh", SVG_REFRESH, () => {
+            reloadIframesForServer(serverName);
+          }),
+        );
         actions.appendChild(
           createTabActionButton("Share", SVG_SHARE, () => {
             shareServerName = serverName;
@@ -322,9 +338,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
   // (reachable via the "New terminal" menu item further down). Everything
   // else, including the default "web" example server, is openable.
-  const apps = getApplications().filter(
-    (app) => app.name !== "system_interface" && app.name !== "terminal",
-  );
+  const apps = getApplications().filter((app) => app.name !== "system_interface" && app.name !== "terminal");
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getApplicationUrl(app.name, app.url);
@@ -672,6 +686,7 @@ function initializeDockview(parentElement: HTMLElement): void {
           return createMithrilRenderer(IframePanel, {
             url: params?.url ?? "",
             title: params?.title ?? "Tab",
+            serverName: params?.title,
           });
 
         case "subagent":
@@ -703,6 +718,14 @@ function initializeDockview(parentElement: HTMLElement): void {
   dv.api.onDidRemovePanel((panel) => {
     panelParams.delete(panel.id);
   });
+
+  // Agent-triggered refresh: reload every open iframe tab whose title matches
+  // the server_name the agent named. This arrives over the existing workspace
+  // server WebSocket as {type: "refresh_service", server_name}.
+  _refreshServiceListener = (serverName: string) => {
+    reloadIframesForServer(serverName);
+  };
+  addRefreshServiceListener(_refreshServiceListener);
 
   // Load saved layout or create default
   loadLayout().then((saved) => {

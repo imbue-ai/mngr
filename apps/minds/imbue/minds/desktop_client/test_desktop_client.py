@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,7 @@ from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.polling import poll_until
 
 
 def _create_multi_backend_http_client(
@@ -1659,3 +1661,93 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
+
+
+def _wait_for_refresh_post(received: list[httpx.Request], timeout_s: float = 2.0) -> None:
+    """Poll until the refresh broadcast POST arrives (or the timeout elapses)."""
+    poll_until(lambda: len(received) > 0, timeout=timeout_s, poll_interval=0.02)
+
+
+def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
+    """A refresh event on the mngr events stream triggers a POST to the agent's
+    workspace server broadcast endpoint with the correct server_name."""
+    agent_id = AgentId()
+    server_name = "web"
+
+    received: list[httpx.Request] = []
+
+    async def _capture(request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
+
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        server_logs={str(agent_id): make_server_log("system_interface", "http://ws-backend:9000")},
+    )
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=http_client,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=RequestInbox(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+
+    with TestClient(app):
+        raw_line = json.dumps(
+            {"source": "refresh", "type": "refresh_service", "server_name": server_name}
+        )
+        resolver._fire_on_refresh(str(agent_id), raw_line)
+        _wait_for_refresh_post(received)
+
+    assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
+    request = received[0]
+    assert request.method == "POST"
+    assert str(request.url) == f"http://ws-backend:9000/api/refresh-service/{server_name}/broadcast"
+
+
+def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) -> None:
+    """A refresh event for an agent whose system_interface URL isn't known does nothing."""
+    agent_id = AgentId()
+
+    received: list[httpx.Request] = []
+
+    async def _capture(request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        return httpx.Response(200)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture))
+
+    # Resolver knows about the agent but not a system_interface server.
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id))
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=http_client,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=RequestInbox(),
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+
+    with TestClient(app):
+        raw_line = json.dumps({"source": "refresh", "server_name": "web"})
+        resolver._fire_on_refresh(str(agent_id), raw_line)
+        # Give the reactor a moment to confirm nothing arrives. poll_until
+        # will run for the full timeout since the predicate never flips.
+        poll_until(lambda: len(received) > 0, timeout=0.2, poll_interval=0.02)
+
+    assert received == []

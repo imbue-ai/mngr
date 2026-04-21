@@ -318,3 +318,52 @@ def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
         types = {msg1["type"], msg2["type"]}
         assert "agents_updated" in types
         assert "applications_updated" in types
+
+
+def test_refresh_service_request_writes_event(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/refresh-service/{server_name} appends a refresh event to the agent state dir."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+
+    response = client.post("/api/refresh-service/web")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+    events_file = tmp_path / "events" / "refresh" / "events.jsonl"
+    assert events_file.exists()
+    event = json.loads(events_file.read_text().splitlines()[0])
+    assert event["type"] == "refresh_service"
+    assert event["server_name"] == "web"
+
+
+def test_refresh_service_request_without_agent_state_dir(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The request endpoint surfaces the config error when MNGR_AGENT_STATE_DIR is unset."""
+    monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
+    response = client.post("/api/refresh-service/web")
+    assert response.status_code == 500
+
+
+@pytest.mark.timeout(10)
+def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
+    """POST /api/refresh-service/{server_name}/broadcast sends a refresh_service WS message."""
+    with TestClient(app, client=("127.0.0.1", 40000)) as loopback_client:
+        with loopback_client.websocket_connect("/api/ws") as ws:
+            # Drain the initial snapshot messages.
+            json.loads(ws.receive_text())
+            json.loads(ws.receive_text())
+
+            response = loopback_client.post("/api/refresh-service/web/broadcast")
+            assert response.status_code == 200
+
+            msg = json.loads(ws.receive_text())
+            assert msg == {"type": "refresh_service", "server_name": "web"}
+
+
+def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
+    """The broadcast endpoint refuses requests whose client host isn't loopback."""
+    with TestClient(app, client=("10.0.0.1", 50000)) as remote_client:
+        response = remote_client.post("/api/refresh-service/web/broadcast")
+    assert response.status_code == 403

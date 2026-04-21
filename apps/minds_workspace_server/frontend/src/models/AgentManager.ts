@@ -36,11 +36,15 @@ type WsEvent =
       creation_type: string;
       parent_agent_id: string | null;
     }
-  | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null };
+  | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
+  | { type: "refresh_service"; server_name: string };
+
+export type RefreshServiceListener = (serverName: string) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
+let refreshListeners: RefreshServiceListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
@@ -121,6 +125,12 @@ function handleEvent(event: WsEvent): void {
       protoAgents = protoAgents.filter((p) => p.agent_id !== event.agent_id);
       break;
     }
+
+    case "refresh_service":
+      for (const listener of refreshListeners) {
+        listener(event.server_name);
+      }
+      break;
   }
 }
 
@@ -150,4 +160,12 @@ export function getApplications(): ApplicationEntry[] {
 
 export function getProtoAgents(): ProtoAgent[] {
   return protoAgents;
+}
+
+export function addRefreshServiceListener(listener: RefreshServiceListener): void {
+  refreshListeners.push(listener);
+}
+
+export function removeRefreshServiceListener(listener: RefreshServiceListener): void {
+  refreshListeners = refreshListeners.filter((l) => l !== listener);
 }

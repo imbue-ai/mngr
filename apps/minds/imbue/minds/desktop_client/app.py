@@ -222,6 +222,10 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
+    # Captured here so background callbacks (e.g. the mngr events refresh
+    # dispatch) can schedule async work on the server's running loop via
+    # asyncio.run_coroutine_threadsafe.
+    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
@@ -1783,6 +1787,9 @@ async def _handle_request_deny(
 
 
 _request_event_apps: dict[int, FastAPI] = {}
+_refresh_event_apps: dict[int, FastAPI] = {}
+
+_SYSTEM_INTERFACE_SERVER_NAME: Final[ServerName] = ServerName("system_interface")
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -1795,6 +1802,71 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
         if current_inbox is not None:
             app.state.request_inbox = current_inbox.add_request(event)
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+
+
+def _parse_refresh_server_name(raw_line: str) -> str | None:
+    """Extract server_name from a refresh event line, or None if unparseable."""
+    try:
+        data = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return None
+    server_name = data.get("server_name")
+    if not isinstance(server_name, str) or not server_name:
+        return None
+    return server_name
+
+
+async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, server_name: str) -> None:
+    """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
+
+    Resolves the ``system_interface`` backend URL for the agent (going through
+    an SSH tunnel automatically for remote agents) and calls
+    ``/api/refresh-service/{server_name}/broadcast``. Errors are logged but
+    swallowed -- a missed refresh is never worth crashing on.
+    """
+    backend_resolver: BackendResolverInterface = app.state.backend_resolver
+    backend_url = backend_resolver.get_backend_url(agent_id, _SYSTEM_INTERFACE_SERVER_NAME)
+    if backend_url is None:
+        logger.debug(
+            "No system_interface backend for agent {}; dropping refresh for server {}",
+            agent_id,
+            server_name,
+        )
+        return
+
+    base_url, _stored_query = _split_backend_url(backend_url)
+    tunnel_client = _get_tunnel_http_client(app, agent_id, backend_url, backend_resolver)
+    http_client = tunnel_client or app.state.http_client
+    url = f"{base_url.rstrip('/')}/api/refresh-service/{server_name}/broadcast"
+    try:
+        await http_client.post(url)
+    except httpx.HTTPError as e:
+        logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
+    finally:
+        if tunnel_client is not None:
+            await tunnel_client.aclose()
+
+
+def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
+    """Fan a refresh event out to every registered app's workspace server.
+
+    Runs on the mngr-events reader thread, so the async POST is scheduled
+    on each app's captured event loop via run_coroutine_threadsafe.
+    """
+    server_name = _parse_refresh_server_name(raw_line)
+    if server_name is None:
+        logger.debug("Ignoring malformed refresh event from {}: {}", agent_id_str, raw_line[:200])
+        return
+    agent_id = AgentId(agent_id_str)
+    for app in _refresh_event_apps.values():
+        # app.state.event_loop is set by _managed_lifespan on startup. The mngr
+        # events stream is started from CLI code after the app is running, so
+        # this attribute is always present when callbacks fire.
+        loop: asyncio.AbstractEventLoop = app.state.event_loop
+        asyncio.run_coroutine_threadsafe(
+            _dispatch_refresh_broadcast(app, agent_id, server_name), loop
+        )
+        logger.info("Scheduled refresh broadcast for agent {} server {}", agent_id_str, server_name)
 
 
 # -- App factory --
@@ -1872,6 +1944,8 @@ def create_desktop_client(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
+        _refresh_event_apps[id(backend_resolver)] = app
+        backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
     # Mount the SuperTokens auth routes
     if session_store is not None:

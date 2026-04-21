@@ -38,9 +38,7 @@ function getAgentTerminalUrl(agentId: string): string {
   // agent isn't in the local cache yet, fall back to no name arg and let
   // agent.sh attach to the ambient session.
   const agent = getAgentById(agentId);
-  const args = agent?.name
-    ? `arg=_&arg=agent&arg=${encodeURIComponent(agent.name)}`
-    : "arg=_&arg=agent";
+  const args = agent?.name ? `arg=_&arg=agent&arg=${encodeURIComponent(agent.name)}` : "arg=_&arg=agent";
   return `${baseUrl}${separator}${args}`;
 }
 

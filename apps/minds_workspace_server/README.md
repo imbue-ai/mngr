@@ -26,6 +26,24 @@ npm install
 npm run dev
 ```
 
+## Refreshing web-service tabs from an agent
+
+An agent running inside the workspace container can tell the user's Minds UI
+to reload any open tab for one of its web services. The agent POSTs to the
+workspace server on localhost:
+
+```bash
+curl -X POST "http://127.0.0.1:${WORKSPACE_SERVER_PORT}/api/refresh-service/web"
+```
+
+This appends a `refresh_service` event to the agent's
+`events/refresh/events.jsonl` file. The minds desktop client tails the event
+via `mngr events --follow`, then POSTs back to the workspace server which
+broadcasts a WebSocket message telling the frontend to reload every open
+iframe tab whose title matches the given server name. Replace `web` with
+whichever service name (as listed in `services.toml` / the tab dropdown) you
+want to refresh.
+
 ## Building
 
 ```bash

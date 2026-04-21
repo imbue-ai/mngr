@@ -1,7 +1,8 @@
-"""Writes request events to ``$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl``.
+"""Writes event files to ``$MNGR_AGENT_STATE_DIR/events/<source>/events.jsonl``.
 
-This module is used by the workspace server to create sharing and
-permissions request events that the minds desktop client will process.
+This module is used by the workspace server to create agent-originated events
+(sharing requests, refresh signals, etc.) that the minds desktop client picks
+up via ``mngr events --follow``.
 """
 
 import json
@@ -22,12 +23,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _get_events_file() -> Path:
-    """Return the path to the request events file for this agent."""
+def _agent_state_dir() -> Path:
+    """Return the agent state directory from the environment."""
     agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
     if not agent_state_dir:
         raise RuntimeError("MNGR_AGENT_STATE_DIR environment variable is not set")
-    return Path(agent_state_dir) / "events" / "requests" / "events.jsonl"
+    return Path(agent_state_dir)
+
+
+def _get_events_file() -> Path:
+    """Return the path to the request events file for this agent."""
+    return _agent_state_dir() / "events" / "requests" / "events.jsonl"
+
+
+def _get_refresh_events_file() -> Path:
+    """Return the path to the refresh events file for this agent."""
+    return _agent_state_dir() / "events" / "refresh" / "events.jsonl"
+
+
+def _append_event_line(events_file: Path, event: dict[str, object]) -> None:
+    """Append a single JSONL-encoded event to the given file, creating parents as needed."""
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event) + "\n"
+    with events_file.open("a") as f:
+        f.write(line)
 
 
 def write_sharing_request(
@@ -53,9 +72,24 @@ def write_sharing_request(
     if suggested_emails:
         event["suggested_emails"] = suggested_emails
 
-    events_file = _get_events_file()
-    events_file.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(event) + "\n"
-    with events_file.open("a") as f:
-        f.write(line)
+    _append_event_line(_get_events_file(), event)
     logger.info("Wrote sharing request event for agent {} server {}", agent_id, server_name)
+
+
+def write_refresh_request(server_name: str) -> None:
+    """Write a refresh-service event to the agent's refresh events file.
+
+    Appended to ``events/refresh/events.jsonl`` (source=``refresh``). The minds
+    desktop client tails this file via ``mngr events --follow`` and turns each
+    line into a WebSocket broadcast that tells the workspace frontend to reload
+    any open tabs whose web-service name matches ``server_name``.
+    """
+    event: dict[str, object] = {
+        "timestamp": _now_iso(),
+        "type": "refresh_service",
+        "event_id": _generate_event_id(),
+        "source": "refresh",
+        "server_name": server_name,
+    }
+    _append_event_line(_get_refresh_events_file(), event)
+    logger.info("Wrote refresh event for server {}", server_name)
