@@ -66,7 +66,7 @@ mngr create my-task my_server
 
 ### Available Settings
 
-- `command`: literal shell command to run as the agent. When set without a `parent_type`, defines a standalone command-based type; when set alongside `parent_type`, overrides the command inherited from the parent.
+- `command`: literal shell command to run as the agent. When set without a `parent_type`, defines a standalone command-based type. When set alongside `parent_type`, it overrides the command inherited from the parent for parents that honor `agent_config.command` (e.g. `claude`, `codex`, or bare PATH commands). The built-in `command` parent type is an exception: it always derives its command from the arguments passed after `--`, so setting `command` on a child of `command` has no effect -- use the arguments after `--` at call time instead.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
