@@ -16,9 +16,9 @@ export SUPERTOKENS_API_KEY=
 
 # Public base URL embedded in password-reset and email-verification links.
 # Must match the URL Modal assigns to the deployed function; if unset, the
-# app derives `https://{workspace}--remote-service-connector-<env>-fastapi-app.modal.run`
+# app derives `https://{workspace}--cloudflare-forwarding-<env>-fastapi-app.modal.run`
 # as a fallback, which is only correct for the default Modal workspace.
-# Same value as the minds client's REMOTE_SERVICE_CONNECTOR_URL.
+# Same value as the minds client's CLOUDFLARE_FORWARDING_URL.
 export AUTH_WEBSITE_DOMAIN=
 
 # Optional: Google OAuth provider overrides. Leave blank to use the
