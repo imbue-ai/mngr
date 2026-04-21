@@ -275,7 +275,33 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
             parts.extend(all_extra_args)
 
         cmd_str = " ".join(parts)
-        return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
+        # DIAGNOSTIC HACK (revert before merging): prepend a pre-claude env
+        # dump + config probe to stderr.log so a silent-exit post-mortem in
+        # offload sandboxes has something to read. Writes env vars relevant
+        # to claude, `claude --version`, and ~/.claude + $CLAUDE_CONFIG_DIR
+        # listings, then appends claude's own stderr. See test_ask_simple_query
+        # investigation: size was ruled out (run 24 failed at 75 chars), now
+        # narrowing the structural-cause hypothesis (TTY / auth / config).
+        diagnostic = (
+            "{ "
+            'echo "=== pre-claude diagnostic ==="; '
+            'echo "--- env (claude/mngr/path) ---"; '
+            'env | grep -E "^(ANTHROPIC|CLAUDE|MNGR_|PATH|HOME|SHELL|TERM)=" | '
+            'sed "s/^\\(ANTHROPIC_API_KEY=\\).*/\\1<redacted-len-$(printf %s \\"$ANTHROPIC_API_KEY\\" | wc -c)>/"; '
+            'echo "--- claude --version ---"; '
+            'claude --version 2>&1 || echo "claude --version failed: $?"; '
+            'echo "--- ls -la ~/.claude ---"; '
+            'ls -la ~/.claude 2>&1 || echo "ls ~/.claude failed: $?"; '
+            'echo "--- ls -la $CLAUDE_CONFIG_DIR ---"; '
+            'ls -la "$CLAUDE_CONFIG_DIR" 2>&1 || echo "ls CLAUDE_CONFIG_DIR failed: $?"; '
+            'echo "--- tty/pty info ---"; '
+            'tty 2>&1 || echo "tty failed: $?"; '
+            'echo "=== pre-claude diagnostic end ==="; '
+            '} > "$MNGR_AGENT_STATE_DIR/stderr.log" 2>&1'
+        )
+        return CommandString(
+            f'{diagnostic} && {cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2>> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+        )
 
     def _get_stdout_path(self) -> Path:
         """Return the path to the stdout.jsonl file for this agent."""
