@@ -225,16 +225,42 @@ def test_generate_backend_loading_html_no_agent_id_has_no_links() -> None:
 
 def test_generate_backend_loading_html_with_agent_id_orders_convention_links() -> None:
     # When the registered servers include names from the convention order
-    # (web, terminal, agent), those appear first and in that order.
+    # (web, terminal, agent, system_interface), those appear first and in
+    # that order regardless of the other_servers input order.
     html = generate_backend_loading_html(
         agent_id=_TEST_AGENT,
-        other_servers=(ServerName("terminal"), ServerName("agent"), ServerName("web")),
+        other_servers=(
+            ServerName("system_interface"),
+            ServerName("terminal"),
+            ServerName("agent"),
+            ServerName("web"),
+        ),
     )
     assert f"/forwarding/{_TEST_AGENT}/web/" in html
     assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
     assert f"/forwarding/{_TEST_AGENT}/agent/" in html
-    # Order check: web appears before terminal, terminal before agent
-    assert html.index("/web/") < html.index("/terminal/") < html.index("/agent/")
+    assert f"/forwarding/{_TEST_AGENT}/system_interface/" in html
+    # Order: web -> terminal -> agent -> system_interface
+    assert (
+        html.index("/web/")
+        < html.index("/terminal/")
+        < html.index("/agent/")
+        < html.index("/system_interface/")
+    )
+
+
+def test_generate_backend_loading_html_appends_unknown_servers_after_conventions() -> None:
+    # A template that registers a server name minds doesn't know about
+    # still gets a working link; it just lands after all recognized
+    # conventions (in registration order).
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(
+            ServerName("custom_dashboard"),
+            ServerName("web"),
+        ),
+    )
+    assert html.index("/web/") < html.index("/custom_dashboard/")
 
 
 def test_generate_backend_loading_html_omits_unregistered_convention_servers() -> None:

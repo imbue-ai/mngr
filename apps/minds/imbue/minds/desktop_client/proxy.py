@@ -215,8 +215,8 @@ _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 # "terminal" = ttyd raw shell (always from mngr_ttyd plugin)
 # "agent" = ttyd attached to the agent's primary tmux session
 #   (dropped by mngr_ttyd as commands/ttyd/agent.sh)
-# "system_interface" = alternate template's primary web UI
-#   (docker/local templates that don't use "web")
+# "system_interface" = another name some templates use for a web UI,
+#   separate from "web" (a single agent can register both at once)
 _CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
     ServerName("web"),
     ServerName("terminal"),
@@ -239,11 +239,12 @@ def generate_backend_loading_html(
 
     When ``agent_id`` is provided, the page shows links to the other
     registered servers for that agent. The order follows
-    ``_CONVENTION_SERVER_ORDER`` for familiar names (web, terminal,
-    agent) with any remaining registered servers appended. We only
-    link to servers that actually appear in ``other_servers`` so
-    clicking a link never routes to a server that does not exist
-    (which would hang forever on this same Loading... page).
+    ``_CONVENTION_SERVER_ORDER`` (web, terminal, agent,
+    system_interface) for familiar names, with any remaining
+    registered servers appended. We only link to servers that actually
+    appear in ``other_servers`` so clicking a link never routes to a
+    server that does not exist (which would hang forever on this same
+    Loading... page).
     """
     links_html = ""
     if agent_id is not None:
