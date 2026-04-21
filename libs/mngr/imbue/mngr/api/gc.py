@@ -349,13 +349,35 @@ def _gc_single_host(
             # also catches its HostOfflineError subclass.
             logger.warning("Cannot determine last activity of host {} during GC, skipping: {}", host.id, e)
             return
-        if seconds_since_activity is None:
-            # No activity recorded -- conservative: skip.  Should be rare for
-            # mngr-managed hosts (BOOT is recorded on create/start).
-            logger.warning("No activity recorded for host {} during GC, skipping", host.id)
-            return
         min_age_seconds = provider.get_min_online_host_age_seconds()
-        if seconds_since_activity < min_age_seconds:
+        if seconds_since_activity is None:
+            # No activity recorded -- typically means the host crashed before
+            # anything had a chance to write an activity file.  Fall back to
+            # created_at for the setup grace period, and require a terminal
+            # state so we don't destroy hosts that are still booting/healthy.
+            try:
+                certified_data = host.get_certified_data()
+            except (HostAuthenticationError, HostConnectionError) as e:
+                logger.warning("Cannot read certified data for host {} during GC, skipping: {}", host.id, e)
+                return
+            host_age_seconds = (datetime.now(timezone.utc) - certified_data.created_at).total_seconds()
+            if host_age_seconds < min_age_seconds:
+                logger.trace(
+                    "Skipped GC for host {} (no activity, age {:.0f}s < minimum {:.0f}s)",
+                    host.id,
+                    host_age_seconds,
+                    min_age_seconds,
+                )
+                return
+            if host.get_state() not in (HostState.CRASHED, HostState.FAILED):
+                logger.trace(
+                    "Skipped GC for host {} (no activity, past grace period, but state {} is not terminal)",
+                    host.id,
+                    host.get_state(),
+                )
+                return
+            # Past grace period, no activity, in terminal state -- destroy
+        elif seconds_since_activity < min_age_seconds:
             logger.trace(
                 "Skipped GC for host {} (last activity {:.0f}s ago < minimum {:.0f}s)",
                 host.id,

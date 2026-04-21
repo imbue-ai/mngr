@@ -2080,6 +2080,7 @@ class _RemoteHost(Host):
 
     mock_certified_data: CertifiedHostData | None = None
     mock_last_activity_time: datetime | None = None
+    mock_state: HostState | None = None
 
     @property
     def is_local(self) -> bool:
@@ -2092,6 +2093,11 @@ class _RemoteHost(Host):
         if self.mock_certified_data is not None:
             return self.mock_certified_data
         return super().get_certified_data()
+
+    def get_state(self) -> HostState:
+        if self.mock_state is not None:
+            return self.mock_state
+        return super().get_state()
 
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
         # Report mock_last_activity_time for BOOT so gc sees it as the most recent activity.
@@ -2135,6 +2141,8 @@ def _make_remote_host(
     provider: LocalProviderInstance,
     *,
     last_activity_seconds_ago: float | None = 0,
+    created_seconds_ago: float = 0,
+    mock_state: HostState | None = None,
     host_cls: type[_RemoteHost] = _RemoteHost,
 ) -> _RemoteHost:
     """Create a _RemoteHost (or subclass) with configurable time since last activity.
@@ -2149,10 +2157,11 @@ def _make_remote_host(
     last_activity_time = (
         None if last_activity_seconds_ago is None else now - timedelta(seconds=last_activity_seconds_ago)
     )
+    created_at = now - timedelta(seconds=created_seconds_ago)
     certified_data = CertifiedHostData(
         host_id=str(host_id),
         host_name="remote-test-host",
-        created_at=now,
+        created_at=created_at,
         updated_at=now,
     )
     return host_cls(
@@ -2162,6 +2171,7 @@ def _make_remote_host(
         mngr_ctx=provider.mngr_ctx,
         mock_certified_data=certified_data,
         mock_last_activity_time=last_activity_time,
+        mock_state=mock_state,
     )
 
 
@@ -2307,20 +2317,66 @@ def test_gc_machines_skips_host_when_activity_time_unreadable(
     assert provider.destroyed_hosts == []
 
 
-def test_gc_machines_skips_host_when_no_activity_recorded(
+def test_gc_machines_skips_young_host_with_no_activity(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_host_dir: Path,
 ) -> None:
-    """gc_machines skips hosts with no recorded activity (every ActivitySource returns None).
-
-    This exercises the conservative-skip branch in _gc_single_host: if the
-    host-level activity directory is empty, we cannot judge the host's age
-    and must not destroy it.
-    """
-    host = _make_remote_host(local_provider, last_activity_seconds_ago=None)
+    """Young host with no activity is in setup grace period -- skip."""
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=60,  # young, under 10min grace
+    )
     provider, result = _run_gc_on_remote_host(
-        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-no-activity"
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-young-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_destroys_old_crashed_host_with_no_activity(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """Host past grace period with no activity and CRASHED state -- destroy.
+
+    This is the case Josh flagged: a host that crashed so hard nothing wrote
+    any activity file.  Without this path, such hosts would never be cleaned up.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        mock_state=HostState.CRASHED,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-crashed-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == [host.id]
+
+
+def test_gc_machines_skips_old_running_host_with_no_activity(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """Host past grace period with no activity but RUNNING state -- skip.
+
+    Healthy hosts that happen to have no mngr agents are the user's call, not GC's.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        mock_state=HostState.RUNNING,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-running-no-activity"
     )
 
     assert len(result.machines_destroyed) == 0
