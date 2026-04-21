@@ -21,33 +21,12 @@ def test_clone_creates_agent_from_source(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     temp_host_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that clone creates a new agent by delegating to create --from."""
     source_name = f"test-clone-source-{uuid4().hex}"
     clone_name = f"test-clone-target-{uuid4().hex}"
     create_test_agent(source_name, "sleep 300001")
     clone_session = f"{mngr_test_prefix}{clone_name}"
-
-    # CliRunner does not update sys.argv, but clone's --/create delegation
-    # inspects sys.argv to detect the `--` end-of-options separator. Patch it
-    # so the real argv layout is visible during the invoke.
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "mngr",
-            "clone",
-            source_name,
-            clone_name,
-            "--type",
-            "command",
-            "--transfer=none",
-            "--no-connect",
-            "--",
-            "sleep",
-            "150001",
-        ],
-    )
 
     # Clone session is created by clone command, not by create_test_agent, so clean it up separately
     with tmux_session_cleanup(clone_session):
