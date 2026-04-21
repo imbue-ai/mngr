@@ -34,7 +34,7 @@ const latestChromeState = {
   requestCount: 0,  // most recent request_count value
 };
 
-let chromeSseAbortRef = { current: null };
+const chromeSseAbortRef = { current: null };
 let chromeSseReconnectTick = 0; // bumped to interrupt the current wait
 
 function getSessionStatePath() {
