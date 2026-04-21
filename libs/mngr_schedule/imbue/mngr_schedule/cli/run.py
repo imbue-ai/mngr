@@ -76,17 +76,20 @@ def _emit_output(output: str, output_format: OutputFormat) -> None:
     JSONL tags the line with an ``event`` field, mirroring
     ``stream_or_accumulate_response`` and ``emit_event`` so consumers can
     dispatch on event type.
-    """
-    if not output:
-        return
 
+    JSON and JSONL always emit a parseable object (even when the output is
+    empty) so that downstream consumers can rely on getting at least one
+    JSON value on stdout. HUMAN mode suppresses empty output to avoid
+    printing a bare newline when the trigger produced nothing.
+    """
     match output_format:
         case OutputFormat.JSON:
             emit_final_json({"output": output})
         case OutputFormat.JSONL:
             emit_final_json({"event": "output", "output": output})
         case OutputFormat.HUMAN:
-            write_human_line("{}", output.rstrip("\n"))
+            if output:
+                write_human_line("{}", output.rstrip("\n"))
         case _ as unreachable:
             assert_never(unreachable)
 

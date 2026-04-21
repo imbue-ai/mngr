@@ -118,9 +118,24 @@ def test_emit_output_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     assert data == {"event": "output", "output": "trigger output\n"}
 
 
-def test_emit_output_empty_string_produces_no_output(capsys: pytest.CaptureFixture[str]) -> None:
-    """Empty output should produce no stdout for any format."""
-    for fmt in OutputFormat:
-        _emit_output("", fmt)
+def test_emit_output_empty_string_human_produces_no_output(capsys: pytest.CaptureFixture[str]) -> None:
+    """Empty output in HUMAN mode should produce no stdout (avoid a bare newline)."""
+    _emit_output("", OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_emit_output_empty_string_json_emits_object(capsys: pytest.CaptureFixture[str]) -> None:
+    """Empty output in JSON mode should still emit a JSON object so consumers can parse."""
+    _emit_output("", OutputFormat.JSON)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data == {"output": ""}
+
+
+def test_emit_output_empty_string_jsonl_emits_object(capsys: pytest.CaptureFixture[str]) -> None:
+    """Empty output in JSONL mode should still emit a tagged JSON object."""
+    _emit_output("", OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data == {"event": "output", "output": ""}
