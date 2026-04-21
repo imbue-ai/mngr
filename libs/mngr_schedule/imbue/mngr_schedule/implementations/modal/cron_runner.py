@@ -134,6 +134,17 @@ app = modal.App(name=_APP_NAME, image=_image)
 
 # --- Runtime functions ---
 
+
+class CronRunnerError(Exception):
+    """Errors raised by the in-container verify path.
+
+    cron_runner.py is forbidden from importing imbue exception types (see
+    the file-level comment). Raising a locally-defined exception class
+    instead of a built-in gives the verify path a namespaced error type
+    without violating the import policy.
+    """
+
+
 # Sentinel line prefix used to communicate a structured verification result to
 # the deploying machine. The line is written once, on its own, at the end of
 # the runtime function. The deploy-side verification parser looks for this
@@ -218,7 +229,7 @@ def _get_lifecycle_state(agent_name: str) -> str | None:
     # use a restricted character set ([\w-]+), so interpolating into the CEL
     # expression is safe. Guard against unexpected characters defensively.
     if not re.fullmatch(r"[\w-]+", agent_name):
-        raise RuntimeError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
+        raise CronRunnerError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
     try:
         completed = subprocess.run(
             [
@@ -271,7 +282,7 @@ def _poll_until_done(
 ) -> str:
     """Poll the agent's lifecycle state until it leaves the running states.
 
-    Returns the final state string. Raises RuntimeError on timeout.
+    Returns the final state string. Raises CronRunnerError on timeout.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -279,7 +290,7 @@ def _poll_until_done(
         if state is not None and state not in _RUNNING_STATES:
             return state
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
+            raise CronRunnerError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
         time.sleep(poll_interval_seconds)
 
 
@@ -337,8 +348,9 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
        dict, so callers using either `modal run` or `fn.remote()` can inspect
        the outcome
 
-    Raises RuntimeError if the underlying mngr command fails or the verify
-    step times out.
+    Raises RuntimeError if the underlying mngr command fails, and
+    CronRunnerError if verify_mode is invalid. A full-verify timeout is
+    reported via the sentinel (status="timeout") rather than an exception.
     """
     # Validate verify_mode up front, before any side effects. Otherwise an
     # invalid value would only be caught after `mngr create` has already
@@ -346,7 +358,7 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     # the destroy/poll path could run.
     normalized_verify = verify_mode.lower()
     if normalized_verify not in ("none", "quick", "full"):
-        raise RuntimeError(f"unknown verify_mode: {verify_mode!r}")
+        raise CronRunnerError(f"unknown verify_mode: {verify_mode!r}")
 
     trigger = _deploy_config["trigger"]
 
@@ -443,10 +455,10 @@ def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
     else:
         try:
             final_state = _poll_until_done(agent_name)
-        except RuntimeError as exc:
+        except CronRunnerError as exc:
             # Full-verify hit its inner timeout. Best-effort destroy so the
             # agent is not orphaned, then report the timeout via the sentinel
-            # (instead of propagating the RuntimeError, which would bypass
+            # (instead of propagating the error, which would bypass
             # _print_result_sentinel and leave the deploy side with only a
             # generic non-zero-exit error).
             destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
