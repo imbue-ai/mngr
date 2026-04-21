@@ -769,7 +769,7 @@ body {
   </div>
   <span class="minds-title" id="page-title">Minds</span>
   <button id="servers-btn" title="Switch to another server for this agent (chat, terminal, etc.)" style="display:none;">Servers</button>
-  <button id="update-btn" title="A new version is ready. Click to restart and apply.">Update</button>
+  <button id="update-btn" title="A new version is ready. Click to restart and apply." style="display:none;">Update</button>
   <div class="minds-user-area">
     <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>

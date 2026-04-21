@@ -610,8 +610,28 @@ ipcMain.on('open-log-file', () => {
 ipcMain.handle('is-update-ready', () => updateReady);
 
 ipcMain.on('install-update', () => {
-  if (todesktop.autoUpdater) {
+  // restartAndInstall() throws "Cannot restart and install. There is
+  // no update downloaded" if called before `update-downloaded` has
+  // fired. The chrome button is hidden in that state (we only show it
+  // after update-ready), but guard anyway so a stale click doesn't
+  // surface Electron's uncaught-exception dialog.
+  if (!updateReady || !todesktop.autoUpdater) {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'No update to install.',
+      detail: 'The app is already up to date, or the new version has not finished downloading yet. Try File > Check for Updates...',
+    });
+    return;
+  }
+  try {
     todesktop.autoUpdater.restartAndInstall();
+  } catch (err) {
+    console.error('[update] restartAndInstall failed:', err);
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update failed to install.',
+      detail: String(err && err.message ? err.message : err),
+    });
   }
 });
 
