@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, shell } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, dialog, ipcMain, shell } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -58,11 +58,98 @@ if (!gotLock) {
 async function onReady() {
   if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
     Menu.setApplicationMenu(null);
+  } else {
+    installMacMenu();
   }
 
   createWindow();
   registerShortcuts();
   await runStartupSequence();
+}
+
+// Custom macOS menu bar that adds a "Check for Updates" item under the
+// File menu. The rest mirrors Electron's default so standard Mac
+// affordances (Edit, View, Window) keep working.
+function installMacMenu() {
+  const appName = require('electron').app.getName();
+  const template = [
+    {
+      label: appName,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
+      ],
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// User-initiated update check from File > Check for Updates. ToDesktop's
+// auto-updater runs on launch + every autoCheckInterval, but this menu
+// item lets the user trigger it on demand (useful right after a release
+// ships, or to confirm "up to date" when you're not sure).
+async function triggerUpdateCheck() {
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: 'This build is running in draft mode; the auto-updater is disabled until the build is released to the latest channel.',
+    });
+    return;
+  }
+  // Attach a one-shot "update-not-available" listener so we can tell the
+  // user they're up to date. "update-available" is already handled by
+  // todesktop's Notifier (showInstallAndRestartPrompt: 'always' in init).
+  const onNotAvailable = () => {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'You\'re up to date.',
+      detail: 'No updates are currently available.',
+    });
+  };
+  const onError = (err) => {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  };
+  autoUpdater.once('update-not-available', onNotAvailable);
+  autoUpdater.once('error', onError);
+  try {
+    await autoUpdater.checkForUpdates({ source: 'menu' });
+  } catch (err) {
+    // checkForUpdates() itself threw (vs emitting 'error'). Surface it.
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  } finally {
+    // If an update WAS available, Notifier handled the prompt; neither
+    // listener fired. Remove them so they don't stack on repeat clicks.
+    autoUpdater.removeListener('update-not-available', onNotAvailable);
+    autoUpdater.removeListener('error', onError);
+  }
 }
 
 function createWindow() {
