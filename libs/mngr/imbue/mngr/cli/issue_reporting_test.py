@@ -422,19 +422,17 @@ def test_write_diagnose_context_file_different_inputs() -> None:
 
 
 def test_offer_diagnose_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_offer_diagnose returns False and produces no output when IS_AUTONOMOUS=1."""
+    """_offer_diagnose produces no output when IS_AUTONOMOUS=1."""
     monkeypatch.setenv("IS_AUTONOMOUS", "1")
     with capture_loguru(level="INFO") as log_output:
-        result = _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
-    assert result is False
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
     assert log_output.getvalue() == ""
 
 
 def test_offer_diagnose_shows_install_hint_when_no_plugin() -> None:
     """_offer_diagnose shows install + run instructions when plugin is not installed."""
     with capture_loguru(level="INFO") as log_output:
-        result = _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
-    assert result is False
+        _offer_diagnose(Path("/tmp/fake-ctx.json"), ctx=None)
     output = log_output.getvalue()
     assert "mngr plugin add imbue-mngr-diagnose" in output
     assert "mngr diagnose --context-file" in output

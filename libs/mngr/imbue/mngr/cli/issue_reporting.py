@@ -315,58 +315,30 @@ def _is_diagnose_command(ctx: click.Context | None) -> bool:
 def _offer_diagnose(
     context_file_path: Path,
     ctx: click.Context | None,
-) -> bool:
-    """Print the diagnose command and offer to run it.
+) -> None:
+    """Print the diagnose command the user can run to investigate the crash.
 
-    Returns True if the diagnose command was successfully invoked (the user
-    has been handed off to the diagnostic agent), False otherwise.
+    If the diagnose plugin is not installed, also prints the install command.
     """
     if os.environ.get("IS_AUTONOMOUS", "0") == "1":
-        return False
+        return
 
     diagnose_cmd = f"mngr diagnose --context-file {context_file_path}"
 
     pm = ctx.obj if ctx is not None else None
     has_diagnose = pm is not None and pm.has_plugin("diagnose")
 
+    logger.info("")
     if has_diagnose:
-        logger.info("")
         logger.info("To launch an agent to diagnose this problem, run:")
         logger.info("  {}", diagnose_cmd)
     else:
-        logger.info("")
         logger.info(
             "To launch an agent to diagnose this problem, install the diagnose plugin"
             " and then run the diagnose command:"
         )
         logger.info("  mngr plugin add imbue-mngr-diagnose")
         logger.info("  {}", diagnose_cmd)
-        return False
-
-    if not click.confirm("\nRun diagnostic agent now?", default=True):
-        return False
-
-    # ctx here is the AliasAwareGroup's own context (the root CLI group), passed
-    # down from main.py's except-block where the error was caught.
-    if ctx is None:
-        logger.warning("No CLI context available to invoke diagnose command")
-        return False
-
-    root_command = ctx.command
-    if not isinstance(root_command, click.Group):
-        logger.warning("Root CLI command is not a group")
-        return False
-
-    diagnose_command = root_command.get_command(ctx, "diagnose")
-    if diagnose_command is None:
-        logger.warning("Diagnose command not found in CLI group")
-        return False
-
-    diagnose_args = ["--context-file", str(context_file_path)]
-    diagnose_ctx = diagnose_command.make_context("diagnose", diagnose_args, parent=ctx)
-    with diagnose_ctx:
-        diagnose_command.invoke(diagnose_ctx)
-    return True
 
 
 def handle_unexpected_error(
@@ -406,11 +378,10 @@ def handle_unexpected_error(
         _prompt_and_report_issue(title, body, error_message)
         raise SystemExit(1)
 
-    # Normal command crash: offer diagnose. If the diagnose path itself raises
-    # (disk issue writing context, crash in the diagnostic agent's own
-    # invocation, ...), let the exception propagate -- the original error has
-    # already been logged above, and a separate diagnose failure is useful to
-    # surface so the user can report it as its own issue.
+    # Normal command crash: write an error-context file and print the diagnose
+    # command the user can run to investigate. If writing the context file
+    # raises (e.g. disk full), let it propagate -- the original error has
+    # already been logged above.
     context_path = write_diagnose_context_file(
         traceback_str=tb_str,
         mngr_version=get_mngr_version(),
