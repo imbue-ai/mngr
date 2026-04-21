@@ -615,13 +615,6 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         return output if isinstance(output, str) else ""
     if isinstance(result, str):
         return result
-    # Neither the new dict contract nor the old bare-string contract. Do not
-    # swallow silently -- emit a warning so the unexpected shape is visible
-    # even though we still return an empty string to keep the public contract.
-    logger.warning(
-        "invoke_modal_trigger_function: unexpected result type {} from run_scheduled_trigger; returning empty output",
-        type(result).__name__,
-    )
     return ""
 
 
