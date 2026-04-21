@@ -21,7 +21,6 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -49,6 +48,26 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+
+
+def _compute_idle_seconds(
+    user_activity: datetime | None,
+    agent_activity: datetime | None,
+    ssh_activity: datetime | None,
+) -> float | None:
+    """Compute idle seconds from the most recent activity time.
+
+    Duplicated from imbue.mngr.hosts.common.compute_idle_seconds so this
+    module (in the interfaces layer) doesn't violate the import layer
+    contract by depending on hosts/.
+    """
+    latest_activity = max(
+        (t for t in (user_activity, agent_activity, ssh_activity) if t is not None),
+        default=None,
+    )
+    if latest_activity is None:
+        return None
+    return (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
 
 def _build_host_details_from_host(
@@ -143,7 +162,7 @@ def _build_agent_details_from_online_agent(
 
     # idle_seconds: include host-level ssh_activity; None if no activity was ever recorded
     # (distinct from 0s which would incorrectly imply fresh activity).
-    idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
+    idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
     plugin_data: dict[str, Any] = {}
