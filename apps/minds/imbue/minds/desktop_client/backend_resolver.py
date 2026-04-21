@@ -811,7 +811,7 @@ class MngrStreamManager(MutableModel):
             logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> servers requests --follow for a workspace agent."""
+        """Start mngr events <agent-id> servers requests refresh --follow for a workspace agent."""
         if self._cg.is_shutting_down():
             logger.debug("Skipping events stream for {} -- shutting down", agent_id)
             return
