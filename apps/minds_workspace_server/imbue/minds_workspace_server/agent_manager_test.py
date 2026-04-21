@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -371,6 +372,21 @@ def test_applications_file_handler_fires_on_move(tmp_path: Path) -> None:
     )
 
     assert seen == ["agent-x"]
+
+
+def test_applications_file_handler_ignores_unrelated_paths(tmp_path: Path) -> None:
+    """The handler must not fire for writes to forward_port.py's scratch
+    ``applications.toml.*.tmp`` files. Every upsert creates and modifies one
+    of those before the atomic rename, and firing on each would produce a
+    broadcast storm with no useful information (the scratch file is never
+    the source of truth we read).
+    """
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "applications.toml.abc123.tmp")))
+
+    assert seen == []
 
 
 def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:
