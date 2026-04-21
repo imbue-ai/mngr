@@ -1,3 +1,4 @@
+import importlib.resources
 import shlex
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
@@ -375,14 +377,8 @@ def _accumulate_chunks(chunks: Iterator[str]) -> str:
 
 
 def _load_mega_tutorial() -> str:
-    """Load the mega_tutorial.sh resource file.
-
-    DIAGNOSTIC HACK (revert before merging): unconditionally returns an
-    empty string so we can A/B whether the 110KB tutorial is what makes
-    test_ask_simple_query exit silently in offload sandboxes. Bypasses
-    the env-var version to rule out env-propagation issues entirely.
-    """
-    return ""
+    """Load the mega_tutorial.sh resource file."""
+    return importlib.resources.files(mngr_resources).joinpath("mega_tutorial.sh").read_text()
 
 
 def _build_ask_context() -> str:
@@ -392,15 +388,7 @@ def _build_ask_context() -> str:
     registry plus the mega tutorial (which contains the most up-to-date
     usage examples), so no pre-generated files are needed.
     """
-    # DIAGNOSTIC HACK (revert before merging): hardcode to a tiny system
-    # prompt so we can isolate whether the silent-exit failure is driven
-    # by prompt size. Run 22 saw 110KB system prompt failing; run 23 saw
-    # 50KB (no mega tutorial) failing. If 50-char also fails, size is
-    # ruled out and the issue is structural (claude CLI / sandbox env).
-    return "You are a helpful CLI assistant. Answer the user's question concisely."
-
-    # Original below (unreachable until revert):
-    parts: list[str] = [  # ty: ignore[unreachable]
+    parts: list[str] = [
         "# mngr CLI Documentation",
         "",
         "mngr is a tool for managing AI coding agents across different hosts.",
