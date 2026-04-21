@@ -6,6 +6,7 @@ notifications, or a tkinter toast popup depending on the runtime context.
 
 import platform
 import threading
+from collections.abc import Callable
 from enum import auto
 from types import ModuleType
 from typing import Any
@@ -37,6 +38,31 @@ class NotificationUrgency(UpperCaseStrEnum):
     LOW = auto()
     NORMAL = auto()
     CRITICAL = auto()
+
+
+class DispatchChannel(UpperCaseStrEnum):
+    """Channel a NotificationDispatcher routes a notification to.
+
+    Electron takes priority when the server is running inside the desktop app;
+    otherwise macOS native notifications are used on Darwin, and tkinter toasts
+    elsewhere.
+    """
+
+    ELECTRON = auto()
+    MACOS = auto()
+    TKINTER = auto()
+
+
+def _select_dispatch_channel(is_electron: bool, is_macos: bool) -> DispatchChannel:
+    """Pick the dispatch channel for the given platform flags.
+
+    Priority: Electron > macOS native > tkinter toast.
+    """
+    if is_electron:
+        return DispatchChannel.ELECTRON
+    if is_macos:
+        return DispatchChannel.MACOS
+    return DispatchChannel.TKINTER
 
 
 class NotificationRequest(FrozenModel):
@@ -199,15 +225,29 @@ def _show_tkinter_toast(
     thread.start()
 
 
-def _run_macos_notification_subprocess(script: str) -> None:
-    """Run an AppleScript notification command via osascript on a background thread."""
+OsascriptCommandRunner = Callable[[list[str]], None]
+
+
+def _run_osascript_command(command: list[str]) -> None:
+    """Execute an osascript command via ConcurrencyGroup.
+
+    Raises on subprocess failure; the caller swallows OSError/ExceptionGroup.
+    """
     cg = ConcurrencyGroup(name="macos-notification")
+    with cg:
+        cg.run_process_to_completion(
+            command=command,
+            is_checked_after=False,
+        )
+
+
+def _run_macos_notification_subprocess(
+    script: str,
+    command_runner: OsascriptCommandRunner = _run_osascript_command,
+) -> None:
+    """Run an AppleScript notification command, logging and swallowing errors."""
     try:
-        with cg:
-            cg.run_process_to_completion(
-                command=["osascript", "-e", script],
-                is_checked_after=False,
-            )
+        command_runner(["osascript", "-e", script])
     except (OSError, ExceptionGroup) as e:
         logger.warning("Failed to show macOS notification: {}", e)
 
@@ -279,9 +319,10 @@ class NotificationDispatcher(FrozenModel):
 
         Priority: Electron > macOS native > tkinter toast.
         """
-        if self.is_electron:
+        channel = _select_dispatch_channel(is_electron=self.is_electron, is_macos=self.is_macos)
+        if channel == DispatchChannel.ELECTRON:
             _dispatch_electron_notification(request, agent_display_name)
-        elif self.is_macos:
+        elif channel == DispatchChannel.MACOS:
             _dispatch_macos_notification(request, agent_display_name)
         else:
             _show_tkinter_toast(request, agent_display_name, tk=self._tk)
