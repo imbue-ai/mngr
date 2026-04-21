@@ -202,8 +202,6 @@ class AuthBackendClient(FrozenModel):
             json={"provider_id": provider_id, "callback_url": callback_url},
             timeout=self.timeout_seconds,
         )
-        if response.status_code >= 500 or response.status_code == 503:
-            raise AuthBackendError(f"Auth backend returned {response.status_code}: {response.text[:200]}")
         if response.status_code != 200:
             raise AuthBackendError(f"Auth backend returned {response.status_code}: {response.text[:200]}")
         try:

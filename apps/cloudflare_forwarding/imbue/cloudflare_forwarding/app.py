@@ -1415,29 +1415,39 @@ def _require_supertokens_configured() -> None:
 
 @web_app.post("/auth/signup", response_model=AuthResponse)
 async def auth_signup(body: SignUpRequest) -> AuthResponse:
-    """Create a new email/password account and return a session + user info."""
+    """Create a new email/password account and return a session + user info.
+
+    Any exception from the SuperTokens SDK (core unreachable, schema mismatch,
+    etc.) is caught and surfaced as a structured ``AuthResponse(status="ERROR")``
+    so the desktop client receives a stable JSON shape rather than a FastAPI
+    default 500 body that its typed client cannot parse.
+    """
     _require_supertokens_configured()
     email = body.email.strip()
     if not email or not body.password:
         return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    result = await ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+    try:
+        result = await ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-    if isinstance(result, EmailAlreadyExistsError):
-        return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
+        if isinstance(result, EmailAlreadyExistsError):
+            return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
 
-    if not isinstance(result, EPSignUpOkResult):
-        return AuthResponse(status="ERROR", message="Sign-up failed")
+        if not isinstance(result, EPSignUpOkResult):
+            return AuthResponse(status="ERROR", message="Sign-up failed")
 
-    user = result.user
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-    tokens = await _build_session_tokens(user.id)
-    await send_email_verification_email(
-        tenant_id=_AUTH_TENANT_ID,
-        user_id=user.id,
-        recipe_user_id=recipe_user_id,
-        email=email,
-    )
+        user = result.user
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+        tokens = await _build_session_tokens(user.id)
+        await send_email_verification_email(
+            tenant_id=_AUTH_TENANT_ID,
+            user_id=user.id,
+            recipe_user_id=recipe_user_id,
+            email=email,
+        )
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.error("SuperTokens SDK error during signup: %s", exc)
+        return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
         user=AuthUser(user_id=user.id, email=email),
@@ -1448,31 +1458,40 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
 
 @web_app.post("/auth/signin", response_model=AuthResponse)
 async def auth_signin(body: SignInRequest) -> AuthResponse:
-    """Authenticate with email/password and return a session + user info."""
+    """Authenticate with email/password and return a session + user info.
+
+    Any exception from the SuperTokens SDK is caught and returned as
+    ``AuthResponse(status="ERROR")`` -- see the ``auth_signup`` docstring for
+    the rationale.
+    """
     _require_supertokens_configured()
     email = body.email.strip()
     if not email or not body.password:
         return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    result = await ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+    try:
+        result = await ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-    if isinstance(result, WrongCredentialsError):
-        return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
+        if isinstance(result, WrongCredentialsError):
+            return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
 
-    if not isinstance(result, EPSignInOkResult):
-        return AuthResponse(status="ERROR", message="Sign-in failed")
+        if not isinstance(result, EPSignInOkResult):
+            return AuthResponse(status="ERROR", message="Sign-in failed")
 
-    user = result.user
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-    verified = await is_email_verified(recipe_user_id=recipe_user_id, email=email)
-    tokens = await _build_session_tokens(user.id)
-    if not verified:
-        await send_email_verification_email(
-            tenant_id=_AUTH_TENANT_ID,
-            user_id=user.id,
-            recipe_user_id=recipe_user_id,
-            email=email,
-        )
+        user = result.user
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+        verified = await is_email_verified(recipe_user_id=recipe_user_id, email=email)
+        tokens = await _build_session_tokens(user.id)
+        if not verified:
+            await send_email_verification_email(
+                tenant_id=_AUTH_TENANT_ID,
+                user_id=user.id,
+                recipe_user_id=recipe_user_id,
+                email=email,
+            )
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.error("SuperTokens SDK error during signin: %s", exc)
+        return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
         user=AuthUser(user_id=user.id, email=email),

@@ -22,7 +22,9 @@ from imbue.cloudflare_forwarding.app import extract_username_from_tunnel_name
 from imbue.cloudflare_forwarding.app import make_hostname
 from imbue.cloudflare_forwarding.app import make_tunnel_name
 from imbue.cloudflare_forwarding.app import web_app
+from imbue.cloudflare_forwarding.testing import FakeSuperTokensBackend
 from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
+from imbue.cloudflare_forwarding.testing import make_fake_supertokens_backend
 from imbue.cloudflare_forwarding.testing import make_fake_tunnel_token
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
@@ -664,3 +666,391 @@ def test_auth_reset_password_page_renders_form(monkeypatch: pytest.MonkeyPatch) 
     assert resp.status_code == 200
     assert "tok-xyz" in resp.text
     assert "Reset password" in resp.text
+
+
+# -- /auth/* happy-path tests (powered by FakeSuperTokensBackend) --
+
+
+def _install_fake_supertokens(monkeypatch: pytest.MonkeyPatch) -> FakeSuperTokensBackend:
+    """Wire the FakeSuperTokensBackend into the app module and return it."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    backend = make_fake_supertokens_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    return backend
+
+
+def test_auth_signup_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/signup creates an account, issues a session, and sends a verification email."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/signup", json={"email": "new@example.com", "password": "password123"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    assert body["user"]["email"] == "new@example.com"
+    assert body["tokens"]["access_token"].startswith("at-")
+    assert body["needs_email_verification"] is True
+    assert len(backend.sent_verification_emails) == 1
+    assert "new@example.com" in backend.accounts_by_email
+
+
+def test_auth_signup_field_error_on_empty_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/signup returns FIELD_ERROR for empty email or password."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/signup", json={"email": "  ", "password": "x"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "FIELD_ERROR"
+
+
+def test_auth_signup_duplicate_email_returns_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signing up with an email that already exists returns EMAIL_ALREADY_EXISTS."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "dup@example.com", "password": "password123"})
+    resp = client.post("/auth/signup", json={"email": "dup@example.com", "password": "password123"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "EMAIL_ALREADY_EXISTS"
+    assert len(backend.accounts_by_email) == 1
+
+
+def test_auth_signup_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SuperTokens SDK exception in signup is surfaced as AuthResponse(status='ERROR')."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    async def _boom(**_kwargs: object) -> None:
+        raise SuperTokensGeneralError("core down")
+
+    monkeypatch.setattr(app_mod, "ep_sign_up", _boom)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/signup", json={"email": "x@y.com", "password": "password123"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ERROR",
+        "message": "Auth backend unavailable",
+        "user": None,
+        "tokens": None,
+        "needs_email_verification": False,
+    }
+
+
+def test_auth_signin_happy_path_with_verified_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/signin against a verified account returns OK and skips resending verification."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "a@b.com", "password": "password123"})
+    initial_verify_count = len(backend.sent_verification_emails)
+    account = backend.accounts_by_email["a@b.com"]
+    backend.mark_email_verified(account.user_id)
+    resp = client.post("/auth/signin", json={"email": "a@b.com", "password": "password123"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    assert body["needs_email_verification"] is False
+    assert len(backend.sent_verification_emails) == initial_verify_count
+
+
+def test_auth_signin_wrong_password_returns_wrong_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/signin with an incorrect password returns WRONG_CREDENTIALS without issuing a session."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "x@y.com", "password": "password123"})
+    resp = client.post("/auth/signin", json={"email": "x@y.com", "password": "wrong"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "WRONG_CREDENTIALS"
+    assert body["tokens"] is None
+
+
+def test_auth_signin_unverified_email_triggers_resend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signing in to an unverified account sends another verification email."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "unv@example.com", "password": "password123"})
+    before = len(backend.sent_verification_emails)
+    resp = client.post("/auth/signin", json={"email": "unv@example.com", "password": "password123"})
+    assert resp.status_code == 200
+    assert resp.json()["needs_email_verification"] is True
+    assert len(backend.sent_verification_emails) == before + 1
+
+
+def test_auth_signin_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SuperTokens SDK exception in signin is surfaced as AuthResponse(status='ERROR')."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+
+    async def _boom(**_kwargs: object) -> None:
+        raise SuperTokensSessionError("session store down")
+
+    monkeypatch.setattr(app_mod, "ep_sign_in", _boom)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/signin", json={"email": "x@y.com", "password": "password123"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ERROR"
+
+
+def test_auth_session_refresh_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/session/refresh rotates tokens and invalidates the old refresh token."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    signup = client.post("/auth/signup", json={"email": "r@e.com", "password": "password123"}).json()
+    initial_refresh = signup["tokens"]["refresh_token"]
+    resp = client.post("/auth/session/refresh", json={"refresh_token": initial_refresh})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    assert body["tokens"]["access_token"].startswith("at-")
+    assert body["tokens"]["refresh_token"] != initial_refresh
+    assert initial_refresh not in backend.sessions_by_refresh_token
+
+
+def test_auth_session_refresh_rejects_unknown_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/session/refresh returns status=ERROR for an unknown refresh token."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/session/refresh", json={"refresh_token": "does-not-exist"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ERROR"
+
+
+def test_auth_session_revoke_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/session/revoke tears down every session for the authenticated user."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    signup = client.post("/auth/signup", json={"email": "rev@e.com", "password": "password123"}).json()
+    access = signup["tokens"]["access_token"]
+    assert len(backend.sessions_by_access_token) == 1
+    resp = client.post(
+        "/auth/session/revoke",
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "OK"
+    assert resp.json()["revoked_count"] == 1
+    assert len(backend.sessions_by_access_token) == 0
+
+
+def test_auth_send_verification_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/email/send-verification resends a verification email for a known user."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    signup = client.post("/auth/signup", json={"email": "v@e.com", "password": "password123"}).json()
+    user_id = signup["user"]["user_id"]
+    before = len(backend.sent_verification_emails)
+    resp = client.post(
+        "/auth/email/send-verification",
+        json={"user_id": user_id, "email": "v@e.com"},
+    )
+    assert resp.status_code == 200
+    assert len(backend.sent_verification_emails) == before + 1
+
+
+def test_auth_send_verification_email_unknown_user_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sending verification email for a user that doesn't exist returns 404."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/email/send-verification",
+        json={"user_id": "does-not-exist", "email": "a@b.com"},
+    )
+    assert resp.status_code == 404
+
+
+def test_auth_is_email_verified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/email/is-verified reflects the underlying account state."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    signup = client.post("/auth/signup", json={"email": "iv@e.com", "password": "password123"}).json()
+    user_id = signup["user"]["user_id"]
+    resp = client.post("/auth/email/is-verified", json={"user_id": user_id, "email": "iv@e.com"})
+    assert resp.status_code == 200
+    assert resp.json() == {"verified": False}
+    backend.mark_email_verified(user_id)
+    resp = client.post("/auth/email/is-verified", json={"user_id": user_id, "email": "iv@e.com"})
+    assert resp.json() == {"verified": True}
+
+
+def test_auth_is_email_verified_unknown_user_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/email/is-verified returns verified=False for a user that doesn't exist."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/email/is-verified", json={"user_id": "nope", "email": "a@b.com"})
+    assert resp.status_code == 200
+    assert resp.json() == {"verified": False}
+
+
+def test_auth_verify_email_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verify-email page consumes a valid token and marks the account verified."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "ve@e.com", "password": "password123"})
+    token = next(iter(backend.verification_tokens.keys()))
+    resp = client.get("/auth/verify-email", params={"token": token})
+    assert resp.status_code == 200
+    assert "successfully verified" in resp.text.lower() or "verified" in resp.text.lower()
+    user_id = backend.accounts_by_email["ve@e.com"].user_id
+    assert backend.accounts_by_id[user_id].is_verified is True
+
+
+def test_auth_verify_email_invalid_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Submitting an invalid verification token renders the failure page."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/verify-email", params={"token": "bogus"})
+    assert resp.status_code == 400
+    assert "Verification failed" in resp.text
+
+
+def test_auth_forgot_password_sends_reset_email_for_known_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/password/forgot enqueues a reset email when the account exists."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "fp@e.com", "password": "password123"})
+    resp = client.post("/auth/password/forgot", json={"email": "fp@e.com"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "OK"
+    assert len(backend.sent_reset_emails) == 1
+
+
+def test_auth_forgot_password_unknown_email_still_returns_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For unknown emails the endpoint returns the same success shape (anti-enumeration)."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/password/forgot", json={"email": "nobody@e.com"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "OK"
+    assert backend.sent_reset_emails == []
+
+
+def test_auth_reset_password_consumes_token_and_updates_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid reset token updates the account password; it cannot be reused."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "rp@e.com", "password": "password123"})
+    user_id = backend.accounts_by_email["rp@e.com"].user_id
+    token = backend.issue_reset_token(user_id)
+    resp = client.post("/auth/password/reset", json={"token": token, "new_password": "newpass456"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "OK"
+    assert backend.accounts_by_id[user_id].password == "newpass456"
+    resp = client.post("/auth/password/reset", json={"token": token, "new_password": "again789"})
+    assert resp.json()["status"] == "INVALID_TOKEN"
+
+
+def test_auth_reset_password_rejects_missing_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/password/reset returns 400 when the token or password is missing."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post("/auth/password/reset", json={"token": "", "new_password": ""})
+    assert resp.status_code == 400
+
+
+def test_auth_oauth_authorize_returns_redirect_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/oauth/authorize asks the provider for a redirect URL."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider("google", email="oa@e.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/authorize",
+        json={"provider_id": "google", "callback_url": "http://127.0.0.1:9999/cb"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    assert body["url"].startswith("https://google.example.com/auth")
+
+
+def test_auth_oauth_authorize_unknown_provider_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/oauth/authorize returns status=ERROR for a provider that isn't registered."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/authorize",
+        json={"provider_id": "unknown", "callback_url": "http://127.0.0.1/cb"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ERROR"
+
+
+def test_auth_oauth_callback_creates_user_and_returns_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/oauth/callback links the provider user, creates an account, and returns tokens."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider(
+        "google",
+        email="cb@e.com",
+        third_party_user_id="tp-1",
+        display_name="Callback User",
+    )
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/callback",
+        json={
+            "provider_id": "google",
+            "callback_url": "http://127.0.0.1:9999/cb",
+            "query_params": {"code": "abc", "state": "xyz"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    assert body["user"]["email"] == "cb@e.com"
+    assert body["user"]["display_name"] == "Callback User"
+    assert body["tokens"]["access_token"].startswith("at-")
+    assert "cb@e.com" in backend.accounts_by_email
+
+
+def test_auth_oauth_callback_unknown_provider_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/oauth/callback returns status=ERROR for a provider that isn't registered."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/callback",
+        json={
+            "provider_id": "missing",
+            "callback_url": "http://127.0.0.1/cb",
+            "query_params": {},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ERROR"
+
+
+def test_auth_get_user_returns_provider_email_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/users/{user_id} reports 'email' for password-registered accounts."""
+    backend = _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post("/auth/signup", json={"email": "gu@e.com", "password": "password123"})
+    user_id = backend.accounts_by_email["gu@e.com"].user_id
+    resp = client.get(f"/auth/users/{user_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provider"] == "email"
+    assert body["email"] == "gu@e.com"
+
+
+def test_auth_get_user_reports_third_party_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/users/{user_id} reports the OAuth provider ID for OAuth accounts."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider("google", email="oauth-user@e.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    client.post(
+        "/auth/oauth/callback",
+        json={
+            "provider_id": "google",
+            "callback_url": "http://127.0.0.1/cb",
+            "query_params": {"code": "a"},
+        },
+    )
+    user_id = backend.accounts_by_email["oauth-user@e.com"].user_id
+    resp = client.get(f"/auth/users/{user_id}")
+    assert resp.status_code == 200
+    assert resp.json()["provider"] == "google"
+
+
+def test_auth_get_user_missing_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/auth/users/{user_id} returns 404 when the user does not exist."""
+    _install_fake_supertokens(monkeypatch)
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/users/does-not-exist")
+    assert resp.status_code == 404
