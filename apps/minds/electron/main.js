@@ -7,11 +7,26 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const limaInstall = require('./lima-install');
 
+// Suppress ToDesktop's built-in blocking modal; we surface update-ready
+// state via a non-blocking "Update" button in the chrome titlebar instead.
+// See the `update-downloaded` listener below and `ipcMain.on('install-update')`.
 todesktop.init({
   updateReadyAction: {
-    showInstallAndRestartPrompt: 'always',
+    showInstallAndRestartPrompt: 'never',
+    showNotification: 'never',
   },
 });
+
+let updateReady = false;
+
+if (todesktop.autoUpdater) {
+  todesktop.autoUpdater.on('update-downloaded', () => {
+    updateReady = true;
+    if (chromeView && !chromeView.webContents.isDestroyed()) {
+      chromeView.webContents.send('update-ready');
+    }
+  });
+}
 
 let mainWindow = null;
 let chromeView = null;
@@ -500,6 +515,17 @@ ipcMain.on('retry', async () => {
 ipcMain.on('open-log-file', () => {
   const logPath = path.join(paths.getLogDir(), 'minds.log');
   shell.openPath(logPath);
+});
+
+// Non-blocking auto-update: the chrome titlebar polls this on load so it
+// can show the "Update" button if the download completed before the
+// chrome finished loading, and otherwise listens for 'update-ready'.
+ipcMain.handle('is-update-ready', () => updateReady);
+
+ipcMain.on('install-update', () => {
+  if (todesktop.autoUpdater) {
+    todesktop.autoUpdater.restartAndInstall();
+  }
 });
 
 ipcMain.on('window-minimize', () => {

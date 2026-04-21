@@ -50,4 +50,13 @@ contextBridge.exposeInMainWorld('minds', {
   onLimaProgress: (callback) => {
     ipcRenderer.on('lima-progress', (_event, pct) => callback(pct));
   },
+
+  // Non-blocking auto-update: chrome titlebar shows an "Update" button when
+  // ToDesktop reports an update has finished downloading. Clicking it
+  // applies the update and restarts. See main.js for the wiring.
+  isUpdateReady: () => ipcRenderer.invoke('is-update-ready'),
+  onUpdateReady: (callback) => {
+    ipcRenderer.on('update-ready', () => callback());
+  },
+  installUpdate: () => ipcRenderer.send('install-update'),
 });

@@ -692,6 +692,17 @@ body {
 }
 .minds-user-btn:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
 
+#update-btn {
+  -webkit-app-region: no-drag;
+  display: none;
+  width: auto !important; height: auto !important;
+  background: #3b82f6; color: #fff !important;
+  cursor: pointer; padding: 4px 10px; border-radius: 4px;
+  font-size: 12px; font-family: inherit; white-space: nowrap;
+  margin-right: 6px; border: none;
+}
+#update-btn:hover { background: #2563eb; }
+
 .minds-wc { display: flex; }
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
 .minds-wc button { border-radius: 0; width: 36px; height: """
@@ -757,6 +768,7 @@ body {
     </button>
   </div>
   <span class="minds-title" id="page-title">Minds</span>
+  <button id="update-btn" title="A new version is ready. Click to restart and apply.">Update</button>
   <div class="minds-user-area">
     <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>
@@ -846,6 +858,23 @@ if (isElectron) {
   document.getElementById('content-frame').style.display = 'none';
   // Hide browser sidebar panel in Electron (separate WebContentsView)
   document.getElementById('sidebar-panel').style.display = 'none';
+}
+
+// -- Non-blocking auto-update button (Electron only) --
+// The "Update" button stays hidden until ToDesktop reports that an update
+// has finished downloading. Clicking it restarts the app and applies the
+// update. Handles the race where the update finished before this page
+// loaded by querying current state once on load.
+if (isElectron) {
+  var updateBtn = document.getElementById('update-btn');
+  updateBtn.onclick = function() { window.minds.installUpdate(); };
+  function showUpdateButton() { updateBtn.style.display = 'inline-block'; }
+  window.minds.onUpdateReady(showUpdateButton);
+  if (window.minds.isUpdateReady) {
+    window.minds.isUpdateReady().then(function(ready) {
+      if (ready) showUpdateButton();
+    });
+  }
 }
 
 // -- Title tracking + auth refresh on navigation --
