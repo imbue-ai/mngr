@@ -35,8 +35,17 @@ Trigger: "draft", "build draft", "build", "pnpm dist", "todesktop build".
 Trigger: "release", "todesktop release", "promote", "ship".
 
 1. `git status --short` — flag if tree is dirty; user probably doesn't want to release code that doesn't match a pushed commit.
-2. If the user said "release this build" / "release <id>", use that id. Otherwise `pnpm dist` first so we release HEAD.
-3. Execute:
+
+2. **BUMP THE VERSION.** This is mandatory — ToDesktop's auto-updater compares installed vs channel version via semver, so re-releasing the same version number produces no update prompt for existing users. Silent no-op that wastes a release cycle.
+   - Read current: `grep '"version"' apps/minds/package.json`
+   - Pick: patch bump (`0.1.0` → `0.1.1`) for internal / dogfood changes, minor (`0.1.1` → `0.2.0`) for user-visible behavior change, major (`0.2.0` → `1.0.0`) for a public cut.
+   - When unsure, default to patch bump and tell the user what you chose.
+   - Edit `apps/minds/package.json` `"version"` field, then commit: `git add apps/minds/package.json && git commit -m "Bump minds to v<new>"`.
+   - Only skip the bump if the user explicitly says "re-release the same version" — and warn them the auto-updater will not fire.
+
+3. If the user said "release this build" / "release <id>", use that id. Otherwise `pnpm dist` first so we release HEAD (with the bumped version).
+
+4. Execute:
    ```
    (cd apps/minds && source ~/.zshrc 2>/dev/null && pnpm exec todesktop release <BUILD_ID> --force)
    ```
@@ -44,8 +53,10 @@ Trigger: "release", "todesktop release", "promote", "ship".
    ```
    (cd apps/minds && source ~/.zshrc 2>/dev/null && pnpm exec todesktop release --latest --force)
    ```
-4. Expected error: "Not all platforms were code-signed: Windows ..." — user has explicitly said "ignore Windows, we just care about Mac". Ask if they want Windows disabled on the ToDesktop dashboard, or skip release.
-5. Report the release URL / version on success.
+
+5. Expected error: "Not all platforms were code-signed: Windows ..." — user has explicitly said "ignore Windows, we just care about Mac". Ask if they want Windows disabled on the ToDesktop dashboard, or skip release.
+
+6. Report the release URL + the version number just released. Mention that existing installs will see the update on their next autoCheckInterval tick (default ~1 hour), or immediately via File > Check for Updates... in the app.
 
 ## Sub-command: create lima agent
 
