@@ -41,4 +41,13 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
+
+  // Lima lazy install (called by the create form when LIMA mode is
+  // selected, so the tarball downloads in the background while the user
+  // fills out the form).
+  ensureLima: () => ipcRenderer.invoke('ensure-lima'),
+  isLimaAvailable: () => ipcRenderer.invoke('is-lima-available'),
+  onLimaProgress: (callback) => {
+    ipcRenderer.on('lima-progress', (_event, pct) => callback(pct));
+  },
 });

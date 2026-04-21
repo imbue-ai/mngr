@@ -5,6 +5,7 @@ const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const limaInstall = require('./lima-install');
 
 todesktop.init({
   updateReadyAction: {
@@ -81,6 +82,7 @@ function createWindow() {
   // Create content view -- loads page content (landing page, workspaces, etc.)
   contentView = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -526,6 +528,28 @@ ipcMain.on('window-close', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.close();
   }
+});
+
+// -- Lima lazy install --
+// The renderer (create form) calls ensure-lima when the user picks LIMA
+// mode. We emit lima-progress events during download so the form can
+// show an inline progress pill. Resolves immediately if limactl is
+// already cached or installed on the system PATH.
+ipcMain.handle('ensure-lima', async (event) => {
+  try {
+    const result = await limaInstall.ensureLima((pct) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('lima-progress', pct);
+      }
+    });
+    return { ok: true, source: result.source };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('is-lima-available', async () => {
+  return { available: limaInstall.isLimaAvailable() };
 });
 
 // -- App lifecycle --

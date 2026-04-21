@@ -209,6 +209,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
             <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
           </select>
+          <span id="lima-status" style="margin-left:8px;font-size:12px;color:#94a3b8;"></span>
         </div>
       </div>
       <div class="form-group">
@@ -222,6 +223,67 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       </div>
     </form>
   </div>
+  <script>
+    // When LIMA mode is selected, kick off a background download of the
+    // bundled limactl (a no-op if it is already cached or a system
+    // install is on PATH). The submit handler awaits this promise so
+    // users can click Create before the download finishes.
+    var limaInstallPromise = null;
+
+    function startLimaInstallIfNeeded() {
+      if (typeof window.minds === "undefined" || !window.minds.ensureLima) {
+        return;
+      }
+      if (limaInstallPromise) return;
+      var status = document.getElementById("lima-status");
+      if (status) status.textContent = "Checking lima...";
+      limaInstallPromise = window.minds.ensureLima().then(function (result) {
+        if (!result || !result.ok) {
+          if (status) {
+            status.textContent = "Lima install failed: " +
+              (result && result.error ? result.error : "unknown error");
+            status.style.color = "#b91c1c";
+          }
+          throw new Error(result && result.error || "lima install failed");
+        }
+        if (status) status.textContent = "";
+      });
+      limaInstallPromise.catch(function () {
+        // Reset so a retry (mode change) can try again.
+        limaInstallPromise = null;
+      });
+    }
+
+    if (typeof window.minds !== "undefined" && window.minds.onLimaProgress) {
+      window.minds.onLimaProgress(function (pct) {
+        var status = document.getElementById("lima-status");
+        if (status) status.textContent = "Installing lima... " + pct + "%";
+      });
+    }
+
+    var launchModeSelect = document.getElementById("launch_mode");
+    if (launchModeSelect) {
+      launchModeSelect.addEventListener("change", function () {
+        if (launchModeSelect.value === "LIMA") startLimaInstallIfNeeded();
+      });
+      if (launchModeSelect.value === "LIMA") startLimaInstallIfNeeded();
+    }
+
+    var createForm = document.getElementById("create-form");
+    if (createForm) {
+      createForm.addEventListener("submit", function (e) {
+        if (launchModeSelect && launchModeSelect.value === "LIMA" &&
+            limaInstallPromise) {
+          e.preventDefault();
+          limaInstallPromise.then(function () {
+            createForm.submit();
+          }).catch(function () {
+            // error already shown in status pill
+          });
+        }
+      });
+    }
+  </script>
 </body>
 </html>"""
 )
