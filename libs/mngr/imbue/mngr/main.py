@@ -156,7 +156,7 @@ class AliasAwareGroup(DefaultCommandGroup):
 
 
 @click.command(cls=AliasAwareGroup)
-@click.version_option(package_name="mngr", prog_name="mngr", message="%(prog)s %(version)s")
+@click.version_option(package_name="imbue-mngr", prog_name="mngr", message="%(prog)s %(version)s")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """
@@ -250,6 +250,13 @@ def apply_plugin_cli_options(command: TCommand, command_name: str | None = None)
     return command
 
 
+def load_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
+    """Register any hookspec modules that plugins return via the register_hookspecs hook."""
+    for hookspec_module in pm.hook.register_hookspecs():
+        if hookspec_module is not None:
+            pm.add_hookspecs(hookspec_module)
+
+
 def create_plugin_manager() -> pluggy.PluginManager:
     """
     Initializes the plugin manager and loads all plugin registries.
@@ -278,6 +285,9 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # Automatically discover and load plugins registered via setuptools entry points.
     # External packages can register hooks by adding an entry point for the "mngr" group.
     pm.load_setuptools_entrypoints("mngr")
+
+    # Allow plugins to register their own hookspec modules (for plugin-specific hooks).
+    load_plugin_hookspecs(pm)
 
     # load all classes defined by plugins so they are available later
     load_all_registries(pm)
