@@ -8,7 +8,6 @@ Run with:
 """
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -26,19 +25,6 @@ pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code C
 def test_ask_simple_query(temp_git_repo: Path) -> None:
     """mngr ask should return a non-empty response from Claude."""
     env = setup_claude_trust_config_for_subprocess([temp_git_repo])
-    # DIAGNOSTIC (revert before merging): the offload sandbox stderr.log
-    # diagnostic showed ANTHROPIC_API_KEY missing from the tmux pane env
-    # even though the justfile passes it via --env. Capture where the key
-    # is set/missing along the propagation chain so the assertion message
-    # surfaces it.
-    outer_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    subprocess_key = env.get("ANTHROPIC_API_KEY", "")
-    diag_prefix = (
-        f"[env diag] os.environ ANTHROPIC_API_KEY: "
-        f"set={bool(outer_key)} len={len(outer_key)}; "
-        f"subprocess env ANTHROPIC_API_KEY: "
-        f"set={bool(subprocess_key)} len={len(subprocess_key)}\n"
-    )
     result = run_mngr_subprocess(
         "ask",
         "just say hi",
@@ -49,6 +35,6 @@ def test_ask_simple_query(temp_git_repo: Path) -> None:
         env=env,
         cwd=temp_git_repo,
     )
-    assert result.returncode == 0, f"mngr ask failed:\n{diag_prefix}{result.stderr}"
+    assert result.returncode == 0, f"mngr ask failed: {result.stderr}"
     parsed = json.loads(result.stdout)
     assert len(parsed["response"].strip()) > 0, f"Expected non-empty response, got: {parsed['response']!r}"
