@@ -48,25 +48,25 @@ class WorkspaceServerHealthTracker(MutableModel):
         default=_DEFAULT_FAILURE_THRESHOLD,
         description="Number of failures within the window that marks a server stuck",
     )
+    clock: Callable[[], float] = Field(
+        default=time.time,
+        description=(
+            "Callable returning the current UNIX timestamp. Override via constructor "
+            "to inject a deterministic clock in tests."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _failures: dict[tuple[str, str], list[float]] = PrivateAttr(default_factory=dict)
     _stuck: dict[tuple[str, str], StuckServerInfo] = PrivateAttr(default_factory=dict)
     _callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
-    # Injected monotonic-ish clock so tests can advance time deterministically
-    # instead of sleeping. Defaults to time.time.
-    _clock: Callable[[], float] = PrivateAttr(default=time.time)
-
-    def set_clock(self, clock: Callable[[], float]) -> None:
-        """Replace the clock function (used by tests to advance time without sleeping)."""
-        object.__setattr__(self, "_clock", clock)
 
     def record_failure(self, agent_id: str, server_name: str, error_class: str) -> None:
         """Note a proxy failure for (agent_id, server_name).
 
         Fires on-change callbacks when a server transitions from healthy to stuck.
         """
-        now = self._clock()
+        now = self.clock()
         fired = False
         with self._lock:
             key = (agent_id, server_name)

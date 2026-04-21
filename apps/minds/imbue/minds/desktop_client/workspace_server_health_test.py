@@ -35,8 +35,11 @@ def test_success_after_stuck_clears_state() -> None:
 def test_failures_outside_window_are_not_counted() -> None:
     """Old failures age out, preventing spurious "stuck" signals from long-quiet history."""
     now = [1000.0]
-    tracker = WorkspaceServerHealthTracker(window_seconds=30.0, failure_threshold=3)
-    tracker.set_clock(lambda: now[0])
+    tracker = WorkspaceServerHealthTracker(
+        window_seconds=30.0,
+        failure_threshold=3,
+        clock=lambda: now[0],
+    )
 
     for _ in range(2):
         tracker.record_failure("agent-1", "system_interface", "TimeoutException")
