@@ -585,15 +585,12 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     """Invoke the deployed modal function for a trigger.
 
     Calls modal.Function.from_name() to look up the deployed function and
-    invokes it remotely. Returns the full captured output of the command
-    (from run_scheduled_trigger's return value).
+    invokes it remotely. Returns the captured stdout of the mngr command
+    that the runner executed, extracted from the structured result dict
+    (shape: {"status": ..., "output": <str>, ...}).
 
-    `run_scheduled_trigger` returns a dict of shape
-    `{"status": ..., "output": <captured stdout>, ...}`; we unpack the
-    "output" field so callers can display the command output. An earlier
-    branch that returned a bare string is tolerated for back-compat.
-
-    Raises MngrError if the function is not found or the invocation fails.
+    Raises MngrError if the function is not found or the invocation fails,
+    or if the result shape is not the expected dict-with-output.
     """
     try:
         fn = modal.Function.from_name(
@@ -610,12 +607,18 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
 
-    if isinstance(result, dict):
-        output = result.get("output", "")
-        return output if isinstance(output, str) else ""
-    if isinstance(result, str):
-        return result
-    return ""
+    if not isinstance(result, dict):
+        raise MngrError(
+            f"run_scheduled_trigger returned unexpected type {type(result).__name__}; "
+            "expected a dict with an 'output' field."
+        )
+    output = result.get("output")
+    if not isinstance(output, str):
+        raise MngrError(
+            f"run_scheduled_trigger result missing string 'output' field (got {type(output).__name__}). "
+            "The trigger may need to be re-deployed with 'mngr schedule add'."
+        )
+    return output
 
 
 def remove_modal_schedule(
