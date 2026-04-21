@@ -23,17 +23,6 @@ class AgentEventQueues:
         # its own API directly -- the runtime effectively inserts the
         # unregister() call mid-register() via a GC finalizer. With a
         # non-reentrant Lock that indirect re-entrance self-deadlocks.
-        #
-        # TODO: the proper fix is to either (a) move register()'s put_nowait
-        # loop outside the critical section via two-phase registration
-        # (needs identity tracking to survive BufferBehavior.FLUSH so the
-        # ordering invariant "buffered events first, then live broadcasts"
-        # is preserved), or (b) make the SSE stream handlers async def and
-        # back event_queue with asyncio.Queue fed via loop.call_soon_threadsafe
-        # from the watcher thread. RLock buys time but keeps
-        # allocations-under-lock as a latent smell: future same-thread
-        # finalizers reaching back into this API will silently succeed
-        # instead of deadlocking loudly, which can mask real bugs.
         self._lock: threading.RLock = threading.RLock()
         self._shutdown: bool = False
 
