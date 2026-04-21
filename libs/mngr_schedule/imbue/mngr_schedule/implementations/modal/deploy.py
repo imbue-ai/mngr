@@ -116,9 +116,10 @@ def try_get_repo_root() -> Path | None:
 def _try_get_repo_root_with_error() -> tuple[Path | None, str | None]:
     """Internal: like try_get_repo_root but also returns git stderr on failure.
 
-    The second element is None on success, and git's stderr (possibly empty) on
-    failure. Callers can distinguish "no error available" (None) from "git
-    produced an empty stderr" (empty string) if they need to.
+    The second element is None on success, and git's `.strip()`-normalized
+    stderr on failure (which may itself be empty if git exits non-zero
+    without writing anything to stderr). Callers that want to surface the
+    stderr to the user should check truthiness and skip the empty case.
     """
     with ConcurrencyGroup(name="git-toplevel") as cg:
         result = cg.run_process_to_completion(
