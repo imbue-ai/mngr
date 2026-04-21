@@ -59,6 +59,7 @@ RUN if [ -f /code/build-context/current.tar.gz ]; then \
       mkdir -p /code/mngr/ && tar -xzf /code/build-context/current.tar.gz -C /code/mngr/ && rm -rf /code/build-context; \
     else \
       mv /code/build-context /code/mngr; \
+      cd /code/mngr && git init -q .; \
     fi \
     && git config --global --add safe.directory /code/mngr/ \
     && chown -R root:root /code/mngr/
