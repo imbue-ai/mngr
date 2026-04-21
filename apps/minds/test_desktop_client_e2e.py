@@ -40,34 +40,11 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.testing import clean_env
-from imbue.mngr.utils.testing import generate_test_environment_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"
 _SIGNAL_FILE = Path("/tmp/minds-e2e-done")
 _AGENT_NAME = "forever"
-
-
-@pytest.fixture(autouse=True)
-def _isolate_mngr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate each test's mngr state from the host and from other tests.
-
-    The desktop client spawns `mngr` as a subprocess via ConcurrencyGroup
-    (no explicit env= argument), so the subprocess inherits os.environ from
-    the pytest process. Without this fixture, those mngr subprocesses see
-    no MNGR_HOST_DIR / MNGR_PREFIX, mint a fresh uuid4 user_id, and create
-    an orphan mngr-<uuid> Modal environment that does not match the CI
-    cleanup script's mngr_test-* pattern.
-
-    Using the mngr_test-YYYY-MM-DD-HH-MM-SS- prefix makes any leaked envs
-    visible to cleanup_old_modal_test_environments.py as a safety net.
-    MNGR_ALLOW_PYTEST=1 is the explicit opt-in for the project config's
-    is_allowed_in_pytest=False guard (mirrors what clean_env() sets for
-    subprocess calls that go through it).
-    """
-    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / ".mngr"))
-    monkeypatch.setenv("MNGR_PREFIX", f"{generate_test_environment_name()}-")
-    monkeypatch.setenv("MNGR_ALLOW_PYTEST", "1")
 
 
 def _get_template_repo() -> str:

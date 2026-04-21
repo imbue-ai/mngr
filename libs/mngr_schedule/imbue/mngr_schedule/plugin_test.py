@@ -30,17 +30,15 @@ def test_register_cli_commands_returns_schedule_command() -> None:
 # =============================================================================
 
 
-def _make_mngr_ctx_with_profile(profile_dir: Path, default_host_dir: Path | None = None) -> MngrContext:
+def _make_mngr_ctx_with_profile(profile_dir: Path, default_host_dir: Path) -> MngrContext:
     """Create a lightweight MngrContext stand-in with profile_dir + config.default_host_dir attrs."""
-    if default_host_dir is None:
-        default_host_dir = Path.home() / ".mngr"
     config = SimpleNamespace(default_host_dir=default_host_dir)
     return cast(MngrContext, SimpleNamespace(profile_dir=profile_dir, config=config))
 
 
 def test_get_files_for_deploy_returns_empty_dict_when_no_mngr_files(tmp_path: Path) -> None:
     """get_files_for_deploy returns empty dict when no mngr config files exist."""
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -57,7 +55,7 @@ def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path) -> None:
     mngr_dir.mkdir(parents=True, exist_ok=True)
     config_file = mngr_dir / "config.toml"
     config_file.write_text("[test]\nkey = 'value'\n")
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", mngr_dir)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -77,7 +75,7 @@ def test_get_files_for_deploy_reads_config_from_deployer_host_dir(tmp_path: Path
     custom_host_dir.mkdir(parents=True, exist_ok=True)
     config_file = custom_host_dir / "config.toml"
     config_file.write_text('profile = "abc123"\n')
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", default_host_dir=custom_host_dir)
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", custom_host_dir)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -98,7 +96,7 @@ def test_get_files_for_deploy_includes_top_level_profile_files(tmp_path: Path) -
     settings_file.write_text("[test]\nvalue = 1\n")
     user_id_file = profile_dir / "user_id"
     user_id_file.write_text("abc123")
-    mngr_ctx = _make_mngr_ctx_with_profile(profile_dir)
+    mngr_ctx = _make_mngr_ctx_with_profile(profile_dir, Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -122,7 +120,7 @@ def test_get_files_for_deploy_excludes_provider_subdirectories(tmp_path: Path) -
     provider_dir = profile_dir / "providers" / "modal"
     provider_dir.mkdir(parents=True, exist_ok=True)
     (provider_dir / "modal_ssh_key").write_text("private-key")
-    mngr_ctx = _make_mngr_ctx_with_profile(profile_dir)
+    mngr_ctx = _make_mngr_ctx_with_profile(profile_dir, Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -142,7 +140,7 @@ def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(tmp_path
     mngr_dir.mkdir(parents=True, exist_ok=True)
     config_file = mngr_dir / "config.toml"
     config_file.write_text("[test]\nkey = 'value'\n")
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", mngr_dir)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -156,7 +154,7 @@ def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(tmp_path
 
 def test_get_files_for_deploy_includes_project_local_settings(tmp_path: Path) -> None:
     """get_files_for_deploy includes .mngr/settings.local.toml from the repo root."""
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     local_mngr_dir = repo_root / ".mngr"
@@ -174,7 +172,7 @@ def test_get_files_for_deploy_includes_project_local_settings(tmp_path: Path) ->
 
 def test_get_files_for_deploy_excludes_project_settings_when_flag_false(tmp_path: Path) -> None:
     """get_files_for_deploy skips project-local settings when include_project_settings is False."""
-    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     local_mngr_dir = repo_root / ".mngr"
