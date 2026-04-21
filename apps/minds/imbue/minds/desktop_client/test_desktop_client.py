@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _snapshot_stuck_for_chrome
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -1993,3 +1994,38 @@ def test_proxy_records_success_clears_stuck_state(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert tracker.snapshot_stuck() == ()
+
+
+def test_snapshot_stuck_for_chrome_orders_and_serializes() -> None:
+    """Chrome-side snapshot sorts entries deterministically and shapes them for SSE JSON.
+
+    The SSE change-detection loop compares snapshots by equality, so unstable
+    ordering would spuriously fire events. Cover the ordering + serialization
+    shape directly since the SSE stream itself can't be driven from TestClient.
+    """
+    tracker = WorkspaceServerHealthTracker(failure_threshold=1)
+    # Intentionally record in an order different from the expected sorted output.
+    tracker.record_failure("agent-b", "system_interface", "TimeoutException")
+    tracker.record_failure("agent-a", "web", "ReadError")
+    tracker.record_failure("agent-a", "system_interface", "ConnectError")
+
+    snapshot = _snapshot_stuck_for_chrome(tracker)
+
+    # Sorted by (agent_id, server_name).
+    keys = [(entry["agent_id"], entry["server_name"]) for entry in snapshot]
+    assert keys == [
+        ("agent-a", "system_interface"),
+        ("agent-a", "web"),
+        ("agent-b", "system_interface"),
+    ]
+    # Each entry carries exactly the fields the frontend expects.
+    expected_fields = {
+        "agent_id",
+        "server_name",
+        "stuck_since",
+        "failure_count",
+        "last_error_class",
+        "last_error_time",
+    }
+    for entry in snapshot:
+        assert set(entry.keys()) == expected_fields
