@@ -151,12 +151,19 @@ BRANCH="mngr/changelog-consolidation-$(date -u +%Y-%m-%d-%H-%M-%S)"
 git checkout -b "$BRANCH"
 git push --set-upstream origin "$BRANCH"
 
-PR_URL=$(gh pr create --base main --title "Changelog consolidation $DATE_STR" --body "Automated changelog consolidation for $DATE_STR." 2>&1) || {
+# Capture stdout (just the URL on success) separately from stderr (progress
+# messages like "Creating pull request for X into Y in Z"). Folding the two
+# streams together would embed multi-line text into the single-quoted Python
+# string in write_status and break status.json on the success path.
+PR_STDERR=$(mktemp)
+PR_URL=$(gh pr create --base main --title "Changelog consolidation $DATE_STR" --body "Automated changelog consolidation for $DATE_STR." 2>"$PR_STDERR") || {
     EXIT=$?
-    echo "gh pr create failed (exit $EXIT): $PR_URL"
+    echo "gh pr create failed (exit $EXIT): $(cat "$PR_STDERR")"
     write_status "failed" "" "gh pr create failed (branch pushed: $BRANCH)"
+    rm -f "$PR_STDERR"
     exit 1
 }
+rm -f "$PR_STDERR"
 
 write_status "done" "'$PR_URL'" "Opened PR for $DATE_STR"
 echo "=== done: $PR_URL ==="
