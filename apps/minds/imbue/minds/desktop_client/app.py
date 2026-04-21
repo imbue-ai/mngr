@@ -965,6 +965,36 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
+    # Block creating an agent with a name that's already taken. We previously
+    # let the underlying `mngr create --reuse --update` path handle this,
+    # which appeared to "work" (the agent got reused) but broke on the
+    # git-mirror push -- mirror push with --prune wants to delete all
+    # non-matching refs, including the currently-checked-out branch on the
+    # existing agent's bare repo, which git refuses. The user-visible symptom
+    # was a cryptic "refusing to delete the current branch" failure rather
+    # than "name is taken, pick a different one". Fail fast at the API layer
+    # instead.
+    if agent_name:
+        backend_resolver = request.app.state.backend_resolver
+        existing_names: set[str] = set()
+        for existing_id in backend_resolver.list_known_workspace_ids():
+            existing_name = backend_resolver.get_workspace_name(existing_id)
+            if existing_name is not None:
+                existing_names.add(existing_name)
+        if agent_name in existing_names:
+            return Response(
+                status_code=409,
+                content=json.dumps(
+                    {
+                        "error": (
+                            "An agent named '{}' already exists. "
+                            "Pick a different name, or destroy the existing one first."
+                        ).format(agent_name)
+                    }
+                ),
+                media_type="application/json",
+            )
+
     agent_id = agent_creator.start_creation(
         git_url,
         agent_name=agent_name,
