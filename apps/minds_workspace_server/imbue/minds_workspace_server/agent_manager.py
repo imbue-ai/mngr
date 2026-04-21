@@ -104,8 +104,6 @@ class AgentManager:
 
         ``mngr_binary`` is the path or name of the mngr executable used for
         the discovery-only observe subprocess and for agent-creation commands.
-        Tests inject a stand-in (e.g. ``/usr/bin/false``) to exercise failure
-        paths without relying on a working mngr installation.
         """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
@@ -479,8 +477,8 @@ class AgentManager:
     def _resolve_observe_events_dir(self) -> Path:
         """Return the path to the mngr observe events directory.
 
-        Does not create the directory; ``_start_observe`` is responsible for
-        creating it on the production start path.
+        Does not create the directory; ``_start_observe`` creates it before
+        spawning the subprocess.
         """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
