@@ -34,6 +34,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import make_test_agent_details
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_exists
 from imbue.mngr.utils.testing import wait_for_agent_session
 
@@ -94,8 +95,10 @@ def test_connect_via_cli_group(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     intercepted_execvp_calls: list[tuple[str, list[str]]],
+    temp_host_dir: Path,
 ) -> None:
     """Test calling connect through the main CLI group."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100009")
     agent_name = f"test-connect-cli-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -107,8 +110,8 @@ def test_connect_via_cli_group(
                 "create",
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 918273",
+                "--type",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -141,8 +144,10 @@ def test_connect_start_restarts_stopped_agent(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     intercepted_execvp_calls: list[tuple[str, list[str]]],
+    temp_host_dir: Path,
 ) -> None:
     """Test that --start (default) automatically restarts a stopped agent via the CLI."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100010")
     agent_name = f"test-connect-start-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -153,8 +158,8 @@ def test_connect_start_restarts_stopped_agent(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 736291",
+                "--type",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -198,8 +203,10 @@ def test_connect_no_start_raises_error_for_stopped_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
 ) -> None:
     """Test that --no-start raises UserInputError when agent is stopped."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100011")
     agent_name = f"test-connect-nostart-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -210,8 +217,8 @@ def test_connect_no_start_raises_error_for_stopped_agent(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 847362",
+                "--type",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

@@ -39,22 +39,28 @@ from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_source_location
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import is_param_explicit
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
+from imbue.mngr.cli.headless_runner import destroy_agent_on_exit
+from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -75,7 +81,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -146,6 +151,108 @@ def _split_address_and_target_path(raw: str) -> tuple[str, Path | None]:
     address_part, path_str = raw.split(":", 1)
     path = Path(path_str) if path_str else None
     return address_part, path
+
+
+@pure
+def _resolve_agent_type_name(
+    type_flag: str | None,
+    positional_agent_type: str | None,
+) -> str | None:
+    """Resolve the agent type name from CLI options.
+
+    Shared logic for both the early headless detection path and the full
+    _parse_agent_opts path. Returns the resolved type name, or None when
+    neither --type nor positional agent type is set (caller defaults to "claude").
+
+    Precedence: --type flag > positional argument.
+    """
+    resolved = type_flag
+    if positional_agent_type and resolved is None:
+        resolved = positional_agent_type
+    return resolved
+
+
+def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
+    """Return the agent name from the address, or auto-generate one from --name-style.
+
+    Called from ``_parse_agent_opts`` as part of the shared create pipeline
+    (which now handles both interactive and headless agents). Callers that
+    need to treat "no explicit name" differently from "auto-generate" should
+    read ``address.agent_name`` directly rather than going through this
+    helper.
+    """
+    if address.agent_name is not None:
+        return address.agent_name
+    return generate_agent_name(AgentNameStyle(opts.name_style.upper()))
+
+
+# Flags that only make sense on the interactive-create path. Everything
+# related to source resolution, transfer, git, environment, provisioning,
+# and agent identity now flows through the shared _setup_create /
+# _create_agent pipeline and so works for headless too. The flags below
+# are rejected for one of three reasons:
+#   1. They drive the post-create "connect + attach" phase that headless
+#      skips entirely (--reconnect, --attach-command, --connect-command).
+#   2. They require delivering text via agent.send_message after startup,
+#      which headless agents do not support (--edit-message).
+#   3. They only make sense for long-lived agents, not one-shot streaming
+#      agents (--reuse, --update, --start-on-boot).
+# Accepting any of these silently would confuse users, so we reject early.
+_HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
+    # --edit-message opens an editor and delivers the result via send_message
+    # after the agent boots. Headless agents have no send_message path.
+    ("edit_message", "--edit-message"),
+    ("reconnect", "--reconnect/--no-reconnect"),
+    ("attach_command", "--attach-command"),
+    ("connect_command", "--connect-command"),
+    # --reuse / --update select an existing agent by name. Headless agents
+    # are short-lived and auto-named (streaming then destroyed), so reusing
+    # one would be surprising and --update (re-create with fresh work_dir)
+    # does not fit either. Rejecting them keeps the contract explicit.
+    ("reuse", "--reuse/--no-reuse"),
+    ("update", "--update/--no-update"),
+    # start_on_boot means "restart this agent on host boot" -- doesn't apply
+    # to a one-shot streaming agent.
+    ("start_on_boot", "--start-on-boot/--no-start-on-boot"),
+    # --no-connect is allowed (redundant but consistent -- headless never connects);
+    # only explicit --connect=True is rejected. Handled in the function body below.
+)
+
+
+def _reject_incompatible_headless_flags(
+    ctx: click.Context,
+    agent_type_name: str,
+    opts: CreateCliOptions,
+) -> None:
+    """Raise UserInputError if any flags incompatible with the headless path were explicitly set.
+
+    Headless agents stream and auto-destroy after one pass, so the
+    interactive post-create flow (connect, attach, reconnect-on-drop) does
+    not apply, neither does the send_message path used by --edit-message,
+    nor do long-lived-agent flags like --reuse/--update/--start-on-boot.
+    Everything else -- source resolution, transfer, git, env, provisioning,
+    agent identity -- is shared with the non-headless path and works
+    normally. This function catches the small set of genuinely incompatible
+    flags early so they are not silently ignored.
+    """
+    explicit_flags: list[str] = [
+        display_name for param_name, display_name in _HEADLESS_INCOMPATIBLE_FLAGS if is_param_explicit(ctx, param_name)
+    ]
+
+    # --connect/--no-connect share a param. --no-connect is redundant (headless
+    # already never connects) so it's allowed; explicit --connect contradicts.
+    if is_param_explicit(ctx, "connect") and opts.connect:
+        explicit_flags.append("--connect")
+
+    if explicit_flags:
+        flags_str = ", ".join(explicit_flags)
+        raise UserInputError(
+            f"Headless agent type '{agent_type_name}' does not support: {flags_str}. "
+            f"The headless flow streams output and auto-destroys, so flags for the "
+            f"post-create connect/attach phase (e.g. --reconnect, --attach-command), "
+            f"for send-message-based delivery (--edit-message), and for long-lived "
+            f"agents (--reuse, --update, --start-on-boot) do not apply."
+        )
 
 
 @pure
@@ -240,10 +347,6 @@ class _CreateCommand(click.Command):
     help="Auto-generated name style",
 )
 @optgroup.option("--type", help="Which type of agent to run [default: claude]")
-@optgroup.option(
-    "--command",
-    help="Run a literal command using the generic agent type (mutually exclusive with --type)",
-)
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(
@@ -290,6 +393,12 @@ class _CreateCommand(click.Command):
     help="When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse",
 )
 @optgroup.option("--connect/--no-connect", default=True, help="Connect to the agent after creation [default: connect]")
+@optgroup.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Uses the same source resolution, transfer, and provisioning as non-headless create (pass --transfer=none to run in-place at --source)",
+)
 @optgroup.option(
     "--auto-start/--no-auto-start",
     "start_host",
@@ -500,6 +609,39 @@ def create(ctx: click.Context, **kwargs) -> None:
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
+        # Validate conflicting agent types early (before the headless path
+        # returns). This is the single check; _parse_agent_opts uses the
+        # shared _resolve_agent_type_name helper which assumes no conflict.
+        if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
+            raise UserInputError(
+                f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
+                f"but --type says '{opts.type}'. Use one or the other."
+            )
+
+        # Detect headless agent types and enforce the --foreground flag.
+        # --foreground is required for headless types (makes the behavior explicit)
+        # and rejected for non-headless types (it doesn't apply).
+        resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
+        is_headless = False
+        if resolved_agent_type is not None:
+            agent_class = get_agent_class(resolved_agent_type)
+            is_headless = issubclass(agent_class, StreamingHeadlessAgentMixin)
+
+        if is_headless and not opts.foreground:
+            raise UserInputError(
+                f"Agent type '{resolved_agent_type}' is a headless agent type. "
+                f"Use --foreground to run it (streams output and auto-destroys when done)."
+            )
+        if opts.foreground and not is_headless:
+            type_desc = f"'{resolved_agent_type}'" if resolved_agent_type else "'claude' (default)"
+            raise UserInputError(
+                f"--foreground is only valid with headless agent types, but {type_desc} is not headless."
+            )
+
+        if is_headless:
+            assert resolved_agent_type is not None
+            _reject_incompatible_headless_flags(ctx, resolved_agent_type, opts)
+
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
         # Filter None (unset single options) and empty tuples (unset multiple options).
         plugin_cli_params: dict[str, Any] = {
@@ -509,10 +651,18 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Setup (validation, editor session, source resolution, etc.)
         setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params, target_path)
 
-        # Create agent
+        # Create agent. Shared across headless and non-headless so that
+        # source resolution, transfer, git, env, and provisioning all work
+        # the same way for both. The fork is what happens afterwards: a
+        # headless agent is streamed and destroyed; an interactive agent
+        # is connected to and the command returns after finish.
         create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
-        _post_create(create_result, connection_opts, opts, mngr_ctx)
-        _finish_create(create_result, setup, output_opts)
+
+        if is_headless:
+            _stream_and_destroy_headless_agent(create_result, output_opts)
+        else:
+            _post_create(create_result, connection_opts, opts, mngr_ctx)
+            _finish_create(create_result, setup, output_opts)
 
 
 class _AutoLabels(FrozenModel):
@@ -547,6 +697,19 @@ class _CreateSetup(FrozenModel):
     )
 
 
+def _resolve_initial_message_content(opts: CreateCliOptions) -> str | None:
+    """Return the message content from --message / --message-file, or None.
+
+    Raises UserInputError if both flags are set. Shared between the
+    headless and non-headless create paths so they resolve the same way.
+    """
+    if opts.message is not None and opts.message_file is not None:
+        raise UserInputError("Cannot provide both --message and --message-file")
+    if opts.message_file is not None:
+        return Path(opts.message_file).read_text()
+    return opts.message
+
+
 def _setup_create(
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
@@ -557,19 +720,8 @@ def _setup_create(
     target_path: Path | None = None,
 ) -> _CreateSetup:
     """Validate options, resolve messages, start editor session, resolve source location."""
-    # Validate that both --message and --message-file are not provided
-    if opts.message is not None and opts.message_file is not None:
-        raise UserInputError("Cannot provide both --message and --message-file")
-
-    # Read message from file if --message-file is provided (used as initial content for editor if --edit-message)
-    initial_message_content: str | None
-    if opts.message_file is not None:
-        message_file_path = Path(opts.message_file)
-        initial_message_content = message_file_path.read_text()
-    elif opts.message is not None:
-        initial_message_content = opts.message
-    else:
-        initial_message_content = None
+    # Read message from --message or --message-file (used as initial content for editor if --edit-message)
+    initial_message_content: str | None = _resolve_initial_message_content(opts)
 
     # If --edit-message is set, start the editor immediately
     # The editor runs in parallel with agent creation
@@ -779,6 +931,28 @@ def _create_agent(
                 )
 
     return create_result, connection_opts
+
+
+def _stream_and_destroy_headless_agent(
+    create_result: CreateAgentResult,
+    output_opts: OutputOptions,
+) -> None:
+    """Stream the just-created headless agent's output and destroy it on exit.
+
+    Used instead of _post_create / _finish_create when the agent type is a
+    StreamingHeadlessAgentMixin. We reuse the full _setup_create +
+    _create_agent pipeline (so source resolution, transfer, git,
+    provisioning, etc. work identically to the interactive path) and only
+    diverge after the agent has been created.
+    """
+    agent = create_result.agent
+    if not isinstance(agent, StreamingHeadlessAgentMixin):
+        raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
+    with destroy_agent_on_exit(create_result.host, agent):
+        stream_or_accumulate_response(
+            chunks=agent.stream_output(),
+            output_format=output_opts.output_format,
+        )
 
 
 def _post_create(
@@ -1233,13 +1407,9 @@ def _parse_agent_opts(
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
-    # otherwise auto-generate
-    parsed_agent_name: AgentName
-    if address.agent_name is not None:
-        parsed_agent_name = address.agent_name
-    else:
-        parsed_name_style = AgentNameStyle(opts.name_style.upper())
-        parsed_agent_name = generate_agent_name(parsed_name_style)
+    # otherwise auto-generate. Runs on both interactive and headless agents
+    # since they share this pipeline.
+    parsed_agent_name = _resolve_or_generate_agent_name(address, opts)
 
     # Determine transfer mode
     transfer_mode = _resolve_transfer_mode(opts, address, source_location, mngr_ctx, target_path)
@@ -1311,34 +1481,10 @@ def _parse_agent_opts(
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
-    # Determine agent type: --type and positional are equivalent; specifying both
-    # with different values is an error. _CreateCommand.parse_args handles --
-    # correctly so positional_agent_type is always a real positional.
-    #
-    # Special case: --command implies using the "generic" agent type, which simply
-    # runs the provided command. If --type is also specified to something other
-    # than "generic", that's an error (they are mutually exclusive).
-    resolved_agent_type = opts.type
+    # Determine agent type using the shared resolution logic.
+    # Conflicting types are already validated in the create() entry point.
     resolved_agent_args = opts.agent_args
-
-    if opts.positional_agent_type and resolved_agent_type and resolved_agent_type != opts.positional_agent_type:
-        raise UserInputError(
-            f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
-            f"but --type says '{resolved_agent_type}'. Use one or the other."
-        )
-    if opts.positional_agent_type and resolved_agent_type is None:
-        resolved_agent_type = opts.positional_agent_type
-
-    # Handle --command: it implies using the "generic" agent type
-    if opts.command:
-        if resolved_agent_type is not None and resolved_agent_type != "generic":
-            raise UserInputError(
-                f"--command and --type are mutually exclusive. "
-                f"Use --command to run a literal command (implicitly uses 'generic' agent type), "
-                f"or use --type to specify an agent type like '{resolved_agent_type}'."
-            )
-        # Automatically use the "generic" agent type when --command is provided
-        resolved_agent_type = "generic"
+    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
 
     is_clone = source_agent_state_dir is not None
 
@@ -1349,7 +1495,6 @@ def _parse_agent_opts(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
         name=parsed_agent_name,
-        command=CommandString(opts.command) if opts.command else None,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
         target_path=target_path,
@@ -1623,6 +1768,15 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+Headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude) require the --foreground flag.
+This runs the headless flow: source resolution, transfer, git,
+environment, and provisioning all work the same as non-headless create,
+but the agent streams its output to stdout and is destroyed when done
+instead of being connected to. Only connect/attach-phase flags (e.g.
+--reconnect, --attach-command, --reuse) are rejected as incompatible.
+Pass --transfer=none to run the agent in-place at the source directory.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.""",
@@ -1642,6 +1796,7 @@ by pushing all local branches and tags via git. Use --transfer to override the d
         ("Create without connecting", "mngr create my-agent --no-connect"),
         ("Add extra tmux windows", 'mngr create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mngr create my-agent --reuse"),
+        ("Run a headless agent", "mngr create --type headless_command --foreground -t my-command-template"),
     ),
     see_also=(
         ("connect", "Connect to an existing agent"),

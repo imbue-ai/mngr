@@ -25,6 +25,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 
 
 class MngrListError(Exception):
@@ -130,6 +131,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
        - Idle snapshot (created during shutdown)
     """
     # Use a unique agent name for this test
+    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100112")
     agent_name = f"test-idle-snap-{get_short_random_string()}"
 
     source_dir = tmp_path / "source"
@@ -159,9 +161,11 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     # Create an agent with:
     # - Very short idle timeout (15 seconds) so it shuts down quickly
     # - Short sandbox timeout (120 seconds) with buffer time for clean shutdown
-    # - Echo command that exits immediately so the host becomes idle
-    # - idle-mode=boot so only BOOT activity is checked (not PROCESS which
-    #   keeps getting updated while the tmux bash shell is running)
+    # - A long-running sleep as the agent command (from the test-sleep agent
+    #   type). idle-mode=boot only checks BOOT activity, which flips off once
+    #   the host finishes booting, so the sleep running indefinitely is fine.
+    # - idle-mode=boot (not PROCESS, which keeps updating while the tmux bash
+    #   shell is alive and would prevent the host from ever looking idle)
     result = subprocess.run(
         [
             "uv",
@@ -169,7 +173,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "generic",
+            modal_test_sleep_agent_type,
             "--no-connect",
             "--no-ensure-clean",
             "--source",
@@ -179,7 +183,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "15",
             # Use boot idle mode so only BOOT activity is checked
             # (the default IO mode includes PROCESS which keeps getting
-            # updated while the tmux bash shell is alive after echo exits)
+            # updated while the tmux bash shell is alive)
             "--idle-mode",
             "boot",
             # Set sandbox timeout to 120 seconds via build args
@@ -190,8 +194,6 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "--file=libs/mngr/imbue/mngr/resources/Dockerfile",
             "-b",
             "context-dir=.mngr/dev/build/",
-            "--",
-            "echo hi && sleep 300",
         ],
         capture_output=True,
         text=True,
@@ -222,10 +224,11 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
         f"Expected 'initial' snapshot after agent creation, but found snapshots: {initial_snapshot_names}"
     )
 
-    # Wait for the host to become idle and shut down
-    # The echo command exits immediately, so the host should become idle
-    # after the 15-second idle timeout, then the activity_watcher will
-    # call shutdown.sh which calls snapshot_and_shutdown
+    # Wait for the host to become idle and shut down.
+    # With idle-mode=boot, only BOOT activity is checked; once boot finishes
+    # the boot flag stops updating, so the host becomes idle after the
+    # 15-second idle timeout. The activity_watcher then calls shutdown.sh
+    # which calls snapshot_and_shutdown.
     #
     # Total wait time budget:
     # - ~15 seconds for idle timeout

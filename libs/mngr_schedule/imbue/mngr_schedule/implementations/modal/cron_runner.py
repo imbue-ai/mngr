@@ -139,8 +139,13 @@ def _run_and_stream(
     is_checked: bool = True,
     cwd: str | None = None,
     is_shell: bool = False,
-) -> int:
-    """Run a command, streaming output to stdout in real time."""
+) -> tuple[int, str]:
+    """Run a command, streaming output to stdout in real time.
+
+    Returns (exit_code, captured_output). The captured output contains
+    the full stdout+stderr of the command. On failure, the last 50 lines
+    are included in the RuntimeError for diagnostics.
+    """
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -151,21 +156,25 @@ def _run_and_stream(
         shell=is_shell,
     )
     assert process.stdout is not None
+    captured_lines: list[str] = []
     for line in process.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
+        captured_lines.append(line)
     process.wait()
+    full_output = "".join(captured_lines)
     if is_checked and process.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}")
-    return process.returncode
+        tail = "".join(captured_lines[-50:])
+        raise RuntimeError(f"Command failed with exit code {process.returncode}: {cmd}\nLast output:\n{tail}")
+    return process.returncode, full_output
 
 
 @app.function(
     schedule=modal.Cron(_CRON_SCHEDULE, timezone=_CRON_TIMEZONE),
     timeout=3600,
 )
-def run_scheduled_trigger() -> None:
-    """Run the scheduled mngr command.
+def run_scheduled_trigger() -> str:
+    """Run the scheduled mngr command and return its output.
 
     This function executes on the cron schedule and:
     1. Checks if the trigger is enabled
@@ -180,7 +189,7 @@ def run_scheduled_trigger() -> None:
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        return
+        return ""
 
     # Load consolidated env vars into the process environment so that the
     # mngr CLI and any subprocesses it spawns have access to them.
@@ -228,6 +237,8 @@ def run_scheduled_trigger() -> None:
     print(f"Currently in {os.getcwd()}")
 
     print(f"Running: {' '.join(cmd)}")
-    exit_code = _run_and_stream(cmd, is_checked=False)
+    exit_code, full_output = _run_and_stream(cmd, is_checked=False)
     if exit_code != 0:
-        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}")
+        raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nOutput:\n{full_output}")
+
+    return full_output

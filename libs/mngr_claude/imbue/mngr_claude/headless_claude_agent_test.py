@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -232,6 +233,108 @@ def test_assemble_command_raises_without_command(
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_config=config)
     with pytest.raises(NoCommandDefinedError):
         agent.assemble_command(host, agent_args=(), command_override=None)
+
+
+def test_stage_initial_message_writes_prompt_file_in_state_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """stage_initial_message writes the prompt into the agent's state dir (not work dir).
+
+    Writing to the state dir means the file is blown away when the agent is
+    destroyed, so it never leaks into an in-place source directory.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    # The agent state dir is normally created by create_agent_state; mirror
+    # that here so stage_initial_message's write has a parent directory.
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    agent.stage_initial_message("please fix the tests")
+
+    assert (agent_dir / ".mngr-prompt").read_text() == "please fix the tests"
+    # Work dir remains clean.
+    assert not (agent.work_dir / ".mngr-prompt").exists()
+
+
+def test_assemble_command_appends_prompt_ref_when_initial_message_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When initial_message is passed (via Host.create_agent_state from
+    CreateAgentOptions.initial_message) and agent_args do not already
+    reference the prompt file, assemble_command appends a cat of
+    $MNGR_AGENT_STATE_DIR/.mngr-prompt so claude actually receives the
+    user's message.
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None, initial_message="hi there")
+
+    assert ".mngr-prompt" in cmd
+    # Cat-form against the state dir (not the work dir), so cleanup is automatic.
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in cmd
+
+
+def test_assemble_command_does_not_duplicate_prompt_ref(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """If the caller already included a state-dir .mngr-prompt reference in agent_args,
+    assemble_command must not append a second one (would double-feed the prompt).
+    """
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    explicit_prompt_arg = '"$(cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt")"'
+    cmd = agent.assemble_command(
+        host, agent_args=(explicit_prompt_arg,), command_override=None, initial_message="hi there"
+    )
+
+    assert cmd.count(".mngr-prompt") == 1
+
+
+def test_assemble_command_no_prompt_ref_when_no_initial_message(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """No initial_message supplied = no appended prompt reference."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    assert ".mngr-prompt" not in cmd
+
+
+def test_create_agent_state_persists_prompt_cat_in_command_for_headless_claude(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """End-to-end regression: Host.create_agent_state must thread
+    options.initial_message into HeadlessClaude.assemble_command so the
+    persisted command (in data.json) actually cats the staged prompt.
+
+    Unit tests on assemble_command alone cannot catch a regression where
+    create_agent_state forgets to forward initial_message -- that is the
+    original bug this test pins down. Reading the command back from
+    data.json mirrors what start_agents does in production via
+    _get_agent_command.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    options = CreateAgentOptions(
+        name=AgentName("test-prompt-plumbing"),
+        agent_type=AgentTypeName("headless_claude"),
+        command=CommandString("claude"),
+        initial_message="hello from the regression test",
+    )
+    agent = host.create_agent_state(work_dir, options)
+
+    data_path = host.host_dir / "agents" / str(agent.id) / "data.json"
+    persisted = json.loads(data_path.read_text())
+    assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in persisted["command"]
 
 
 def test_assemble_command_is_posix_compatible(

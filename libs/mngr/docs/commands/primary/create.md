@@ -30,6 +30,15 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
+Headless agent types (those implementing StreamingHeadlessAgentMixin,
+like headless_command and headless_claude) require the --foreground flag.
+This runs the headless flow: source resolution, transfer, git,
+environment, and provisioning all work the same as non-headless create,
+but the agent streams its output to stdout and is destroyed when done
+instead of being connected to. Only connect/attach-phase flags (e.g.
+--reconnect, --attach-command, --reuse) are rejected as incompatible.
+Pass --transfer=none to run the agent in-place at the source directory.
+
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
 by pushing all local branches and tags via git. Use --transfer to override the default.
@@ -65,7 +74,6 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
-| `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
@@ -88,6 +96,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create) | `False` |
 | `--update`, `--no-update` | boolean | When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
+| `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Uses the same source resolution, transfer, and provisioning as non-headless create (pass --transfer=none to run in-place at --source) | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
 | `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
 
@@ -364,4 +373,10 @@ $ mngr create my-agent -w server="npm run dev"
 
 ```bash
 $ mngr create my-agent --reuse
+```
+
+**Run a headless agent**
+
+```bash
+$ mngr create --type headless_command --foreground -t my-command-template
 ```

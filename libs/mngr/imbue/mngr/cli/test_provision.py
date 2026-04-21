@@ -9,6 +9,7 @@ from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -21,7 +22,7 @@ def test_provision_existing_agent(
 ) -> None:
     """Test that provisioning an existing agent succeeds."""
     agent_name = f"test-provision-{get_short_random_string()}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300003")
 
     result = cli_runner.invoke(
         provision,
@@ -44,7 +45,7 @@ def test_provision_with_extra_provision_command(
     agent_name = f"test-prov-cmd-{get_short_random_string()}"
     marker_file = tmp_path / "provision_marker.txt"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300004")
 
     result = cli_runner.invoke(
         provision,
@@ -72,7 +73,7 @@ def test_provision_with_env_var(
     """Test that provisioning with --env sets environment variables."""
     agent_name = f"test-prov-env-{get_short_random_string()}"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300005")
 
     result = cli_runner.invoke(
         provision,
@@ -108,6 +109,7 @@ def test_provision_preserves_existing_env_vars(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that provisioning preserves existing environment variables."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100061")
     agent_name = f"test-prov-env-preserve-{get_short_random_string()}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -118,8 +120,8 @@ def test_provision_preserves_existing_env_vars(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 849127",
+                "--type",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -171,7 +173,7 @@ def test_provision_with_upload_file(
     local_file.write_text("uploaded content")
     remote_path = tmp_path / "upload_destination.txt"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300006")
 
     result = cli_runner.invoke(
         provision,
@@ -212,7 +214,7 @@ def test_provision_with_agent_option(
     """Test that --agent option works as an alternative to positional argument."""
     agent_name = f"test-prov-opt-{get_short_random_string()}"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300007")
 
     result = cli_runner.invoke(
         provision,
@@ -255,7 +257,7 @@ def test_provision_json_output(
     """Test that --format json produces JSON output."""
     agent_name = f"test-prov-json-{get_short_random_string()}"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300008")
 
     result = cli_runner.invoke(
         provision,
@@ -286,7 +288,7 @@ def test_provision_stopped_agent(
     """
     agent_name = f"test-prov-stopped-{get_short_random_string()}"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300009")
 
     # Stop the agent
     stop_result = cli_runner.invoke(
@@ -324,7 +326,7 @@ def test_provision_stopped_agent_with_extra_provision_command(
     agent_name = f"test-prov-stopped-cmd-{get_short_random_string()}"
     marker_file = tmp_path / "stopped_provision_marker.txt"
 
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300010")
 
     # Stop the agent
     stop_result = cli_runner.invoke(
@@ -364,7 +366,7 @@ def test_provision_running_agent_restarts_by_default(
     and should be running after provisioning completes.
     """
     agent_name = f"test-prov-restart-{get_short_random_string()}"
-    session_name = create_test_agent(agent_name)
+    session_name = create_test_agent(agent_name, "sleep 300011")
 
     # Verify agent is running before provisioning
     assert tmux_session_exists(session_name), "Agent should be running before provision"
@@ -396,7 +398,7 @@ def test_provision_running_agent_no_restart_keeps_running(
 ) -> None:
     """Test that --no-restart does not stop/restart a running agent."""
     agent_name = f"test-prov-norestart-{get_short_random_string()}"
-    session_name = create_test_agent(agent_name)
+    session_name = create_test_agent(agent_name, "sleep 300012")
 
     # Verify agent is running before provisioning
     assert tmux_session_exists(session_name), "Agent should be running before provision"
@@ -427,7 +429,7 @@ def test_provision_stopped_agent_stays_stopped_with_restart(
     be restarted. A stopped agent should remain stopped.
     """
     agent_name = f"test-prov-stopped-norestart-{get_short_random_string()}"
-    session_name = create_test_agent(agent_name)
+    session_name = create_test_agent(agent_name, "sleep 300013")
 
     # Stop the agent
     stop_result = cli_runner.invoke(

@@ -18,6 +18,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -78,8 +79,10 @@ def test_rename_running_agent_renames_tmux_session(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
 ) -> None:
     """Test renaming a running agent also renames the tmux session."""
+    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100062")
     agent_name = f"test-rename-running-{uuid4().hex}"
     new_name = f"test-renamed-running-{uuid4().hex}"
     old_session_name = f"{mngr_test_prefix}{agent_name}"
@@ -91,8 +94,8 @@ def test_rename_running_agent_renames_tmux_session(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 493817",
+                "--type",
+                test_sleep_agent_type,
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",

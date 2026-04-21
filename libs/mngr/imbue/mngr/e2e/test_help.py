@@ -38,4 +38,4 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("--no-connect")
-    expect(result.stdout).to_contain("--command")
+    expect(result.stdout).to_contain("--type")
