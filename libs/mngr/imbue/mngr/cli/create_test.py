@@ -60,6 +60,8 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -740,12 +742,12 @@ def test_create_headless_streams_output(
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
     settings_path = profile_dir / "settings.toml"
-    settings_doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
+    settings_doc = load_config_file_tomlkit(settings_path)
     agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
     type_table = tomlkit.table()
     type_table["command"] = "echo headless-test-output"
     agent_types["headless_command"] = type_table
-    settings_path.write_text(tomlkit.dumps(settings_doc))
+    save_config_file(settings_path, settings_doc)
     result = cli_runner.invoke(
         create,
         [
