@@ -8,6 +8,7 @@ from typing import cast
 import click
 import pluggy
 import pytest
+import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
@@ -60,7 +61,23 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
-from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
+
+
+def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, command: str) -> None:
+    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+
+    Inlines the load / setdefault("agent_types") / save dance so tests that
+    declare a lightweight agent type do not need a top-level helper.
+    """
+    settings_doc = load_config_file_tomlkit(settings_path)
+    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    type_table = tomlkit.table()
+    type_table["command"] = command
+    agent_types[type_name] = type_table
+    save_config_file(settings_path, settings_doc)
+
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -786,7 +803,9 @@ def test_create_headless_streams_output(
     source dir, which is slow and unnecessary for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
     source_dir = tmp_path / "headless-src"
     source_dir.mkdir()
     result = cli_runner.invoke(
@@ -825,7 +844,9 @@ def test_create_headless_with_message_does_not_raise(
     checking that the flow completes when --message is supplied.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
     source_dir = tmp_path / "headless-src"
     source_dir.mkdir()
     result = cli_runner.invoke(
@@ -1024,7 +1045,7 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
     work directory path.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "pwd")
+    _write_agent_type_command_to_settings(profile_dir / "settings.toml", "headless_command", "pwd")
     # Use a nested dir so the source-must-not-contain-state-dir check (which
     # scans for ``.mngr/``) does not fire against the shared pytest tmp root.
     source_dir = tmp_path / "headless-src"

@@ -13,7 +13,6 @@ from imbue.mngr.cli.create import create
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -24,10 +23,8 @@ def test_destroy_single_agent(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test destroying a single agent."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100030")
     agent_name = f"test-destroy-single-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -38,12 +35,15 @@ def test_destroy_single_agent(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120001",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -78,10 +78,8 @@ def test_destroy_single_agent_via_session(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test destroying a single agent using the --session option."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100031")
     agent_name = f"test-destroy-session-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -92,12 +90,15 @@ def test_destroy_single_agent_via_session(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120002",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -132,14 +133,12 @@ def test_destroy_with_confirmation(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test destroying a stopped agent with confirmation prompt.
 
     Stops the tmux session before calling destroy so the agent is not running,
     since non-force destroy blocks running agents.
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100032")
     agent_name = f"test-destroy-confirm-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -150,12 +149,15 @@ def test_destroy_with_confirmation(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -194,10 +196,8 @@ def test_destroy_blocks_running_agent_without_force(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that destroying a running agent without --force is blocked with expected message."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100033")
     agent_name = f"test-destroy-blocked-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -208,12 +208,15 @@ def test_destroy_blocks_running_agent_without_force(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120004",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -264,7 +267,6 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that destroy fails if any specified identifier doesn't match an agent.
 
@@ -272,7 +274,6 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
     1. Fail without destroying any agents
     2. Include all missing identifiers in the error message
     """
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100034")
     agent_name = f"test-destroy-partial-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     nonexistent_name1 = "nonexistent-agent-897231"
@@ -286,12 +287,15 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120005",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -329,10 +333,8 @@ def test_destroy_multiple_agents(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test destroying multiple agents at once."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100035")
     timestamp = int(time.time())
     agent_name1 = f"test-destroy-multi1-{timestamp}"
     agent_name2 = f"test-destroy-multi2-{timestamp}"
@@ -350,12 +352,15 @@ def test_destroy_multiple_agents(
                     "--name",
                     agent_name,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "120006",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
@@ -493,10 +498,8 @@ def test_destroy_remove_created_branch_deletes_branch(
     temp_git_repo: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --remove-created-branch deletes the git branch after destroying a worktree agent."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100036")
     agent_name = f"test-rm-branch-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     branch_name = f"mngr/{agent_name}"
@@ -508,12 +511,15 @@ def test_destroy_remove_created_branch_deletes_branch(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
                 "--transfer=git-worktree",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120007",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -543,10 +549,8 @@ def test_destroy_without_remove_created_branch_leaves_branch(
     temp_git_repo: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that destroy without --remove-created-branch leaves the git branch intact."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100037")
     agent_name = f"test-keep-branch-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
     branch_name = f"mngr/{agent_name}"
@@ -558,12 +562,15 @@ def test_destroy_without_remove_created_branch_leaves_branch(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
                 "--transfer=git-worktree",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120008",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -592,10 +599,8 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test that --remove-created-branch is a no-op when agent has no created_branch_name."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100038")
     agent_name = f"test-no-branch-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -606,12 +611,15 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
                 "--name",
                 agent_name,
                 "--type",
-                test_sleep_agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120009",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -636,10 +644,8 @@ def test_destroy_via_stdin(
     temp_work_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
 ) -> None:
     """Test destroying multiple agents by piping names via stdin ('-')."""
-    test_sleep_agent_type = make_test_sleep_agent_type(temp_host_dir, "sleep 100039")
     timestamp = int(time.time())
     agent_name1 = f"test-destroy-stdin1-{timestamp}"
     agent_name2 = f"test-destroy-stdin2-{timestamp}"
@@ -657,12 +663,15 @@ def test_destroy_via_stdin(
                     "--name",
                     agent_name,
                     "--type",
-                    test_sleep_agent_type,
+                    "command",
                     "--source",
                     str(temp_work_dir),
                     "--transfer=none",
                     "--no-connect",
                     "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "120011",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,

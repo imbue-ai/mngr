@@ -41,7 +41,7 @@ def _build_ttyd_command() -> str:
         "_write_evt() { "
         'local _N="$1" _U="$2"; '
         '_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"); '
-        '_EID="evt-$(echo "$_N:$_U" | sha256sum | cut -c1-32)"; '
+        '_EID="evt-$(tr -d - < /proc/sys/kernel/random/uuid)"; '
         'printf \'{"timestamp":"%s","type":"server_registered","event_id":"%s","source":"servers",'
         '"server":"%s","url":"%s"}\\n\' '
         '"$_TS" "$_EID" "$_N" "$_U" >> "$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl"; '

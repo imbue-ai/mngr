@@ -13,7 +13,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_env(e2e: E2eSession) -> None:
-    env_echo_agent_type = e2e.make_sleep_agent_type("echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 99999")
     e2e.write_tutorial_block("""
     # you can set environment variables for the agent:
     mngr create my-task --env DEBUG=true
@@ -21,9 +20,14 @@ def test_create_with_env(e2e: E2eSession) -> None:
     """)
     # Use a unique value so we can verify it appears in the tmux pane
     env_value = uuid.uuid4().hex
+    # Pass the compound command as a single argument after ``--`` so that
+    # ``&&`` reaches the agent's shell instead of being interpreted by the
+    # outer e2e runner shell. The command agent joins agent_args with spaces,
+    # so a single quoted arg is preserved verbatim.
     expect(
         e2e.run(
-            f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type {env_echo_agent_type} --no-ensure-clean",
+            f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type command --no-ensure-clean"
+            " -- 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100116'",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
@@ -47,7 +51,6 @@ def test_create_with_env(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_pass_env(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100093")
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
     export API_KEY=abc123
@@ -56,7 +59,7 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"API_KEY=abc123 mngr create my-task --pass-env API_KEY --type {sleep_agent_type} --no-ensure-clean",
+            "API_KEY=abc123 mngr create my-task --pass-env API_KEY --type command --no-ensure-clean -- sleep 100093",
             comment="it is *strongly encouraged* to use either use --env-file or --pass-env",
         )
     ).to_succeed()
@@ -68,7 +71,6 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100094")
     e2e.write_tutorial_block("""
     # you can use templates to quickly apply a set of preconfigured options:
     echo '[create_templates.my_modal_template]' >> .mngr/settings.local.toml
@@ -94,7 +96,7 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
     # The template sets provider=modal which is disabled, so create should fail
     result = e2e.run(
-        f"mngr create my-task --template my_modal_template --type {sleep_agent_type} --no-ensure-clean",
+        "mngr create my-task --template my_modal_template --type command --no-ensure-clean -- sleep 100094",
         comment="templates are defined in your config",
     )
     # Expect failure because the modal provider is disabled in the test environment
@@ -106,13 +108,12 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_with_plugin_flags(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100095")
     e2e.write_tutorial_block("""
     # you can enable or disable specific plugins:
     mngr create my-task --plugin my-plugin --disable-plugin other-plugin
     """)
     result = e2e.run(
-        f"mngr create my-task --plugin my-plugin --disable-plugin other-plugin --type {sleep_agent_type} --no-ensure-clean",
+        "mngr create my-task --plugin my-plugin --disable-plugin other-plugin --type command --no-ensure-clean -- sleep 100095",
         comment="you can enable or disable specific plugins",
     )
     # The plugin flags should be accepted by the CLI (no "No such option" error).
@@ -129,7 +130,6 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100096")
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
     echo "alias mc='mngr create --transfer=none'" >> ~/.bashrc && source ~/.bashrc
@@ -137,7 +137,7 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --transfer=none --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100096",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
@@ -205,14 +205,13 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_label(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100097")
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:
     mngr create my-task --label team=backend --host-label env=staging
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --label team=backend --host-label env=staging",
+            "mngr create my-task --type command --no-ensure-clean --label team=backend --host-label env=staging -- sleep 100097",
             comment="you can add labels to organize your agents and tags for host metadata",
         )
     ).to_succeed()
