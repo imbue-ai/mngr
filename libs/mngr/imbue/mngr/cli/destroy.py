@@ -49,6 +49,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import remove_worktree
@@ -70,8 +71,8 @@ class _DestroyTargets(FrozenModel):
 
     model_config = {**FrozenModel.model_config, "arbitrary_types_allowed": True}
 
-    online_agents: list[tuple[AgentInterface, OnlineHostInterface]] = Field(
-        description="Agents on online hosts to destroy, paired with their host"
+    online_agents: list[tuple[AgentInterface, OnlineHostInterface, ProviderInstanceName]] = Field(
+        description="Agents on online hosts to destroy, paired with their host and provider name"
     )
     offline_hosts: list[_OfflineHostToDestroy] = Field(
         description="Offline hosts where all agents are targeted for destruction"
@@ -226,6 +227,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     # Destroy all targets (online agents + offline hosts) in parallel
     destroyed_agents: list[AgentName] = []
+    destroyed_provider_names: set[ProviderInstanceName] = set()
     worktrees_to_remove: list[tuple[Path, Path]] = []
     branches_to_remove: list[tuple[str, Path]] = []
     results_lock = threading.Lock()
@@ -234,17 +236,19 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         parent_cg=mngr_ctx.concurrency_group, name="destroy_agents", max_workers=32
     ) as executor:
         futures: list[Future[None]] = []
-        for agent, host in targets.online_agents:
+        for agent, host, provider_name in targets.online_agents:
             futures.append(
                 executor.submit(
                     _destroy_single_online_agent,
                     agent,
                     host,
+                    provider_name,
                     opts,
                     output_opts,
                     mngr_ctx,
                     results_lock,
                     destroyed_agents,
+                    destroyed_provider_names,
                     worktrees_to_remove,
                     branches_to_remove,
                 )
@@ -258,6 +262,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     mngr_ctx,
                     results_lock,
                     destroyed_agents,
+                    destroyed_provider_names,
                 )
             )
 
@@ -277,9 +282,15 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     for created_branch, source_repo_path in branches_to_remove:
         _remove_created_branch(created_branch, source_repo_path, mngr_ctx.concurrency_group, output_opts)
 
-    # Run garbage collection if enabled
+    # Run garbage collection if enabled, scoped to the providers we actually touched
+    # so we don't eagerly instantiate unrelated providers (which could create cloud
+    # resources as a side effect, e.g. a Modal environment).
     if opts.gc and destroyed_agents:
-        _run_post_destroy_gc(mngr_ctx=mngr_ctx, output_opts=output_opts)
+        _run_post_destroy_gc(
+            mngr_ctx=mngr_ctx,
+            output_opts=output_opts,
+            provider_names=tuple(sorted(str(p) for p in destroyed_provider_names)),
+        )
 
     # Output final result
     _output_result(destroyed_agents, output_opts)
@@ -324,7 +335,7 @@ def _partition_destroy_targets(
 
     Each host is resolved in parallel via a ConcurrencyGroupExecutor.
     """
-    online_agents: list[tuple[AgentInterface, OnlineHostInterface]] = []
+    online_agents: list[tuple[AgentInterface, OnlineHostInterface, ProviderInstanceName]] = []
     offline_hosts: list[_OfflineHostToDestroy] = []
     results_lock = threading.Lock()
 
@@ -364,7 +375,7 @@ def _resolve_host_for_partition(
     matches: Sequence[AgentMatch],
     mngr_ctx: MngrContext,
     results_lock: threading.Lock,
-    online_agents: list[tuple[AgentInterface, OnlineHostInterface]],
+    online_agents: list[tuple[AgentInterface, OnlineHostInterface, ProviderInstanceName]],
     offline_hosts: list[_OfflineHostToDestroy],
 ) -> None:
     """Resolve a single host and categorize its agents for destruction."""
@@ -392,7 +403,7 @@ def _resolve_host_for_partition(
             with results_lock:
                 for agent in agents:
                     if agent.id in matched_ids:
-                        online_agents.append((agent, online_host))
+                        online_agents.append((agent, online_host, provider_name))
         case HostInterface() as offline_host:
             _check_all_agents_targeted_on_offline_host(
                 offline_host, matched_ids, host_id_str, offline_hosts, provider, results_lock
@@ -404,11 +415,13 @@ def _resolve_host_for_partition(
 def _destroy_single_online_agent(
     agent: AgentInterface,
     host: OnlineHostInterface,
+    provider_name: ProviderInstanceName,
     opts: DestroyCliOptions,
     output_opts: OutputOptions,
     mngr_ctx: MngrContext,
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
+    destroyed_provider_names: set[ProviderInstanceName],
     worktrees_to_remove: list[tuple[Path, Path]],
     branches_to_remove: list[tuple[str, Path]],
 ) -> None:
@@ -439,6 +452,7 @@ def _destroy_single_online_agent(
         mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
         with results_lock:
             destroyed_agents.append(agent.name)
+            destroyed_provider_names.add(provider_name)
         _output(f"Destroyed agent: {agent_display}", output_opts)
 
         # Emit agent_destroyed event, then re-emit remaining host state
@@ -455,6 +469,7 @@ def _destroy_single_offline_host(
     mngr_ctx: MngrContext,
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
+    destroyed_provider_names: set[ProviderInstanceName],
 ) -> None:
     """Destroy a single offline host and all its agents. Thread-safe."""
     host_name = offline.host.get_name()
@@ -465,6 +480,7 @@ def _destroy_single_offline_host(
         mngr_ctx.pm.hook.on_host_destroyed(host=offline.host, mngr_ctx=mngr_ctx)
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
+            destroyed_provider_names.add(offline.provider.name)
         for name in offline.agent_names:
             _output(f"Destroyed agent: {name}@{host_name} (via host destruction)", output_opts)
 
@@ -511,7 +527,7 @@ def _check_all_agents_targeted_on_offline_host(
 def _confirm_destruction(targets: _DestroyTargets) -> None:
     """Prompt user to confirm destruction of agents."""
     write_human_line("\nThe following agents will be destroyed:")
-    for agent, host in targets.online_agents:
+    for agent, host, _provider_name in targets.online_agents:
         write_human_line("  - {}@{}", agent.name, host.get_name())
     for offline in targets.offline_hosts:
         host_name = offline.host.get_name()
@@ -573,16 +589,24 @@ def _remove_created_branch(
         logger.warning("Failed to delete branch {}: {}", branch_name, e)
 
 
-def _run_post_destroy_gc(mngr_ctx: MngrContext, output_opts: OutputOptions) -> None:
+def _run_post_destroy_gc(
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+    provider_names: tuple[str, ...],
+) -> None:
     """Run garbage collection after destroying agents.
 
     This cleans up orphaned host-level resources (machines, work dirs, snapshots, volumes).
     Errors are logged but don't prevent destroy from reporting success.
+
+    provider_names scopes GC to the providers whose agents were actually destroyed,
+    so unrelated providers are not eagerly instantiated. This matters because some
+    provider backends (e.g. Modal) create cloud resources on construction.
     """
     try:
         _output("Garbage collecting...", output_opts)
 
-        providers = get_all_provider_instances(mngr_ctx)
+        providers = get_all_provider_instances(mngr_ctx, provider_names=provider_names)
 
         resource_types = GcResourceTypes(
             is_machines=True,
