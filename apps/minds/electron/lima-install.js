@@ -63,6 +63,7 @@ function isBundledLimaReady() {
 // a fallback so users with `brew install lima` keep working without a
 // second copy of the binary.
 function findSystemLimactl() {
+  if (process.env.MINDS_SKIP_SYSTEM_LIMA === '1') return null;
   const candidates = [
     '/opt/homebrew/bin/limactl',
     '/usr/local/bin/limactl',
