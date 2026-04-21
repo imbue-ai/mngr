@@ -117,8 +117,12 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
 
         uvBin = uvPath;
         args = [
+          // -v lifts INFO-level logs (lifecycle: "mngr observe started",
+          // "observe exited unexpectedly", etc.) into minds.log so user bug
+          // reports contain enough context to debug "Discovering agents..."
+          // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
-          'minds', '--format', 'jsonl',
+          'minds', '-v', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
