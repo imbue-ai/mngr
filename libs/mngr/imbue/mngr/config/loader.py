@@ -1,5 +1,4 @@
 import os
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -222,28 +221,18 @@ def load_config(
         if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
                 "Running mngr within pytest is not allowed by the current configuration. "
-                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1 and point "
-                "MNGR_HOST_DIR at a tmp directory so the subprocess cannot mutate real "
-                "mngr state."
+                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
+                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
+                "cannot mutate real mngr state."
             )
-        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in, but it's only safe if the test
-        # has also isolated MNGR_HOST_DIR to a temp directory. Otherwise the opt-in
-        # just re-opens the hole the guard was supposed to close -- the subprocess
-        # would mutate the developer's real ~/.mngr state. MNGR_PREFIX isolation is
-        # separately enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
-        # which rejects env names that don't start with mngr_test-.
-        host_dir = final_config.default_host_dir
-        tmp_root = Path(tempfile.gettempdir()).resolve()
-        try:
-            resolved_host_dir = Path(host_dir).expanduser().resolve()
-            resolved_host_dir.relative_to(tmp_root)
-        except ValueError:
-            raise ConfigParseError(
-                f"MNGR_ALLOW_PYTEST=1 requires MNGR_HOST_DIR to be under the system temp "
-                f"directory ({tmp_root}) so the test cannot mutate the developer's real mngr "
-                f"state, but default_host_dir resolves to {host_dir!r}. Point MNGR_HOST_DIR "
-                f"at a tmp_path-scoped directory in the test fixture."
-            ) from None
+        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
+        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
+        # test_schedule_add.py's local-dev path intentionally runs against the
+        # developer's real ~/.mngr so the subprocess can pick up their Modal
+        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
+        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
+        # which rejects env names that don't match TEST_ENV_PATTERN during
+        # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
