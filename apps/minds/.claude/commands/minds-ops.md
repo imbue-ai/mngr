@@ -1,6 +1,6 @@
 ---
-description: Common minds-app dev tasks. draft | release | create agent | delete agent <id> | status
-argument-hint: "draft | release | create agent | delete agent <id> | status"
+description: Common minds-app dev tasks. launch | draft | release | create agent | delete agent <id> | status
+argument-hint: "launch | draft | release | create agent | delete agent <id> | status"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, WebSearch, WebFetch
 ---
 
@@ -13,6 +13,35 @@ User arguments: `$ARGUMENTS`
 Parse the argument to pick ONE sub-command (case-insensitive, keyword match). If ambiguous, ask once which one.
 
 Keep responses terse and action-oriented. Only ask the user before doing destructive things (deleting agents, force-pushing, spending build credits). For routine things (`pnpm dist`, running the drive-minds harness) just do them.
+
+## Sub-command: launch
+
+Trigger: "launch", "run", "dev", "local", "pnpm start".
+
+Launch the Electron app from local source (no packaging). Code changes in `apps/minds/electron/` + `imbue/minds/desktop_client/templates.py` etc. are picked up by restarting; wheel changes need a rebuild.
+
+1. Kill any already-running local dev instance so the new one doesn't trip the Electron single-instance lock:
+   ```
+   pkill -9 -f "electron .*apps/minds" 2>/dev/null
+   pkill -9 -f "uv run --package minds minds" 2>/dev/null
+   sleep 2
+   ```
+2. Start:
+   ```
+   (cd apps/minds && source ~/.zshrc 2>/dev/null && pnpm start) > /tmp/minds-local.log 2>&1 &
+   disown
+   ```
+3. Wait ~10 s for the backend to bind and the window to appear, then report:
+   - PID of the Electron main: `pgrep -f "electron.*apps/minds" | head -1`
+   - Backend port: extract from `/tmp/minds-local.log` (look for "Backend ready. Loading chrome from").
+   - Login URL: `grep -oE 'http://127\.0\.0\.1:[0-9]+/login\?one_time_code=[A-Za-z0-9_-]+' /tmp/minds-local.log | tail -1` -- if needed to drive via curl.
+
+4. To stop: `pkill -9 -f "electron.*apps/minds"` (the minds forward subprocess dies with the parent).
+
+**Caveats:**
+- Running from local source ignores the installed /Applications/minds.app — the dev instance has its own user-data-dir under `~/Library/Application Support/minds` (same path as the packaged app, so the two collide if both run). Kill the packaged one first if it's running: `pkill -9 -f "/Applications/minds.app"`.
+- If auth fails because the login code was consumed, restart the backend (step 1 + 2) to mint a fresh one.
+- Draft-mode build (local dev) disables the auto-updater -- expect `@todesktop/runtime: skipping autoUpdater initialization because the build isn't released`. Not a bug.
 
 ## Sub-command: draft / build draft
 
