@@ -621,6 +621,16 @@ def test_auth_session_refresh_returns_503_when_not_configured(
     assert resp.status_code == 503
 
 
+def test_auth_session_revoke_returns_503_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/revoke without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/revoke", json={"user_id": "u1"})
+    assert resp.status_code == 503
+
+
 def test_auth_verify_email_missing_token_shows_failed_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

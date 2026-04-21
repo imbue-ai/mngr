@@ -75,3 +75,10 @@ def test_session_tokens_allows_null_refresh_token() -> None:
     """SessionTokens accepts a null refresh_token."""
     tokens = SessionTokens.model_validate({"access_token": "a", "refresh_token": None})
     assert tokens.refresh_token is None
+
+
+def test_revoke_all_sessions_returns_false_on_connection_error() -> None:
+    """revoke_all_sessions swallows connection errors and returns False, so a
+    network failure on sign-out does not block the local session removal."""
+    client = _make_client()
+    assert client.revoke_all_sessions(user_id="u1") is False
