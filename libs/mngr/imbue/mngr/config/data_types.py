@@ -37,8 +37,15 @@ from imbue.mngr.utils.logging import LoggingConfig
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
-# 7 days in seconds
+# 7 days in seconds -- controls how long destroyed host records (and their
+# snapshots) are kept before permanent deletion, giving users a recovery
+# window via `mngr create --snapshot`.
 _DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 7.0
+
+# 10 minutes -- minimum age before GC will destroy an online host with no agents.
+# Short because we only need to protect against transient empty states (e.g. between
+# agent creation and discovery).
+_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 
 # === Helper Functions ===
 
@@ -268,6 +275,11 @@ class ProviderInstanceConfig(FrozenModel):
         default=None,
         description="How long (in seconds) a destroyed host's records are kept before permanent deletion. "
         "Overrides the global default_destroyed_host_persisted_seconds when set.",
+    )
+    min_online_host_age_seconds: float | None = Field(
+        default=None,
+        description="Minimum age (in seconds) before GC will destroy an online host with no agents. "
+        "Overrides the global default_min_online_host_age_seconds when set.",
     )
 
     def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
@@ -555,6 +567,11 @@ class MngrConfig(FrozenModel):
         description="Default number of seconds a destroyed host's records are kept before permanent deletion. "
         "Can be overridden per provider via destroyed_host_persisted_seconds in the provider config.",
     )
+    default_min_online_host_age_seconds: float = Field(
+        default=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS,
+        description="Default minimum age (in seconds) before GC will destroy an online host with no agents. "
+        "Can be overridden per provider via min_online_host_age_seconds in the provider config.",
+    )
 
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
@@ -696,6 +713,11 @@ class MngrConfig(FrozenModel):
         if override.default_destroyed_host_persisted_seconds is not None:
             default_destroyed_host_persisted_seconds = override.default_destroyed_host_persisted_seconds
 
+        # Merge default_min_online_host_age_seconds (scalar - override wins if not None)
+        default_min_online_host_age_seconds = self.default_min_online_host_age_seconds
+        if override.default_min_online_host_age_seconds is not None:
+            default_min_online_host_age_seconds = override.default_min_online_host_age_seconds
+
         # Merge retry (nested config - use merge_with if override.retry is not None)
         merged_retry = self.retry
         if override.retry is not None:
@@ -729,6 +751,7 @@ class MngrConfig(FrozenModel):
             is_error_reporting_enabled=merged_is_error_reporting_enabled,
             is_allowed_in_pytest=is_allowed_in_pytest,
             default_destroyed_host_persisted_seconds=default_destroyed_host_persisted_seconds,
+            default_min_online_host_age_seconds=default_min_online_host_age_seconds,
         )
 
 

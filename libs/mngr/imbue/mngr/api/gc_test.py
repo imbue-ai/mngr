@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pluggy
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
@@ -36,7 +37,9 @@ from imbue.mngr.api.gc import gc_volumes
 from imbue.mngr.api.gc import gc_work_dirs
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS
 from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -47,7 +50,9 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
@@ -723,12 +728,16 @@ def test_gc_snapshots_skips_provider_without_snapshot_support(
     assert len(result.errors) == 0
 
 
-def _make_snapshot_info(snapshot_id: str = "snap-001", name: str = "test-snapshot") -> SnapshotInfo:
+def _make_snapshot_info(
+    snapshot_id: str = "snap-001",
+    name: str = "test-snapshot",
+    created_at: datetime | None = None,
+) -> SnapshotInfo:
     """Create a SnapshotInfo for testing."""
     return SnapshotInfo(
         id=SnapshotId(snapshot_id),
         name=SnapshotName(name),
-        created_at=datetime.now(timezone.utc),
+        created_at=created_at if created_at is not None else datetime.now(timezone.utc),
     )
 
 
@@ -788,13 +797,13 @@ def test_gc_snapshots_preserves_paused_host_snapshots_snapshot_based_provider(
     assert host.get_state() == HostState.PAUSED
 
 
-def test_gc_snapshots_deletes_destroyed_host_snapshots(
+def test_gc_snapshots_deletes_old_destroyed_host_snapshots(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """gc_snapshots deletes snapshots from DESTROYED hosts.
+    """gc_snapshots deletes old snapshots from DESTROYED hosts.
 
-    When a host is destroyed, its snapshots are orphaned and serve no purpose.
-    gc_snapshots should clean these up.
+    When a host is destroyed, its snapshots are kept for recovery until they
+    exceed the destroyed_host_persisted_seconds threshold.
     """
     # supports_shutdown_hosts=True makes get_state() return the stop_reason directly,
     # so setting stop_reason=DESTROYED gives us a DESTROYED host on a provider that
@@ -802,7 +811,8 @@ def test_gc_snapshots_deletes_destroyed_host_snapshots(
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=HostState.DESTROYED.value)
     gc_mock_provider.mock_hosts = [host]
 
-    snapshot = _make_snapshot_info()
+    old_created_at = datetime.now(timezone.utc) - timedelta(days=31)
+    snapshot = _make_snapshot_info(created_at=old_created_at)
     gc_mock_provider.mock_snapshots = [snapshot]
 
     assert host.get_state() == HostState.DESTROYED
@@ -819,6 +829,72 @@ def test_gc_snapshots_deletes_destroyed_host_snapshots(
     assert result.snapshots_destroyed[0].id == snapshot.id
     assert len(gc_mock_provider.deleted_snapshots) == 1
     assert gc_mock_provider.deleted_snapshots[0] == (host.id, snapshot.id)
+
+
+def test_gc_snapshots_preserves_young_destroyed_host_snapshots(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc_snapshots preserves recent snapshots on DESTROYED hosts for recovery."""
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=HostState.DESTROYED.value)
+    gc_mock_provider.mock_hosts = [host]
+
+    # Snapshot created recently -- should be preserved
+    snapshot = _make_snapshot_info()
+    gc_mock_provider.mock_snapshots = [snapshot]
+
+    assert host.get_state() == HostState.DESTROYED
+
+    result = GcResult()
+    gc_snapshots(
+        hosts_by_provider=_hosts_for(gc_mock_provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.snapshots_destroyed) == 0
+    assert gc_mock_provider.deleted_snapshots == []
+
+
+def test_gc_snapshots_respects_custom_snapshot_age(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """gc_snapshots uses the provider's configured destroyed_host_persisted_seconds.
+
+    With a short age (1 hour), a 2-hour-old snapshot on a DESTROYED host should be deleted.
+    """
+    # Configure provider with a 1-hour retention
+    config = MngrConfig(
+        prefix=temp_mngr_ctx.config.prefix,
+        default_destroyed_host_persisted_seconds=3600.0,
+    )
+    ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, config),
+    )
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("custom-age-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=ctx,
+    )
+
+    host = _make_offline_host(provider, ctx, stop_reason=HostState.DESTROYED.value, days_old=1)
+    provider.mock_hosts = [host]
+
+    two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    snapshot = _make_snapshot_info(created_at=two_hours_ago)
+    provider.mock_snapshots = [snapshot]
+
+    result = GcResult()
+    gc_snapshots(
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.snapshots_destroyed) == 1
+    assert provider.deleted_snapshots == [(host.id, snapshot.id)]
 
 
 # =========================================================================
@@ -1992,3 +2068,358 @@ def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, t
 
     # The directory should have been removed via rm -rf fallback.
     assert not work_dir.exists()
+
+
+# =========================================================================
+# gc_machines: online host minimum age and auth error tests
+# =========================================================================
+
+
+class _RemoteHost(Host):
+    """Host subclass that appears remote (is_local=False) with configurable certified data."""
+
+    mock_certified_data: CertifiedHostData | None = None
+    mock_last_activity_time: datetime | None = None
+    mock_state: HostState | None = None
+
+    @property
+    def is_local(self) -> bool:
+        return False
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        return []
+
+    def get_certified_data(self) -> CertifiedHostData:
+        if self.mock_certified_data is not None:
+            return self.mock_certified_data
+        return super().get_certified_data()
+
+    def get_state(self) -> HostState:
+        if self.mock_state is not None:
+            return self.mock_state
+        return super().get_state()
+
+    def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
+        # Report mock_last_activity_time for BOOT so gc sees it as the most recent activity.
+        if activity_type == ActivitySource.BOOT and self.mock_last_activity_time is not None:
+            return self.mock_last_activity_time
+        return None
+
+
+class _RemoteAuthErrorOnDiscoverHost(_RemoteHost):
+    """Remote host where discover_agents raises HostAuthenticationError."""
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        raise HostAuthenticationError("simulated auth failure from test")
+
+
+class _RemoteConnectionErrorOnDiscoverHost(_RemoteHost):
+    """Remote host where discover_agents raises HostConnectionError."""
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        raise HostConnectionError("simulated connection failure from test")
+
+
+class _ActivityTimeAuthErrorHost(_RemoteHost):
+    """Remote host where get_reported_activity_time raises HostAuthenticationError."""
+
+    def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
+        raise HostAuthenticationError("simulated auth error reading activity time from test")
+
+
+class _GetStateAuthErrorHost(_RemoteHost):
+    """Remote host where get_state raises HostAuthenticationError after the first call.
+
+    The mock provider's ``discover_hosts`` calls ``get_state`` once to build the
+    DiscoveredHost record, so we let that first call through (returning RUNNING)
+    and raise on the internal call made by ``_gc_single_host``.
+    """
+
+    _get_state_call_count: int = 0
+
+    def get_state(self) -> HostState:
+        self._get_state_call_count += 1
+        if self._get_state_call_count == 1:
+            return HostState.RUNNING
+        raise HostAuthenticationError("simulated auth error reading state from test")
+
+
+class _DestroyableProvider(MockProviderInstance):
+    """MockProviderInstance that supports destroy_host."""
+
+    destroyed_hosts: list[HostId] = Field(default_factory=list)
+
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.destroyed_hosts.append(host_id)
+
+
+def _make_remote_host(
+    provider: LocalProviderInstance,
+    *,
+    last_activity_seconds_ago: float | None = 0,
+    created_seconds_ago: float = 0,
+    mock_state: HostState | None = None,
+    host_cls: type[_RemoteHost] = _RemoteHost,
+) -> _RemoteHost:
+    """Create a _RemoteHost (or subclass) with configurable time since last activity.
+
+    Pass ``last_activity_seconds_ago=None`` to simulate a host with no
+    recorded activity at all (every ActivitySource returns None).
+    """
+    pyinfra_host = provider._create_local_pyinfra_host()
+    connector = PyinfraConnector(pyinfra_host)
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    last_activity_time = (
+        None if last_activity_seconds_ago is None else now - timedelta(seconds=last_activity_seconds_ago)
+    )
+    created_at = now - timedelta(seconds=created_seconds_ago)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="remote-test-host",
+        created_at=created_at,
+        updated_at=now,
+    )
+    return host_cls(
+        id=host_id,
+        connector=connector,
+        provider_instance=provider,
+        mngr_ctx=provider.mngr_ctx,
+        mock_certified_data=certified_data,
+        mock_last_activity_time=last_activity_time,
+        mock_state=mock_state,
+    )
+
+
+def _run_gc_on_remote_host(
+    host: _RemoteHost,
+    *,
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    provider_name: str,
+    dry_run: bool = False,
+) -> tuple[_DestroyableProvider, GcResult]:
+    """Wrap `host` in a _DestroyableProvider and run gc_machines against it.
+
+    Returns the provider and result so callers can assert on `destroyed_hosts`
+    and `machines_destroyed`.
+    """
+    provider = _DestroyableProvider(
+        name=ProviderInstanceName(provider_name),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=dry_run,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+    return provider, result
+
+
+def test_gc_machines_skips_young_online_host_with_no_agents(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips online hosts with no agents that are younger than the minimum age."""
+    host = _make_remote_host(local_provider, last_activity_seconds_ago=60)
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-remote"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_destroys_old_online_host_with_no_agents(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines destroys online hosts with no agents that exceed the minimum age."""
+    host = _make_remote_host(local_provider, last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60)
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-remote-old"
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == [host.id]
+
+
+def test_gc_machines_skips_host_on_auth_error_during_discover(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts that raise HostAuthenticationError during discover_agents.
+
+    Auth errors are treated conservatively: if we cannot authenticate, we
+    cannot verify whether the host has running agents, so it must not be
+    destroyed.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        host_cls=_RemoteAuthErrorOnDiscoverHost,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-auth-skip"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_on_connection_error_during_discover(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts that raise HostConnectionError during discover_agents."""
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        host_cls=_RemoteConnectionErrorOnDiscoverHost,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-conn-skip"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_dry_run_identifies_but_does_not_destroy_old_online_host(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines dry run reports old online hosts but does not actually destroy them."""
+    host = _make_remote_host(local_provider, last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60)
+    provider, result = _run_gc_on_remote_host(
+        host,
+        temp_host_dir=temp_host_dir,
+        temp_mngr_ctx=temp_mngr_ctx,
+        provider_name="test-dry-run",
+        dry_run=True,
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_when_activity_time_unreadable(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts where get_reported_activity_time fails (cannot determine activity)."""
+    host = _make_remote_host(
+        local_provider,
+        # mock activity time is unused: _ActivityTimeAuthErrorHost raises unconditionally
+        last_activity_seconds_ago=None,
+        host_cls=_ActivityTimeAuthErrorHost,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-cert-error"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_young_host_with_no_activity(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """Young host with no activity is in setup grace period -- skip."""
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=60,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-young-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_destroys_old_crashed_host_with_no_activity(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """Host past grace period with no activity and CRASHED state -- destroy.
+
+    This is the case Josh flagged: a host that crashed so hard nothing wrote
+    any activity file.  Without this path, such hosts would never be cleaned up.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        mock_state=HostState.CRASHED,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-crashed-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 1
+    assert provider.destroyed_hosts == [host.id]
+
+
+def test_gc_machines_skips_old_running_host_with_no_activity(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """Host past grace period with no activity but RUNNING state -- skip.
+
+    Healthy hosts that happen to have no mngr agents are the user's call, not GC's.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        mock_state=HostState.RUNNING,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-running-no-activity"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
+
+
+def test_gc_machines_skips_host_when_get_state_unreadable(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """gc_machines skips hosts where get_state fails (cannot determine terminal state).
+
+    Reaches the no-activity branch past the grace period, then fails to read
+    state.  Must not destroy: without a terminal state we cannot distinguish a
+    crashed host from a healthy one.
+    """
+    host = _make_remote_host(
+        local_provider,
+        last_activity_seconds_ago=None,
+        created_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60,
+        host_cls=_GetStateAuthErrorHost,
+    )
+    provider, result = _run_gc_on_remote_host(
+        host, temp_host_dir=temp_host_dir, temp_mngr_ctx=temp_mngr_ctx, provider_name="test-state-auth-error"
+    )
+
+    assert len(result.machines_destroyed) == 0
+    assert provider.destroyed_hosts == []
