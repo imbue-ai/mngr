@@ -6,15 +6,13 @@
 # command.
 #
 # IMPORTANT: This file must NOT import from imbue.* or any other 3rd-party packages
-# We simply want to call into the mngr command, which can then use those other packages if necessary.
-# This avoids modal needing to package or load any additional dependencies.
-#
-# The one narrow exception is `cron_runner_constants`, a sibling stdlib-only
-# module that defines mirrored enum values. Importing it triggers zero
-# 3rd-party code because the ancestor __init__.py files are all empty and
-# the module itself imports nothing. A drift test
-# (cron_runner_constants_test.py) keeps the mirrors honest against the real
-# imbue enums (AgentLifecycleState, VerifyMode).
+# at module scope. Modal runs this file as a standalone app — its Python
+# interpreter does NOT inherit the uv-tool-managed mngr install's site-packages,
+# so `from imbue.mngr_schedule... import X` raises ModuleNotFoundError at deploy
+# time. Values that mirror imbue enums (RUNNING_STATES, VALID_VERIFY_MODES,
+# AGENT_MISSING_STATE, RESULT_SENTINEL) must therefore be duplicated here as
+# bare literals; verification.py defines the deploy-side copies. Any changes
+# must be mirrored by hand in both files.
 #
 # Image building strategy:
 # 1. Base image: built from the mngr Dockerfile, which provides a complete
@@ -44,11 +42,6 @@ from pathlib import Path
 from typing import Any
 
 import modal
-
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import AGENT_MISSING_STATE
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RESULT_SENTINEL
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RUNNING_STATES
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import VALID_VERIFY_MODES
 
 # --- Deploy-time configuration ---
 # At deploy time (modal.is_local() == True), we read configuration from a
@@ -156,6 +149,28 @@ class CronRunnerError(Exception):
     without violating the import policy.
     """
 
+
+# Lifecycle states (as reported by `mngr list --format json`) that indicate
+# the agent is still actively running. Mirror of the running subset of
+# `imbue.mngr.primitives.AgentLifecycleState`; verification.py defines the
+# deploy-side copy. Any change must be applied in both places.
+RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
+
+# Accepted values for the `verify_mode` parameter of `run_scheduled_trigger`.
+# Mirror of `imbue.mngr_schedule.data_types.VerifyMode` values (lowercased);
+# duplicated here because Modal runs this file outside the imbue namespace.
+VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
+
+# Sentinel returned by `_get_lifecycle_state` when the named agent is absent
+# from `mngr list` output. Deliberately distinct from any real
+# AgentLifecycleState value so the deploy-side verifier can distinguish
+# "agent vanished" from "agent reached an unexpected terminal state".
+# Must match verification._AGENT_MISSING_STATE exactly.
+AGENT_MISSING_STATE: str = "MISSING"
+
+# Sentinel line prefix used to communicate a structured verification result
+# to the deploying machine. Must match verification._RESULT_SENTINEL exactly.
+RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
 
 # Regex that extracts the agent name from `mngr create` output. The CLI logs
 # a line like: "Starting agent <name> ..." once the agent has been created.

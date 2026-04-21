@@ -33,8 +33,12 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import AGENT_MISSING_STATE
-from imbue.mngr_schedule.implementations.modal.cron_runner_constants import RESULT_SENTINEL
+
+# Duplicated from cron_runner.py; that file is deployed standalone into Modal
+# and cannot import imbue.* at module scope, so we can't share these via a
+# sibling module. Any change must be mirrored in both files.
+_AGENT_MISSING_STATE: Final[str] = "MISSING"
+_RESULT_SENTINEL: Final[str] = "__MNGR_SCHEDULE_VERIFY__"
 
 # Three timers stack for full-verify:
 #   1. cron_runner._AGENT_FINISH_TIMEOUT_SECONDS (~3000s) -- inner poll.
@@ -64,7 +68,7 @@ _TERMINAL_SUCCESS_STATES: Final[frozenset[str]] = frozenset(
 # container ids or timestamps don't defeat detection) and captures the JSON
 # payload that follows it. Greedy match up to end-of-line so that payloads
 # containing braces / quotes are captured in full.
-_SENTINEL_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(RESULT_SENTINEL) + r"\s+(\{.*\})\s*$")
+_SENTINEL_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_RESULT_SENTINEL) + r"\s+(\{.*\})\s*$")
 
 
 @pure
@@ -263,7 +267,7 @@ def verify_schedule_deployment(
                 final_state,
             )
             return
-        if final_state == AGENT_MISSING_STATE:
+        if final_state == _AGENT_MISSING_STATE:
             raise ScheduleDeployError(
                 f"Full verification of schedule '{trigger_name}' could not find agent "
                 f"{result.get('agent_name')!r} in `mngr list` output before it reached a terminal "
