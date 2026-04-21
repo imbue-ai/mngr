@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import httpx
@@ -1707,3 +1708,102 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
+
+
+# -- Workspace delete tests --
+
+
+def _install_fake_mngr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exit_code: int = 0) -> Path:
+    """Install a fake `mngr` on PATH that records its args and exits with the given code."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log_path = bin_dir / "mngr.log"
+    fake_mngr = bin_dir / "mngr"
+    fake_mngr.write_text(
+        '#!/bin/bash\n'
+        'printf "%s\\n" "$@" >> "{}"\n'
+        'exit {}\n'.format(log_path, exit_code)
+    )
+    fake_mngr.chmod(0o755)
+    monkeypatch.setenv("PATH", "{}:{}".format(bin_dir, os.environ.get("PATH", "")))
+    return log_path
+
+
+def test_delete_workspace_rejects_unauthenticated_requests(tmp_path: Path) -> None:
+    """POST /workspace/{id}/delete without auth returns 403."""
+    # _create_test_server_with_agent_creator auto-authenticates; for the
+    # unauthenticated case we build the client without calling through it.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    agent_creator = AgentCreator(paths=WorkspacePaths(data_dir=tmp_path / "minds"))
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        agent_creator=agent_creator,
+    )
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 403
+
+
+def test_delete_workspace_invokes_mngr_destroy_and_returns_redirect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful delete runs `mngr destroy --yes --gc --remove-created-branch`
+    and returns 200 with a redirect URL."""
+    log_path = _install_fake_mngr(monkeypatch, tmp_path, exit_code=0)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "DELETED"
+    assert data["redirect_url"] == "/"
+
+    assert log_path.is_file(), "fake mngr should have been invoked"
+    args = log_path.read_text().strip().split("\n")
+    assert args[0] == "destroy"
+    assert args[1] == str(agent_id)
+    assert "--force" in args
+    assert "--gc" in args
+    assert "--remove-created-branch" in args
+
+
+def test_delete_workspace_returns_500_on_mngr_destroy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When `mngr destroy` exits non-zero, the handler returns 500 with the error."""
+    _install_fake_mngr(monkeypatch, tmp_path, exit_code=1)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 500
+    assert "Failed to destroy workspace" in response.json()["error"]
+
+
+def test_delete_workspace_removes_minds_data_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On success, the per-agent minds data dir (api_key_hash, etc.) is removed."""
+    _install_fake_mngr(monkeypatch, tmp_path, exit_code=0)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    # Seed a fake agent directory the way save_api_key_hash would. The fixture
+    # puts AgentCreator.paths.data_dir at tmp_path/"minds".
+    agent_dir = tmp_path / "minds" / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "api_key_hash").write_text("deadbeef")
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 200
+    assert not agent_dir.exists(), "per-agent minds dir should be removed after delete"

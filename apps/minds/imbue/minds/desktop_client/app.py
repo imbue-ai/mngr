@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import queue
+import shutil
 import socket as socket_module
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
@@ -25,6 +26,8 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -1483,19 +1486,104 @@ async def _handle_workspace_disassociate(
     """Disassociate a workspace from its account and tear down tunnels."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    if session_store:
-        account = session_store.get_account_for_workspace(agent_id)
-        if account:
-            # Tear down Cloudflare tunnel
-            cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-            if cf_client is not None:
-                try:
-                    cf_client.delete_tunnel(AgentId(agent_id))
-                except (httpx.HTTPError, ValueError, OSError) as e:
-                    logger.warning("Failed to delete tunnel during disassociation: {}", e)
-            session_store.disassociate_workspace(str(account.user_id), agent_id)
+    _disassociate_and_teardown_cf(request, agent_id)
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
+
+
+def _disassociate_and_teardown_cf(request: Request, agent_id: str) -> None:
+    """Tear down the Cloudflare tunnel for a workspace and detach it from its
+    supertokens account if associated. Shared by /disassociate and /delete.
+
+    Best-effort: any failure here is logged, not raised -- the caller wants to
+    proceed regardless.
+    """
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if session_store is None:
+        return
+    account = session_store.get_account_for_workspace(agent_id)
+    if account is None:
+        return
+    cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
+    if cf_client is not None:
+        try:
+            cf_client.delete_tunnel(AgentId(agent_id))
+        except (httpx.HTTPError, ValueError, OSError) as e:
+            logger.warning("Failed to delete CF tunnel for {}: {}", agent_id, e)
+    try:
+        session_store.disassociate_workspace(str(account.user_id), agent_id)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to disassociate workspace {}: {}", agent_id, e)
+
+
+async def _handle_workspace_delete(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Destroy a workspace: run `mngr destroy`, remove local state, tear down
+    tunnels and account association.
+
+    Returns JSON {"status": "DELETED", "redirect_url": "/"} on success, or
+    {"error": "..."} with a 4xx/5xx on failure. This is async-ish: the mngr
+    subprocess can take 10-30s for Lima VMs, so the caller UI should show a
+    spinner while this runs.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403, content='{"error": "Not authenticated"}', media_type="application/json"
+        )
+
+    # 1. Disassociate + tear down CF tunnel first so the UI stops trying to
+    #    route to an agent we're about to kill.
+    _disassociate_and_teardown_cf(request, agent_id)
+
+    # 2. Shell out to `mngr destroy` for the real VM / host / git-branch
+    #    cleanup. --force skips confirmation prompts and stops running
+    #    agents (the user just clicked the Danger Zone button). --gc cleans
+    #    up any orphaned resources the agent was holding.
+    #    --remove-created-branch deletes the mngr/<name> branch the agent
+    #    was working on so the source template's git repo doesn't
+    #    accumulate branches.
+    destroy_cmd = [
+        MNGR_BINARY,
+        "destroy",
+        agent_id,
+        "--force",
+        "--gc",
+        "--remove-created-branch",
+    ]
+    logger.info("Running: {}", " ".join(destroy_cmd))
+    cg = ConcurrencyGroup(name="workspace-delete")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=destroy_cmd,
+            is_checked_after=False,
+        )
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip() or "mngr destroy failed"
+        logger.error("Failed to destroy workspace {}: {}", agent_id, err)
+        return Response(
+            status_code=500,
+            content=json.dumps({"error": "Failed to destroy workspace: {}".format(err)}),
+            media_type="application/json",
+        )
+
+    # 3. Remove the per-agent minds data directory (api_key_hash, etc.). The
+    #    mngr destroy above handles everything on the mngr side; this covers
+    #    the minds-side state that mngr doesn't know about.
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is not None:
+        agent_dir = agent_creator.paths.data_dir / "agents" / agent_id
+        if agent_dir.is_dir():
+            try:
+                shutil.rmtree(agent_dir)
+            except OSError as e:
+                logger.warning("Failed to remove minds data dir for {}: {}", agent_id, e)
+
+    return Response(
+        content=json.dumps({"status": "DELETED", "redirect_url": "/"}),
+        media_type="application/json",
+    )
 
 
 # -- Requests panel routes --
@@ -1974,6 +2062,7 @@ def create_desktop_client(
     app.get("/workspace/{agent_id}/settings")(_handle_workspace_settings)
     app.post("/workspace/{agent_id}/associate")(_handle_workspace_associate)
     app.post("/workspace/{agent_id}/disassociate")(_handle_workspace_disassociate)
+    app.post("/workspace/{agent_id}/delete")(_handle_workspace_delete)
 
     # Request inbox routes
     app.get("/_chrome/requests-panel")(_handle_requests_panel)

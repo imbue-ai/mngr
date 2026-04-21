@@ -1458,7 +1458,8 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
     <h2>Danger Zone</h2>
     <p style="color:#94a3b8;font-size:13px;margin-bottom:8px;">
       Permanently delete this workspace and all its data.</p>
-    <button class="btn btn-danger" onclick="alert('Not implemented')">Delete workspace</button>
+    <button class="btn btn-danger" id="delete-workspace-btn" onclick="submitDeleteWorkspace()">Delete workspace</button>
+    <span id="delete-workspace-spinner" style="display:none;margin-left:8px;color:#94a3b8;">Deleting...</span>
 
     <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
   </div>
@@ -1480,6 +1481,37 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
         spinner.style.display = 'none';
         section.style.opacity = '1';
         section.style.pointerEvents = 'auto';
+      });
+  }
+
+  function submitDeleteWorkspace() {
+    // mngr destroy is not reversible: the Lima VM, host record, agent
+    // state, and mngr/<name> git branch all go away. Confirm hard.
+    if (!confirm("Permanently delete this workspace?\n\n" +
+                 "This destroys the VM, removes the agent, and deletes the " +
+                 "mngr/<name> branch. It cannot be undone.")) {
+      return;
+    }
+    var btn = document.getElementById('delete-workspace-btn');
+    var spinner = document.getElementById('delete-workspace-spinner');
+    btn.disabled = true;
+    spinner.style.display = 'inline';
+    fetch('/workspace/{{ agent_id }}/delete', { method: 'POST' })
+      .then(function(resp) {
+        if (!resp.ok) {
+          return resp.json().then(function(data) {
+            throw new Error(data.error || ('HTTP ' + resp.status));
+          });
+        }
+        return resp.json();
+      })
+      .then(function(data) {
+        window.location.href = data.redirect_url || '/';
+      })
+      .catch(function(err) {
+        alert('Failed to delete workspace: ' + err.message);
+        btn.disabled = false;
+        spinner.style.display = 'none';
       });
   }
   {% if telegram_js %}
