@@ -1,6 +1,6 @@
 import re
 
-_ENVIRONMENT_NOT_FOUND_RE = re.compile(r"^\s*Environment\b", re.IGNORECASE)
+_ENVIRONMENT_NOT_FOUND_RE = re.compile(r"^Environment '[^']+' not found\b")
 
 
 def is_environment_not_found_error(e: Exception) -> bool:
@@ -10,9 +10,8 @@ def is_environment_not_found_error(e: Exception) -> bool:
     (expected during normal operations, e.g. listing a directory that hasn't been
     created yet) and "environment doesn't exist" (indicates the Modal environment
     is gone and should propagate to retry / error-handling layers). This helper
-    distinguishes by matching messages of the form "Environment '<name>' not found"
-    at the start of the exception message, so a path such as "/Environment/foo.json"
-    in a path-level not-found is not misclassified as an environment error.
+    matches the exact Modal SDK wording for the environment case:
+    ``Environment '<name>' not found``.
     """
     return _ENVIRONMENT_NOT_FOUND_RE.match(str(e)) is not None
 
