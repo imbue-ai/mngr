@@ -83,7 +83,7 @@ Package apps/minds as a standalone, installable Electron desktop app.
 * `electron/paths.js` -- Resolves paths to bundled binaries (uv, git) and data directories, accounting for platform differences and asar packaging
 * `todesktop.json` -- ToDesktop for Electron configuration
 * `electron/assets/icon.svg` -- Placeholder app icon (brain SVG), used for dock/taskbar/window icon
-* `electron/pyproject.toml` -- Standalone pyproject.toml that declares `imbue-minds` (and transitively `mngr`) as a dependency, with a lockfile pinning exact versions. This is what `uv sync` operates on inside the app -- it is separate from the monorepo's pyproject.toml.
+* `electron/pyproject/pyproject.toml` -- Standalone pyproject.toml that lists every monorepo workspace package as a direct dependency (uv ignores `[tool.uv.sources]` overrides for transitive-only packages). At build time, `scripts/build.js` builds a wheel for each workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` to point at those bundled wheels, and runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock`. Only the regenerated lockfile ships in the bundle; no lockfile is committed at `electron/pyproject/`.
 
 **Changes to existing Python code:**
 
