@@ -208,8 +208,30 @@ async function downloadGit(resourcesDir, { platform }) {
     fs.copyFileSync(gitExe, path.join(binDir, 'git.exe'));
     fs.copyFileSync(gitExe, path.join(binDir, 'git'));
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
+  } else if (platform === 'darwin') {
+    // macOS: /usr/bin/git is the Xcode CommandLineTools *shim*, not a real
+    // binary -- copying it into the app bundle produces something macOS
+    // kills with SIGKILL the moment it runs because the shim can't find
+    // its expected Xcode paths relative to the bundle. Resolve the shim
+    // to the actual git binary via `xcrun --find git` and copy that.
+    let resolvedGit;
+    try {
+      resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
+    } catch (err) {
+      throw new Error(
+        'git not resolvable via `xcrun --find git`. Install Xcode Command ' +
+        'Line Tools (`xcode-select --install`) and retry.',
+      );
+    }
+    if (!resolvedGit || !fs.existsSync(resolvedGit)) {
+      throw new Error(`xcrun returned a git path that does not exist: ${resolvedGit}`);
+    }
+    const destGit = path.join(binDir, 'git');
+    fs.copyFileSync(resolvedGit, destGit);
+    fs.chmodSync(destGit, 0o755);
+    console.log(`[download-binaries] git copied from ${resolvedGit} to ${destGit}`);
   } else {
-    // macOS and Linux: copy the system git binary
+    // Linux: copy the system git binary (no shim indirection).
     const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
     if (!systemGit) {
       throw new Error('git not found on system -- install git first');
