@@ -5,7 +5,7 @@ description = "Diagnose plugin for mngr - launch an agent to investigate bugs an
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.4",
+    "imbue-mngr==0.2.5",
 ]
 
 [project.entry-points.mngr]
