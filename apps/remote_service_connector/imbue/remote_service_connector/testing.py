@@ -1,4 +1,4 @@
-"""Test utilities for cloudflare_forwarding."""
+"""Test utilities for remote_service_connector."""
 
 import base64
 import json
@@ -27,7 +27,7 @@ from supertokens_python.types import RecipeUserId
 from supertokens_python.types import User
 from supertokens_python.types.base import AccountInfoInput
 
-from imbue.cloudflare_forwarding.app import ForwardingCtx
+from imbue.remote_service_connector.app import ForwardingCtx
 
 
 class FakeCloudflareOps:
@@ -191,13 +191,13 @@ def make_fake_tunnel_token(tunnel_id: str) -> str:
 # ---------------------------------------------------------------------------
 # SuperTokens SDK fakes
 #
-# The cloudflare_forwarding service wraps the SuperTokens SDK behind /auth/*
+# The remote_service_connector service wraps the SuperTokens SDK behind /auth/*
 # endpoints. Exercising those endpoints against a real SuperTokens core is
 # slow (Docker) and unreliable in CI, so the tests install the fakes below as
 # drop-in replacements for every SDK function the handlers call. The backend
 # state (accounts, sessions, reset tokens) lives on a single
 # ``FakeSuperTokensBackend`` instance; ``FakeSuperTokensBackend.install_on_app_module``
-# swaps the SDK references on ``cloudflare_forwarding.app`` over to methods on
+# swaps the SDK references on ``remote_service_connector.app`` over to methods on
 # that instance. Swapping the ``app`` module's bound references (rather than
 # the SDK's source module) means handlers see fakes without needing to
 # initialize the real SuperTokens SDK, which would fail without a live core.

@@ -1,10 +1,10 @@
-"""Client for the Cloudflare forwarding API.
+"""Client for the Cloudflare-tunnel endpoints of the remote service connector.
 
 Encapsulates authentication, URL construction, and HTTP calls to the
-Modal-hosted cloudflare_forwarding service. Every request authenticates with
-the signed-in user's SuperTokens session: the JWT goes in the ``Authorization:
-Bearer ...`` header, the user-id prefix is used for tunnel naming, and the
-account email backs the default Cloudflare Access policy.
+Modal-hosted remote_service_connector service. Every request authenticates
+with the signed-in user's SuperTokens session: the JWT goes in the
+``Authorization: Bearer ...`` header, the user-id prefix is used for tunnel
+naming, and the account email backs the default Cloudflare Access policy.
 """
 
 import httpx
@@ -16,22 +16,22 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 
 
-class CloudflareForwardingUrl(AnyUrl):
-    """URL of the Cloudflare forwarding API."""
+class RemoteServiceConnectorUrl(AnyUrl):
+    """URL of the remote service connector."""
 
     ...
 
 
-class CloudflareForwardingClient(FrozenModel):
-    """Client for interacting with the Cloudflare forwarding API.
+class CloudflareClient(FrozenModel):
+    """Client for the Cloudflare-tunnel endpoints of the remote service connector.
 
     All requests authenticate via the caller's SuperTokens session. Callers
-    build one client per request by enriching the shared ``forwarding_url``
+    build one client per request by enriching the shared ``connector_url``
     with the active account's ``supertokens_token`` / ``user_id_prefix`` /
     ``email`` before issuing Cloudflare operations.
     """
 
-    forwarding_url: CloudflareForwardingUrl = Field(description="Base URL of the cloudflare_forwarding API")
+    connector_url: RemoteServiceConnectorUrl = Field(description="Base URL of the remote service connector")
     supertokens_token: str | None = Field(default=None, description="SuperTokens JWT access token for Bearer auth")
     supertokens_user_id_prefix: str | None = Field(
         default=None,
@@ -44,7 +44,7 @@ class CloudflareForwardingClient(FrozenModel):
     def _auth_header(self) -> str:
         """Return the Bearer header for the current SuperTokens session."""
         if not self.supertokens_token:
-            raise ValueError("No supertokens_token configured for cloudflare_forwarding client")
+            raise ValueError("No supertokens_token configured for remote service connector client")
         return f"Bearer {self.supertokens_token}"
 
     def _effective_username(self) -> str:
@@ -63,9 +63,9 @@ class CloudflareForwardingClient(FrozenModel):
 
         pydantic's AnyUrl normalizes bare origins to have a trailing slash (e.g.
         ``https://example.com`` -> ``https://example.com/``), so naive
-        ``f"{self.forwarding_url}{path}"`` can yield double slashes.
+        ``f"{self.connector_url}{path}"`` can yield double slashes.
         """
-        return str(self.forwarding_url).rstrip("/") + path
+        return str(self.connector_url).rstrip("/") + path
 
     def make_tunnel_name(self, agent_id: AgentId) -> str:
         """Build the tunnel name for an agent."""
@@ -244,7 +244,7 @@ class CloudflareForwardingClient(FrozenModel):
         tunnel_name = self.make_tunnel_name(agent_id)
         try:
             response = httpx.delete(
-                f"{self.forwarding_url}/tunnels/{tunnel_name}",
+                f"{self.connector_url}/tunnels/{tunnel_name}",
                 headers={"Authorization": self._auth_header()},
                 timeout=30.0,
             )

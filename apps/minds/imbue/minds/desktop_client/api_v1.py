@@ -22,7 +22,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -99,7 +99,7 @@ def _json_error(message: str, status_code: int) -> Response:
 
 def get_cf_client_with_auth(
     request: Request, agent_id: AgentId | None = None
-) -> tuple[CloudflareForwardingClient | None, Response | None]:
+) -> tuple[CloudflareClient | None, Response | None]:
     """Get a cloudflare client enriched with the active account's SuperTokens session.
 
     Returns ``(client, None)`` when the workspace has an associated signed-in
@@ -108,7 +108,7 @@ def get_cf_client_with_auth(
     workspace-account association, or an unrefreshable token. Without a valid
     session there is no way to authenticate to the forwarding backend.
     """
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
 
     if cf_client is None:
@@ -126,7 +126,7 @@ def get_cf_client_with_auth(
 
     # Preserve the concrete subclass (tests swap in subclasses that stub HTTP methods).
     enriched_client = type(cf_client)(
-        forwarding_url=cf_client.forwarding_url,
+        connector_url=cf_client.connector_url,
         supertokens_token=access_token,
         supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
         supertokens_email=account.email,

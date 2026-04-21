@@ -2,7 +2,7 @@
 
 These tests exercise the client against a connection-refused endpoint; real
 end-to-end flows are covered by ``test_supertokens_auth_e2e.py`` which talks
-to a deployed ``cloudflare_forwarding`` server.
+to a deployed ``remote_service_connector`` server.
 """
 
 import httpx

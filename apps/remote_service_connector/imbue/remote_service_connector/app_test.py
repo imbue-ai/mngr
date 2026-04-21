@@ -8,28 +8,28 @@ from starlette.testclient import TestClient
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 
-import imbue.cloudflare_forwarding.app as app_mod
-from imbue.cloudflare_forwarding.app import AdminAuth
-from imbue.cloudflare_forwarding.app import AuthPolicy
-from imbue.cloudflare_forwarding.app import CloudflareApiError
-from imbue.cloudflare_forwarding.app import HttpCloudflareOps
-from imbue.cloudflare_forwarding.app import InvalidTunnelComponentError
-from imbue.cloudflare_forwarding.app import ServiceNotFoundError
-from imbue.cloudflare_forwarding.app import TunnelComponentTooLongError
-from imbue.cloudflare_forwarding.app import TunnelNotFoundError
-from imbue.cloudflare_forwarding.app import TunnelOwnershipError
-from imbue.cloudflare_forwarding.app import _authenticate_supertokens
-from imbue.cloudflare_forwarding.app import cf_check
-from imbue.cloudflare_forwarding.app import cf_list_all_pages
-from imbue.cloudflare_forwarding.app import extract_service_name
-from imbue.cloudflare_forwarding.app import extract_username_from_tunnel_name
-from imbue.cloudflare_forwarding.app import make_hostname
-from imbue.cloudflare_forwarding.app import make_tunnel_name
-from imbue.cloudflare_forwarding.app import web_app
-from imbue.cloudflare_forwarding.testing import FakeSuperTokensBackend
-from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
-from imbue.cloudflare_forwarding.testing import make_fake_supertokens_backend
-from imbue.cloudflare_forwarding.testing import make_fake_tunnel_token
+import imbue.remote_service_connector.app as app_mod
+from imbue.remote_service_connector.app import AdminAuth
+from imbue.remote_service_connector.app import AuthPolicy
+from imbue.remote_service_connector.app import CloudflareApiError
+from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import InvalidTunnelComponentError
+from imbue.remote_service_connector.app import ServiceNotFoundError
+from imbue.remote_service_connector.app import TunnelComponentTooLongError
+from imbue.remote_service_connector.app import TunnelNotFoundError
+from imbue.remote_service_connector.app import TunnelOwnershipError
+from imbue.remote_service_connector.app import _authenticate_supertokens
+from imbue.remote_service_connector.app import cf_check
+from imbue.remote_service_connector.app import cf_list_all_pages
+from imbue.remote_service_connector.app import extract_service_name
+from imbue.remote_service_connector.app import extract_username_from_tunnel_name
+from imbue.remote_service_connector.app import make_hostname
+from imbue.remote_service_connector.app import make_tunnel_name
+from imbue.remote_service_connector.app import web_app
+from imbue.remote_service_connector.testing import FakeSuperTokensBackend
+from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
+from imbue.remote_service_connector.testing import make_fake_supertokens_backend
+from imbue.remote_service_connector.testing import make_fake_tunnel_token
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
 _ADMIN_STUB_USERNAME = "testuser"
