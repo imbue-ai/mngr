@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -32,7 +33,6 @@ from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -1747,9 +1747,15 @@ def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) 
     with TestClient(app):
         raw_line = json.dumps({"source": "refresh", "server_name": "web"})
         resolver._fire_on_refresh(str(agent_id), raw_line)
-        # Give the reactor a moment to confirm nothing arrives. poll_until
-        # will run for the full timeout since the predicate never flips.
-        poll_until(lambda: len(received) > 0, timeout=0.2, poll_interval=0.02)
+        # Schedule a trailing no-op on the same event loop and wait for it.
+        # run_coroutine_threadsafe preserves enqueue order from a single
+        # thread, so by the time the barrier future completes, the refresh
+        # dispatch coroutine scheduled just before it has also completed.
+        # This deterministically replaces a 200ms sleep-based wait.
+        loop = app.state.event_loop
+        assert loop is not None, "lifespan should have captured the loop"
+        barrier_future = asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop)
+        barrier_future.result(timeout=2.0)
 
     assert received == []
 
