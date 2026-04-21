@@ -239,6 +239,11 @@
 # Local-only throwaway scripts (e.g. one-off test harnesses).
 **/scripts/*.local.sh
 
+# Personal, untracked Claude skills for this repo. Each local skill gets
+# an explicit line here so the invocation path stays clean (e.g.
+# /minds-dev instead of /minds-dev.local).
+**/.claude/skills/minds-dev/
+
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
 
