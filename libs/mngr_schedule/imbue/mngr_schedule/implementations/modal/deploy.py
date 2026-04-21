@@ -99,9 +99,15 @@ def get_repo_root() -> Path:
     repo_root, error = _try_get_repo_root_with_error()
     if repo_root is None:
         base_message = "Could not find git repository root. Must be run from within a git repository."
-        if error:
-            raise ScheduleDeployError(f"{base_message} git stderr: {error}")
-        raise ScheduleDeployError(base_message)
+        # Honor the None-vs-"" distinction the helper advertises: None means
+        # the invocation itself failed (no stderr available), empty string
+        # means git ran but its stderr was empty, non-empty string is the
+        # stderr text.
+        if error is None:
+            raise ScheduleDeployError(f"{base_message} git invocation failed.")
+        if error == "":
+            raise ScheduleDeployError(f"{base_message} git ran but produced no stderr.")
+        raise ScheduleDeployError(f"{base_message} git stderr: {error}")
     return repo_root
 
 
