@@ -563,11 +563,16 @@ def list_schedule_creation_records(
     except (modal.exception.NotFoundError, FileNotFoundError):
         return []
 
+    # Sort so the returned records are ordered deterministically regardless
+    # of the volume's listing order.
+    entries = sorted(entries, key=lambda e: e.path)
     records: list[ModalScheduleCreationRecord] = []
     for entry in entries:
         if not entry.path.endswith(".json"):
             continue
-        file_path = f"{_SCHEDULE_RECORDS_PREFIX}/{entry.path}"
+        # entry.path from volume.listdir() is relative to the volume root,
+        # not relative to the listdir prefix, so don't prepend the prefix again.
+        file_path = entry.path
         try:
             data = volume.read_file(file_path)
         except (modal.exception.NotFoundError, FileNotFoundError, OSError) as exc:

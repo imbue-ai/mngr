@@ -33,15 +33,20 @@ After creation, the agent is accessible at:
 - **Servers page**: `http://127.0.0.1:8420/agents/{agent_id}/servers/` (lists all services with local + global URLs)
 - **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
 
-## Environment variables
+## Environment variables and config
 
-For Cloudflare tunnel support, set these before starting the desktop client:
+`CLOUDFLARE_FORWARDING_URL` comes from `MindsConfig`: a default is baked in pointing at the current dev-deployed server, and you can override it via `~/.<MINDS_ROOT_NAME>/config.toml` (file) or environment variable (env overrides file). That URL hosts both the Cloudflare tunnel API and the `/auth/*` routes the desktop client uses for sign-in, so no env-var setup is required for default operation. All Cloudflare tunnel requests authenticate with the signed-in user's SuperTokens session, and the session's email is used as the default Cloudflare Access policy -- so no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. SuperTokens credentials (API key, OAuth client secrets) live on the backend server and never need to be set on the client.
+
+To pin the forwarding URL explicitly:
 
 ```bash
 export CLOUDFLARE_FORWARDING_URL=https://your-modal-endpoint.modal.run
-export CLOUDFLARE_FORWARDING_USERNAME=your-username
-export CLOUDFLARE_FORWARDING_SECRET=your-secret
-export OWNER_EMAIL=you@example.com
+```
+
+To run an isolated dev copy alongside an installed minds:
+
+```bash
+export MINDS_ROOT_NAME=devminds    # data lives in ~/.devminds/ with MNGR_PREFIX=devminds-
 ```
 
 For agent-specific secrets (API keys, telegram credentials), set them in the template repo's `.env` file and ensure they're listed in `pass_env` in `.mngr/settings.toml`.

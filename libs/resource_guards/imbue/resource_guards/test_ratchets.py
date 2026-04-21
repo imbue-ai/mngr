@@ -66,7 +66,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(14))
+    rc.check_inline_imports(_DIR, snapshot(16))
 
 
 def test_prevent_relative_imports() -> None:
@@ -125,6 +125,10 @@ def test_prevent_exit_stack() -> None:
 
 def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
+
+
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 
 
 # --- Naming conventions ---
@@ -200,7 +204,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(5))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(6))
 
 
 def test_prevent_test_container_classes() -> None:

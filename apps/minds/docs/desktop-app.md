@@ -37,19 +37,33 @@ When accessing an agent URL in a regular browser (not the Electron app), the Pyt
 
 ### Shutdown
 
-When the user closes the window, Electron sends SIGTERM to the backend process and waits up to 5 seconds. If the process doesn't exit, SIGKILL is sent.
+Closing an individual window just tears down that window's views -- the backend keeps running while any window is open. When the last window closes (or the user issues `Cmd+Q` / `Ctrl+Q`), Electron sends SIGTERM to the backend process and waits up to 5 seconds. If the process doesn't exit, SIGKILL is sent.
 
 ### Crash recovery
 
-If the backend exits unexpectedly, Electron shows an error screen with the last lines from the log file and a "Retry" button that restarts the backend.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 
 - **Open DevTools**: `Ctrl+Shift+C` (Windows/Linux) or `Cmd+Option+I` (macOS)
+- **New Window**: `Ctrl+N` / `Cmd+N` -- opens a fresh window on the home page. Also available on macOS via `File > New Window` and the dock icon's right-click menu.
+- **Close Window**: `Ctrl+W` / `Cmd+W` -- closes the focused window; the backend keeps running until the last window closes.
+- **Quit**: `Ctrl+Q` / `Cmd+Q` -- closes every window and shuts the backend down.
+
+### Multi-window behavior
+
+Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Uniqueness is enforced across the app: at most one window per workspace.
+
+- **Open in a new window** (from the sidebar): right-click a workspace entry for a native `Open in new window` context menu, or click the hover-revealed icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
+- **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
+- **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
+- **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
 
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
+- `MINDS_ROOT_NAME`: Controls the data-dir/prefix scheme described above (default: `minds`). Must match `[a-z0-9_-]+`.
 
 ## Output and logging conventions
 
@@ -70,7 +84,7 @@ Both are placed in the `resources/` directory (outside the asar archive) and add
 
 ## Data directory
 
-All desktop app state lives in `~/.minds/`:
+All desktop app state lives in `~/.<MINDS_ROOT_NAME>/` (default: `~/.minds/`):
 
 ```
 ~/.minds/
@@ -81,8 +95,35 @@ All desktop app state lives in `~/.minds/`:
     minds.log             # Combined stdout/stderr log from the backend
     minds-events.jsonl    # Structured JSONL event log
   auth/                   # Cookie signing key, one-time codes
-  <agent-id>/             # Per-agent directories
+  config.toml             # Optional minds config (cloudflare/supertokens URLs)
+  window-state.json       # Per-window content URLs, restored on next launch
+  mngr/                   # mngr host directory (MNGR_HOST_DIR)
+    agents/               # per-agent state managed by mngr
+  <agent-id>/             # Per-agent workspace directories
 ```
+
+`MINDS_ROOT_NAME` is a single env var that isolates an installed minds
+from a dev copy. Exporting `MINDS_ROOT_NAME=devminds` moves the entire
+layout to `~/.devminds/` (separate venv, caches, logs, auth, agents).
+The corresponding `MNGR_HOST_DIR` becomes `~/.devminds/mngr/` and
+`MNGR_PREFIX` becomes `devminds-` so tmux sessions and containers for
+the two copies never collide. Standalone `mngr` invocations ignore
+`MINDS_ROOT_NAME`.
+
+### Configuration file
+
+`~/.<MINDS_ROOT_NAME>/config.toml` is optional. When present, it may set:
+
+```toml
+cloudflare_forwarding_url = "https://..."
+```
+
+The `CLOUDFLARE_FORWARDING_URL` environment variable overrides the file.
+The field has a built-in default that points at the current dev-deployed
+server, so packaged minds works out of the box with no config file. The
+SuperTokens core URI and API key are configured on the backend server
+(alongside the Cloudflare credentials) and never need to be set on the
+client.
 
 ## Development
 

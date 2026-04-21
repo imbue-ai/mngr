@@ -1,3 +1,5 @@
+import base64
+import json
 from pathlib import Path
 
 from pydantic import PrivateAttr
@@ -13,10 +15,8 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
-from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
-from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
 from imbue.minds.telegram.credential_store import save_agent_bot_credentials
 from imbue.minds.telegram.data_types import TelegramBotCredentials
@@ -30,9 +30,6 @@ def _make_cloudflare_client() -> CloudflareForwardingClient:
     """Create a CloudflareForwardingClient pointed at a non-listening port (will fail fast)."""
     return CloudflareForwardingClient(
         forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
-        username=CloudflareUsername("testuser"),
-        secret=CloudflareSecret("testsecret"),
-        owner_email=OwnerEmail("test@example.com"),
     )
 
 
@@ -40,12 +37,27 @@ def _create_test_api_client_with_cloudflare(
     tmp_path: Path,
     agent_id: AgentId,
 ) -> tuple[TestClient, str, WorkspacePaths]:
-    """Create a client with a configured (but non-functional) CloudflareForwardingClient."""
+    """Create a client with a configured (but non-functional) CloudflareForwardingClient.
+
+    Seeds a signed-in SuperTokens session and associates the workspace with it
+    so that Cloudflare requests pass the auth gate and can exercise the
+    error-handling code paths below.
+    """
     paths = WorkspacePaths(data_dir=tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
 
     api_key = generate_api_key()
     save_api_key_hash(paths.data_dir, agent_id, hash_api_key(api_key))
+
+    session_store = MultiAccountSessionStore(data_dir=paths.data_dir)
+    user_id = "abcd1234-5678-9abc-def0-1234567890ab"
+    session_store.add_or_update_session(
+        access_token=_make_nonexpiring_jwt(),
+        refresh_token=None,
+        user_id=user_id,
+        email="cloudflare-test@example.com",
+    )
+    session_store.associate_workspace(user_id, str(agent_id))
 
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={str(agent_id): {"web": "http://127.0.0.1:9000"}},
@@ -59,6 +71,7 @@ def _create_test_api_client_with_cloudflare(
         http_client=None,
         notification_dispatcher=notification_dispatcher,
         cloudflare_client=cloudflare_client,
+        session_store=session_store,
         paths=paths,
     )
     client = TestClient(app)
@@ -738,6 +751,8 @@ def _create_test_api_client_with_succeeding_cloudflare(
 
     Pre-stores a tunnel token so that inject_tunnel_token_into_agent is not
     called during tests (it runs mngr exec which is not safe in unit tests).
+    Also seeds a signed-in SuperTokens session and associates the workspace
+    with it, since Cloudflare tunnel requests now require per-request auth.
     """
     paths = WorkspacePaths(data_dir=tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
@@ -749,15 +764,23 @@ def _create_test_api_client_with_succeeding_cloudflare(
     # inject_tunnel_token_into_agent (both require real infrastructure).
     save_tunnel_token(paths.data_dir, agent_id, "pre-stored-test-token")
 
+    # Seed a session and associate the workspace -- mimics a user who signed in.
+    session_store = MultiAccountSessionStore(data_dir=paths.data_dir)
+    user_id = "abcd1234-5678-9abc-def0-1234567890ab"
+    session_store.add_or_update_session(
+        access_token=_make_nonexpiring_jwt(),
+        refresh_token=None,
+        user_id=user_id,
+        email="cloudflare-test@example.com",
+    )
+    session_store.associate_workspace(user_id, str(agent_id))
+
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={str(agent_id): {"web": "http://127.0.0.1:9000"}},
     )
     notification_dispatcher = NotificationDispatcher(is_electron=True)
     cloudflare_client = _AlwaysSucceedCloudflareClient(
         forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
-        username=CloudflareUsername("testuser"),
-        secret=CloudflareSecret("testsecret"),
-        owner_email=OwnerEmail("test@example.com"),
     )
 
     app = create_desktop_client(
@@ -766,10 +789,18 @@ def _create_test_api_client_with_succeeding_cloudflare(
         http_client=None,
         notification_dispatcher=notification_dispatcher,
         cloudflare_client=cloudflare_client,
+        session_store=session_store,
         paths=paths,
     )
     client = TestClient(app)
     return client, api_key, paths
+
+
+def _make_nonexpiring_jwt() -> str:
+    """Return a fake JWT whose exp claim is far in the future so _try_refresh is skipped."""
+    payload = {"exp": 99999999999}
+    b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"header.{b64}.signature"
 
 
 def test_cloudflare_enable_returns_200_on_success(tmp_path: Path) -> None:

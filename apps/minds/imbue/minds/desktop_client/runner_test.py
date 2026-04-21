@@ -1,6 +1,6 @@
-import os
 from pathlib import Path
 
+from pydantic import AnyUrl
 from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
@@ -42,36 +42,13 @@ def test_agent_discovery_handler_callable() -> None:
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_returns_none_when_not_configured() -> None:
-    """Without env vars, _build_cloudflare_client returns None."""
-    for key in (
-        "CLOUDFLARE_FORWARDING_URL",
-        "CLOUDFLARE_FORWARDING_USERNAME",
-        "CLOUDFLARE_FORWARDING_SECRET",
-        "OWNER_EMAIL",
-    ):
-        os.environ.pop(key, None)
-    result = _build_cloudflare_client()
-    assert result is None
-
-
-def test_build_cloudflare_client_returns_client_when_configured() -> None:
-    """With all env vars set, _build_cloudflare_client returns a CloudflareForwardingClient."""
-    os.environ["CLOUDFLARE_FORWARDING_URL"] = "https://example.com"
-    os.environ["CLOUDFLARE_FORWARDING_USERNAME"] = "user"
-    os.environ["CLOUDFLARE_FORWARDING_SECRET"] = "secret"
-    os.environ["OWNER_EMAIL"] = "owner@example.com"
-    try:
-        result = _build_cloudflare_client()
-        assert result is not None
-    finally:
-        for key in (
-            "CLOUDFLARE_FORWARDING_URL",
-            "CLOUDFLARE_FORWARDING_USERNAME",
-            "CLOUDFLARE_FORWARDING_SECRET",
-            "OWNER_EMAIL",
-        ):
-            os.environ.pop(key, None)
+def test_build_cloudflare_client_holds_only_forwarding_url() -> None:
+    """The shared client only carries the forwarding URL; per-request auth is added later."""
+    result = _build_cloudflare_client(AnyUrl("https://example.com/"))
+    assert str(result.forwarding_url) == "https://example.com/"
+    assert result.supertokens_token is None
+    assert result.supertokens_user_id_prefix is None
+    assert result.supertokens_email is None
 
 
 def test_agent_discovery_handler_default_mngr_host_dir() -> None:

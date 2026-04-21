@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import os
 import queue
@@ -33,6 +34,7 @@ from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
@@ -341,11 +343,11 @@ def _handle_agent_default_redirect(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Redirect to the agent's web server by default."""
+    """Redirect to the agent's system_interface server by default."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/web/"})
+    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/system_interface/"})
 
 
 async def _handle_agent_servers_page(
@@ -854,6 +856,8 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     git_url = str(form.get("git_url", "")).strip()
     agent_name = str(form.get("agent_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
+    # HTML checkboxes submit their value only when checked; absence means unchecked.
+    include_env_file = form.get("include_env_file") is not None
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -862,7 +866,13 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
         return HTMLResponse(content=html, status_code=400)
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+    agent_id = agent_creator.start_creation(
+        git_url,
+        agent_name=agent_name,
+        branch=branch,
+        launch_mode=launch_mode,
+        include_env_file=include_env_file,
+    )
     return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
 
 
@@ -903,6 +913,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     git_url = str(body.get("git_url", "")).strip()
     agent_name = str(body.get("agent_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
+    include_env_file = bool(body.get("include_env_file", False))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -918,7 +929,13 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+    agent_id = agent_creator.start_creation(
+        git_url,
+        agent_name=agent_name,
+        branch=branch,
+        launch_mode=launch_mode,
+        include_env_file=include_env_file,
+    )
     return Response(
         content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
         media_type="application/json",
@@ -1440,13 +1457,21 @@ def _handle_requests_panel(
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
         event_id = str(req.event_id)
+        # Encode as JSON for safe embedding in the JS call, then HTML-escape
+        # the result so it is also safe inside the double-quoted onclick
+        # attribute. This is defense-in-depth: req.agent_id is validated as
+        # an AgentId above, but req.event_id is only required to be a
+        # non-empty string by its type, and relying on upstream validation
+        # at each interpolation site is fragile.
+        event_id_attr = html.escape(json.dumps(event_id), quote=True)
+        agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
         cards.append(
-            f'<div class="req-card" onclick="navigateToRequest(\'{event_id}\')">'
+            f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
             f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{server_name}</div></div>'
         )
 
-    html = (
+    html_content = (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Requests</title>'
         "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#cbd5e1;"
         "margin:0;padding:0;overflow-y:auto;height:100vh;}"
@@ -1456,9 +1481,14 @@ def _handle_requests_panel(
         "</style></head>"
         f"<body>"
         f"<script>"
-        f"function navigateToRequest(eventId) {{"
-        f'  if (window.minds) window.minds.navigateContent("/requests/" + eventId);'
-        f'  else window.top.location = "/requests/" + eventId;'
+        f"function navigateToRequest(eventId, agentId) {{"
+        f"  if (window.minds && window.minds.navigateToRequest) {{"
+        f"    window.minds.navigateToRequest(agentId, eventId);"
+        f"  }} else if (window.minds) {{"
+        f'    window.minds.navigateContent("/requests/" + eventId);'
+        f"  }} else {{"
+        f'    window.top.location = "/requests/" + eventId;'
+        f"  }}"
         f"}}"
         f"</script>"
         f"<h2>Requests ({len(pending)})</h2>"
@@ -1472,7 +1502,7 @@ def _handle_requests_panel(
         f"Auto-open on new request</label></div>"
         "</body></html>"
     )
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html_content)
 
 
 async def _handle_requests_auto_open(
@@ -1795,9 +1825,10 @@ def create_desktop_client(
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
+    minds_config: MindsConfig | None = None,
     stream_manager: MngrStreamManager | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    minds_config: MindsConfig | None = None,
+    auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
@@ -1844,6 +1875,7 @@ def create_desktop_client(
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
+    app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
@@ -1858,10 +1890,11 @@ def create_desktop_client(
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
-    # Mount the SuperTokens auth routes
-    if session_store is not None:
+    # Mount the auth routes (proxy to the cloudflare_forwarding auth backend)
+    if session_store is not None and auth_backend_client is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,
+            auth_backend_client=auth_backend_client,
             server_port=server_port,
             output_format=output_format or OutputFormat.JSONL,
         )

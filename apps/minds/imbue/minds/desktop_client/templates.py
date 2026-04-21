@@ -30,7 +30,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Workspaces</title>
+  <title>Projects</title>
   <style>
     """
     + _COMMON_STYLES
@@ -119,7 +119,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
     <div style="text-align: center; padding: 48px 0;">
-      <p class="empty-state" style="margin-bottom: 24px;">No workspaces yet</p>
+      <p class="empty-state" style="margin-bottom: 24px;">No projects yet</p>
       <a href="/create" class="create-btn">Create</a>
     </div>
       {% endif %}
@@ -133,7 +133,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Create a Workspace</title>
+  <title>Create a Project</title>
   <style>
     """
     + _COMMON_STYLES
@@ -165,7 +165,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     <div class="page-header">
-      <a href="/">Back to workspace list</a>
+      <a href="/">Back to project list</a>
       <button type="submit" form="create-form" class="submit-btn">Create</button>
     </div>
     <form id="create-form" action="/create" method="post">
@@ -211,6 +211,15 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
           </select>
         </div>
       </div>
+      <div class="form-group">
+        <div class="form-label">
+          <label for="include_env_file">Include .env file</label>
+          <p class="help-text">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+        </div>
+        <div class="form-input">
+          <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
+        </div>
+      </div>
     </form>
   </div>
 </body>
@@ -221,7 +230,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Creating your workspace...</title>
+  <title>Creating your project...</title>
   <style>
     """
     + _COMMON_STYLES
@@ -243,7 +252,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Creating your workspace...</h1>
+  <h1>Creating your project...</h1>
   <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
   <div id="logs"></div>
   <script>
@@ -302,7 +311,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
-  <title>Login - Workspaces</title>
+  <title>Login - Projects</title>
   <style>
     """
     + _COMMON_STYLES
@@ -311,7 +320,7 @@ _LOGIN_PAGE_TEMPLATE: Final[str] = (
   </style>
 </head>
 <body>
-  <h1>Workspaces</h1>
+  <h1>Projects</h1>
   <p class="login-message">
     Please use the login URL printed in the terminal where the server is running.
   </p>
@@ -521,7 +530,7 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     No servers are currently running for this agent.
   </p>
   {% endif %}
-  <div class="back-link"><a href="/">Back to all workspaces</a></div>
+  <div class="back-link"><a href="/">Back to all projects</a></div>
   <script>
   async function toggleGlobal(agentId, serverName, enable) {
     try {
@@ -672,7 +681,7 @@ body {
 <body>
 <div id="minds-titlebar">
   <div class="minds-nav">
-    <button id="sidebar-toggle" title="Workspaces">
+    <button id="sidebar-toggle" title="Projects">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
     </button>
     <button id="home-btn" title="Home">
@@ -709,7 +718,7 @@ body {
 <!-- Sidebar panel (used in browser mode; hidden by default) -->
 <div id="sidebar-panel">
   <div id="sidebar-workspaces">
-    <div class="sidebar-empty">No workspaces</div>
+    <div class="sidebar-empty">No projects</div>
   </div>
 </div>
 
@@ -783,9 +792,18 @@ function refreshAuthStatus() {
 }
 
 if (isElectron) {
-  window.minds.onContentTitleChange(function(title) {
-    document.getElementById('page-title').textContent = title || 'Minds';
-  });
+  // In Electron, main process pushes an authoritative per-window title
+  // (mirrors the OS window title: "{workspace-name} -- Minds" or "Minds").
+  // Ignore content document.title entirely.
+  if (window.minds.onWindowTitleChange) {
+    window.minds.onWindowTitleChange(function(title) {
+      document.getElementById('page-title').textContent = title || 'Minds';
+    });
+  } else {
+    window.minds.onContentTitleChange(function(title) {
+      document.getElementById('page-title').textContent = title || 'Minds';
+    });
+  }
   window.minds.onContentURLChange(function() {
     refreshAuthStatus();
   });
@@ -830,7 +848,7 @@ document.getElementById('requests-toggle').onclick = function() {
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
     return;
   }
   // Group by account
@@ -862,25 +880,35 @@ function updateRequestsBadge(count) {
   if (badge) badge.style.display = count > 0 ? 'block' : 'none';
 }
 
-var evtSource = null;
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/_chrome/events');
-  evtSource.onmessage = function(event) {
-    try {
-      var data = JSON.parse(event.data);
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
-      if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'request_count') updateRequestsBadge(data.count);
-    } catch(e) {}
-  };
-  evtSource.onerror = function() {
-    evtSource.close();
-    evtSource = null;
-    setTimeout(connectSSE, 5000);
-  };
+function handleChromeEvent(data) {
+  try {
+    if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+    if (data.type === 'auth_status') updateAuthUI(data);
+    if (data.type === 'request_count') updateRequestsBadge(data.count);
+  } catch(e) {}
 }
-connectSSE();
+
+if (isElectron && window.minds.onChromeEvent) {
+  // Electron: main process maintains a single SSE to /_chrome/events and
+  // pushes events to every chrome/sidebar view. Each view opening its own
+  // EventSource used to saturate Chromium's 6-connection-per-host cap.
+  window.minds.onChromeEvent(handleChromeEvent);
+} else {
+  var evtSource = null;
+  function connectSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource('/_chrome/events');
+    evtSource.onmessage = function(event) {
+      try { handleChromeEvent(JSON.parse(event.data)); } catch(e) {}
+    };
+    evtSource.onerror = function() {
+      evtSource.close();
+      evtSource = null;
+      setTimeout(connectSSE, 5000);
+    };
+  }
+  connectSSE();
+}
 </script>
 </body>
 </html>"""
@@ -891,7 +919,7 @@ _SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Workspaces</title>
+<title>Projects</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -907,11 +935,30 @@ h2 {
 }
 
 .sidebar-item {
-  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  position: relative;
+  padding: 10px 36px 10px 12px;
+  cursor: pointer; font-size: 13px; font-weight: 500;
   color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
 .sidebar-item:hover { background: rgba(255,255,255,0.06); }
+
+.sidebar-item-label {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.sidebar-open-new {
+  display: none;
+  background: none; border: none; padding: 4px; cursor: pointer;
+  color: #94a3b8; border-radius: 4px;
+  align-items: center; justify-content: center;
+}
+.sidebar-open-new:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+.sidebar-open-new svg { width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar-item:hover .sidebar-open-new { display: inline-flex; }
+.sidebar-item.is-current .sidebar-open-new { display: none !important; }
 
 .sidebar-empty {
   padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
@@ -919,21 +966,35 @@ h2 {
 </style>
 </head>
 <body>
-<h2>Workspaces</h2>
+<h2>Projects</h2>
 <div id="sidebar-workspaces">
-  <div class="sidebar-empty">No workspaces</div>
+  <div class="sidebar-empty">No projects</div>
 </div>
 <script>
 var isElectron = !!window.minds;
+var currentWorkspaceId = null;
+var lastWorkspaces = [];
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+  });
+}
 
 function selectWorkspace(agentId) {
   if (isElectron) window.minds.navigateContent('/forwarding/' + agentId + '/');
 }
 
+function openInNewWindow(agentId) {
+  if (isElectron && window.minds.openWorkspaceInNewWindow) {
+    window.minds.openWorkspaceInNewWindow(agentId);
+  }
+}
+
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No workspaces</div>';
+    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
     return;
   }
   var groups = {};
@@ -947,34 +1008,95 @@ function renderWorkspaces(workspaces) {
     if (b === 'Private') return 1;
     return a.localeCompare(b);
   });
+  var openIcon = '<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/>'
+    + '<path d="M10 14L21 3"/>'
+    + '<path d="M21 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5"/></svg>';
   var html = '';
   keys.forEach(function(key) {
-    var label = key === 'Private' ? 'PRIVATE' : key;
+    var label = key === 'Private' ? 'PRIVATE' : escapeHtml(key);
     html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
     groups[key].forEach(function(w) {
-      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+      var id = escapeHtml(w.id);
+      var name = escapeHtml(w.name || w.id);
+      var isCurrent = w.id === currentWorkspaceId;
+      var classes = 'sidebar-item' + (isCurrent ? ' is-current' : '');
+      html += '<div class="' + classes + '" data-agent-id="' + id + '">'
+        + '<span class="sidebar-item-label">' + name + '</span>'
+        + '<button class="sidebar-open-new" data-open-new="' + id + '" title="Open in new window" tabindex="-1">'
+        + openIcon
+        + '</button>'
+        + '</div>';
     });
   });
   container.innerHTML = html;
 }
 
-var evtSource = null;
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/_chrome/events');
-  evtSource.onmessage = function(event) {
-    try {
-      var data = JSON.parse(event.data);
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
-    } catch(e) {}
-  };
-  evtSource.onerror = function() {
-    evtSource.close();
-    evtSource = null;
-    setTimeout(connectSSE, 5000);
-  };
+function handleRowClick(target) {
+  var row = target.closest('.sidebar-item');
+  if (!row) return;
+  var openNewBtn = target.closest('.sidebar-open-new');
+  var agentId = row.getAttribute('data-agent-id');
+  if (!agentId) return;
+  if (openNewBtn) {
+    openInNewWindow(agentId);
+    return;
+  }
+  selectWorkspace(agentId);
 }
-connectSSE();
+
+document.addEventListener('click', function(e) {
+  handleRowClick(e.target);
+});
+
+document.addEventListener('contextmenu', function(e) {
+  var row = e.target.closest('.sidebar-item');
+  if (!row) return;
+  var agentId = row.getAttribute('data-agent-id');
+  if (!agentId) return;
+  // Suppress context menu for the current workspace row -- nothing actionable there.
+  if (agentId === currentWorkspaceId) {
+    e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  if (isElectron && window.minds.showWorkspaceContextMenu) {
+    window.minds.showWorkspaceContextMenu(agentId, e.clientX, e.clientY);
+  }
+});
+
+if (isElectron && window.minds.onCurrentWorkspaceChanged) {
+  window.minds.onCurrentWorkspaceChanged(function(agentId) {
+    currentWorkspaceId = agentId || null;
+    renderWorkspaces(lastWorkspaces);
+  });
+}
+
+function handleChromeEvent(data) {
+  if (data.type !== 'workspaces') return;
+  lastWorkspaces = data.workspaces || [];
+  renderWorkspaces(lastWorkspaces);
+}
+
+if (isElectron && window.minds.onChromeEvent) {
+  // In Electron, the main process maintains the single SSE connection and
+  // pushes events to us via IPC. See main.js/runChromeSSELoop.
+  window.minds.onChromeEvent(handleChromeEvent);
+} else {
+  var evtSource = null;
+  function connectSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource('/_chrome/events');
+    evtSource.onmessage = function(event) {
+      try { handleChromeEvent(JSON.parse(event.data)); } catch(e) {}
+    };
+    evtSource.onerror = function() {
+      evtSource.close();
+      evtSource = null;
+      setTimeout(connectSSE, 5000);
+    };
+  }
+  connectSSE();
+}
 </script>
 </body>
 </html>"""
