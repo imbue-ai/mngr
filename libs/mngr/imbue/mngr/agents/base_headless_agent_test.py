@@ -252,8 +252,10 @@ def test_raise_no_output_error_surfaces_pane_content_when_files_exist_but_empty(
     """When redirect files exist but are empty, pane content is still surfaced.
 
     Shell redirects (> stdout 2> stderr) create empty files even when the
-    process fails immediately. The pane capture should be used as a fallback
-    regardless of whether the redirect files exist.
+    process fails immediately. The pane is captured unconditionally by
+    ``_raise_no_output_error`` (not as a fallback); this test verifies that
+    its content still reaches the raised error when the redirect files
+    exist but are empty.
     """
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path, pane_content="startup-crash-output")
     agent_dir = agent._get_agent_dir()
