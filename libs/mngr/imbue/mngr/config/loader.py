@@ -216,7 +216,14 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # check whether we're in pytest
+    # Check whether we're in pytest.  The expected way to hit this branch is a
+    # poorly-scoped test whose subprocess mngr picked up the repo's
+    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
+    # at a tmp directory.  The shared plugin test fixtures handle that
+    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
+    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
+    # setting is_allowed_in_pytest=True in the repo config (both dodge the
+    # guard without actually fixing the isolation).
     if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
         if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
