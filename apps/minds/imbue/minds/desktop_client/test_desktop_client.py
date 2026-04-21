@@ -1822,7 +1822,7 @@ def test_restart_workspace_server_returns_403_when_unauthenticated(tmp_path: Pat
     assert response.status_code == 403
 
 
-def test_restart_workspace_server_returns_501_for_local_without_work_dir(tmp_path: Path) -> None:
+def test_restart_workspace_server_returns_500_for_local_without_work_dir(tmp_path: Path) -> None:
     """If the resolver exposes a workspace_name but not a work_dir, we can't find services.toml."""
     agent_id = AgentId()
     resolver = _RestartBackendResolver(
@@ -1843,7 +1843,7 @@ def test_restart_workspace_server_returns_501_for_local_without_work_dir(tmp_pat
 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
-    assert response.status_code == 501
+    assert response.status_code == 500
     assert "work_dir" in response.text
 
 

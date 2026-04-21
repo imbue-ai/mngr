@@ -1307,13 +1307,14 @@ async def _restart_workspace_server_locally(
 
     Resolves the agent's work_dir via the backend resolver, constructs
     services.toml path relative to it, and runs the kill+touch commands via
-    a local ConcurrencyGroup. Returns 501 if the resolver doesn't know the
-    work_dir (e.g. a backend resolver that doesn't expose it).
+    a local ConcurrencyGroup. Returns 500 if the resolver doesn't know the
+    work_dir for this specific agent (a per-agent runtime data miss, not an
+    implementation-wide capability gap -- hence 500 rather than 501).
     """
     work_dir = backend_resolver.get_work_dir(AgentId(agent_id))
     if work_dir is None:
         return Response(
-            status_code=501,
+            status_code=500,
             content=json.dumps(
                 {"error": "Cannot locate services.toml for local agent: work_dir unavailable"}
             ),
