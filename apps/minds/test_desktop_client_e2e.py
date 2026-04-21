@@ -49,25 +49,25 @@ _AGENT_NAME = "forever"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_mngr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate each test's mngr state from the host and from other tests.
+def _override_prefix_for_real_modal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override the shared-autouse MNGR_PREFIX so the Modal backend guard accepts
+    env names the subprocess mngr creates.
 
-    The desktop client spawns `mngr` as a subprocess via ConcurrencyGroup
-    (no explicit env= argument), so the subprocess inherits os.environ from
-    the pytest process. Without this fixture, those mngr subprocesses see
-    no MNGR_HOST_DIR / MNGR_PREFIX, mint a fresh uuid4 user_id, and create
-    an orphan mngr-<uuid> Modal environment that does not match the CI
-    cleanup script's mngr_test-* pattern.
+    The shared plugin test fixtures (registered in apps/minds/conftest.py) already
+    provide the standard autouse isolation -- HOME, MNGR_HOST_DIR, MNGR_PREFIX,
+    MNGR_ROOT_NAME are all pointed at per-test temp values, so subprocess mngr
+    never sees the developer's real ~/.mngr. That handles all the desktop client's
+    in-process ConcurrencyGroup spawns of mngr.
 
-    Using the mngr_test-YYYY-MM-DD-HH-MM-SS- prefix makes any leaked envs
-    visible to cleanup_old_modal_test_environments.py as a safety net.
-    MNGR_ALLOW_PYTEST=1 is the explicit opt-in for the project config's
-    is_allowed_in_pytest=False guard (mirrors what clean_env() sets for
-    subprocess calls that go through it).
+    The only thing we need to override is MNGR_PREFIX: the shared fixture's value
+    `mngr_<hex>-` starts with `mngr_` (underscore) which trips the Modal backend
+    guard (`libs/mngr_modal/imbue/mngr_modal/backend.py`) -- it only accepts
+    underscore-prefixed env names that begin with `mngr_test-`. Use
+    generate_test_environment_name() to produce `mngr_test-YYYY-MM-DD-HH-MM-SS-`
+    so any Modal env created by this test passes the guard AND is visible to
+    cleanup_old_modal_test_environments.py as a safety net.
     """
-    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / ".mngr"))
     monkeypatch.setenv("MNGR_PREFIX", f"{generate_test_environment_name()}-")
-    monkeypatch.setenv("MNGR_ALLOW_PYTEST", "1")
 
 
 def _get_template_repo() -> str:
