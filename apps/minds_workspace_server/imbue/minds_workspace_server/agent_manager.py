@@ -40,20 +40,48 @@ _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
 _APPLICATIONS_TOML_BASENAME = "applications.toml"
 
 
+_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS = 5.0
+
+
 def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
     """Non-blocking put for a creation-log queue.
 
-    The creation thread must never block on log delivery. If the WebSocket
-    client streaming proto-agent logs disconnects mid-creation, nothing is
-    draining the queue, and a blocking ``put`` would hang the thread at the
-    next log line -- which in turn prevents ``proto_agent_completed`` from
-    ever firing. We drop log lines on a full queue (logs are best-effort;
-    the completion signals below are not).
+    The creation thread must never block on individual log lines. If the
+    WebSocket client streaming proto-agent logs disconnects mid-creation,
+    nothing is draining the queue, and a blocking ``put`` would hang the
+    thread at the next log line -- which in turn prevents
+    ``proto_agent_completed`` from ever firing. We drop log lines on a
+    full queue; callers that need delivery guarantees for sentinels
+    (``done: True`` + the ``None`` terminator) should use
+    :func:`_completion_signal_put` instead.
     """
     try:
         log_queue.put_nowait(message)
     except queue.Full:
         _loguru_logger.trace("Creation log queue full; dropping line")
+
+
+def _completion_signal_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Blocking put (with timeout) for completion sentinels.
+
+    Unlike per-line log writes, the completion sentinel + None terminator
+    must reach the consumer -- otherwise ``_proto_agent_logs_endpoint``
+    loops forever on ``queue.get()`` and the log WebSocket never closes.
+    We therefore block briefly (bounded by
+    ``_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS``) to give a slow consumer
+    time to drain. If the queue is still full at the deadline, log at
+    warning level and drop -- the out-of-band
+    ``broadcast_proto_agent_completed`` WS broadcast is the authoritative
+    signal to the main UI, so the log-channel sentinel being dropped
+    only degrades the dedicated log view, not overall correctness.
+    """
+    try:
+        log_queue.put(message, block=True, timeout=_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS)
+    except queue.Full:
+        _loguru_logger.warning(
+            "Creation log queue full; dropping completion sentinel. "
+            "The log WebSocket consumer may hang until the queue is garbage-collected."
+        )
 
 
 class _LogQueueCallback(MutableModel):
@@ -476,8 +504,8 @@ class AgentManager:
             except (OSError, RuntimeError):
                 _loguru_logger.exception("Failed to clean proto-agent entry for {}", agent_id)
 
-        _safe_log_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
-        _safe_log_put(log_queue, None)
+        _completion_signal_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
+        _completion_signal_put(log_queue, None)
 
         if success:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
