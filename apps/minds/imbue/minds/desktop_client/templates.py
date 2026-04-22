@@ -588,12 +588,53 @@ _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
     {% endfor %}
   </ul>
   {% else %}
-  <p class="empty-state">
+  <p class="empty-state" id="empty-state">
+    Starting up &mdash; waiting for services to register&hellip;
+  </p>
+  <p class="empty-state" id="empty-state-final" style="display: none;">
     No servers are currently running for this agent.
   </p>
   {% endif %}
   <div class="back-link"><a href="/">Back to all projects</a></div>
   <script>
+  // When the servers list is empty, the resolver hasn't received the
+  // `server_registered` events from the VM's app-watcher yet. This is
+  // common right after agent creation completes: the DONE status arrives
+  // before the in-VM forward_port.py registrations propagate back. Retry
+  // the default-redirect URL every ~2s so that the first retry after
+  // events arrive promotes us to the correct server.
+  (function() {
+    var emptyState = document.getElementById('empty-state');
+    if (!emptyState) return;
+    var AGENT_ID = {{ agent_id|tojson }};
+    var RETRY_KEY = 'servers-retry:' + AGENT_ID;
+    var MAX_RETRIES = 30; // ~60 seconds at 2s/retry
+    var n = parseInt(sessionStorage.getItem(RETRY_KEY) || '0', 10);
+    if (n >= MAX_RETRIES) {
+      // Give up and show the hard "nothing running" message so the
+      // user can click Back. Clearing the counter so manual reload
+      // starts fresh.
+      sessionStorage.removeItem(RETRY_KEY);
+      emptyState.style.display = 'none';
+      var finalMsg = document.getElementById('empty-state-final');
+      if (finalMsg) finalMsg.style.display = '';
+      return;
+    }
+    sessionStorage.setItem(RETRY_KEY, String(n + 1));
+    setTimeout(function() {
+      // Go to the default-redirect URL (not this one). If servers are
+      // now registered, it'll redirect to the preferred server
+      // automatically; otherwise it'll bounce back here and retry.
+      location.replace('/forwarding/' + AGENT_ID + '/');
+    }, 2000);
+  })();
+  // A page render that DID find servers means the wait is over; clear the
+  // retry counter so the next fresh open of this agent starts from zero.
+  (function() {
+    if (document.querySelector('.server-list')) {
+      sessionStorage.removeItem('servers-retry:' + {{ agent_id|tojson }});
+    }
+  })();
   async function toggleGlobal(agentId, serverName, enable) {
     try {
       const resp = await fetch('/forwarding/' + agentId + '/servers/' + serverName + '/global', {
