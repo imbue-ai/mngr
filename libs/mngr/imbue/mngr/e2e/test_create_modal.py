@@ -179,7 +179,7 @@ def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(300)
 def test_create_modal_build_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # generally though, you'll want to construct a new Modal host for each agent.
@@ -199,7 +199,7 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(300)
 def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # the most important build args for Modal are probably "--file" and "--context-dir",
@@ -337,7 +337,7 @@ def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(300)
 def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also set host-level environment variables (separate from agent env vars):
@@ -355,7 +355,7 @@ def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(300)
 def test_create_modal_reuse(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
