@@ -35,9 +35,21 @@ from imbue.mngr.api.interrupt import agent_type_supports_interrupt
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
+
+
+def _discovered_agent_supports_interrupt(agent: DiscoveredAgent) -> bool:
+    """Return True if the discovered agent's type implements the interrupt mixin.
+
+    `DiscoveredAgent.agent_type` returns an `AgentTypeName | None`; the
+    interrupt check accepts a plain ``str | None``, so we coerce in one place
+    to keep the call-sites uniform.
+    """
+    agent_type = agent.agent_type
+    return agent_type_supports_interrupt(str(agent_type) if agent_type is not None else None)
 
 
 class _LogQueueCallback(MutableModel):
@@ -547,9 +559,7 @@ class AgentManager:
                 state="RUNNING",
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
-                supports_interrupt=agent_type_supports_interrupt(
-                    str(agent.agent_type) if agent.agent_type is not None else None
-                ),
+                supports_interrupt=_discovered_agent_supports_interrupt(agent),
             )
 
         with self._lock:
@@ -577,9 +587,7 @@ class AgentManager:
             state="RUNNING",
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
-            supports_interrupt=agent_type_supports_interrupt(
-                str(agent.agent_type) if agent.agent_type is not None else None
-            ),
+            supports_interrupt=_discovered_agent_supports_interrupt(agent),
         )
 
         with self._lock:
