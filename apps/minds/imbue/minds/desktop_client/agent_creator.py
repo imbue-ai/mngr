@@ -222,7 +222,23 @@ def _make_host_name(agent_name: AgentName) -> str:
     return f"{agent_name}-host"
 
 
-WELCOME_INITIAL_MESSAGE: Final[str] = "Hello! Please briefly introduce yourself and describe what you can help with."
+# Minds-agent first-turn message. The agent runs Claude Code, which treats
+# `/<skill-name>` in user input as a skill invocation. `welcome` is a skill
+# that ships with forever-claude-template (at `.agents/skills/welcome/` with
+# a symlink from `.claude/skills/welcome/`); it renders a short, friendly
+# greeting without doing any code exploration. The template owns the message
+# text, so to change what new users see first, edit
+# `.agents/skills/welcome/SKILL.md` in FCT rather than this constant.
+#
+# We earlier worried that slash commands would hang `mngr create --message`
+# because Claude Code might intercept them locally without firing the
+# `UserPromptSubmit` hook that mngr's `_send_enter_and_wait_for_signal`
+# depends on. Empirically (Claude Code v2.1.116) the hook does fire for
+# both recognized skill invocations and unknown slash commands, and
+# `mngr message -m "/welcome"` completes in ~2s with the skill output
+# rendered. If that ever regresses, the symptom is a hang at create time
+# and the fallback is to change this constant back to plain text.
+WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
 
 
 def _build_mngr_create_command(

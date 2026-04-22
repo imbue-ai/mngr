@@ -170,12 +170,20 @@ def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
     )
     assert "--message" in cmd
     # The welcome message is sent as the very first user prompt so the agent
-    # introduces itself without any other user interaction. Must be plain text
-    # -- a slash command like "/welcome" is intercepted by Claude Code before
-    # reaching the model, never fires the UserPromptSubmit hook that mngr's
-    # send_message waits on, and therefore hangs until timeout.
+    # renders a greeting without any other user interaction. We deliberately
+    # use the `/welcome` skill invocation (see `.agents/skills/welcome/`
+    # in forever-claude-template) so the template owns the greeting text
+    # and every new agent shows the same polished first response.
+    #
+    # An earlier iteration of this test asserted the message MUST NOT start
+    # with "/" out of concern that Claude Code would intercept slash
+    # commands locally and skip the `UserPromptSubmit` hook that mngr's
+    # send_message waits on, causing a create-time hang. Verified
+    # empirically against Claude Code v2.1.116 that the hook does fire for
+    # both recognized skills and unknown slash commands, so the guard was
+    # guarding against a failure mode that no longer manifests.
     assert cmd[cmd.index("--message") + 1] == WELCOME_INITIAL_MESSAGE
-    assert not cmd[cmd.index("--message") + 1].startswith("/")
+    assert cmd[cmd.index("--message") + 1] == "/welcome"
 
 
 def test_build_mngr_create_command_with_host_env_file(tmp_path: Path) -> None:
