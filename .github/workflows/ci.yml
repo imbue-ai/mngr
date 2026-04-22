@@ -56,12 +56,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.8.0-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.8.0
+            cargo install offload@0.8.1
           fi
 
       - name: Restore offload test durations from previous run
@@ -238,12 +238,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.8.0-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.8.0
+            cargo install offload@0.8.1
           fi
 
       - name: Restore offload test durations from previous run
