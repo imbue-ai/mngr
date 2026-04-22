@@ -78,8 +78,13 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
     terminated explicitly via ``_stop_serial_tailer``.
     """
     global _active_serial_tailer
+    # `-F` = follow-by-name + retry on missing file, on both BSD (macOS) and
+    # GNU tail. GNU-style `--follow=name --retry` is unsupported on macOS
+    # BSD tail and causes the tailer to exit immediately with "unrecognized
+    # option", producing no serial-log output during VM boot (non-fatal,
+    # but loses diagnostics when Lima boot itself misbehaves).
     _active_serial_tailer = cg.run_process_in_background(
-        ["tail", "--follow=name", "--retry", serial_log_path],
+        ["tail", "-F", serial_log_path],
         is_checked_by_group=False,
         on_output=_log_boot_output,
     )
