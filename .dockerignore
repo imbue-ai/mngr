@@ -1,0 +1,55 @@
+# Exclude directories that should never be in the Docker build context.
+# Offload's tree export may include working-directory artifacts (e.g. .venv
+# with macOS binaries), so this file prevents them from being uploaded.
+
+# Version control
+.git/
+.jj/
+
+# Virtual environments (macOS binaries cause exec format errors on Linux)
+**/.venv
+**/.venv-*
+
+# Python caches
+**/__pycache__/
+**/*.py[codz]
+
+# Test artifacts
+**/.pytest_cache/
+**/test-results
+**/.test_output/
+**/htmlcov/
+**/.coverage
+**/.coverage.*
+**/coverage.xml
+**/cov.xml
+
+# Build artifacts
+**/build/
+**/dist/
+**/*.egg-info/
+
+# Offload artifacts
+**/.offload/
+offload-history.jsonl
+
+# IDE and editor files
+**/.idea/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# External worktrees
+.external_worktrees/
+
+# Claude Code artifacts
+**/.claude/
+**/.autofix/
+**/.reviewer/outputs/
+**/.reviews/
+**/.demos/
+
+# Node modules
+**/node_modules/
+
+# Frontend build artifacts
+**/frontend-dist/
