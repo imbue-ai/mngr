@@ -768,7 +768,6 @@ body {
     </button>
   </div>
   <span class="minds-title" id="page-title">Minds</span>
-  <button id="servers-btn" title="Switch to another server for this agent (chat, terminal, etc.)" style="display:none;">Servers</button>
   <button id="update-btn" title="A new version is ready. Click to restart and apply." style="display:none;">Update</button>
   <div class="minds-user-area">
     <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
@@ -883,39 +882,6 @@ function refreshAuthStatus() {
   fetch('/auth/api/status').then(function(r) { return r.json(); }).then(updateAuthUI).catch(function() {});
 }
 
-// -- Servers button: visible only when the user is on an agent's server
-// page (/forwarding/<agent_id>/<server>/...). Click routes to the
-// agent's servers-listing page, which renders clickable links for each
-// registered server so the user can switch between chat, terminal,
-// etc. without getting stuck on one.
-var SERVERS_BTN = document.getElementById('servers-btn');
-var _FORWARDING_RE = /\/forwarding\/(agent-[a-f0-9]+)(?:\/|$)/;
-function _agentIdFromUrl(url) {
-  if (!url) return null;
-  var m = _FORWARDING_RE.exec(url);
-  return m ? m[1] : null;
-}
-function updateServersButton(url) {
-  var aid = _agentIdFromUrl(url);
-  if (aid) {
-    SERVERS_BTN.style.display = 'inline-block';
-    SERVERS_BTN.dataset.agentId = aid;
-  } else {
-    SERVERS_BTN.style.display = 'none';
-    delete SERVERS_BTN.dataset.agentId;
-  }
-}
-SERVERS_BTN.onclick = function() {
-  var aid = SERVERS_BTN.dataset.agentId;
-  if (!aid) return;
-  var target = '/forwarding/' + aid + '/servers/';
-  if (isElectron) {
-    window.minds.navigateContent(target);
-  } else {
-    window.location.href = target;
-  }
-};
-
 if (isElectron) {
   // In Electron, main process pushes an authoritative per-window title
   // (mirrors the OS window title: "{workspace-name} -- Minds" or "Minds").
@@ -929,16 +895,14 @@ if (isElectron) {
       document.getElementById('page-title').textContent = title || 'Minds';
     });
   }
-  window.minds.onContentURLChange(function(url) {
+  window.minds.onContentURLChange(function() {
     refreshAuthStatus();
-    updateServersButton(url);
   });
 } else {
   setInterval(function() {
     try {
       var t = document.getElementById('content-frame').contentDocument.title;
       if (t) document.getElementById('page-title').textContent = t;
-      updateServersButton(document.getElementById('content-frame').contentDocument.location.href);
     } catch(e) {}
   }, 500);
   // Re-check auth on iframe navigation

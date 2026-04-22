@@ -26,11 +26,12 @@ Launch the Electron app from local source (no packaging). Code changes in `apps/
    pkill -9 -f "uv run --package minds minds" 2>/dev/null
    sleep 2
    ```
-2. Start:
+2. Start. **Must** `unset ELECTRON_RUN_AS_NODE` first — it's set in the user's shell env for other tooling, and if inherited, Electron boots in `node_init` mode where `require('electron')` returns a string path and main.js crashes at `app.isPackaged`:
    ```
-   (cd apps/minds && source ~/.zshrc 2>/dev/null && pnpm start) > /tmp/minds-local.log 2>&1 &
+   (cd apps/minds && unset ELECTRON_RUN_AS_NODE && source ~/.zshrc 2>/dev/null && unset ELECTRON_RUN_AS_NODE && pnpm start) > /tmp/minds-local.log 2>&1 &
    disown
    ```
+   (unset both before *and* after sourcing zshrc in case zshrc re-sets it.)
 3. Wait ~10 s for the backend to bind and the window to appear, then report:
    - PID of the Electron main: `pgrep -f "electron.*apps/minds" | head -1`
    - Backend port: extract from `/tmp/minds-local.log` (look for "Backend ready. Loading chrome from").
