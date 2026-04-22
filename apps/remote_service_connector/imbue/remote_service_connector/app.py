@@ -775,13 +775,16 @@ class ForwardingCtx:
 
     # ---- naming --------------------------------------------------------
 
+    _TUNNEL_APP_NAME_PREFIX = "tunnel-"
+    _OVERRIDE_APP_NAME_PREFIX = "override-"
+
     def _tunnel_app_name(self, tunnel_name: str) -> str:
         """Name used for the tunnel-wide Access app. Convention-based lookup."""
-        return f"tunnel-{tunnel_name}"
+        return f"{self._TUNNEL_APP_NAME_PREFIX}{tunnel_name}"
 
     def _override_app_name(self, hostname: str) -> str:
         """Name used for a per-service override Access app."""
-        return f"override-{hostname}"
+        return f"{self._OVERRIDE_APP_NAME_PREFIX}{hostname}"
 
     def _primary_hostname(self, tunnel_name: str, username: str) -> str:
         """Hostname of the always-present ``system_interface`` service on a tunnel.
@@ -1045,10 +1048,21 @@ class ForwardingCtx:
     def _get_override_app(self, hostname: str) -> dict[str, Any] | None:
         # Look up by name convention first (cheap list-then-filter); fall
         # back to domain-match for robustness if the name got renamed.
+        # The domain fallback must explicitly skip the tunnel-wide app:
+        # the tunnel-wide app's ``domain`` equals the primary hostname, so
+        # asking for the override for the primary hostname via a domain
+        # match would otherwise return the tunnel-wide app itself, and the
+        # caller would then clobber its policies or delete it entirely.
         by_name = self.ops.get_access_app_by_name(self._override_app_name(hostname))
         if by_name is not None:
             return by_name
-        return self.ops.get_access_app_by_domain(hostname)
+        by_domain = self.ops.get_access_app_by_domain(hostname)
+        if by_domain is None:
+            return None
+        name = by_domain.get("name", "")
+        if isinstance(name, str) and name.startswith(self._TUNNEL_APP_NAME_PREFIX):
+            return None
+        return by_domain
 
     def _delete_override_app(self, hostname: str) -> None:
         try:

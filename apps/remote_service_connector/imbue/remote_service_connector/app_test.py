@@ -297,6 +297,54 @@ def test_remove_service_without_override_just_drops_hostname() -> None:
     assert "web--agent1--alice.example.com" not in tunnel_app["self_hosted_domains"]
 
 
+def test_set_service_auth_on_primary_creates_distinct_override_app() -> None:
+    """``set_service_auth`` on the primary (``system_interface``) hostname must
+    create a NEW override app, not repurpose the tunnel-wide app.
+
+    The tunnel-wide app's ``domain`` equals the primary hostname, so a naive
+    by-domain fallback in ``_get_override_app`` would return the tunnel-wide
+    app for the primary hostname and silently clobber its default policy.
+    """
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "system_interface", "http://localhost:8080")
+    # Capture the tunnel-wide app id + policy count before the override.
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    tunnel_app_id = tunnel_app["id"]
+    policies_before = list(ctx.fake.access_policies.get(tunnel_app_id, []))
+
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "system_interface", policy)
+
+    # Two apps now: the tunnel-wide one and a distinct new override app.
+    assert len(ctx.fake.access_apps) == 2
+    assert tunnel_app_id in ctx.fake.access_apps
+    # The tunnel-wide app's policies must be untouched.
+    assert ctx.fake.access_policies.get(tunnel_app_id, []) == policies_before
+    override_apps = [a for a in ctx.fake.access_apps.values() if a["name"].startswith("override-")]
+    assert len(override_apps) == 1
+
+
+def test_remove_primary_service_does_not_delete_tunnel_wide_app() -> None:
+    """Removing the primary ``system_interface`` service must NOT take down the
+    tunnel-wide Access app. The tunnel-wide app's ``domain`` equals the primary
+    hostname, so a by-domain fallback for the primary override would otherwise
+    nuke the tunnel-wide app via ``_delete_override_app``.
+    """
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "system_interface", "http://localhost:8080")
+    assert len(ctx.fake.access_apps) == 1
+    tunnel_app_id = next(iter(ctx.fake.access_apps.keys()))
+
+    ctx.remove_service("alice--agent1", "alice", "system_interface")
+
+    # Tunnel-wide app still exists; only its coverage list shrank.
+    assert tunnel_app_id in ctx.fake.access_apps
+    tunnel_app = ctx.fake.access_apps[tunnel_app_id]
+    assert "system_interface--agent1--alice.example.com" not in tunnel_app["self_hosted_domains"]
+
+
 def test_remove_service_raises_for_nonexistent() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
