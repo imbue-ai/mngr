@@ -1,6 +1,6 @@
 {
   "name": "minds",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
