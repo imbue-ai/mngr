@@ -362,6 +362,10 @@ class LatchkeyGatewayManager(MutableModel):
 
         port = _allocate_free_port(self.listen_host)
         log_path = gateway_log_path(data_dir, agent_id)
+        pid_file = log_path.with_suffix(".pid")
+        # Clear any stale pid file so we can tell whether the launcher wrote one.
+        if pid_file.exists():
+            pid_file.unlink()
         command = [
             self.launcher_python,
             "-m",
@@ -374,6 +378,8 @@ class LatchkeyGatewayManager(MutableModel):
             str(port),
             "--log-path",
             str(log_path),
+            "--pid-file",
+            str(pid_file),
         ]
 
         with log_span(
@@ -382,7 +388,7 @@ class LatchkeyGatewayManager(MutableModel):
             self.listen_host,
             port,
         ):
-            pid = _run_launcher_and_parse_pid(command)
+            pid = _run_launcher_and_read_pid(command, pid_file)
 
         record = LatchkeyGatewayRecord(
             agent_id=agent_id,
@@ -395,8 +401,8 @@ class LatchkeyGatewayManager(MutableModel):
         return _build_info_from_record(record)
 
 
-def _run_launcher_and_parse_pid(command: list[str]) -> int:
-    """Invoke the detached launcher script and parse the child PID from stdout.
+def _run_launcher_and_read_pid(command: list[str], pid_file: Path) -> int:
+    """Invoke the detached launcher script and read the child PID from ``pid_file``.
 
     A short-lived ``ConcurrencyGroup`` is created per invocation because the
     launcher exits immediately after spawning its detached child -- we do not
@@ -405,7 +411,7 @@ def _run_launcher_and_parse_pid(command: list[str]) -> int:
     cg = ConcurrencyGroup(name="latchkey-gateway-launcher")
     try:
         with cg:
-            result = cg.run_process_to_completion(
+            cg.run_process_to_completion(
                 command=command,
                 timeout=_LAUNCHER_TIMEOUT_SECONDS,
                 is_checked_after=True,
@@ -414,11 +420,15 @@ def _run_launcher_and_parse_pid(command: list[str]) -> int:
         raise LatchkeyGatewayError(f"Failed to invoke latchkey gateway launcher: {e}") from e
     except ProcessError as e:
         raise LatchkeyGatewayError(f"Latchkey gateway launcher failed: {e}") from e
-    pid_line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if not pid_file.is_file():
+        raise LatchkeyGatewayError(f"Latchkey gateway launcher did not write PID file at {pid_file}")
     try:
-        return int(pid_line)
-    except ValueError as e:
-        raise LatchkeyGatewayError(f"Latchkey gateway launcher produced unexpected output: {result.stdout!r}") from e
+        pid_text = pid_file.read_text().strip()
+        return int(pid_text)
+    except (OSError, ValueError) as e:
+        raise LatchkeyGatewayError(
+            f"Latchkey gateway launcher produced an unreadable PID file at {pid_file}"
+        ) from e
 
 
 class LatchkeyGatewayDiscoveryHandler(FrozenModel):

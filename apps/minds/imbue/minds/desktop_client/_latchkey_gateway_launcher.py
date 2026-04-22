@@ -7,8 +7,9 @@ Invoked by ``LatchkeyGatewayManager`` via ``python -m`` so that the spawned
 2. Starts ``latchkey gateway`` with ``start_new_session=True`` so it detaches
    from the caller's process group and is not killed when the caller (or the
    desktop client that launched the caller) exits.
-3. Prints the child's PID to stdout so ``LatchkeyGatewayManager`` can record
-   it, then exits.
+3. Writes the child's PID to the supplied ``--pid-file`` atomically so
+   ``LatchkeyGatewayManager`` can record it, then exits. A file is used (not
+   stdout) so the launcher does not need to emit non-diagnostic output.
 
 Why this file uses raw ``subprocess.Popen`` (triggering a narrow exclusion
 from the ``check_direct_subprocess`` ratchet): ``ConcurrencyGroup.run_process_*``
@@ -33,6 +34,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--listen-host", required=True, help="Host the gateway should bind to.")
     parser.add_argument("--listen-port", required=True, type=int, help="Port the gateway should bind to.")
     parser.add_argument("--log-path", required=True, help="Path where gateway stdout/stderr will be appended.")
+    parser.add_argument("--pid-file", required=True, help="Path where the child PID should be written.")
     return parser.parse_args(argv)
 
 
@@ -55,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         # own session/process-group leader and survives the parent's death.
         # stdout/stderr redirected to a file keep the gateway producing output
         # after the parent's pipes close.
-        process = subprocess.Popen(  # noqa: S603  # see module docstring
+        # Raw Popen is intentional here; see module docstring.
+        process = subprocess.Popen(
             [args.latchkey_binary, "gateway"],
             stdin=subprocess.DEVNULL,
             stdout=log_file,
@@ -68,9 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         # Our copy of the log fd can be closed; the child inherited its own.
         log_file.close()
 
-    # Report the PID so the caller can persist it.
-    sys.stdout.write(f"{process.pid}\n")
-    sys.stdout.flush()
+    # Record the PID atomically via a temp file + rename so the caller never
+    # observes a half-written file.
+    pid_file = Path(args.pid_file)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_pid_file = pid_file.with_suffix(pid_file.suffix + ".tmp")
+    tmp_pid_file.write_text(f"{process.pid}\n")
+    tmp_pid_file.replace(pid_file)
     return 0
 
 
