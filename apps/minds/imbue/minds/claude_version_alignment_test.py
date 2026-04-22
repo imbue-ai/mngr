@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DOCKERFILE_PATH = _REPO_ROOT / "libs" / "mngr" / "imbue" / "mngr" / "resources" / "Dockerfile"
@@ -63,7 +64,8 @@ def _fetch_template_claude_version(token: str) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read())
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        logger.trace("fetch/parse of {} failed: {}", _TEMPLATE_CONTENTS_URL, e)
         return None
     # Guard against non-dict JSON (e.g. GitHub returning a list for a
     # directory endpoint, or a null/string body on an unusual error path).
@@ -76,7 +78,8 @@ def _fetch_template_claude_version(token: str) -> str | None:
         return None
     try:
         settings_toml_text = base64.b64decode(content_b64).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError) as e:
+        logger.trace("base64/utf-8 decode of template settings failed: {}", e)
         return None
     # tomllib.loads raises tomllib.TOMLDecodeError (a ValueError subclass) on
     # malformed content. Catch it so callers see the documented "return None on
@@ -85,11 +88,13 @@ def _fetch_template_claude_version(token: str) -> str | None:
     # surface that as its own clearer failure message.
     try:
         parsed = tomllib.loads(settings_toml_text)
-    except tomllib.TOMLDecodeError:
+    except tomllib.TOMLDecodeError as e:
+        logger.trace("tomllib parse of template settings failed: {}", e)
         return None
     try:
         return str(parsed["agent_types"]["claude"]["version"])
-    except KeyError:
+    except KeyError as e:
+        logger.trace("template settings missing expected key: {}", e)
         return None
 
 
