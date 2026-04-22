@@ -387,20 +387,29 @@ def _handle_agent_default_redirect(
         if candidate in known_server_names:
             preferred = candidate
             break
-    if preferred is None and known_servers:
-        preferred = str(known_servers[0])
 
     if preferred is None:
-        # Nothing registered yet. Don't redirect to the servers-listing page
-        # -- its empty-state "No servers are currently running" is misleading
-        # during the common post-create race where `status=DONE` arrives at
-        # the UI before the in-VM `app-watcher` has propagated
-        # `server_registered` events back to us. Instead, render the same
-        # Loading page we use for "server registered but backend not
-        # listening yet" -- it auto-reloads this same URL, which re-enters
-        # this handler. As soon as the first registration lands, the next
-        # reload promotes to the preferred server.
-        return HTMLResponse(content=generate_backend_loading_html())
+        # No preferred server is registered yet. Don't fall back to
+        # `known_servers[0]` -- that would silently land users on whichever
+        # server happened to register first, which is almost always
+        # `terminal` (ttyd registers nearly instantly; `system_interface`
+        # takes longer because it has to boot minds-workspace-server).
+        # Users who just created an agent expect to land on the chat UI,
+        # not a shell.
+        #
+        # Render the shared Loading page instead. It auto-reloads this
+        # same URL, so once the in-VM `app-watcher` propagates the first
+        # preferred-server registration, the next reload promotes to it.
+        # Pass the already-registered non-preferred servers as
+        # `other_servers` so users who DO want a shell (or any other
+        # non-preferred server that's already up) have a clickable
+        # escape hatch at the bottom of the Loading page.
+        return HTMLResponse(
+            content=generate_backend_loading_html(
+                agent_id=parsed_id,
+                other_servers=known_servers,
+            )
+        )
 
     return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/{preferred}/"})
 

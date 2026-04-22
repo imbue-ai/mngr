@@ -364,6 +364,41 @@ def test_agent_default_page_shows_loading_when_no_known_servers(tmp_path: Path) 
     assert "location.reload()" in response.text
 
 
+def test_agent_default_page_waits_for_preferred_when_only_non_preferred_registered(
+    tmp_path: Path,
+) -> None:
+    # Right after `status=DONE`, registration events arrive out of order:
+    # `terminal` (from mngr_ttyd, nearly instant) typically beats
+    # `system_interface` (which waits on minds-workspace-server startup).
+    # If the default redirect falls back to `known_servers[0]` when the
+    # preference list doesn't match yet, users silently land on a shell
+    # instead of the chat UI they just created.
+    #
+    # Render the Loading page instead so the next reload promotes to the
+    # preferred server as soon as it registers. Include the
+    # already-registered non-preferred servers as escape-hatch links so
+    # users who DO want to jump to the shell (or anywhere else) can still
+    # do so deliberately.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"terminal": "http://test-backend:7681"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    # Must NOT silently 307 to /terminal/.
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    # The escape-hatch link to terminal must still be present so the user
+    # can opt into the shell deliberately.
+    assert f"/forwarding/{agent_id}/terminal/" in response.text
+
+
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
