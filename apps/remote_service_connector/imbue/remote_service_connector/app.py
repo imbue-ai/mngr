@@ -77,7 +77,12 @@ logger = logging.getLogger(__name__)
 
 _CF_BASE_URL = "https://api.cloudflare.com/client/v4"
 TUNNEL_NAME_SEP = "--"
-KV_NAMESPACE_TITLE = "cloudflare-forwarding-defaults"
+
+# Name of the "root" service every tunnel is guaranteed to have -- it's the
+# high-level UI that iframes every other service. We use its hostname as the
+# `domain` field on the tunnel-wide Access app because CF Access requires a
+# concrete hostname there.
+PRIMARY_SERVICE_NAME = "system_interface"
 
 _HTML_SHARED_STYLES = (
     "body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;"
@@ -381,6 +386,7 @@ def cf_create_access_app(
     hostname: str,
     app_name: str,
     allowed_idps: list[str] | None = None,
+    self_hosted_domains: list[str] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "name": app_name,
@@ -390,10 +396,30 @@ def cf_create_access_app(
     }
     if allowed_idps is not None:
         body["allowed_idps"] = allowed_idps
+    if self_hosted_domains is not None:
+        body["self_hosted_domains"] = self_hosted_domains
     response = client.post(
         f"/accounts/{account_id}/access/apps",
         json=body,
     )
+    return cf_check(response)["result"]
+
+
+def cf_update_access_app(
+    client: httpx.Client,
+    account_id: str,
+    app_id: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Partial update of an Access application.
+
+    Cloudflare's PUT replaces the whole object, so fetch-merge-write to
+    preserve unspecified fields. Used by the tunnel-wide app's
+    ``self_hosted_domains`` edits.
+    """
+    current = cf_check(client.get(f"/accounts/{account_id}/access/apps/{app_id}"))["result"]
+    merged = {**current, **patch}
+    response = client.put(f"/accounts/{account_id}/access/apps/{app_id}", json=merged)
     return cf_check(response)["result"]
 
 
@@ -406,6 +432,17 @@ def cf_get_access_app_by_domain(client: httpx.Client, account_id: str, hostname:
     data = cf_check(response)
     for app_item in data["result"]:
         if app_item.get("domain") == hostname:
+            return app_item
+    return None
+
+
+def cf_list_access_apps(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
+    return cf_list_all_pages(client, f"/accounts/{account_id}/access/apps", params={})
+
+
+def cf_get_access_app_by_name(client: httpx.Client, account_id: str, name: str) -> dict[str, Any] | None:
+    for app_item in cf_list_access_apps(client, account_id):
+        if app_item.get("name") == name:
             return app_item
     return None
 
@@ -453,51 +490,6 @@ def cf_list_service_tokens(client: httpx.Client, account_id: str) -> list[dict[s
 
 def cf_delete_service_token(client: httpx.Client, account_id: str, token_id: str) -> None:
     cf_check(client.delete(f"/accounts/{account_id}/access/service_tokens/{token_id}"))
-
-
-# --- Workers KV operations ---
-
-
-def cf_kv_list_namespaces(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
-    response = client.get(f"/accounts/{account_id}/storage/kv/namespaces")
-    return cf_check(response)["result"]
-
-
-def cf_kv_create_namespace(client: httpx.Client, account_id: str, title: str) -> dict[str, Any]:
-    response = client.post(f"/accounts/{account_id}/storage/kv/namespaces", json={"title": title})
-    return cf_check(response)["result"]
-
-
-def cf_kv_get(client: httpx.Client, account_id: str, namespace_id: str, key: str) -> str | None:
-    response = client.get(f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}")
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    return response.text
-
-
-def cf_kv_put(client: httpx.Client, account_id: str, namespace_id: str, key: str, value: str) -> None:
-    response = client.put(
-        f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}",
-        content=value,
-        headers={"Content-Type": "text/plain"},
-    )
-    cf_check(response)
-
-
-def cf_kv_delete(client: httpx.Client, account_id: str, namespace_id: str, key: str) -> None:
-    response = client.delete(f"/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key}")
-    cf_check(response)
-
-
-def cf_kv_ensure_namespace(client: httpx.Client, account_id: str, title: str) -> str:
-    """Find or create a KV namespace by title. Returns the namespace ID."""
-    namespaces = cf_kv_list_namespaces(client, account_id)
-    for ns in namespaces:
-        if ns["title"] == title:
-            return ns["id"]
-    result = cf_kv_create_namespace(client, account_id, title)
-    return result["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -633,17 +625,21 @@ class CloudflareOps(Protocol):
     def list_dns_records(self, name: str = "") -> list[dict[str, Any]]: ...
     def delete_dns_record(self, record_id: str) -> None: ...
     def create_access_app(
-        self, hostname: str, app_name: str, allowed_idps: list[str] | None = None
+        self,
+        hostname: str,
+        app_name: str,
+        allowed_idps: list[str] | None = None,
+        self_hosted_domains: list[str] | None = None,
     ) -> dict[str, Any]: ...
+    def update_access_app(self, app_id: str, patch: dict[str, Any]) -> dict[str, Any]: ...
     def delete_access_app(self, app_id: str) -> None: ...
     def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None: ...
+    def get_access_app_by_name(self, name: str) -> dict[str, Any] | None: ...
+    def list_access_apps(self) -> list[dict[str, Any]]: ...
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]: ...
     def create_access_policy(self, app_id: str, policy: dict[str, Any]) -> dict[str, Any]: ...
     def update_access_policy(self, app_id: str, policy_id: str, policy: dict[str, Any]) -> dict[str, Any]: ...
     def delete_access_policy(self, app_id: str, policy_id: str) -> None: ...
-    def kv_get(self, key: str) -> str | None: ...
-    def kv_put(self, key: str, value: str) -> None: ...
-    def kv_delete(self, key: str) -> None: ...
     def create_service_token(self, name: str) -> dict[str, Any]: ...
     def list_service_tokens(self) -> list[dict[str, Any]]: ...
     def delete_service_token(self, token_id: str) -> None: ...
@@ -660,12 +656,6 @@ class HttpCloudflareOps:
         )
         self.account_id = account_id
         self.zone_id = zone_id
-        self._kv_namespace_id: str | None = None
-
-    def _ensure_kv_namespace(self) -> str:
-        if self._kv_namespace_id is None:
-            self._kv_namespace_id = cf_kv_ensure_namespace(self.client, self.account_id, KV_NAMESPACE_TITLE)
-        return self._kv_namespace_id
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         return cf_create_tunnel(self.client, self.account_id, name)
@@ -700,14 +690,36 @@ class HttpCloudflareOps:
     def delete_dns_record(self, record_id: str) -> None:
         cf_delete_dns_record(self.client, self.zone_id, record_id)
 
-    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
-        return cf_create_access_app(self.client, self.account_id, hostname, app_name, allowed_idps=allowed_idps)
+    def create_access_app(
+        self,
+        hostname: str,
+        app_name: str,
+        allowed_idps: list[str] | None = None,
+        self_hosted_domains: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return cf_create_access_app(
+            self.client,
+            self.account_id,
+            hostname,
+            app_name,
+            allowed_idps=allowed_idps,
+            self_hosted_domains=self_hosted_domains,
+        )
+
+    def update_access_app(self, app_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        return cf_update_access_app(self.client, self.account_id, app_id, patch)
 
     def delete_access_app(self, app_id: str) -> None:
         cf_delete_access_app(self.client, self.account_id, app_id)
 
     def get_access_app_by_domain(self, hostname: str) -> dict[str, Any] | None:
         return cf_get_access_app_by_domain(self.client, self.account_id, hostname)
+
+    def get_access_app_by_name(self, name: str) -> dict[str, Any] | None:
+        return cf_get_access_app_by_name(self.client, self.account_id, name)
+
+    def list_access_apps(self) -> list[dict[str, Any]]:
+        return cf_list_access_apps(self.client, self.account_id)
 
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]:
         return cf_list_access_policies(self.client, self.account_id, app_id)
@@ -720,18 +732,6 @@ class HttpCloudflareOps:
 
     def delete_access_policy(self, app_id: str, policy_id: str) -> None:
         cf_delete_access_policy(self.client, self.account_id, app_id, policy_id)
-
-    def kv_get(self, key: str) -> str | None:
-        ns_id = self._ensure_kv_namespace()
-        return cf_kv_get(self.client, self.account_id, ns_id, key)
-
-    def kv_put(self, key: str, value: str) -> None:
-        ns_id = self._ensure_kv_namespace()
-        cf_kv_put(self.client, self.account_id, ns_id, key, value)
-
-    def kv_delete(self, key: str) -> None:
-        ns_id = self._ensure_kv_namespace()
-        cf_kv_delete(self.client, self.account_id, ns_id, key)
 
     def create_service_token(self, name: str) -> dict[str, Any]:
         return cf_create_service_token(self.client, self.account_id, name)
@@ -749,12 +749,52 @@ class HttpCloudflareOps:
 
 
 class ForwardingCtx:
-    """Holds the Cloudflare ops abstraction and domain config. Created once per container."""
+    """Holds the Cloudflare ops abstraction and domain config. Created once per container.
+
+    Every tunnel has exactly one "tunnel-wide" Cloudflare Access application
+    whose ``self_hosted_domains`` lists every service hostname on the tunnel.
+    Because a single Access app has one ``aud``, all covered hostnames share
+    one Access session -- so once the owner is authenticated against any
+    sibling hostname, their browser can load an iframe of any other sibling
+    hostname without hitting the X-Frame-Options'd
+    ``*.cloudflareaccess.com`` interstitial that separate per-hostname
+    Access apps would force.
+
+    For selective external sharing (grant different users access to a
+    specific service), we create a per-hostname "override" Access app whose
+    ``domain`` is that specific hostname. Cloudflare Access evaluates more
+    specific hostname matches first, so an override app supersedes the
+    tunnel-wide app for its hostname. When the override is removed, the
+    hostname falls back to the tunnel-wide app's policy.
+    """
 
     def __init__(self, ops: CloudflareOps, domain: str, allowed_idps: list[str] | None = None) -> None:
         self.ops = ops
         self.domain = domain
         self.allowed_idps = allowed_idps
+
+    # ---- naming --------------------------------------------------------
+
+    def _tunnel_app_name(self, tunnel_name: str) -> str:
+        """Name used for the tunnel-wide Access app. Convention-based lookup."""
+        return f"tunnel-{tunnel_name}"
+
+    def _override_app_name(self, hostname: str) -> str:
+        """Name used for a per-service override Access app."""
+        return f"override-{hostname}"
+
+    def _primary_hostname(self, tunnel_name: str, username: str) -> str:
+        """Hostname of the always-present ``system_interface`` service on a tunnel.
+
+        Used as the tunnel-wide Access app's canonical ``domain``. This
+        hostname may not yet have a CNAME when ``create_tunnel`` runs; CF
+        Access accepts the app regardless, and the CNAME is added later by
+        the first ``add_service(system_interface, ...)`` call.
+        """
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
+        return make_hostname(PRIMARY_SERVICE_NAME, agent_id, username, self.domain)
+
+    # ---- helpers -------------------------------------------------------
 
     def verify_ownership(self, tunnel_name: str, username: str) -> None:
         if not tunnel_name.startswith(f"{username}{TUNNEL_NAME_SEP}"):
@@ -773,28 +813,69 @@ class ForwardingCtx:
             raise TunnelNotFoundError(tunnel_id)
         return tunnel["name"]
 
+    def _get_tunnel_app(self, tunnel_name: str) -> dict[str, Any] | None:
+        return self.ops.get_access_app_by_name(self._tunnel_app_name(tunnel_name))
+
+    def _get_tunnel_app_or_raise(self, tunnel_name: str) -> dict[str, Any]:
+        app = self._get_tunnel_app(tunnel_name)
+        if app is None:
+            raise TunnelNotFoundError(tunnel_name)
+        return app
+
+    def _tunnel_covered_hostnames(self, tunnel_name: str) -> list[str]:
+        app = self._get_tunnel_app(tunnel_name)
+        if app is None:
+            return []
+        return list(app.get("self_hosted_domains") or [])
+
+    def _set_tunnel_covered_hostnames(self, tunnel_app_id: str, hostnames: list[str]) -> None:
+        """Replace the tunnel-wide Access app's ``self_hosted_domains``.
+
+        Deduplicates while preserving insertion order so the first entry
+        (the primary ``system_interface`` hostname) stays first.
+        """
+        seen: set[str] = set()
+        deduped = [h for h in hostnames if not (h in seen or seen.add(h))]
+        self.ops.update_access_app(tunnel_app_id, {"self_hosted_domains": deduped})
+
+    # ---- tunnels -------------------------------------------------------
+
     def create_tunnel(self, username: str, agent_id: str, default_auth_policy: AuthPolicy | None = None) -> TunnelInfo:
         name = make_tunnel_name(username, agent_id)
-        existing = self.ops.get_tunnel_by_name(name)
-        if existing is not None:
-            tid = existing["id"]
-            token = self.ops.get_tunnel_token(tid)
-            services = self._list_services(tid, name, username)
-            # Update the default auth policy if provided (may have been missing
-            # from the original creation or may need updating)
-            if default_auth_policy is not None:
-                self.ops.kv_put(name, default_auth_policy.model_dump_json())
-            return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
+        primary_host = self._primary_hostname(name, username)
 
-        result = self.ops.create_tunnel(name)
-        tid = result["id"]
-        token = self.ops.get_tunnel_token(tid)
-        self.ops.put_tunnel_config(tid, wrap_ingress([]))
+        existing_tunnel = self.ops.get_tunnel_by_name(name)
+        if existing_tunnel is None:
+            result = self.ops.create_tunnel(name)
+            tid = result["id"]
+            self.ops.put_tunnel_config(tid, wrap_ingress([]))
+        else:
+            tid = existing_tunnel["id"]
 
+        # Ensure there's a tunnel-wide Access app with the primary hostname
+        # already in its coverage list. system_interface may not have been
+        # registered as a service yet (its CNAME + ingress rule come later
+        # via add_service), but the Access app doesn't need the CNAME to
+        # exist to be created.
+        tunnel_app = self._get_tunnel_app(name)
+        if tunnel_app is None:
+            tunnel_app = self.ops.create_access_app(
+                hostname=primary_host,
+                app_name=self._tunnel_app_name(name),
+                allowed_idps=self.allowed_idps,
+                self_hosted_domains=[primary_host],
+            )
+
+        # Apply / replace the tunnel-wide default auth policy on the app.
+        # Supplying ``default_auth_policy=None`` on a subsequent call is
+        # intentionally a no-op -- it avoids clobbering policy changes that
+        # may have been made through other code paths (e.g. a UI).
         if default_auth_policy is not None:
-            self.ops.kv_put(name, default_auth_policy.model_dump_json())
+            self._replace_app_policies(tunnel_app["id"], default_auth_policy)
 
-        return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=[])
+        token = self.ops.get_tunnel_token(tid)
+        services = self._list_services(tid, name, username)
+        return TunnelInfo(tunnel_name=name, tunnel_id=tid, token=token, services=services)
 
     def list_tunnels(self, username: str) -> list[TunnelInfo]:
         prefix = f"{username}{TUNNEL_NAME_SEP}"
@@ -814,14 +895,24 @@ class ForwardingCtx:
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         tid = tunnel["id"]
         config = self.ops.get_tunnel_config(tid)
+        # Clean up per-hostname override Access apps + CNAMEs for every
+        # service still on the tunnel.
         for rule in non_catchall_rules(config.get("config", {}).get("ingress", [])):
             hostname = rule.get("hostname", "")
             if hostname:
-                self._delete_access_app_for_hostname(hostname)
+                self._delete_override_app(hostname)
                 self._delete_dns_by_name(hostname)
         self.ops.put_tunnel_config(tid, wrap_ingress([]))
+        # Delete the tunnel-wide Access app that covered everything on this tunnel.
+        tunnel_app = self._get_tunnel_app(tunnel_name)
+        if tunnel_app is not None:
+            try:
+                self.ops.delete_access_app(tunnel_app["id"])
+            except (CloudflareApiError, httpx.HTTPError) as exc:
+                logger.warning("Failed to delete tunnel-wide Access app for %s: %s", tunnel_name, exc)
         self.ops.delete_tunnel(tid)
-        self._kv_delete_safe(tunnel_name)
+
+    # ---- services ------------------------------------------------------
 
     def add_service(self, tunnel_name: str, username: str, service_name: str, service_url: str) -> ServiceInfo:
         self.verify_ownership(tunnel_name, username)
@@ -829,6 +920,8 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
+
+        # CNAME + ingress rule: unchanged from the old shape.
         self.ops.create_cname(hostname, f"{tid}.cfargotunnel.com")
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
@@ -841,7 +934,13 @@ class ForwardingCtx:
         )
         self.ops.put_tunnel_config(tid, wrap_ingress(rules))
 
-        self._apply_default_access_policy(tunnel_name, hostname)
+        # Add this hostname to the tunnel-wide Access app's coverage so it
+        # shares the single ``aud`` with every other service on this tunnel.
+        tunnel_app = self._get_tunnel_app_or_raise(tunnel_name)
+        covered = list(tunnel_app.get("self_hosted_domains") or [])
+        if hostname not in covered:
+            covered.append(hostname)
+            self._set_tunnel_covered_hostnames(tunnel_app["id"], covered)
 
         return ServiceInfo(service_name=service_name, hostname=hostname, service_url=service_url)
 
@@ -851,53 +950,28 @@ class ForwardingCtx:
         tid = tunnel["id"]
         agent_id = extract_agent_id_prefix(tunnel_name, username)
         hostname = make_hostname(service_name, agent_id, username, self.domain)
+
         config = self.ops.get_tunnel_config(tid)
         rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
         new_rules = [r for r in rules if r.get("hostname") != hostname]
         if len(new_rules) == len(rules):
             raise ServiceNotFoundError(service_name, tunnel_name)
         self.ops.put_tunnel_config(tid, wrap_ingress(new_rules))
-        self._delete_access_app_for_hostname(hostname)
+
+        # Drop this hostname from the tunnel-wide coverage list and tear
+        # down any per-hostname override app that was created for external
+        # sharing. The tunnel-wide app itself lives on as long as the
+        # tunnel does -- removing the last service does not delete it.
+        tunnel_app = self._get_tunnel_app(tunnel_name)
+        if tunnel_app is not None:
+            covered = list(tunnel_app.get("self_hosted_domains") or [])
+            if hostname in covered:
+                covered = [h for h in covered if h != hostname]
+                self._set_tunnel_covered_hostnames(tunnel_app["id"], covered)
+        self._delete_override_app(hostname)
         self._delete_dns_by_name(hostname)
 
-    def get_tunnel_auth(self, tunnel_name: str) -> AuthPolicy | None:
-        """Get the default auth policy for a tunnel from KV."""
-        raw = self.ops.kv_get(tunnel_name)
-        if raw is None:
-            return None
-        return AuthPolicy.model_validate_json(raw)
-
-    def set_tunnel_auth(self, tunnel_name: str, policy: AuthPolicy) -> None:
-        """Set the default auth policy for a tunnel in KV."""
-        self.ops.kv_put(tunnel_name, policy.model_dump_json())
-
-    def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
-        """Get the auth policy for a specific service from its Access Application."""
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
-        access_app = self.ops.get_access_app_by_domain(hostname)
-        if access_app is None:
-            return None
-        policies = self.ops.list_access_policies(access_app["id"])
-        return cf_policies_to_auth_policy(policies)
-
-    def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
-        """Set the auth policy for a specific service on its Access Application."""
-        agent_id = extract_agent_id_prefix(tunnel_name, username)
-        hostname = make_hostname(service_name, agent_id, username, self.domain)
-        access_app = self.ops.get_access_app_by_domain(hostname)
-        if access_app is None:
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{service_name}", allowed_idps=self.allowed_idps)
-
-        existing_policies = self.ops.list_access_policies(access_app["id"])
-        for ep in existing_policies:
-            self.ops.delete_access_policy(access_app["id"], ep["id"])
-
-        for cf_policy in policy_to_cf_rules(policy):
-            self.ops.create_access_policy(access_app["id"], cf_policy)
-
     def list_services(self, tunnel_name: str, username: str) -> list[ServiceInfo]:
-        """List all services on a tunnel."""
         self.verify_ownership(tunnel_name, username)
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         return self._list_services(tunnel["id"], tunnel_name, username)
@@ -915,43 +989,91 @@ class ForwardingCtx:
                 services.append(ServiceInfo(service_name=svc_name, hostname=hostname, service_url=svc_url))
         return services
 
+    # ---- auth ----------------------------------------------------------
+
+    def get_tunnel_auth(self, tunnel_name: str) -> AuthPolicy | None:
+        """Return the tunnel-wide default auth policy (what gates everything on the tunnel)."""
+        tunnel_app = self._get_tunnel_app(tunnel_name)
+        if tunnel_app is None:
+            return None
+        policies = self.ops.list_access_policies(tunnel_app["id"])
+        return cf_policies_to_auth_policy(policies)
+
+    def set_tunnel_auth(self, tunnel_name: str, policy: AuthPolicy) -> None:
+        """Replace the tunnel-wide default auth policy."""
+        tunnel_app = self._get_tunnel_app_or_raise(tunnel_name)
+        self._replace_app_policies(tunnel_app["id"], policy)
+
+    def get_service_auth(self, tunnel_name: str, username: str, service_name: str) -> AuthPolicy | None:
+        """Return the per-service override policy, or None if the service is
+        gated by the tunnel-wide default policy only."""
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
+        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        override_app = self._get_override_app(hostname)
+        if override_app is None:
+            return None
+        policies = self.ops.list_access_policies(override_app["id"])
+        return cf_policies_to_auth_policy(policies)
+
+    def set_service_auth(self, tunnel_name: str, username: str, service_name: str, policy: AuthPolicy) -> None:
+        """Install / replace a per-service override Access app for this hostname.
+
+        CF Access matches more specific domains first, so a per-hostname
+        app takes precedence over the tunnel-wide one, letting a service
+        be shared with a narrower (or broader) set of principals than the
+        tunnel default.
+        """
+        agent_id = extract_agent_id_prefix(tunnel_name, username)
+        hostname = make_hostname(service_name, agent_id, username, self.domain)
+        override_app = self._get_override_app(hostname)
+        if override_app is None:
+            override_app = self.ops.create_access_app(
+                hostname=hostname,
+                app_name=self._override_app_name(hostname),
+                allowed_idps=self.allowed_idps,
+            )
+        self._replace_app_policies(override_app["id"], policy)
+
+    # ---- internal helpers ---------------------------------------------
+
+    def _replace_app_policies(self, app_id: str, policy: AuthPolicy) -> None:
+        for existing in self.ops.list_access_policies(app_id):
+            self.ops.delete_access_policy(app_id, existing["id"])
+        for cf_policy in policy_to_cf_rules(policy):
+            self.ops.create_access_policy(app_id, cf_policy)
+
+    def _get_override_app(self, hostname: str) -> dict[str, Any] | None:
+        # Look up by name convention first (cheap list-then-filter); fall
+        # back to domain-match for robustness if the name got renamed.
+        by_name = self.ops.get_access_app_by_name(self._override_app_name(hostname))
+        if by_name is not None:
+            return by_name
+        return self.ops.get_access_app_by_domain(hostname)
+
+    def _delete_override_app(self, hostname: str) -> None:
+        try:
+            override_app = self._get_override_app(hostname)
+            if override_app is not None:
+                self.ops.delete_access_app(override_app["id"])
+        except (CloudflareApiError, httpx.HTTPError) as exc:
+            logger.warning("Failed to delete override Access app for %s: %s", hostname, exc)
+
     def _delete_dns_by_name(self, hostname: str) -> None:
         records = self.ops.list_dns_records(name=hostname)
         for record in records:
             self.ops.delete_dns_record(record["id"])
 
-    def _delete_access_app_for_hostname(self, hostname: str) -> None:
-        try:
-            access_app = self.ops.get_access_app_by_domain(hostname)
-            if access_app is not None:
-                self.ops.delete_access_app(access_app["id"])
-        except (CloudflareApiError, httpx.HTTPError) as exc:
-            logger.warning("Failed to delete Access Application for %s: %s", hostname, exc)
-
-    def _apply_default_access_policy(self, tunnel_name: str, hostname: str) -> None:
-        """Apply the tunnel's default auth policy to a new service, if one is set."""
-        try:
-            raw = self.ops.kv_get(tunnel_name)
-            if raw is None:
-                return
-            policy = AuthPolicy.model_validate_json(raw)
-            access_app = self.ops.create_access_app(hostname, f"cf-fwd-{hostname}", allowed_idps=self.allowed_idps)
-            for cf_policy in policy_to_cf_rules(policy):
-                self.ops.create_access_policy(access_app["id"], cf_policy)
-        except (CloudflareApiError, httpx.HTTPError) as exc:
-            logger.warning("Failed to apply Access policy for %s: %s", hostname, exc)
-
-    def _kv_delete_safe(self, key: str) -> None:
-        try:
-            self.ops.kv_delete(key)
-        except (CloudflareApiError, httpx.HTTPError) as exc:
-            logger.warning("Failed to delete KV entry for %s: %s", key, exc)
-
     def create_service_token(self, tunnel_name: str, username: str, name: str) -> ServiceTokenInfo:
-        """Create a Cloudflare Access service token and add it to all existing services on the tunnel.
+        """Create a Cloudflare Access service token and attach a non-identity
+        policy to the tunnel-wide app (and to any per-service override apps).
 
-        The service token can be used for programmatic access via
-        CF-Access-Client-Id and CF-Access-Client-Secret headers.
+        The service token can then be used for programmatic access via the
+        ``CF-Access-Client-Id`` and ``CF-Access-Client-Secret`` headers on
+        any hostname covered by the tunnel-wide app. For hostnames that
+        have their own override app (because they've been selectively
+        shared with a narrower set of principals), we also attach the
+        token to that app, since override apps supersede the tunnel-wide
+        one for their specific hostname.
         """
         self.verify_ownership(tunnel_name, username)
         result = self.ops.create_service_token(name)
@@ -959,26 +1081,34 @@ class ForwardingCtx:
         client_id = result["client_id"]
         client_secret = result["client_secret"]
 
-        # Add a non_identity policy for this service token to all existing services
+        policy_body = {
+            "name": f"Service token: {name}",
+            "decision": "non_identity",
+            "include": [{"service_token": {"token_id": token_id}}],
+            "precedence": 10,
+        }
+
+        target_app_ids: list[str] = []
+        tunnel_app = self._get_tunnel_app(tunnel_name)
+        if tunnel_app is not None:
+            target_app_ids.append(tunnel_app["id"])
+        # Pull in any per-service override apps on this tunnel by iterating
+        # the tunnel's ingress and looking each hostname up.
         tunnel = self.get_tunnel_or_raise(tunnel_name)
         config = self.ops.get_tunnel_config(tunnel["id"])
-        rules = non_catchall_rules(config.get("config", {}).get("ingress", []))
-        for rule in rules:
+        for rule in non_catchall_rules(config.get("config", {}).get("ingress", [])):
             hostname = rule.get("hostname", "")
+            if not hostname:
+                continue
+            override_app = self._get_override_app(hostname)
+            if override_app is not None and override_app["id"] not in target_app_ids:
+                target_app_ids.append(override_app["id"])
+
+        for app_id in target_app_ids:
             try:
-                access_app = self.ops.get_access_app_by_domain(hostname)
-                if access_app is not None:
-                    self.ops.create_access_policy(
-                        access_app["id"],
-                        {
-                            "name": f"Service token: {name}",
-                            "decision": "non_identity",
-                            "include": [{"service_token": {"token_id": token_id}}],
-                            "precedence": 10,
-                        },
-                    )
+                self.ops.create_access_policy(app_id, policy_body)
             except (CloudflareApiError, httpx.HTTPError) as exc:
-                logger.warning("Failed to add service token policy for %s: %s", hostname, exc)
+                logger.warning("Failed to add service token policy on app %s: %s", app_id, exc)
 
         return ServiceTokenInfo(
             token_id=token_id,

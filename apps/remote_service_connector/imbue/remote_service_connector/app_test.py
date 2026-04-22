@@ -189,7 +189,9 @@ def test_delete_tunnel_cascades() -> None:
     ctx.delete_tunnel("alice--agent1", "alice")
     assert len(ctx.fake.tunnels) == 0
     assert len(ctx.fake.dns_records) == 0
-    assert ctx.fake.kv_get("alice--agent1") is None
+    # The tunnel-wide Access app and any per-service override apps are
+    # cascaded away with the tunnel.
+    assert len(ctx.fake.access_apps) == 0
 
 
 def test_delete_tunnel_raises_for_wrong_owner() -> None:
@@ -207,58 +209,92 @@ def test_add_service_creates_dns_and_ingress() -> None:
     assert len(ctx.fake.dns_records) == 1
 
 
-def test_add_service_applies_default_access_policy() -> None:
+def test_add_service_adds_to_tunnel_wide_app_self_hosted_domains() -> None:
+    """Adding a service appends its hostname to the tunnel-wide Access app's
+    ``self_hosted_domains`` instead of creating a new per-service app."""
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
-    ctx.set_tunnel_auth("alice--agent1", policy)
-    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    # Just the tunnel-wide app exists so far, covering the predicted
+    # system_interface hostname.
     assert len(ctx.fake.access_apps) == 1
-    app_id = list(ctx.fake.access_apps.keys())[0]
-    assert len(ctx.fake.access_policies.get(app_id, [])) == 1
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    assert tunnel_app["self_hosted_domains"] == ["system_interface--agent1--alice.example.com"]
+
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    # Still exactly one Access app; the new hostname just gets added to its coverage.
+    assert len(ctx.fake.access_apps) == 1
+    assert tunnel_app["self_hosted_domains"] == [
+        "system_interface--agent1--alice.example.com",
+        "web--agent1--alice.example.com",
+    ]
 
 
-def test_add_service_passes_allowed_idps_to_access_app() -> None:
-    """When ForwardingCtx has allowed_idps configured, they are passed to created Access Applications."""
+def test_create_tunnel_passes_allowed_idps_to_tunnel_wide_app() -> None:
+    """When ForwardingCtx has allowed_idps configured, the tunnel-wide Access
+    app is created with them."""
     ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123"])
     ctx.create_tunnel("alice", "agent1")
-    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
-    ctx.set_tunnel_auth("alice--agent1", policy)
-    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    app_id = list(ctx.fake.access_apps.keys())[0]
-    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123"]
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    assert tunnel_app["allowed_idps"] == ["google-idp-uuid-123"]
 
 
-def test_add_service_no_allowed_idps_when_not_configured() -> None:
-    """When allowed_idps is None, it is not included in the Access Application."""
+def test_create_tunnel_no_allowed_idps_when_not_configured() -> None:
+    """When allowed_idps is None, it is not included in the tunnel-wide Access app."""
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
-    ctx.set_tunnel_auth("alice--agent1", policy)
-    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    app_id = list(ctx.fake.access_apps.keys())[0]
-    assert "allowed_idps" not in ctx.fake.access_apps[app_id]
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    assert "allowed_idps" not in tunnel_app
 
 
-def test_set_service_auth_passes_allowed_idps() -> None:
-    """set_service_auth creates Access Applications with allowed_idps when configured."""
+def test_set_service_auth_creates_override_app_with_allowed_idps() -> None:
+    """set_service_auth creates a per-hostname override Access app (separate
+    from the tunnel-wide app) with allowed_idps when configured."""
     ctx = make_fake_forwarding_ctx(allowed_idps=["google-idp-uuid-123", "otp-idp-uuid-456"])
     ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_service_auth("alice--agent1", "alice", "web", policy)
-    app_id = list(ctx.fake.access_apps.keys())[0]
-    assert ctx.fake.access_apps[app_id]["allowed_idps"] == ["google-idp-uuid-123", "otp-idp-uuid-456"]
+    # Tunnel-wide app + new override app.
+    assert len(ctx.fake.access_apps) == 2
+    override_apps = [a for a in ctx.fake.access_apps.values() if a["name"].startswith("override-")]
+    assert len(override_apps) == 1
+    assert override_apps[0]["allowed_idps"] == ["google-idp-uuid-123", "otp-idp-uuid-456"]
+    assert override_apps[0]["domain"] == "web--agent1--alice.example.com"
 
 
-def test_remove_service_deletes_access_app() -> None:
+def test_remove_service_drops_from_tunnel_app_and_deletes_override() -> None:
+    """Removing a service with an override app: removes it from the tunnel-wide
+    app's self_hosted_domains and deletes the override app. The tunnel-wide
+    app itself stays."""
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
-    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
-    ctx.set_tunnel_auth("alice--agent1", policy)
     ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
-    assert len(ctx.fake.access_apps) == 1
+    policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
+    ctx.set_service_auth("alice--agent1", "alice", "web", policy)
+    # Tunnel-wide app + newly created override app.
+    assert len(ctx.fake.access_apps) == 2
+
     ctx.remove_service("alice--agent1", "alice", "web")
-    assert len(ctx.fake.access_apps) == 0
+    # Override gone, tunnel-wide app persists but no longer lists the hostname.
+    assert len(ctx.fake.access_apps) == 1
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    assert "web--agent1--alice.example.com" not in tunnel_app["self_hosted_domains"]
+
+
+def test_remove_service_without_override_just_drops_hostname() -> None:
+    """Removing a service that has no override app just removes its hostname
+    from the tunnel-wide app's coverage."""
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    # Just the tunnel-wide app; no per-service override was created.
+    assert len(ctx.fake.access_apps) == 1
+
+    ctx.remove_service("alice--agent1", "alice", "web")
+    # Same one app, hostname no longer in coverage.
+    assert len(ctx.fake.access_apps) == 1
+    tunnel_app = next(iter(ctx.fake.access_apps.values()))
+    assert "web--agent1--alice.example.com" not in tunnel_app["self_hosted_domains"]
 
 
 def test_remove_service_raises_for_nonexistent() -> None:
@@ -270,7 +306,14 @@ def test_remove_service_raises_for_nonexistent() -> None:
 
 def test_tunnel_auth_get_set() -> None:
     ctx = make_fake_forwarding_ctx()
+    # Before the tunnel exists, no tunnel-wide Access app exists, so the
+    # policy read comes back as None (nothing to read from).
     assert ctx.get_tunnel_auth("alice--agent1") is None
+    ctx.create_tunnel("alice", "agent1")
+    # Just-created tunnel has no policies attached yet.
+    fresh = ctx.get_tunnel_auth("alice--agent1")
+    assert fresh is not None
+    assert fresh.rules == []
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_tunnel_auth("alice--agent1", policy)
     result = ctx.get_tunnel_auth("alice--agent1")
@@ -1236,62 +1279,6 @@ def test_http_ops_access_app_and_policies_roundtrip() -> None:
     ops.delete_access_app("app1")
 
 
-def test_http_ops_kv_namespace_create_when_missing() -> None:
-    """kv_get/kv_put/kv_delete + namespace creation path."""
-    stored: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if request.method == "GET" and path.endswith("/storage/kv/namespaces"):
-            return httpx.Response(200, json=_cf_result([]))
-        if request.method == "POST" and path.endswith("/storage/kv/namespaces"):
-            return httpx.Response(200, json=_cf_result({"id": "ns1", "title": "cloudflare-forwarding-defaults"}))
-        if "/storage/kv/namespaces/ns1/values/" in path:
-            key = path.rsplit("/", 1)[-1]
-            if request.method == "GET":
-                if key not in stored:
-                    return httpx.Response(404)
-                return httpx.Response(200, text=stored[key])
-            if request.method == "PUT":
-                stored[key] = request.content.decode()
-                return httpx.Response(200, json=_cf_result(None))
-            if request.method == "DELETE":
-                stored.pop(key, None)
-                return httpx.Response(200, json=_cf_result(None))
-        raise AssertionError(f"Unexpected request: {request.method} {path}")
-
-    ops = _build_http_ops_with_handler(handler)
-    assert ops.kv_get("missing") is None
-    ops.kv_put("alice--a1", '{"default": "allow"}')
-    assert ops.kv_get("alice--a1") == '{"default": "allow"}'
-    ops.kv_delete("alice--a1")
-    assert ops.kv_get("alice--a1") is None
-
-
-def test_http_ops_kv_namespace_reuses_existing() -> None:
-    """cf_kv_ensure_namespace returns the existing namespace's id without creating a new one."""
-    create_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal create_calls
-        path = request.url.path
-        if request.method == "GET" and path.endswith("/storage/kv/namespaces"):
-            return httpx.Response(
-                200,
-                json=_cf_result([{"id": "ns-existing", "title": "cloudflare-forwarding-defaults"}]),
-            )
-        if request.method == "POST" and path.endswith("/storage/kv/namespaces"):
-            create_calls += 1
-            return httpx.Response(200, json=_cf_result({"id": "ns-new", "title": "cloudflare-forwarding-defaults"}))
-        if "/storage/kv/namespaces/ns-existing/values/" in path and request.method == "PUT":
-            return httpx.Response(200, json=_cf_result(None))
-        raise AssertionError(f"Unexpected request: {request.method} {path}")
-
-    ops = _build_http_ops_with_handler(handler)
-    ops.kv_put("k", "v")
-    assert create_calls == 0
-
-
 def test_http_ops_service_token_roundtrip() -> None:
     """create_service_token, list_service_tokens, delete_service_token."""
     routes: dict[tuple[str, str], httpx.Response] = {
@@ -1417,14 +1404,17 @@ def test_route_delete_tunnel_admin_succeeds(monkeypatch: pytest.MonkeyPatch) -> 
     assert resp.json() == []
 
 
-def test_ctx_set_tunnel_auth_is_persisted_in_kv() -> None:
-    """set_tunnel_auth writes the JSON policy to the KV namespace keyed by tunnel name."""
+def test_ctx_set_tunnel_auth_is_persisted_on_tunnel_wide_app() -> None:
+    """set_tunnel_auth replaces the policies attached to the tunnel-wide
+    Access app; the policy lives on Cloudflare now instead of in KV."""
     ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
     policy = AuthPolicy(rules=[{"action": "allow", "include": [{"email": {"email": "a@b.com"}}]}])
     ctx.set_tunnel_auth("alice--agent1", policy)
-    stored_raw = ctx.fake.kv_get("alice--agent1")
-    assert stored_raw is not None
-    assert "a@b.com" in stored_raw
+    tunnel_app = next(a for a in ctx.fake.access_apps.values() if a["name"] == "tunnel-alice--agent1")
+    stored_policies = ctx.fake.access_policies.get(tunnel_app["id"], [])
+    assert len(stored_policies) == 1
+    assert stored_policies[0]["include"] == [{"email": {"email": "a@b.com"}}]
 
 
 def test_ctx_remove_service_scrubs_ingress_rule() -> None:
