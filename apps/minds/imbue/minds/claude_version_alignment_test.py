@@ -65,6 +65,12 @@ def _fetch_template_claude_version(token: str) -> str | None:
             payload = json.loads(response.read())
     except (urllib.error.URLError, OSError, ValueError):
         return None
+    # Guard against non-dict JSON (e.g. GitHub returning a list for a
+    # directory endpoint, or a null/string body on an unusual error path).
+    # Calling `.get` on a non-dict would raise AttributeError and escape
+    # the documented "return None on any parse failure" contract.
+    if not isinstance(payload, dict):
+        return None
     content_b64 = payload.get("content")
     if not isinstance(content_b64, str):
         return None
