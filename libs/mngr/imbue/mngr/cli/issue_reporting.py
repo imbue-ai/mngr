@@ -23,6 +23,7 @@ from imbue.mngr.errors import BaseMngrError
 
 GITHUB_REPO: Final[str] = "imbue-ai/mngr"
 GITHUB_BASE_URL: Final[str] = f"https://github.com/{GITHUB_REPO}"
+MNGR_REPO_URL: Final[str] = f"{GITHUB_BASE_URL}.git"
 ISSUE_TITLE_PREFIX: Final[str] = "[NotImplemented]"
 
 # Maximum URL length to stay within browser and GitHub limits
@@ -234,9 +235,6 @@ def get_mngr_version() -> str:
         return importlib.metadata.version("imbue-mngr")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
-
-
-MNGR_REPO_URL: Final[str] = f"https://github.com/{GITHUB_REPO}.git"
 
 
 @pure
