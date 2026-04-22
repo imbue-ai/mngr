@@ -91,10 +91,15 @@ def _fetch_template_claude_version(token: str) -> str | None:
     except tomllib.TOMLDecodeError as e:
         logger.trace("tomllib parse of template settings failed: {}", e)
         return None
+    # KeyError: a required key is absent.
+    # TypeError: an intermediate value is not a dict (e.g. an unexpected TOML
+    # payload with ``agent_types`` as a list/string rather than a table), which
+    # would otherwise escape as an opaque traceback and violate the documented
+    # "return None on any parse failure" contract.
     try:
         return str(parsed["agent_types"]["claude"]["version"])
-    except KeyError as e:
-        logger.trace("template settings missing expected key: {}", e)
+    except (KeyError, TypeError) as e:
+        logger.trace("template settings missing expected key or wrong type: {}", e)
         return None
 
 
