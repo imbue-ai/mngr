@@ -1,6 +1,6 @@
 ---
-description: Common minds-app dev tasks. launch | draft | release | create agent | delete agent <id> | status
-argument-hint: "launch | draft | release | create agent | delete agent <id> | status"
+description: Common minds-app dev tasks. launch | draft | release | create agent | delete agent <id> | status | interact <prompt>
+argument-hint: "launch | draft | release | create agent | delete agent <id> | status | interact <prompt>"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, WebSearch, WebFetch
 ---
 
@@ -147,6 +147,99 @@ Report compactly:
 - Lima VMs: `/opt/homebrew/bin/limactl list`
 - Latest ToDesktop build: `ls -t /tmp/minds-build*.log | head -1` + extract id
 - Dirty tree: `git status --short`
+
+## Sub-command: interact
+
+Trigger: "interact", "drive UI", "automate", "click", "send message in chat".
+
+Drive the minds desktop app's UI autonomously via Chrome DevTools Protocol (CDP). Useful for verifying chat UI behavior, reproducing button-click bugs, and capturing browser console logs without asking the user to manually click through.
+
+**Setup (once per session):** launch Electron with `--remote-debugging-port=9222` instead of plain `pnpm start`. The existing `launch` sub-command does *not* enable CDP, so for `interact` you must relaunch:
+
+```
+pkill -9 -f "electron .*apps/minds" 2>/dev/null; sleep 2
+(cd apps/minds && unset ELECTRON_RUN_AS_NODE && source ~/.zshrc 2>/dev/null && unset ELECTRON_RUN_AS_NODE && ./node_modules/.bin/electron . --remote-debugging-port=9222) > /tmp/minds-local.log 2>&1 &
+disown
+sleep 12
+curl -s http://localhost:9222/json/list | python3 -c 'import json,sys; [print(x["type"], x.get("url",""), x["webSocketDebuggerUrl"]) for x in json.load(sys.stdin)]'
+```
+
+Pick the `page` target whose URL points at the chat UI (e.g. `.../system_interface/`) — that's the `webSocketDebuggerUrl` you'll connect to. It's also OK to connect to `/_chrome` to drive the sidebar/titlebar.
+
+**Typical interaction pattern:** connect via `websockets`, subscribe to `Runtime.consoleAPICalled` to capture `console.log`, evaluate JS in the page context to type / click / read state. Skeleton:
+
+```python
+# /tmp/cdp_interact.py -- adapt per task
+import asyncio, json, websockets
+
+TARGET_WS = "ws://localhost:9222/devtools/page/<ID>"  # from /json/list
+
+async def main():
+    async with websockets.connect(TARGET_WS, max_size=10_000_000) as ws:
+        logs, next_id, pending = [], [100], {}
+
+        async def send(method, params=None):
+            next_id[0] += 1; mid = next_id[0]
+            fut = asyncio.get_event_loop().create_future(); pending[mid] = fut
+            await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+            return await fut
+
+        async def reader():
+            while True:
+                try: d = json.loads(await ws.recv())
+                except websockets.ConnectionClosed: return
+                if "id" in d and d["id"] in pending: pending.pop(d["id"]).set_result(d)
+                elif d.get("method") == "Runtime.consoleAPICalled":
+                    p = d["params"]
+                    logs.append(f"[{p.get('type')}] " + " | ".join(str(a.get('value', a.get('description', ''))) for a in p.get('args', [])))
+
+        asyncio.create_task(reader())
+        await send("Runtime.enable"); await send("Page.enable")
+        await send("Page.reload", {"ignoreCache": True})  # bypass cached bundle / SW
+        await asyncio.sleep(5)
+
+        # Example: type + click send. Uses InputEvent so Mithril's oninput fires
+        # (.value=... alone won't -- Mithril relies on event.target.value in the
+        # handler, and the onclick wiring is per-agent state, so whichever tab
+        # rendered last governs what's typed).
+        await send("Runtime.evaluate", {"expression": r'''
+        (async () => {
+            const tb = document.querySelector('.message-input-textbox');
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(tb, 'hello from cdp');
+            tb.dispatchEvent(new InputEvent('input', {bubbles:true, data:'hello from cdp', inputType:'insertText'}));
+            await new Promise(r => setTimeout(r, 500));
+            document.querySelector('.message-input-send-button')?.click();
+            await new Promise(r => setTimeout(r, 1500));
+        })()
+        ''', "returnByValue": True, "awaitPromise": True})
+        await asyncio.sleep(1)
+        print("\n".join(logs[-40:]))
+
+asyncio.run(main())
+```
+
+Run with `uv run --with websockets python3 /tmp/cdp_interact.py`.
+
+**Recipes:**
+
+- **"send a message in chat"**: as above. `InputEvent('input')` is mandatory for Mithril (synthetic `.value=...` alone won't propagate). The send button only renders when `messageText.trim().length > 0`, so always type first.
+- **"click tab X" / "navigate to workspace Y"**: find the tab element by visible text with `Array.from(document.querySelectorAll('.dv-tab')).find(el => el.textContent.trim() === 'X')?.click()`.
+- **"inspect what URLs the page is requesting"**: monkey-patch `XMLHttpRequest.prototype.open/send` + `window.fetch` before triggering the action. Store into `window.__xhrs` / `window.__fetches` and read after.
+- **"check what event listeners are on element"**: use `DOMDebugger.getEventListeners` over a resolved objectId (enable `DOM.enable` + `Runtime.enable` first).
+- **"capture console errors"**: `Runtime.consoleAPICalled` covers log/warn/error. `Runtime.exceptionThrown` covers uncaught errors; subscribe separately.
+- **"inspect frontend bundle behavior live"**: the compiled JS is in `/home/weishi.guest/.local/share/uv/tools/minds-workspace-server/lib/python3.12/site-packages/imbue/minds_workspace_server/static/assets/index-*.js` inside the VM. Add `console.log` to the source in `~/Developer/imbue/forever-claude-template/vendor/mngr/apps/minds_workspace_server/frontend/src/`, `npm run build` in `frontend/`, then `limactl copy ...` the new JS + `index.html` into the installed static dir for hot-patching. Reload via `Page.reload({ignoreCache:true})` to serve the new bundle.
+
+**Caveats:**
+
+- Mithril uses `addEventListener('click', eventsObject, false)` where `eventsObject` is an `EventListenerObject` -- `element.onclick` stays `null`. Don't use `.onclick = ...` overrides.
+- DockView creates one Mithril root per tab. If you see repeated `view()` calls with different `agentId` values, that's each tab's ChatPanel redrawing. Per-agent state must be keyed explicitly (see `messageTextByAgent` in `MessageInput.ts` for the pattern).
+- The chat UI registers a service worker. Cached responses + cached bundle survive across launches. `Page.reload({ignoreCache: true})` + `Network.clearBrowserCache` clear the HTTP cache; for SW changes, `ServiceWorker.unregister` the old SW first.
+- The login URL is one-time-use. Electron consumes it on its first chrome-view load. If you need to auth a second client (e.g. a separate curl), restart the Python backend (`minds forward`) to mint a fresh code.
+
+**Do not**: use this for destructive actions (delete workspace, kill agent, push anywhere). CDP is an observation / light-interaction tool; for state-changing ops prefer direct API calls you can audit.
+
+**When the prompt needs a workspace that doesn't exist yet**: don't drive the Create form via CDP -- the HTTP path is faster (~1:30 cold, ~30s warm) and more deterministic. Compose: run the `create agent` sub-command first, wait for `status=DONE`, then connect CDP to the resulting workspace's `/forwarding/<agent_id>/system_interface/` target. Same for cleanup: `delete agent <id>` via `mngr destroy` has real cleanup (VM + remote branch); the UI's X button only detaches.
 
 ## Cross-cutting rules
 

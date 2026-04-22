@@ -297,6 +297,32 @@ setTimeout(function() {{ location.reload(); }}, {interval});
 </html>""".format(interval=_BACKEND_LOADING_RETRY_INTERVAL_MS, links=links_html)
 
 
+_BASE_PATH_META_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r'(<meta\s+name="minds-workspace-server-base-path"\s+content=")[^"]*(")',
+    re.IGNORECASE,
+)
+
+
+@pure
+def rewrite_base_path_meta(html_content: str, agent_id: AgentId, server_name: ServerName) -> str:
+    """Populate the `minds-workspace-server-base-path` <meta> tag with the proxy prefix.
+
+    The minds_workspace_server frontend reads this meta at page load and
+    prepends its content to every relative API URL it constructs (see
+    `apiUrl()` in `frontend/src/base-path.ts`). When the server is directly
+    accessed, content is empty -- URLs like `/api/agents/.../screen` resolve
+    against the document origin. But when we proxy it under
+    `/forwarding/{agent}/system_interface/`, that root-relative fetch bypasses
+    our `<base>` tag (which only applies to `<a href>`, `<img src>`, etc. --
+    not to fetch/XHR) and lands on the desktop client's backend, which has
+    no such route and returns 404. Populating this meta with our proxy
+    prefix makes the frontend build fully-prefixed URLs that route through
+    the proxy correctly.
+    """
+    prefix = _get_server_prefix(agent_id, server_name)
+    return _BASE_PATH_META_PATTERN.sub(rf"\g<1>{prefix}\g<2>", html_content, count=1)
+
+
 @pure
 def rewrite_proxied_html(
     html_content: str,
@@ -316,6 +342,10 @@ def rewrite_proxied_html(
         agent_id=agent_id,
         server_name=server_name,
     )
+
+    # Populate the minds_workspace_server base-path meta tag so the frontend
+    # builds prefixed URLs for fetch/XHR (which ignore <base>).
+    rewritten = rewrite_base_path_meta(rewritten, agent_id, server_name)
 
     # Build the injection: base tag + WS shim
     base_tag = f'<base href="{prefix}/">'
