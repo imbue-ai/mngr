@@ -5,9 +5,15 @@ test_timeout_secs = 900
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
-# git add -A syncs the index after git apply, which only updates the working
-# tree. Without it, git ls-files would still list files deleted by the patch.
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
+
+[checkpoint]
+build_inputs = [
+    "libs/mngr/imbue/mngr/resources/Dockerfile",
+    "libs/mngr/imbue/mngr/resources/Dockerfile.release.extras",
+    "libs/mngr/imbue/mngr/resources/start-dockerd.sh",
+    "uv.lock",
+    "pyproject.toml",
+]
 
 [provider]
 type = "modal"
