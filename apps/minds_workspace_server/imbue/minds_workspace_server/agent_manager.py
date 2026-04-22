@@ -403,12 +403,19 @@ class AgentManager:
             self._log_queues.pop(agent_id, None)
 
             if success:
+                # Newly-created agents use mngr's default agent type ("claude"),
+                # because `create_chat_agent` and `create_worktree_agent` do not
+                # pass `--agent-type` to `mngr create`. The discovery event
+                # emitted by `mngr observe` will reconcile this shortly; we
+                # populate it eagerly so the UI renders the interrupt control
+                # immediately rather than flipping from false to true later.
                 self._agents[agent_id] = AgentStateItem(
                     id=agent_id,
                     name=agent_name,
                     state="RUNNING",
                     labels=labels,
                     work_dir=str(work_dir),
+                    supports_interrupt=agent_type_supports_interrupt("claude"),
                 )
 
         if success:
