@@ -46,7 +46,9 @@ function parseWorkspaceId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    const m = parsed.pathname.match(/^\/forwarding\/([^\/]+)(?:\/|$)/);
+    // Workspace URLs are now `<agent-id>.localhost:PORT/...`; the desktop
+    // client serves agent-neutral pages on the bare `localhost` host.
+    const m = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
     return m ? m[1] : null;
   } catch {
     return null;
@@ -57,6 +59,20 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
+}
+
+// Build the root URL for an agent's workspace (served by the desktop client's
+// subdomain forwarding middleware). Returns null if the backend hasn't come up
+// yet, in which case the caller should wait.
+function workspaceUrlForAgent(agentId) {
+  if (!agentId || !backendBaseUrl) return null;
+  try {
+    const parsed = new URL(backendBaseUrl);
+    parsed.hostname = `${agentId}.localhost`;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 function findBundleForWorkspace(agentId) {
@@ -569,7 +585,7 @@ function openOrFocusWorkspace(agentId, url) {
     focusBundle(existing);
     return existing;
   }
-  const absolute = toAbsoluteUrl(url || ('/forwarding/' + agentId + '/'));
+  const absolute = toAbsoluteUrl(url || workspaceUrlForAgent(agentId));
   return openNewWindow(absolute);
 }
 
@@ -1283,7 +1299,7 @@ ipcMain.on('open-requests-panel', (event) => {
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
-  openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+  openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
   // The sidebar is the sender for both the hover-icon click and the native
   // context-menu "Open in new window" item; close it now that the action is done.
   const bundle = getBundleFromEvent(event);
@@ -1322,7 +1338,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     {
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
         closeSidebar(bundle);
       },
     },
