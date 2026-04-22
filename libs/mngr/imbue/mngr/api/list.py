@@ -226,8 +226,10 @@ def _maybe_write_full_discovery_snapshot(
     if not is_full_listing:
         return
     if result.errors:
-        logger.trace("Skipping full discovery snapshot: {} error(s) during listing", len(result.errors))
-        return
+        logger.warning(
+            "Writing partial discovery snapshot despite {} error(s); failed providers will be absent",
+            len(result.errors),
+        )
     try:
         discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
         write_full_discovery_snapshot(mngr_ctx.config, discovered_agents, discovered_hosts)

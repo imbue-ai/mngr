@@ -481,7 +481,7 @@ class MngrStreamManager(MutableModel):
         self._cg.__enter__()
         # Run from $HOME so mngr uses its global config, not any project-specific
         # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
-        command = [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+        command = [self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error=continue"]
         logger.info("Starting agent discovery: {}", " ".join(command))
         self._observe_process = self._cg.run_process_in_background(
             command=command,
