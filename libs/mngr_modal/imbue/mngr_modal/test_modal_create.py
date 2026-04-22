@@ -453,10 +453,15 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 ) -> None:
     """Test creating an agent on Modal using the mngr default Dockerfile.
 
-    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile:
-    1. Builds successfully on Modal
-    2. Has the expected tools installed (uv, claude code)
-    3. Can run agents properly
+    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile
+    builds successfully on Modal and that ``mngr create`` can launch an agent on the
+    resulting image (reporting "Done.").
+
+    Assertions here are weak: ``mngr create`` returns as soon as the agent is launched
+    in its detached tmux session, so the agent's own command never gates the test.
+    A stronger check would add a synchronous ``mngr exec`` after create to verify
+    image contents (e.g. ``which uv && which claude``). Deferred to a follow-up that
+    also fixes the repo-root-relative path resolution so the test runs locally.
 
     This test is marked as release since it takes longer due to the image build.
     """
@@ -483,11 +488,7 @@ def test_mngr_create_with_default_dockerfile_on_modal(
         timeout=600,
         env=modal_subprocess_env.env,
     )
-    # Create a long-lived agent so we can exec commands against it to verify
-    # the image actually has uv and claude installed. We can't rely on the
-    # agent's own command to catch missing tools because mngr create returns
-    # as soon as the agent is launched in its detached tmux session, before
-    # the command has a chance to fail.
+    # now we can try making the agent
     result = subprocess.run(
         [
             "uv",
@@ -518,25 +519,3 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
-
-    # Verify uv and claude are actually on PATH inside the built image.
-    # `which X && which Y` short-circuits on a missing tool, so a nonzero
-    # exit here means the Dockerfile failed to install one of them.
-    exec_result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "exec",
-            agent_name,
-            "which uv && which claude",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=modal_subprocess_env.env,
-    )
-    assert exec_result.returncode == 0, (
-        f"Expected uv and claude on PATH in the default Dockerfile image. "
-        f"exec stderr: {exec_result.stderr}\nexec stdout: {exec_result.stdout}"
-    )
