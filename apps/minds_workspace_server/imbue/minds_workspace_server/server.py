@@ -26,6 +26,7 @@ from starlette.websockets import WebSocketDisconnect
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import interrupt_agent
 from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
@@ -39,6 +40,7 @@ from imbue.minds_workspace_server.models import CreateChatRequest
 from imbue.minds_workspace_server.models import CreateWorktreeRequest
 from imbue.minds_workspace_server.models import DestroyAgentResponse
 from imbue.minds_workspace_server.models import ErrorResponse
+from imbue.minds_workspace_server.models import InterruptAgentResponse
 from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
@@ -199,7 +201,15 @@ def _discover_with_filters(request: Request) -> list[AgentInfo]:
 def _list_agents_endpoint(request: Request) -> JSONResponse:
     """List all mngr-managed agents."""
     agents = _discover_with_filters(request)
-    items = [AgentListItem(id=agent.id, name=agent.name, state=agent.state) for agent in agents]
+    items = [
+        AgentListItem(
+            id=agent.id,
+            name=agent.name,
+            state=agent.state,
+            supports_interrupt=agent.supports_interrupt,
+        )
+        for agent in agents
+    ]
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
@@ -232,6 +242,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
         claude_config_dir=claude_config_dir,
         labels=agent_state.labels,
         work_dir=agent_state.work_dir,
+        supports_interrupt=agent_state.supports_interrupt,
     )
 
 
@@ -318,6 +329,29 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
+
+
+def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResponse:
+    """Interrupt an agent's current turn.
+
+    Returns 404 if the agent is unknown, 405 if its type does not support
+    interrupt, 500 on runtime failure, 200 otherwise. Idle agents return 200
+    because the underlying capability is a no-op when nothing is running.
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    if not agent_info.supports_interrupt:
+        error = ErrorResponse(detail=f"Agent type does not support interrupt: '{agent_info.name}'")
+        return JSONResponse(content=error.model_dump(), status_code=405)
+
+    success, error_detail = interrupt_agent(agent_info.name)
+    if not success:
+        error = ErrorResponse(detail=error_detail or f"Failed to interrupt agent '{agent_info.name}'")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content=InterruptAgentResponse(status="ok").model_dump())
 
 
 def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
@@ -678,6 +712,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/interrupt", _interrupt_agent_endpoint, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/layout", _get_layout, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])

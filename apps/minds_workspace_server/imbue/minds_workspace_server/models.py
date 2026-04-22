@@ -15,6 +15,16 @@ class AgentListItem(FrozenModel):
     id: str = Field(description="The agent's unique identifier")
     name: str = Field(description="The agent's human-readable name")
     state: str = Field(description="The agent's lifecycle state")
+    supports_interrupt: bool = Field(
+        default=False,
+        description="Whether the agent type supports interrupting the current turn",
+    )
+
+
+class InterruptAgentResponse(FrozenModel):
+    """Response from the /api/agents/{id}/interrupt endpoint."""
+
+    status: str = Field(description="Status of the interrupt operation")
 
 
 class AgentListResponse(FrozenModel):
@@ -49,6 +59,10 @@ class AgentStateItem(FrozenModel):
     state: str = Field(description="The agent's lifecycle state")
     labels: dict[str, str] = Field(description="Agent labels (e.g., user_created, chat_parent_id)")
     work_dir: str | None = Field(description="The agent's working directory path")
+    supports_interrupt: bool = Field(
+        default=False,
+        description="Whether the agent type supports interrupting the current turn",
+    )
 
 
 class ApplicationEntry(FrozenModel):

@@ -9,6 +9,8 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.interrupt import agent_type_supports_interrupt
+from imbue.mngr.api.interrupt import interrupt_agents
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -30,6 +32,8 @@ class AgentInfo(FrozenModel):
     claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
     work_dir: str | None = Field(default=None, description="Agent working directory path")
+    agent_type: str | None = Field(default=None, description="Agent type name (e.g. claude, codex)")
+    supports_interrupt: bool = Field(default=False, description="Whether the agent type supports interrupting the current turn")
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
@@ -93,6 +97,7 @@ def discover_agents(
         agent_id = str(agent_details.id)
         agent_name = str(agent_details.name)
         state = str(agent_details.state.value) if agent_details.state else "unknown"
+        agent_type = str(agent_details.type) if agent_details.type else None
 
         # Compute agent state dir from the default host dir
         agent_state_dir = default_host_dir / "agents" / agent_id
@@ -109,6 +114,8 @@ def discover_agents(
                 claude_config_dir=claude_config_dir,
                 labels=dict(agent_details.labels),
                 work_dir=str(agent_details.work_dir),
+                agent_type=agent_type,
+                supports_interrupt=agent_type_supports_interrupt(agent_type),
             )
         )
 
@@ -128,3 +135,21 @@ def send_message(agent_name: str, message: str) -> bool:
     finally:
         cg.__exit__(None, None, None)
     return len(result.successful_agents) > 0
+
+
+def interrupt_agent(agent_name: str) -> tuple[bool, str | None]:
+    """Interrupt an agent's current turn. Returns (success, error_detail_or_None)."""
+    mngr_ctx, cg = _get_mngr_context()
+    try:
+        result = interrupt_agents(
+            mngr_ctx=mngr_ctx,
+            include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+    finally:
+        cg.__exit__(None, None, None)
+    if len(result.successful_agents) > 0:
+        return True, None
+    if len(result.failed_agents) > 0:
+        return False, result.failed_agents[0][1]
+    return False, "No matching agent found"

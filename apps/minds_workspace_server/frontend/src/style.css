@@ -221,6 +221,26 @@ body {
   background: var(--color-accent-hover);
 }
 
+.message-input-stop-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #fff;
+  background: #64748b;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 120ms;
+  flex-shrink: 0;
+}
+
+.message-input-stop-button:hover:not(:disabled) {
+  background: #475569;
+}
+
 .message-input-logo {
   width: 32px;
   height: 32px;

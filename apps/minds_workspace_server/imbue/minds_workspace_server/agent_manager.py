@@ -31,6 +31,7 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.interrupt import agent_type_supports_interrupt
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
@@ -180,6 +181,7 @@ class AgentManager:
                     "state": a.state,
                     "labels": a.labels,
                     "work_dir": a.work_dir,
+                    "supports_interrupt": a.supports_interrupt,
                 }
                 for a in self._agents.values()
             ]
@@ -426,6 +428,7 @@ class AgentManager:
                         state=agent_info.state,
                         labels=agent_info.labels,
                         work_dir=agent_info.work_dir,
+                        supports_interrupt=agent_info.supports_interrupt,
                     )
                     self._agents[agent_info.id] = agent_state
 
@@ -447,6 +450,7 @@ class AgentManager:
                     state=agent_info.state,
                     labels=agent_info.labels,
                     work_dir=agent_info.work_dir,
+                    supports_interrupt=agent_info.supports_interrupt,
                 )
 
             with self._lock:
@@ -536,6 +540,9 @@ class AgentManager:
                 state="RUNNING",
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
+                supports_interrupt=agent_type_supports_interrupt(
+                    str(agent.agent_type) if agent.agent_type is not None else None
+                ),
             )
 
         with self._lock:
@@ -563,6 +570,9 @@ class AgentManager:
             state="RUNNING",
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
+            supports_interrupt=agent_type_supports_interrupt(
+                str(agent.agent_type) if agent.agent_type is not None else None
+            ),
         )
 
         with self._lock:
