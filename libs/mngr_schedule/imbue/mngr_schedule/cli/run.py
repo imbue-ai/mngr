@@ -1,4 +1,4 @@
-import subprocess
+import sys
 from typing import Any
 from typing import assert_never
 
@@ -6,6 +6,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_final_json
@@ -59,7 +60,7 @@ def schedule_run(ctx: click.Context, **kwargs: Any) -> None:
     provider = load_schedule_provider(opts.provider, mngr_ctx)
 
     if isinstance(provider, LocalProviderInstance):
-        exit_code = run_local_trigger(mngr_ctx, opts.name)
+        exit_code = run_local_trigger(mngr_ctx, opts.name, output_opts.output_format)
     elif isinstance(provider, ModalProviderInstance):
         output = run_modal_trigger(provider, opts.name)
         _emit_output(output, output_opts.output_format)
@@ -94,11 +95,19 @@ def _emit_output(output: str, output_format: OutputFormat) -> None:
             assert_never(unreachable)
 
 
-def run_local_trigger(mngr_ctx: MngrContext, trigger_name: str) -> int:
+def run_local_trigger(mngr_ctx: MngrContext, trigger_name: str, output_format: OutputFormat) -> int:
     """Run a local trigger by executing its run.sh wrapper script.
 
     This is the exact same code path as cron: execute the run.sh script
     that was created by schedule add.
+
+    Output behavior depends on ``output_format``:
+    - HUMAN: the script runs with inherited stdout/stderr, so its output
+      streams to the terminal live (matching cron-style execution).
+    - JSON / JSONL: stdout and stderr are captured and emitted as a
+      single parseable object via ``_emit_output``, matching the modal
+      branch so downstream consumers see a consistent shape regardless
+      of provider.
     """
     record = get_local_schedule_creation_record(mngr_ctx, trigger_name)
     if record is None:
@@ -118,8 +127,41 @@ def run_local_trigger(mngr_ctx: MngrContext, trigger_name: str) -> int:
         )
 
     logger.info("Executing local trigger '{}' via {}", trigger_name, run_script)
-    result = subprocess.run([str(run_script)])
-    return result.returncode
+    # Run via ConcurrencyGroup so the subprocess participates in the
+    # standard cleanup protocol (per CLAUDE.md's direct-subprocess ratchet).
+    # HUMAN mode writes each output chunk to stdout/stderr as it arrives to
+    # preserve cron-style live streaming; JSON / JSONL mode stays silent
+    # during the run and emits one structured envelope at the end.
+    on_output = _stream_human_output if output_format is OutputFormat.HUMAN else None
+    with ConcurrencyGroup(name=f"schedule-run-local-{trigger_name}") as cg:
+        finished = cg.run_process_to_completion(
+            [str(run_script)],
+            is_checked_after=False,
+            on_output=on_output,
+        )
+
+    match output_format:
+        case OutputFormat.HUMAN:
+            # Output already streamed to stdout/stderr via _stream_human_output.
+            return finished.returncode if finished.returncode is not None else 1
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            # Merge stderr into stdout so the emitted payload mirrors the
+            # combined stream that the modal branch returns.
+            _emit_output(finished.stdout + finished.stderr, output_format)
+            return finished.returncode if finished.returncode is not None else 1
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _stream_human_output(chunk: str, is_stderr: bool) -> None:
+    """Forward a ConcurrencyGroup output chunk to stdout or stderr.
+
+    Used as the ``on_output`` callback for ``run_process_to_completion`` so
+    the local trigger's output streams live to the terminal in HUMAN mode.
+    """
+    stream = sys.stderr if is_stderr else sys.stdout
+    stream.write(chunk)
+    stream.flush()
 
 
 def run_modal_trigger(provider: ModalProviderInstance, trigger_name: str) -> str:

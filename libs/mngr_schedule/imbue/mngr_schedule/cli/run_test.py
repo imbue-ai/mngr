@@ -47,7 +47,7 @@ def test_run_local_trigger_executes_run_script(
     # run.sh will fail (uv run mngr create isn't set up in test env) but
     # the point is that it tried to execute the script. A non-zero exit
     # code proves run.sh was invoked.
-    exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger")
+    exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.HUMAN)
     assert isinstance(exit_code, int)
 
 
@@ -56,7 +56,7 @@ def test_run_local_trigger_not_found_raises(
 ) -> None:
     """Requesting a nonexistent trigger should raise ClickException."""
     with pytest.raises(click.ClickException, match="No local schedule record found"):
-        run_local_trigger(temp_mngr_ctx, "nonexistent")
+        run_local_trigger(temp_mngr_ctx, "nonexistent", OutputFormat.HUMAN)
 
 
 def test_run_local_trigger_missing_script_raises(
@@ -71,7 +71,7 @@ def test_run_local_trigger_missing_script_raises(
     run_script.unlink()
 
     with pytest.raises(click.ClickException, match="Wrapper script not found"):
-        run_local_trigger(temp_mngr_ctx, "test-trigger")
+        run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.HUMAN)
 
 
 def test_run_local_trigger_disabled_still_runs(
@@ -79,8 +79,38 @@ def test_run_local_trigger_disabled_still_runs(
 ) -> None:
     """A disabled trigger should still be run (with a warning)."""
     _deploy_echo_trigger(temp_mngr_ctx, "disabled-trigger", is_enabled=False)
-    exit_code = run_local_trigger(temp_mngr_ctx, "disabled-trigger")
+    exit_code = run_local_trigger(temp_mngr_ctx, "disabled-trigger", OutputFormat.HUMAN)
     assert isinstance(exit_code, int)
+
+
+def test_run_local_trigger_json_emits_parseable_object(
+    temp_mngr_ctx: MngrContext,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSON format must emit exactly one parseable JSON object with captured output.
+
+    For the local provider, HUMAN format streams the script's stdout live.
+    JSON / JSONL must instead capture the script output and emit it via
+    the same structured envelope as the modal branch, so downstream
+    consumers see a consistent shape regardless of provider.
+    """
+    _deploy_echo_trigger(temp_mngr_ctx)
+
+    # Replace the generated run.sh with a deterministic script that writes
+    # a known marker to stdout (and nothing to stderr), so we can assert
+    # on exact captured output without depending on ``uv run mngr create``.
+    run_script = get_local_trigger_run_script(temp_mngr_ctx, "test-trigger")
+    run_script.write_text("#!/bin/sh\necho local-trigger-marker\n")
+
+    exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.JSON)
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    # In JSON mode, the *only* thing on stdout should be the structured
+    # envelope. The script's raw output must be captured into the envelope
+    # rather than leaking through.
+    payload = json.loads(captured.out)
+    assert payload == {"output": "local-trigger-marker\n"}
 
 
 # =============================================================================
