@@ -25,7 +25,7 @@ def _deploy(trigger: ScheduleTriggerDefinition, mngr_ctx: MngrContext) -> list[s
 
 def test_remove_local_schedule_cleans_all_artifacts(
     temp_mngr_ctx: MngrContext,
-    make_test_trigger: Callable[[str], ScheduleTriggerDefinition],
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """Removing a trigger should delete the crontab entry, trigger dir, and record."""
     trigger = make_test_trigger()
@@ -65,7 +65,7 @@ def test_remove_local_schedule_idempotent(
 
 def test_remove_local_schedule_leaves_other_triggers(
     temp_mngr_ctx: MngrContext,
-    make_test_trigger: Callable[[str], ScheduleTriggerDefinition],
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """Removing one trigger should not affect other triggers."""
     trigger_a = make_test_trigger("trigger-a")

@@ -73,26 +73,32 @@ def bare_temp_mngr_ctx(
     return _build_mngr_ctx(bare_plugin_manager, tmp_path)
 
 
-@pytest.fixture()
-def make_test_trigger() -> Callable[[str], ScheduleTriggerDefinition]:
-    """Factory fixture for building a minimal ``ScheduleTriggerDefinition``.
+def _build_test_trigger(name: str = "test-trigger") -> ScheduleTriggerDefinition:
+    """Build a minimal local-provider CREATE trigger for unit tests.
 
-    Returns a callable that takes a trigger name (default ``"test-trigger"``)
-    and returns a local-provider CREATE trigger with fixed stub fields. Used
-    across schedule unit tests so a change to the trigger shape only needs
-    to be made in one place.
+    Module-level so the ``make_test_trigger`` fixture can expose it directly
+    without defining an inline closure (which the inline-function ratchet
+    disallows).
     """
+    return ScheduleTriggerDefinition(
+        name=name,
+        command=ScheduledMngrCommand.CREATE,
+        args="--message hello",
+        schedule_cron="0 2 * * *",
+        provider="local",
+    )
 
-    def _build(name: str = "test-trigger") -> ScheduleTriggerDefinition:
-        return ScheduleTriggerDefinition(
-            name=name,
-            command=ScheduledMngrCommand.CREATE,
-            args="--message hello",
-            schedule_cron="0 2 * * *",
-            provider="local",
-        )
 
-    return _build
+@pytest.fixture()
+def make_test_trigger() -> Callable[..., ScheduleTriggerDefinition]:
+    """Factory fixture returning ``_build_test_trigger``.
+
+    Callers invoke ``make_test_trigger()`` for the default name or
+    ``make_test_trigger("custom-name")`` to override it. Used across schedule
+    unit tests so a change to the trigger shape only needs to be made in one
+    place.
+    """
+    return _build_test_trigger
 
 
 @pytest.fixture()

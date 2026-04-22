@@ -20,7 +20,7 @@ from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule_creation_records
 
-TriggerFactory = Callable[[str], ScheduleTriggerDefinition]
+TriggerFactory = Callable[..., ScheduleTriggerDefinition]
 
 
 # =============================================================================
