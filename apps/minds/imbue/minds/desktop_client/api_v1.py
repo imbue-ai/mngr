@@ -207,11 +207,11 @@ def _handle_cloudflare_enable(
     assert cf_client is not None
 
     parsed_id = AgentId(agent_id)
-    parsed_server = ServiceName(service_name)
+    parsed_service = ServiceName(service_name)
 
     service_url = body.service_url if body is not None else None
     if service_url is None:
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
         if backend_url is None:
             return _json_error("Server not found locally", 404)
         service_url = backend_url
@@ -228,14 +228,14 @@ def _handle_cloudflare_enable(
         save_tunnel_token(paths.data_dir, parsed_id, token)
         inject_tunnel_token_into_agent(parsed_id, token)
 
-    is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
+    is_success = cf_client.add_service(parsed_id, parsed_service, service_url)
     if not is_success:
         return _json_error("Cloudflare API call failed", 502)
 
     # Apply auth rules if provided
     auth_rules = body.auth_rules if body is not None else None
     if auth_rules is not None:
-        cf_client.set_service_auth(parsed_id, str(parsed_server), auth_rules)
+        cf_client.set_service_auth(parsed_id, str(parsed_service), auth_rules)
 
     return _json_response({"ok": True})
 
@@ -253,9 +253,9 @@ def _handle_cloudflare_disable(
     assert cf_client is not None
 
     parsed_id = AgentId(agent_id)
-    parsed_server = ServiceName(service_name)
+    parsed_service = ServiceName(service_name)
 
-    is_success = cf_client.remove_service(parsed_id, parsed_server)
+    is_success = cf_client.remove_service(parsed_id, parsed_service)
 
     if is_success:
         return _json_response({"ok": True})

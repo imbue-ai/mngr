@@ -201,6 +201,14 @@ class AgentManager:
             observer.join(timeout=5)
         self._app_observers.clear()
 
+    @property
+    def broadcaster(self) -> WebSocketBroadcaster:
+        """The WebSocketBroadcaster this manager owns. Primarily useful to
+        callers that need to reuse the same broadcaster across related
+        application state (e.g. the workspace_server lifespan when an
+        externally-constructed AgentManager is injected for tests)."""
+        return self._broadcaster
+
     def get_agents(self) -> list[AgentStateItem]:
         """Return current agent list."""
         with self._lock:

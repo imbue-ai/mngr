@@ -23,18 +23,18 @@ from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
-_SERVER_WEB: ServiceName = ServiceName("web")
-_SERVER_API: ServiceName = ServiceName("api")
+_SERVICE_WEB: ServiceName = ServiceName("web")
+_SERVICE_API: ServiceName = ServiceName("api")
 
 
 # -- StaticBackendResolver tests --
 
 
-def test_static_get_backend_url_returns_url_for_known_agent_and_server() -> None:
+def test_static_get_backend_url_returns_url_for_known_agent_and_service() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
-    url = resolver.get_backend_url(_AGENT_A, _SERVER_WEB)
+    url = resolver.get_backend_url(_AGENT_A, _SERVICE_WEB)
     assert url == "http://localhost:3001"
 
 
@@ -42,15 +42,15 @@ def test_static_get_backend_url_returns_none_for_unknown_agent() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
-    url = resolver.get_backend_url(_AGENT_B, _SERVER_WEB)
+    url = resolver.get_backend_url(_AGENT_B, _SERVICE_WEB)
     assert url is None
 
 
-def test_static_get_backend_url_returns_none_for_unknown_server() -> None:
+def test_static_get_backend_url_returns_none_for_unknown_service() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
-    url = resolver.get_backend_url(_AGENT_A, _SERVER_API)
+    url = resolver.get_backend_url(_AGENT_A, _SERVICE_API)
     assert url is None
 
 
@@ -71,17 +71,17 @@ def test_static_list_known_agent_ids_returns_empty_tuple_when_no_agents() -> Non
     assert ids == ()
 
 
-def test_static_list_servers_for_agent_returns_sorted_names() -> None:
+def test_static_list_services_for_agent_returns_sorted_names() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={
             str(_AGENT_A): {"web": "http://localhost:3001", "api": "http://localhost:3002"},
         },
     )
     servers = resolver.list_services_for_agent(_AGENT_A)
-    assert servers == (_SERVER_API, _SERVER_WEB)
+    assert servers == (_SERVICE_API, _SERVICE_WEB)
 
 
-def test_static_list_servers_for_agent_returns_empty_for_unknown_agent() -> None:
+def test_static_list_services_for_agent_returns_empty_for_unknown_agent() -> None:
     resolver = StaticBackendResolver(url_by_agent_and_service={})
     servers = resolver.list_services_for_agent(_AGENT_A)
     assert servers == ()
@@ -90,7 +90,7 @@ def test_static_list_servers_for_agent_returns_empty_for_unknown_agent() -> None
 # -- parse_service_log_records tests --
 
 
-def test_parse_server_log_records_parses_valid_jsonl() -> None:
+def test_parse_service_log_records_parses_valid_jsonl() -> None:
     text = '{"service": "web", "url": "http://127.0.0.1:9100"}\n'
     records = parse_service_log_records(text)
 
@@ -100,24 +100,24 @@ def test_parse_server_log_records_parses_valid_jsonl() -> None:
     assert records[0].url == "http://127.0.0.1:9100"
 
 
-def test_parse_server_log_records_returns_empty_for_empty_input() -> None:
+def test_parse_service_log_records_returns_empty_for_empty_input() -> None:
     assert parse_service_log_records("") == []
     assert parse_service_log_records("\n") == []
 
 
-def test_parse_server_log_records_raises_on_invalid_json() -> None:
+def test_parse_service_log_records_raises_on_invalid_json() -> None:
     text = 'bad line\n{"service": "web", "url": "http://127.0.0.1:9100"}\n'
     with pytest.raises(json.JSONDecodeError):
         parse_service_log_records(text)
 
 
-def test_parse_server_log_records_raises_on_missing_fields() -> None:
+def test_parse_service_log_records_raises_on_missing_fields() -> None:
     text = '{"service": "web"}\n'
     with pytest.raises(ServiceLogParseError, match="missing required fields"):
         parse_service_log_records(text)
 
 
-def test_parse_server_log_records_ignores_envelope_fields() -> None:
+def test_parse_service_log_records_ignores_envelope_fields() -> None:
     text = (
         json.dumps(
             {
@@ -139,7 +139,7 @@ def test_parse_server_log_records_ignores_envelope_fields() -> None:
     assert records[0].url == "http://127.0.0.1:9100"
 
 
-def test_parse_server_log_records_returns_multiple_records() -> None:
+def test_parse_service_log_records_returns_multiple_records() -> None:
     text = '{"service": "web", "url": "http://127.0.0.1:9100"}\n{"service": "api", "url": "http://127.0.0.1:9200"}\n'
     records = parse_service_log_records(text)
 
@@ -170,54 +170,54 @@ def test_parse_agent_ids_from_json_returns_empty_for_invalid_json() -> None:
 # -- MngrCliBackendResolver tests (using direct state updates) --
 
 
-def test_mngr_cli_resolver_returns_url_for_specific_server() -> None:
+def test_mngr_cli_resolver_returns_url_for_specific_service() -> None:
     resolver = make_resolver_with_data(
         service_logs={str(_AGENT_A): make_service_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
     )
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
 
 
-def test_mngr_cli_resolver_returns_none_for_unknown_server_name() -> None:
+def test_mngr_cli_resolver_returns_none_for_unknown_service_name() -> None:
     resolver = make_resolver_with_data(
         service_logs={str(_AGENT_A): make_service_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
     )
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_API) is None
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_API) is None
 
 
 def test_mngr_cli_resolver_returns_none_for_unknown_agent() -> None:
     resolver = make_resolver_with_data(service_logs={}, agents_json=make_agents_json())
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) is None
 
 
-def test_mngr_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
+def test_mngr_cli_resolver_handles_multiple_services_for_one_agent() -> None:
     log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_API) == "http://127.0.0.1:9200"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_API) == "http://127.0.0.1:9200"
 
 
-def test_mngr_cli_resolver_later_entry_overrides_earlier_for_same_server() -> None:
+def test_mngr_cli_resolver_later_entry_overrides_earlier_for_same_service() -> None:
     log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("web", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9200"
 
 
-def test_mngr_cli_resolver_lists_servers_for_agent() -> None:
+def test_mngr_cli_resolver_lists_services_for_agent() -> None:
     log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
     servers = resolver.list_services_for_agent(_AGENT_A)
-    assert servers == (_SERVER_API, _SERVER_WEB)
+    assert servers == (_SERVICE_API, _SERVICE_WEB)
 
 
 def test_mngr_cli_resolver_lists_known_agents() -> None:
@@ -269,10 +269,10 @@ def test_mngr_cli_resolver_update_services_replaces_state() -> None:
     resolver = MngrCliBackendResolver()
 
     resolver.update_services(_AGENT_A, {"web": "http://127.0.0.1:9100"})
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
 
     resolver.update_services(_AGENT_A, {"web": "http://127.0.0.1:9200"})
-    assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
+    assert resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9200"
 
 
 # -- parse_agents_from_json tests --
@@ -535,14 +535,14 @@ def test_stream_manager_handle_discovery_line_ignores_invalid_json() -> None:
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_events_stream_output_updates_servers() -> None:
+def test_stream_manager_on_events_stream_output_updates_services() -> None:
     manager = _make_stream_manager()
     manager._events_services[str(_AGENT_A)] = {}
 
     server_line = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
     manager._on_events_stream_output(server_line, is_stdout=True, agent_id=_AGENT_A)
 
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
 
 
 def test_stream_manager_on_events_stream_output_ignores_stderr() -> None:
@@ -550,7 +550,7 @@ def test_stream_manager_on_events_stream_output_ignores_stderr() -> None:
     manager._events_services[str(_AGENT_A)] = {}
 
     manager._on_events_stream_output("stderr noise", is_stdout=False, agent_id=_AGENT_A)
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) is None
 
 
 def test_stream_manager_on_events_stream_output_ignores_invalid_json() -> None:
@@ -558,10 +558,10 @@ def test_stream_manager_on_events_stream_output_ignores_invalid_json() -> None:
     manager._events_services[str(_AGENT_A)] = {}
 
     manager._on_events_stream_output("not json", is_stdout=True, agent_id=_AGENT_A)
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) is None
 
 
-def test_stream_manager_on_events_stream_output_accumulates_servers() -> None:
+def test_stream_manager_on_events_stream_output_accumulates_services() -> None:
     """Multiple server records for the same agent accumulate in the server map."""
     manager = _make_stream_manager()
     manager._events_services[str(_AGENT_A)] = {}
@@ -572,8 +572,8 @@ def test_stream_manager_on_events_stream_output_accumulates_servers() -> None:
     manager._on_events_stream_output(web_line, is_stdout=True, agent_id=_AGENT_A)
     manager._on_events_stream_output(api_line, is_stdout=True, agent_id=_AGENT_A)
 
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_API) == "http://127.0.0.1:9200"
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_API) == "http://127.0.0.1:9200"
 
 
 def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() -> None:
@@ -587,7 +587,7 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
     manager._on_events_stream_output(line1, is_stdout=True, agent_id=_AGENT_A)
     manager._on_events_stream_output(line2, is_stdout=True, agent_id=_AGENT_A)
 
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9200"
 
 
 def _make_discovery_full_line(
@@ -880,7 +880,7 @@ def test_stream_manager_agent_destroyed_removes_agent() -> None:
     assert _AGENT_B in ids
 
 
-def test_stream_manager_agent_destroyed_clears_servers() -> None:
+def test_stream_manager_agent_destroyed_clears_services() -> None:
     """An AGENT_DESTROYED event clears the server URLs for that agent."""
     manager = _make_stream_manager()
     host_id = "host-00000000000000000000000000000001"
@@ -896,13 +896,13 @@ def test_stream_manager_agent_destroyed_clears_servers() -> None:
         # Add server data
         server_line = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
         manager._on_events_stream_output(server_line, is_stdout=True, agent_id=_AGENT_A)
-        assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
+        assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9100"
 
         # Destroy the agent
         destroy_line = _make_agent_destroyed_line(str(_AGENT_A), host_id)
         manager._handle_discovery_line(destroy_line)
 
-    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) is None
 
 
 def test_stream_manager_agent_destroyed_for_unknown_agent_is_harmless() -> None:

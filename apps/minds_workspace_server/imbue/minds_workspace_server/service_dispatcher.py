@@ -114,7 +114,10 @@ async def _forward_http_request_streaming(
     """Forward an HTTP request and stream the response back without buffering.
 
     Used for SSE (Server-Sent Events) endpoints where the backend sends data
-    incrementally and the client needs to receive it as it arrives.
+    incrementally and the client needs to receive it as it arrives. The
+    backend's status code and Content-Type are propagated so that a backend
+    responding with something other than ``text/event-stream`` (e.g. chunked
+    ``application/x-ndjson``) still renders correctly client-side.
     """
     proxy_url = f"{backend_url.rstrip('/')}/{path}"
     if request.url.query:
@@ -125,34 +128,41 @@ async def _forward_http_request_streaming(
 
     body = await request.body()
 
+    backend_request = http_client.build_request(
+        method=request.method,
+        url=proxy_url,
+        headers=headers,
+        content=body,
+    )
     try:
-        backend_stream = http_client.stream(
-            method=request.method,
-            url=proxy_url,
-            headers=headers,
-            content=body,
-        )
-    except httpx.ConnectError:
-        logger.debug("Backend connection refused for service {} (streaming)", service_name)
+        backend_response = await http_client.send(backend_request, stream=True)
+    except httpx.ConnectError as e:
+        logger.warning("Backend connection refused for service {} (streaming): {}", service_name, e)
         return Response(status_code=502, content="Backend connection refused")
+    except httpx.TimeoutException as e:
+        logger.warning("Backend stream timed out for service {}: {}", service_name, e)
+        return Response(status_code=504, content="Backend stream timed out")
 
     async def _stream_generator() -> AsyncGenerator[bytes, None]:
         try:
-            async with backend_stream as response:
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-        except httpx.ConnectError:
-            logger.debug("Backend connection lost during streaming for service {}", service_name)
-        except httpx.ReadError:
-            logger.debug("Backend read error during streaming for service {}", service_name)
-        except httpx.RemoteProtocolError:
-            logger.debug("Backend disconnected without response during streaming for service {}", service_name)
-        except httpx.TimeoutException:
-            logger.debug("Backend stream timed out for service {}", service_name)
+            async for chunk in backend_response.aiter_bytes():
+                yield chunk
+        except httpx.ReadError as e:
+            logger.warning("Backend read error during streaming for service {}: {}", service_name, e)
+        except httpx.RemoteProtocolError as e:
+            logger.warning(
+                "Backend disconnected without response during streaming for service {}: {}", service_name, e
+            )
+        except httpx.TimeoutException as e:
+            logger.warning("Backend stream timed out for service {}: {}", service_name, e)
+        finally:
+            await backend_response.aclose()
 
+    media_type = backend_response.headers.get("content-type", "text/event-stream")
     return StreamingResponse(
         _stream_generator(),
-        media_type="text/event-stream",
+        status_code=backend_response.status_code,
+        media_type=media_type,
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

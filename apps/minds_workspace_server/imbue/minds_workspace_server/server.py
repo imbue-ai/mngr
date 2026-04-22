@@ -85,7 +85,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         agent_manager.start()
     else:
         agent_manager = preconfigured_agent_manager
-        broadcaster = agent_manager._broadcaster
+        broadcaster = agent_manager.broadcaster
 
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager

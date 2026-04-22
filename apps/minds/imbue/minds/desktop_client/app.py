@@ -505,22 +505,28 @@ async def _forward_workspace_http(
     is_likely_sse = "text/event-stream" in accept
 
     if is_likely_sse:
+        backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
         try:
-            stream_ctx = http_client.stream(method=request.method, url=url, headers=headers, content=body)
+            backend_response = await http_client.send(backend_request, stream=True)
         except httpx.ConnectError:
             return Response(status_code=502, content="Workspace server connection refused")
+        except httpx.TimeoutException:
+            return Response(status_code=504, content="Workspace server stream timed out")
 
         async def _stream() -> AsyncGenerator[bytes, None]:
             try:
-                async with stream_ctx as backend_response:
-                    async for chunk in backend_response.aiter_bytes():
-                        yield chunk
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException):
-                pass
+                async for chunk in backend_response.aiter_bytes():
+                    yield chunk
+            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+                logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
+            finally:
+                await backend_response.aclose()
 
+        media_type = backend_response.headers.get("content-type", "text/event-stream")
         return StreamingResponse(
             _stream(),
-            media_type="text/event-stream",
+            status_code=backend_response.status_code,
+            media_type=media_type,
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
@@ -1497,8 +1503,8 @@ async def _handle_sharing_enable(
     cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if cf_client is not None:
         parsed_id = AgentId(agent_id)
-        parsed_server = ServiceName(service_name)
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        parsed_service = ServiceName(service_name)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
         if backend_url:
             paths: WorkspacePaths = request.app.state.api_v1_paths
             stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
@@ -1507,14 +1513,14 @@ async def _handle_sharing_enable(
                 if token:
                     _save_tunnel_token(paths.data_dir, parsed_id, token)
                     inject_tunnel_token_into_agent(parsed_id, token)
-            cf_client.add_service(parsed_id, parsed_server, backend_url)
+            cf_client.add_service(parsed_id, parsed_service, backend_url)
             sharing_succeeded = True
             # Apply auth rules if emails were provided
             if emails:
                 rules: list[dict[str, object]] = [
                     {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
                 ]
-                cf_client.set_service_auth(parsed_id, str(parsed_server), rules)
+                cf_client.set_service_auth(parsed_id, str(parsed_service), rules)
 
     # If there's a pending request for this agent/server, mark it as granted only if sharing succeeded
     inbox: RequestInbox | None = request.app.state.request_inbox
