@@ -219,6 +219,7 @@ class AgentManager:
     def create_worktree_agent(self, name: str, selected_agent_id: str) -> str:
         """Create a new worktree agent. Returns the pre-generated agent ID."""
         agent_id = str(AgentId())
+        agent_type = "claude"
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(selected_agent_id)
@@ -238,6 +239,8 @@ class AgentManager:
             name,
             "--id",
             agent_id,
+            "--type",
+            agent_type,
             "--transfer",
             "git-worktree",
             "--branch",
@@ -277,13 +280,14 @@ class AgentManager:
         labels = {"user_created": "true", "workspace": name}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, agent_type, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
     def create_chat_agent(self, name: str) -> str:
         """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID."""
         agent_id = str(AgentId())
+        agent_type = "claude"
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(self._own_agent_id)
@@ -300,6 +304,8 @@ class AgentManager:
             name,
             "--id",
             agent_id,
+            "--type",
+            agent_type,
             "--transfer",
             "none",
             "--template",
@@ -335,7 +341,7 @@ class AgentManager:
         for key in ("workspace", "project"):
             if key in primary_labels:
                 labels[key] = primary_labels[key]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, agent_type, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
@@ -343,6 +349,7 @@ class AgentManager:
         self,
         agent_id: str,
         agent_name: str,
+        agent_type: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
@@ -351,7 +358,7 @@ class AgentManager:
         """Start a background thread to run agent creation and stream logs."""
         self._creation_cg.start_new_thread(
             target=self._run_creation,
-            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels),
+            args=(agent_id, agent_name, agent_type, cmd, work_dir, log_queue, labels),
             name=f"create-{agent_id[:8]}",
             is_checked=False,
         )
@@ -378,6 +385,7 @@ class AgentManager:
         self,
         agent_id: str,
         agent_name: str,
+        agent_type: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
@@ -421,6 +429,7 @@ class AgentManager:
                     state="RUNNING",
                     labels=labels,
                     work_dir=str(work_dir),
+                    supports_interrupt=agent_type_supports_interrupt(agent_type),
                 )
 
         if success:
