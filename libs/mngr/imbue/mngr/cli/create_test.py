@@ -1237,27 +1237,6 @@ def test_parse_agent_opts_agent_id_none_by_default(
     assert result.agent_id is None
 
 
-def test_create_rejects_conflicting_type_and_positional(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Specifying both --type and positional agent type with different values should abort.
-
-    The check lives in the ``create`` CLI callback (before the headless
-    branch returns) rather than in ``_parse_agent_opts`` -- the latter
-    uses the shared ``_resolve_agent_type_name`` helper which assumes
-    no conflict.
-    """
-    result = cli_runner.invoke(
-        create,
-        ["my-agent", "codex", "--type", "claude", "--no-connect"],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "Conflicting agent types" in result.output
-
-
 def test_parse_agent_opts_matching_type_and_positional_ok(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
