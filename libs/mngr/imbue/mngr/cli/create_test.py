@@ -1656,6 +1656,8 @@ def test_create_provider_flag_sets_provider(
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
