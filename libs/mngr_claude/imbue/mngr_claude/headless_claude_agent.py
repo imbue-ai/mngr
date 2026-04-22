@@ -333,6 +333,13 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         if stdout_error:
             sources.append(stdout_error)
         sources.append(f"[work-dir]\n{self._get_work_dir_diagnostic()}")
+        # DIAGNOSTIC: surface claude's own --debug-file log in the
+        # test_ask_simple_query silent-hang post-mortem. assemble_command
+        # pins --debug-file to $MNGR_AGENT_STATE_DIR/claude-debug.log so
+        # whatever claude writes before it hangs is captured in a path
+        # independent of stdout/stderr redirection.
+        debug_log = self._get_agent_dir() / "claude-debug.log"
+        sources.append(f"[claude-debug]\n{render_file_diagnostic(self.host, debug_log, 'claude-debug.log')}")
         return sources
 
     def _get_work_dir_diagnostic(self) -> str:
