@@ -1,3 +1,4 @@
+import shlex
 import sys
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -71,7 +72,7 @@ def create_work_dir_on_host(host: OnlineHostInterface) -> Path:
 def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
     """Remove a work directory on the host, suppressing errors."""
     try:
-        host.execute_idempotent_command(f"rm -rf '{work_path}'")
+        host.execute_idempotent_command(f"rm -rf {shlex.quote(str(work_path))}")
     except (OSError, BaseMngrError) as exc:
         logger.warning("Failed to remove work dir {}: {}", work_path, exc)
 
