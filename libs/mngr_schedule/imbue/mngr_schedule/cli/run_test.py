@@ -88,54 +88,50 @@ def test_run_local_trigger_disabled_still_runs(
 # =============================================================================
 
 
-def test_emit_output_human_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """HUMAN format should write the output text with exactly one trailing newline."""
-    _emit_output("hello from trigger\n", OutputFormat.HUMAN)
+@pytest.mark.parametrize(
+    ("output_text", "output_format", "expected_raw", "expected_json"),
+    [
+        pytest.param(
+            "hello from trigger\n", OutputFormat.HUMAN, "hello from trigger\n", None, id="human_with_newline"
+        ),
+        pytest.param("hello from trigger", OutputFormat.HUMAN, "hello from trigger\n", None, id="human_no_newline"),
+        pytest.param(
+            "trigger output\n", OutputFormat.JSON, None, {"output": "trigger output\n"}, id="json_with_content"
+        ),
+        pytest.param(
+            "trigger output\n",
+            OutputFormat.JSONL,
+            None,
+            {"event": "output", "output": "trigger output\n"},
+            id="jsonl_with_content",
+        ),
+        pytest.param("", OutputFormat.HUMAN, "", None, id="human_empty_suppresses_output"),
+        pytest.param("", OutputFormat.JSON, None, {"output": ""}, id="json_empty_still_emits_object"),
+        pytest.param(
+            "", OutputFormat.JSONL, None, {"event": "output", "output": ""}, id="jsonl_empty_still_emits_object"
+        ),
+    ],
+)
+def test_emit_output_produces_expected_stream(
+    capsys: pytest.CaptureFixture[str],
+    output_text: str,
+    output_format: OutputFormat,
+    expected_raw: str | None,
+    expected_json: dict[str, str] | None,
+) -> None:
+    """_emit_output produces the right stdout shape for each output format.
+
+    HUMAN format writes the text with a single trailing newline, or nothing at
+    all for empty input (avoiding a bare newline). JSON and JSONL always emit a
+    parseable object on stdout even when the output is empty, so downstream
+    consumers can rely on getting at least one JSON value. JSONL additionally
+    tags the line with an ``event`` field.
+    """
+    _emit_output(output_text, output_format)
     captured = capsys.readouterr()
-    assert captured.out == "hello from trigger\n"
 
-
-def test_emit_output_human_format_no_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """HUMAN format should add a newline even if output has none."""
-    _emit_output("hello from trigger", OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert captured.out == "hello from trigger\n"
-
-
-def test_emit_output_json_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSON format should emit a JSON object with an 'output' key."""
-    _emit_output("trigger output\n", OutputFormat.JSON)
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert data == {"output": "trigger output\n"}
-
-
-def test_emit_output_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSONL format should tag the line with an 'event' field."""
-    _emit_output("trigger output\n", OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert data == {"event": "output", "output": "trigger output\n"}
-
-
-def test_emit_output_empty_string_human_produces_no_output(capsys: pytest.CaptureFixture[str]) -> None:
-    """Empty output in HUMAN mode should produce no stdout (avoid a bare newline)."""
-    _emit_output("", OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert captured.out == ""
-
-
-def test_emit_output_empty_string_json_emits_object(capsys: pytest.CaptureFixture[str]) -> None:
-    """Empty output in JSON mode should still emit a JSON object so consumers can parse."""
-    _emit_output("", OutputFormat.JSON)
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert data == {"output": ""}
-
-
-def test_emit_output_empty_string_jsonl_emits_object(capsys: pytest.CaptureFixture[str]) -> None:
-    """Empty output in JSONL mode should still emit a tagged JSON object."""
-    _emit_output("", OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert data == {"event": "output", "output": ""}
+    if expected_json is not None:
+        assert json.loads(captured.out) == expected_json
+    else:
+        assert expected_raw is not None
+        assert captured.out == expected_raw
