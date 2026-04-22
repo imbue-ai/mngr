@@ -51,9 +51,7 @@ def agent_type_supports_interrupt(agent_type: str | None) -> bool:
 class InterruptResult(MutableModel):
     """Result of sending interrupt signals to agents."""
 
-    successful_agents: list[str] = Field(
-        default_factory=list, description="List of agent names that were interrupted"
-    )
+    successful_agents: list[str] = Field(default_factory=list, description="List of agent names that were interrupted")
     failed_agents: list[tuple[str, str]] = Field(
         default_factory=list, description="List of (agent_name, error_message) tuples"
     )

@@ -33,7 +33,9 @@ class AgentInfo(FrozenModel):
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
     work_dir: str | None = Field(default=None, description="Agent working directory path")
     agent_type: str | None = Field(default=None, description="Agent type name (e.g. claude, codex)")
-    supports_interrupt: bool = Field(default=False, description="Whether the agent type supports interrupting the current turn")
+    supports_interrupt: bool = Field(
+        default=False, description="Whether the agent type supports interrupting the current turn"
+    )
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
