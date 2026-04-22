@@ -110,6 +110,7 @@ RUN if [ -f /code/mngr/.git ]; then \
     cd /code/mngr && \
     (git remote get-url origin >/dev/null 2>&1 || \
         git remote add origin https://github.com/imbue-ai/mngr.git) && \
+    mkdir -p /code/mngr/.mngr && \
     echo "$(git rev-parse HEAD)" > /code/mngr/.mngr/image_commit_hash
 
 # set working directory to the project root -- this is where `mngr schedule`
