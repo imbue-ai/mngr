@@ -713,7 +713,8 @@ class AgentManager:
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""
         apps: list[ApplicationEntry] = []
-        if toml_path.exists():
+        file_exists = toml_path.exists()
+        if file_exists:
             try:
                 data = tomllib.loads(toml_path.read_text())
                 for entry in data.get("applications", []):
@@ -726,3 +727,14 @@ class AgentManager:
 
         with self._lock:
             self._applications = apps
+
+        # Diagnostic logging for the "missing items in cloudflare dropdown" bug:
+        # record what the server believes applications.toml contains after
+        # each read. Tells us whether the watcher is seeing the file update
+        # at all, and whether the parsed result has the entries we expect.
+        _loguru_logger.info(
+            "[applications.read] path={} exists={} names={}",
+            toml_path,
+            file_exists,
+            [a.name for a in apps],
+        )

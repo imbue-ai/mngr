@@ -525,26 +525,33 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
     agent_manager: AgentManager = websocket.app.state.agent_manager
     ws_broadcaster: WebSocketBroadcaster = websocket.app.state.broadcaster
 
-    client_queue = ws_broadcaster.register()
-    try:
-        await websocket.send_text(
-            json.dumps(
-                {
-                    "type": "agents_updated",
-                    "agents": agent_manager.get_agents_serialized(),
-                }
-            )
-        )
-        await websocket.send_text(
-            json.dumps(
-                {
-                    "type": "applications_updated",
-                    "applications": agent_manager.get_applications_serialized(),
-                }
-            )
-        )
+    # Diagnostic logging for the "missing items in cloudflare dropdown" bug:
+    # the dropdown is populated entirely from this WS's initial burst + later
+    # incremental broadcasts. If the cloudflare-forwarded flavor of the UI is
+    # seeing an empty dropdown while the desktop-proxied one isn't, the two
+    # most likely causes are (a) the upgrade didn't reach here at all or (b)
+    # the initial burst serialized as empty lists. Logging client origin and
+    # payload counts lets us tell the two apart from the server side.
+    client_host = websocket.client.host if websocket.client else "?"
+    host_header = websocket.headers.get("host", "?")
+    initial_agents = agent_manager.get_agents_serialized()
+    initial_apps = agent_manager.get_applications_serialized()
+    initial_protos = agent_manager.get_proto_agents()
+    logger.info(
+        "[ws.accept] /api/ws client={} host={} n_agents={} apps={} n_protos={}",
+        client_host,
+        host_header,
+        len(initial_agents),
+        [a.get("name", "?") for a in initial_apps],
+        len(initial_protos),
+    )
 
-        for proto in agent_manager.get_proto_agents():
+    client_queue = ws_broadcaster.register()
+    disconnect_reason = "server_shutdown"
+    try:
+        await websocket.send_text(json.dumps({"type": "agents_updated", "agents": initial_agents}))
+        await websocket.send_text(json.dumps({"type": "applications_updated", "applications": initial_apps}))
+        for proto in initial_protos:
             await websocket.send_text(json.dumps({"type": "proto_agent_created", **proto}))
 
         shutdown = False
@@ -558,8 +565,9 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
             except queue.Empty:
                 continue
     except WebSocketDisconnect:
-        pass
+        disconnect_reason = "client_disconnect"
     finally:
+        logger.info("[ws.close] /api/ws client={} host={} reason={}", client_host, host_header, disconnect_reason)
         ws_broadcaster.unregister(client_queue)
 
 
