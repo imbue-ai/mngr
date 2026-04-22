@@ -177,8 +177,8 @@ def rewrite_location_header(
     # The browser will navigate to the explicit host regardless of our prefix, so leave it.
     if parts.scheme or parts.netloc:
         return location_header
-    # Relative path or fragment-only reference -- resolved against the document URL,
-    # which already lives under the proxied prefix thanks to the injected <base> tag.
+    # Relative path or fragment-only reference -- the browser resolves a relative
+    # Location against the request URL, which already lives under the proxied prefix.
     if not parts.path.startswith("/"):
         return location_header
     prefix = _get_server_prefix(agent_id, server_name)
