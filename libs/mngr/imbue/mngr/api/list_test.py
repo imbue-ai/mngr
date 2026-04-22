@@ -460,12 +460,18 @@ def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_fr
     assert "snapshot-agent" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+def test_maybe_write_full_discovery_snapshot_writes_partial_when_errors_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    """_maybe_write_full_discovery_snapshot writes a best-effort snapshot even when
+    some providers errored. The streaming discovery consumer (mngr observe
+    --discovery-only) needs a snapshot to unblock its first emission -- refusing
+    to write one leaves the caller waiting forever. Agents from successful
+    providers still make it into the snapshot; failed providers are simply
+    absent, which is the honest best-effort state.
+    """
     host_details = _make_host_details()
-    agent = _make_agent_details("error-agent", host_details)
+    agent = _make_agent_details("partial-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
     result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
@@ -479,7 +485,10 @@ def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
-    assert not events_path.exists()
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_FULL" in content
+    assert "partial-agent" in content
 
 
 def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(

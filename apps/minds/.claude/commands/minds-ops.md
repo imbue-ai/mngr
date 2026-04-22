@@ -111,14 +111,14 @@ Trigger: "create lima agent", "create agent", "drive create", "make a test agent
 2. Run the harness with a fresh baseline:
    ```
    BASELINE=$(grep -c 'Login URL' ~/.minds/logs/minds-events.jsonl)
-   BASELINE_LOGIN_COUNT=$BASELINE bash apps/minds/scripts/drive-minds.local.sh > /tmp/drive-minds.out 2>&1 &
+   BASELINE_LOGIN_COUNT=$BASELINE bash apps/minds/scripts/drive-minds.sh > /tmp/drive-minds.out 2>&1 &
    disown
    ```
-   The harness (`drive-minds.local.sh`) is gitignored; if it's missing, create it from memory — it auths via the Login URL, POSTs to `/api/create-agent` with `branch=wz/lima-disk-size`, polls `/api/create-agent/<id>/status` until DONE or FAILED.
+   The harness auths via the Login URL, POSTs to `/api/create-agent`, and polls `/api/create-agent/<id>/status` until DONE or FAILED. Override the template branch with `GIT_BRANCH=<branch>` (default: `pilot`) or the repo with `GIT_URL=<url>`.
 
 3. Monitor `/tmp/drive-minds.out` for `status=DONE` / `FAILED`. Report the agent id + final state.
 
-4. Default branch: `wz/lima-disk-size` (origin/main of forever-claude-template still has the `--memory=4GiB` bug at time of writing). If the user wants main, edit `GIT_BRANCH` in the harness first.
+4. Default branch: `pilot`. If origin/main of forever-claude-template has a regression (e.g. the historical `--memory=4GiB` lima bug), point at a known-good branch via `GIT_BRANCH=...`.
 
 5. Typical timings (warm caches): ~1:30 CLONING→CREATING→DONE. Fresh Mac first run: ~5 min.
 
