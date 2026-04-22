@@ -8,15 +8,20 @@ controlled applications.toml, and exercises the proxy end-to-end.
 import socket
 import threading
 import time
+from collections.abc import AsyncGenerator
 from collections.abc import Generator
 
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import PlainTextResponse
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
@@ -82,6 +87,33 @@ def _build_stub_backend() -> FastAPI:
     @stub.get("/json")
     def json_endpoint() -> JSONResponse:
         return JSONResponse({"ok": True})
+
+    @stub.get("/echo-query")
+    def echo_query(request: Request) -> JSONResponse:
+        return JSONResponse({"query": request.url.query})
+
+    @stub.get("/events")
+    def sse_endpoint() -> StreamingResponse:
+        async def gen() -> AsyncGenerator[bytes, None]:
+            yield b"data: chunk-1\n\n"
+            yield b"data: chunk-2\n\n"
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @stub.websocket("/ws-echo")
+    async def ws_echo(websocket: WebSocket) -> None:
+        await websocket.accept()
+        connected = True
+        try:
+            while connected:
+                msg = await websocket.receive_text()
+                await websocket.send_text(f"echo:{msg}")
+        except WebSocketDisconnect:
+            connected = False
 
     return stub
 
@@ -212,3 +244,44 @@ def test_unknown_service_returns_502_for_non_html(workspace_client: TestClient) 
         headers={"accept": "application/json"},
     )
     assert response.status_code == 502
+
+
+def test_forwarded_query_string_reaches_backend(workspace_client: TestClient) -> None:
+    """Query string on the incoming request is preserved in the backend URL."""
+    response = workspace_client.get(
+        "/service/web/echo-query?foo=bar&baz=qux",
+        cookies={"sw_installed_web": "1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["query"] == "foo=bar&baz=qux"
+
+
+def test_forwarded_sse_is_streamed(workspace_client: TestClient) -> None:
+    """An SSE request (accept: text/event-stream) streams chunks back to the client."""
+    response = workspace_client.get(
+        "/service/web/events",
+        headers={"accept": "text/event-stream"},
+        cookies={"sw_installed_web": "1"},
+    )
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    body = response.text
+    assert "chunk-1" in body
+    assert "chunk-2" in body
+
+
+def test_websocket_echo_forwards_bidirectionally(workspace_client: TestClient) -> None:
+    """The WS dispatcher byte-forwards messages between client and backend service."""
+    with workspace_client.websocket_connect("/service/web/ws-echo") as ws:
+        ws.send_text("hello")
+        assert ws.receive_text() == "echo:hello"
+        ws.send_text("world")
+        assert ws.receive_text() == "echo:world"
+
+
+def test_websocket_unknown_service_closes_with_4004(workspace_client: TestClient) -> None:
+    """A WS upgrade against an unregistered service gets closed with 4004."""
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with workspace_client.websocket_connect("/service/nonexistent/anything") as ws:
+            ws.receive_text()
+    assert excinfo.value.code == 4004
