@@ -1720,12 +1720,19 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 
 
 def _apply_host_labels(host: OnlineHostInterface, label_strings: tuple[str, ...]) -> None:
-    """Parse KEY=VALUE host label strings and apply them to an existing host."""
+    """Parse KEY=VALUE host label strings and apply them to an existing host.
+
+    Raises UserInputError for any entry without '=', matching the validation
+    done for the new-host path in _parse_target_host. Silently dropping
+    malformed entries would hide user mistakes (especially on the headless
+    create path, where this is the only --host-label validator).
+    """
     labels_to_add: dict[str, str] = {}
     for label_string in label_strings:
-        if "=" in label_string:
-            key, value = label_string.split("=", 1)
-            labels_to_add[key.strip()] = value.strip()
+        if "=" not in label_string:
+            raise UserInputError(f"Host label must be in KEY=VALUE format, got: {label_string}")
+        key, value = label_string.split("=", 1)
+        labels_to_add[key.strip()] = value.strip()
     if labels_to_add:
         host.add_tags(labels_to_add)
 
