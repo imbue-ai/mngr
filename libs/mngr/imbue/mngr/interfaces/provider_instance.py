@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -43,7 +44,6 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -81,15 +81,13 @@ def _build_host_details_from_host(
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, OnlineHostInterface):
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
+        conn = host.get_ssh_connection_info()
+        if conn is not None:
             ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                user=conn.user,
+                host=conn.hostname,
+                port=conn.port,
+                auth=conn.auth,
             )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()

@@ -18,6 +18,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.interfaces.ssh_auth import SSHAuthField
 
 _BUFFER_SIZE: Final[int] = 65536
 
@@ -42,7 +43,7 @@ class RemoteSSHInfo(FrozenModel):
     user: str = Field(description="SSH username (e.g. 'root')")
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
-    key_path: Path = Field(description="Path to SSH private key file")
+    auth: SSHAuthField = Field(description="SSH authentication method")
 
 
 class SSHTunnelError(Exception):
@@ -410,28 +411,10 @@ class SSHTunnelManager(MutableModel):
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
-    Uses the known_hosts file from the same directory as the SSH key (this is
-    where mngr stores it for each provider). Falls back to AutoAddPolicy if
-    no known_hosts file is found.
+    Delegates to the auth method's connect_paramiko() for polymorphic auth.
     """
     client = paramiko.SSHClient()
-
-    known_hosts_path = ssh_info.key_path.parent / "known_hosts"
-    if known_hosts_path.exists():
-        client.load_host_keys(str(known_hosts_path))
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    else:
-        logger.warning("No known_hosts file at {}, using AutoAddPolicy", known_hosts_path)
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    client.connect(
-        hostname=ssh_info.host,
-        port=ssh_info.port,
-        username=ssh_info.user,
-        key_filename=str(ssh_info.key_path),
-        timeout=10.0,
-    )
-
+    ssh_info.auth.connect_paramiko(client, ssh_info.host, ssh_info.port, ssh_info.user)
     return client
 
 

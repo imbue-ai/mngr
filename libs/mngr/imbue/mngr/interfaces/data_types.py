@@ -23,6 +23,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.errors import ParseSpecError
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -32,7 +33,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId

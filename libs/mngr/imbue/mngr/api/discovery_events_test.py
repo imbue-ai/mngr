@@ -39,6 +39,9 @@ from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifie
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
+from imbue.mngr.interfaces.ssh_auth import SSHKeyAuth
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -46,7 +49,6 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
@@ -126,8 +128,7 @@ def test_extract_agents_and_hosts_returns_ssh_info() -> None:
         user="root",
         host="remote.example.com",
         port=2222,
-        key_path=Path("/tmp/key"),
-        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+        auth=SSHKeyAuth(key_path=Path("/tmp/key")),
     )
     host_id = HostId.generate()
     details = make_test_agent_details(host_id=host_id, provider_name=ProviderInstanceName("modal"), ssh=ssh)
@@ -146,8 +147,13 @@ def test_extract_agents_and_hosts_returns_empty_ssh_for_local() -> None:
 class _FakeHostWithSSH:
     """Minimal stub for testing _build_ssh_info_from_host with SSH info."""
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path]:
-        return ("root", "remote.example.com", 2222, Path("/tmp/key"))
+    def get_ssh_connection_info(self) -> SSHConnectionInfo:
+        return SSHConnectionInfo(
+            user="root",
+            hostname="remote.example.com",
+            port=2222,
+            auth=SSHKeyAuth(key_path=Path("/tmp/key")),
+        )
 
 
 class _FakeLocalHost:
@@ -163,8 +169,8 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
     assert result.user == "root"
     assert result.host == "remote.example.com"
     assert result.port == 2222
-    assert result.key_path == Path("/tmp/key")
-    assert result.command == "ssh -i /tmp/key -p 2222 root@remote.example.com"
+    assert isinstance(result.auth, SSHKeyAuth)
+    assert result.auth.key_path == Path("/tmp/key")
 
 
 def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:
@@ -403,8 +409,7 @@ def test_emit_host_ssh_info_writes_to_file(temp_config: MngrConfig) -> None:
         user="root",
         host="remote.example.com",
         port=2222,
-        key_path=Path("/tmp/key"),
-        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+        auth=SSHKeyAuth(key_path=Path("/tmp/key")),
     )
     emit_host_ssh_info(temp_config, host_id, ssh)
 
@@ -424,8 +429,7 @@ def test_parse_host_ssh_info_event_round_trips() -> None:
         user="root",
         host="remote.example.com",
         port=2222,
-        key_path=Path("/tmp/key"),
-        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+        auth=SSHKeyAuth(key_path=Path("/tmp/key")),
     )
     timestamp, event_id = _make_envelope_fields()
     event = HostSSHInfoEvent(
@@ -442,7 +446,8 @@ def test_parse_host_ssh_info_event_round_trips() -> None:
     assert parsed.host_id == host_id
     assert parsed.ssh.host == "remote.example.com"
     assert parsed.ssh.port == 2222
-    assert parsed.ssh.key_path == Path("/tmp/key")
+    assert isinstance(parsed.ssh.auth, SSHKeyAuth)
+    assert parsed.ssh.auth.key_path == Path("/tmp/key")
 
 
 # === resolve_provider_names_for_identifiers Tests ===

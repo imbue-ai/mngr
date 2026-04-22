@@ -64,7 +64,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
-from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -80,6 +79,9 @@ from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.interfaces.ssh_auth import SSHAuthMethod
+from imbue.mngr.interfaces.ssh_auth import SSHConnectionInfo
+from imbue.mngr.interfaces.ssh_auth import expose_secrets_for_subprocess
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -222,6 +224,9 @@ class Host(BaseHost, OnlineHostInterface):
     """
 
     connector: PyinfraConnector = Field(frozen=True, description="Pyinfra connector for host operations")
+    ssh_auth: SSHAuthMethod | None = Field(
+        default=None, frozen=True, description="SSH auth method. None for local hosts."
+    )
     provider_instance: ProviderInstanceInterface = Field(
         frozen=True, description="The provider instance managing this host"
     )
@@ -878,22 +883,20 @@ class Host(BaseHost, OnlineHostInterface):
         joined_dirs = " ".join(f"'{str(p)}'" for p in paths)
         self.execute_idempotent_command(f"mkdir -p {joined_dirs}")
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> SSHConnectionInfo | None:
         """Get SSH connection info for this host if it's remote.
 
-        Returns (user, hostname, port, private_key_path) if remote, None if local.
+        Returns SSHConnectionInfo if remote, None if local.
         """
         if self.is_local:
             return None
 
+        assert self.ssh_auth is not None, "ssh_auth must be set for remote hosts"
         host_data = self.connector.host.data
         user = host_data.get("ssh_user", "root")
         hostname = self.connector.host.name
         port = host_data.get("ssh_port", 22)
-        key_path_str = host_data.get("ssh_key", "")
-        assert key_path_str, "SSH key path must be set for remote hosts"
-
-        return (user, hostname, port, Path(key_path_str))
+        return SSHConnectionInfo(user=user, hostname=hostname, port=port, auth=self.ssh_auth)
 
     # =========================================================================
     # Activity Times
@@ -1635,21 +1638,23 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
-        target_ssh_info = self.get_ssh_connection_info()
+        target_conn = self.get_ssh_connection_info()
 
-        if target_ssh_info is None:
+        if target_conn is None:
             if source_host.is_local:
                 git_url = str(target_path / ".git")
             else:
-                source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-                if source_ssh_info is None:
+                source_conn = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+                if source_conn is None:
                     raise MngrError("Cannot determine SSH connection info for remote source host")
-                user, hostname, port, key_path = source_ssh_info
                 source_known_hosts = get_ssh_known_hosts_file(source_host)
                 with log_span("Fetching from remote source to local target"):
-                    git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
-                    env = {"GIT_SSH_COMMAND": git_ssh_cmd}
-                    remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+                    transport = source_conn.auth.build_transport_command(source_conn.port, source_known_hosts)
+                    env = {"GIT_SSH_COMMAND": transport.command}
+                    env.update(expose_secrets_for_subprocess(transport.env))
+                    remote_url = (
+                        f"ssh://{source_conn.user}@{source_conn.hostname}:{source_conn.port}{source_path}/.git"
+                    )
                     try:
                         self.mngr_ctx.concurrency_group.run_process_to_completion(
                             ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
@@ -1659,8 +1664,7 @@ class Host(BaseHost, OnlineHostInterface):
                         raise MngrError(f"Failed to clone from remote source: {e}") from e
                     return
         else:
-            user, hostname, port, key_path = target_ssh_info
-            git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
+            git_url = f"ssh://{target_conn.user}@{target_conn.hostname}:{target_conn.port}{target_path}/.git"
 
         # Build the environment and command for a mirror-like push. We use
         # explicit refspecs instead of --mirror to avoid pushing remote-tracking
@@ -1668,11 +1672,11 @@ class Host(BaseHost, OnlineHostInterface):
         # errors on git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
         # --no-verify skips hooks, since they can sometimes fail on mirror pushes.
         env: dict[str, str] = {}
-        if target_ssh_info is not None:
-            user, hostname, port, key_path = target_ssh_info
+        if target_conn is not None:
             target_known_hosts = get_ssh_known_hosts_file(self)
-            git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
-            env["GIT_SSH_COMMAND"] = git_ssh_cmd
+            transport = target_conn.auth.build_transport_command(target_conn.port, target_known_hosts)
+            env["GIT_SSH_COMMAND"] = transport.command
+            env.update(expose_secrets_for_subprocess(transport.env))
 
         # Don't bother pushing LFS objects - they can be transferred later as needed,
         # and without this, it can take a ridiculously long time.
@@ -1700,9 +1704,34 @@ class Host(BaseHost, OnlineHostInterface):
                     raise MngrError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
             else:
-                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+                # Remote-source-to-remote-target: the command runs on the remote source
+                # host via SSH. Secret env vars (like SSHPASS) must not appear in the
+                # command string because they'd be visible in `ps` output. We write
+                # secrets to a temporary env file (mode 0600), source it, run the
+                # command, and delete the file -- all in a single shell invocation with
+                # a trap to ensure cleanup even on failure.
+                secret_env = expose_secrets_for_subprocess(transport.env)
+                non_secret_env = {k: v for k, v in env.items() if k not in secret_env}
+                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in non_secret_env.items())
                 refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
-                push_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+                git_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
+
+                if secret_env:
+                    # Write secrets to a temp file, source it, run git, clean up.
+                    # The file is 0600 and deleted immediately after use via trap.
+                    env_file_lines = [f"export {k}={shlex.quote(v)}" for k, v in secret_env.items()]
+                    env_file_content = "\\n".join(env_file_lines)
+                    push_cmd = (
+                        f"_mngr_env=$(mktemp) && "
+                        f"trap 'rm -f \"$_mngr_env\"' EXIT && "
+                        f"printf '{env_file_content}\\n' > \"$_mngr_env\" && "
+                        f'chmod 600 "$_mngr_env" && '
+                        f'. "$_mngr_env" && '
+                        f"{git_cmd}"
+                    )
+                else:
+                    push_cmd = git_cmd
+
                 result = source_host.execute_idempotent_command(push_cmd, cwd=source_path)
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
@@ -1959,57 +1988,62 @@ class Host(BaseHost, OnlineHostInterface):
         source_path_str = str(source_path).rstrip("/") + "/"
         target_path_str = str(target_path).rstrip("/") + "/"
 
+        # Extra env vars for subprocess (e.g. SSHPASS for password auth).
+        # Populated by transport.env when SSH is involved.
+        rsync_env: dict[str, str] = {}
+
         if source_host.is_local and self.is_local:
             # Local to local
             rsync_args.extend([source_path_str, target_path_str])
             rsync_description = "rsync: local to local"
         elif source_host.is_local and not self.is_local:
             # Local to remote
-            target_ssh_info = self.get_ssh_connection_info()
-            assert target_ssh_info is not None
-            user, hostname, port, key_path = target_ssh_info
+            target_conn = self.get_ssh_connection_info()
+            assert target_conn is not None
             target_known_hosts = get_ssh_known_hosts_file(self)
-            rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, target_known_hosts)])
-            rsync_args.extend([source_path_str, f"{user}@{hostname}:{target_path_str}"])
-            rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
+            transport = target_conn.auth.build_transport_command(target_conn.port, target_known_hosts)
+            rsync_args.extend(["-e", transport.command])
+            rsync_env.update(expose_secrets_for_subprocess(transport.env))
+            rsync_args.extend([source_path_str, f"{target_conn.user}@{target_conn.hostname}:{target_path_str}"])
+            rsync_description = f"rsync: local to remote {target_conn.user}@{target_conn.hostname}:{target_conn.port}"
         elif not source_host.is_local and self.is_local:
             # Remote to local
-            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-            assert source_ssh_info is not None
-            user, hostname, port, key_path = source_ssh_info
+            source_conn = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+            assert source_conn is not None
             source_known_hosts = get_ssh_known_hosts_file(source_host)
-            rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, source_known_hosts)])
-            rsync_args.extend([f"{user}@{hostname}:{source_path_str}", target_path_str])
-            rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
+            transport = source_conn.auth.build_transport_command(source_conn.port, source_known_hosts)
+            rsync_args.extend(["-e", transport.command])
+            rsync_env.update(expose_secrets_for_subprocess(transport.env))
+            rsync_args.extend([f"{source_conn.user}@{source_conn.hostname}:{source_path_str}", target_path_str])
+            rsync_description = f"rsync: remote to local {source_conn.user}@{source_conn.hostname}:{source_conn.port}"
         else:
             # Remote to remote: sync via local temp directory as intermediary
-            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-            assert source_ssh_info is not None
-            target_ssh_info = self.get_ssh_connection_info()
-            assert target_ssh_info is not None
-
-            src_user, src_hostname, src_port, src_key_path = source_ssh_info
-            tgt_user, tgt_hostname, tgt_port, tgt_key_path = target_ssh_info
+            source_conn = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+            assert source_conn is not None
+            target_conn = self.get_ssh_connection_info()
+            assert target_conn is not None
 
             with tempfile.TemporaryDirectory(prefix="mngr-rsync-") as temp_dir:
                 temp_path_str = temp_dir.rstrip("/") + "/"
 
                 with log_span(
                     "rsync: remote-to-remote via local intermediary ({}@{}:{} -> {}@{}:{})",
-                    src_user,
-                    src_hostname,
-                    src_port,
-                    tgt_user,
-                    tgt_hostname,
-                    tgt_port,
+                    source_conn.user,
+                    source_conn.hostname,
+                    source_conn.port,
+                    target_conn.user,
+                    target_conn.hostname,
+                    target_conn.port,
                 ):
                     # Step 1: pull from source remote to local temp
                     pull_args = list(rsync_args)
                     src_known_hosts = get_ssh_known_hosts_file(source_host)
-                    pull_args.extend(["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)])
-                    pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
+                    src_transport = source_conn.auth.build_transport_command(source_conn.port, src_known_hosts)
+                    pull_args.extend(["-e", src_transport.command])
+                    pull_args.extend([f"{source_conn.user}@{source_conn.hostname}:{source_path_str}", temp_path_str])
+                    src_env = {**os.environ, **expose_secrets_for_subprocess(src_transport.env)}
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args, env=src_env)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (pull from source): {e.stderr}") from e
                     logger.trace("Ran rsync pull command: {}", " ".join(pull_args))
@@ -2022,19 +2056,22 @@ class Host(BaseHost, OnlineHostInterface):
                     if extra_args:
                         push_args.extend(shlex.split(extra_args))
                     tgt_known_hosts = get_ssh_known_hosts_file(self)
-                    push_args.extend(["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)])
-                    push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
+                    tgt_transport = target_conn.auth.build_transport_command(target_conn.port, tgt_known_hosts)
+                    push_args.extend(["-e", tgt_transport.command])
+                    push_args.extend([temp_path_str, f"{target_conn.user}@{target_conn.hostname}:{target_path_str}"])
+                    tgt_env = {**os.environ, **expose_secrets_for_subprocess(tgt_transport.env)}
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(push_args, env=tgt_env)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (push to target): {e.stderr}") from e
                     logger.trace("Ran rsync push command: {}", " ".join(push_args))
 
             return
 
+        subprocess_env = {**os.environ, **rsync_env} if rsync_env else None
         with log_span("{}", rsync_description):
             try:
-                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args, env=subprocess_env)
             except ProcessError as e:
                 raise MngrError(f"rsync failed: {e.stderr}") from e
             logger.trace("Ran rsync command: {}", " ".join(rsync_args))

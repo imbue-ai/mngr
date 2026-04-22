@@ -33,29 +33,6 @@ def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
     return None
 
 
-@pure
-def build_ssh_transport_command(
-    key_path: Path,
-    port: int,
-    known_hosts_file: Path | None,
-) -> str:
-    """Build an SSH transport command string for use with rsync -e or GIT_SSH_COMMAND.
-
-    Always uses StrictHostKeyChecking=yes, which refuses connections to hosts not
-    present in the known_hosts file. When known_hosts_file is provided, that file is
-    used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
-    is used without setting UserKnownHostsFile.
-    """
-    parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
-    if known_hosts_file is not None:
-        parts.extend(
-            ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
-        )
-    else:
-        parts.extend(["-o", "StrictHostKeyChecking=yes"])
-    return " ".join(parts)
-
-
 def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
     """Add a git safe.directory entry on a remote host.
 

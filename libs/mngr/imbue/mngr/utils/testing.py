@@ -40,6 +40,7 @@ from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.ssh_auth import SSHInfo
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -51,7 +52,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
