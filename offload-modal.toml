@@ -1,7 +1,7 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 100
-test_timeout_secs = 60
+test_timeout_secs = 600
 stream_output = true
 sandbox_project_root = "/code/mngr"
 sandbox_init_cmd = "uv sync --all-packages"

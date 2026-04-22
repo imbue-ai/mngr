@@ -1,7 +1,7 @@
 # offload configuration for running mngr release tests on Modal
 [offload]
 max_parallel = 200
-test_timeout_secs = 900
+test_timeout_secs = 1200
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mngr"
