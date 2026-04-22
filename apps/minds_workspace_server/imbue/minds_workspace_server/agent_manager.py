@@ -10,8 +10,8 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
-from watchdog.events import DirModifiedEvent
-from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
+from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
 
@@ -37,6 +37,7 @@ from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
+_APPLICATIONS_TOML_BASENAME = "applications.toml"
 
 
 class _LogQueueCallback(MutableModel):
@@ -51,13 +52,31 @@ class _LogQueueCallback(MutableModel):
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on modifications to applications.toml."""
+    """Watchdog handler that triggers on any change to applications.toml.
+
+    Uses ``on_any_event`` rather than ``on_modified`` because scripts/forward_port.py
+    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``. Atomic replaces
+    surface through watchdog as moved/created events, not modified events, so a
+    handler that only overrides ``on_modified`` would silently miss every
+    service registration after the watcher starts.
+
+    Events are filtered to only those whose src or dest path basename is
+    ``applications.toml``. Without this filter we'd also fire on every write
+    to forward_port.py's ``applications.toml.*.tmp`` scratch files, which is
+    correctness-neutral (the re-read is idempotent) but produces a broadcast
+    storm per upsert.
+    """
 
     agent_id: str
     on_change: Any
 
-    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
-        if not event.is_directory:
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        paths = [event.src_path]
+        if isinstance(event, FileMovedEvent):
+            paths.append(event.dest_path)
+        if any(os.path.basename(p) == _APPLICATIONS_TOML_BASENAME for p in paths):
             self.on_change(self.agent_id)
 
 
