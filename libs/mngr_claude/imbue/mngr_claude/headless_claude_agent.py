@@ -274,8 +274,38 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         if all_extra_args:
             parts.extend(all_extra_args)
 
+        # DIAGNOSTIC: bisect the test_ask_simple_query silent-exit failure
+        # mode (0 chars stdout + 0 chars stderr inside Modal-in-Modal offload
+        # sandboxes, despite the ANTHROPIC_API_KEY propagation fix in
+        # fdc68196e landing the key into the agent env file). Three probes
+        # wrapped around the real invocation:
+        #   1. `before-claude` marker + `claude --version` / `--help | wc`
+        #      liveness snapshot before the real call. If the marker lands
+        #      but version/help don't, the claude binary is broken in the
+        #      sandbox; if they do, the API call itself is the problem.
+        #   2. `after-claude rc=$?` marker + exit code after the real call.
+        #      Missing `after` marker ⇒ claude is hanging; present with rc=0
+        #      and zero output ⇒ claude exited clean with nothing to say;
+        #      present with rc≠0 and zero output ⇒ claude crashed silently.
+        #   3. `--debug all --debug-file .../claude-debug.log` on the real
+        #      claude call itself. Free if claude dies before argv parse;
+        #      if it gets past, we get a debug log in a path independent of
+        #      the possibly-busted stdout/stderr redirection.
+        # All three revert together by backing out this commit.
+        parts.extend(["--debug", "all", "--debug-file", '"$MNGR_AGENT_STATE_DIR/claude-debug.log"'])
         cmd_str = " ".join(parts)
-        return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
+        probe_before = (
+            'echo "== DIAG before-claude $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
+            '(claude --version; echo "help-lines=$(claude --help 2>&1 | wc -l)") '
+            '>> "$MNGR_AGENT_STATE_DIR/stderr.log" 2>&1; '
+            'echo "== DIAG pre-invoke done ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+        )
+        probe_after = 'echo "== DIAG after-claude rc=$? $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+        return CommandString(
+            f"{probe_before}; "
+            f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2>> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
+            f"{probe_after}"
+        )
 
     def _get_stdout_path(self) -> Path:
         """Return the path to the stdout.jsonl file for this agent."""
