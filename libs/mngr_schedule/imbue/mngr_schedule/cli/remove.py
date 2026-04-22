@@ -66,10 +66,6 @@ def schedule_remove(ctx: click.Context, **kwargs: Any) -> None:
         for name in missing_names:
             logger.warning("No schedule record found for trigger '{}' on provider '{}'", name, opts.provider)
 
-    if not found_names and not missing_names:
-        write_human_line("No triggers specified.")
-        return
-
     # Confirm with user unless --force
     if not opts.force and found_names:
         write_human_line("\nThe following triggers will be removed:")
