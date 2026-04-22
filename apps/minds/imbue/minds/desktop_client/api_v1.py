@@ -6,7 +6,6 @@ per-agent API keys (Bearer tokens) with SHA-256 hash lookup.
 """
 
 import json
-import os
 import shlex
 from typing import Annotated
 
@@ -23,8 +22,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -101,49 +99,39 @@ def _json_error(message: str, status_code: int) -> Response:
 
 def get_cf_client_with_auth(
     request: Request, agent_id: AgentId | None = None
-) -> tuple[CloudflareForwardingClient | None, Response | None]:
-    """Get a cloudflare client enriched with auth for a specific workspace's account.
+) -> tuple[CloudflareClient | None, Response | None]:
+    """Get a cloudflare client enriched with the active account's SuperTokens session.
 
-    Looks up the account associated with the workspace (via agent_id) and
-    uses that account's tokens for Bearer auth. Falls back to Basic Auth
-    if no account is associated or no session store is configured.
-
-    Returns (client, None) on success, or (None, error_response) if auth is required but missing.
+    Returns ``(client, None)`` when the workspace has an associated signed-in
+    account and its access token is still valid. Returns ``(None, error)`` in
+    every other case -- missing cloudflare config, missing session store, no
+    workspace-account association, or an unrefreshable token. Without a valid
+    session there is no way to authenticate to the forwarding backend.
     """
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
 
-    if cf_client is None and session_store is None:
-        return None, _json_error("Cloudflare forwarding not configured", 501)
-
-    # Look up the account associated with this workspace
-    if session_store is not None and agent_id is not None:
-        account = session_store.get_account_for_workspace(str(agent_id))
-        if account is not None:
-            access_token = session_store.get_access_token(str(account.user_id))
-            if access_token is not None:
-                forwarding_url = cf_client.forwarding_url if cf_client else None
-                if forwarding_url is None:
-                    forwarding_url_str = os.environ.get("CLOUDFLARE_FORWARDING_URL", "")
-                    if not forwarding_url_str:
-                        return None, _json_error("Cloudflare forwarding URL not configured", 501)
-                    forwarding_url = CloudflareForwardingUrl(forwarding_url_str)
-
-                enriched_client = CloudflareForwardingClient(
-                    forwarding_url=forwarding_url,
-                    username=cf_client.username if cf_client else None,
-                    secret=cf_client.secret if cf_client else None,
-                    owner_email=cf_client.owner_email if cf_client else None,
-                    supertokens_token=access_token,
-                    supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
-                    supertokens_email=account.email,
-                )
-                return enriched_client, None
-
-    # No per-workspace account, use the original client (Basic Auth)
     if cf_client is None:
         return None, _json_error("Cloudflare forwarding not configured", 501)
-    return cf_client, None
+    if session_store is None or agent_id is None:
+        return None, _json_error("No signed-in account available for Cloudflare forwarding", 403)
+
+    account = session_store.get_account_for_workspace(str(agent_id))
+    if account is None:
+        return None, _json_error("No signed-in account is associated with this workspace", 403)
+
+    access_token = session_store.get_access_token(str(account.user_id))
+    if access_token is None:
+        return None, _json_error("The associated account's session has expired; sign in again", 401)
+
+    # Preserve the concrete subclass (tests swap in subclasses that stub HTTP methods).
+    enriched_client = type(cf_client)(
+        connector_url=cf_client.connector_url,
+        supertokens_token=access_token,
+        supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
+        supertokens_email=account.email,
+    )
+    return enriched_client, None
 
 
 # -- Request body models --
@@ -179,10 +167,10 @@ def _handle_cloudflare_status(
 
     parsed_id = AgentId(agent_id)
 
-    # Build the default auth rules from the owner email for when no policy is stored
-    effective_email = cf_client.effective_owner_email()
+    # Build the default auth rules from the session's email for when no policy is stored
+    session_email = cf_client.supertokens_email
     owner_default_rules = (
-        [{"action": "allow", "include": [{"email": {"email": effective_email}}]}] if effective_email else []
+        [{"action": "allow", "include": [{"email": {"email": session_email}}]}] if session_email else []
     )
 
     services = cf_client.list_services(parsed_id)

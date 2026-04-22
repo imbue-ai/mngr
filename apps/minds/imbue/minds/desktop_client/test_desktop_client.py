@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.conftest import make_server_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import create_sharing_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -1723,6 +1724,51 @@ def test_requests_panel_shows_empty_inbox(tmp_path: Path) -> None:
     response = client.get("/_chrome/requests-panel")
     assert response.status_code == 200
     assert "Requests (0)" in response.text
+
+
+def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
+    """A pending request renders a card whose onclick calls navigateToRequest
+    with both event_id and agent_id, and the inline script prefers the
+    window.minds.navigateToRequest bridge when available."""
+    # Build the app inline so we can seed the inbox before creating the
+    # TestClient and still have a concretely-typed handle to app.state.
+    agent_id = str(AgentId())
+    event = create_sharing_request_event(agent_id=agent_id, server_name="web")
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    request_inbox = RequestInbox().add_request(event)
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        request_inbox=request_inbox,
+        paths=WorkspacePaths(data_dir=tmp_path),
+    )
+    client = TestClient(app)
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/requests-panel")
+    assert response.status_code == 200
+    body = response.text
+
+    # The rendered card must reference both ids in its onclick.
+    assert "navigateToRequest" in body
+    assert str(event.event_id) in body
+    assert agent_id in body
+    # Defense-in-depth escaping: ids are embedded via JSON/HTML-escaped quotes
+    # rather than raw single quotes, so &quot; must appear in place of ".
+    assert f"&quot;{event.event_id}&quot;" in body
+    assert f"&quot;{agent_id}&quot;" in body
+
+    # The script must prefer the IPC bridge when present, and keep the
+    # in-window and top-level fallbacks.
+    assert "window.minds.navigateToRequest" in body
+    assert "window.minds.navigateContent" in body
+    assert "window.top.location" in body
 
 
 def test_request_page_not_found(tmp_path: Path) -> None:

@@ -227,7 +227,34 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
     return false;
   }
 
+  var oauthPollInterval = null;
+  var oauthPollDeadline = 0;
+
+  function oauthShowWaiting(provider) {
+    var nameMap = { google: 'Google', github: 'GitHub' };
+    var providerLabel = nameMap[provider] || provider;
+    // Disable both tabs' OAuth buttons while we wait so the user can't re-trigger.
+    var buttons = document.querySelectorAll('.oauth-btn');
+    for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = true; }
+    // Surface progress in both tabs' info bars so it shows up wherever the user is.
+    var msg = 'Waiting for you to finish signing in with ' + providerLabel + ' in the browser...';
+    var banners = [
+      document.getElementById('signup-error'),
+      document.getElementById('signin-error'),
+    ];
+    for (var j = 0; j < banners.length; j++) {
+      var el = banners[j];
+      if (!el) continue;
+      el.textContent = msg;
+      el.style.color = '#1e40af';
+      el.style.background = '#eff6ff';
+      el.style.display = 'block';
+    }
+  }
+
   async function oauthSignIn(provider) {
+    var startBtn = event && event.target;
+    if (startBtn && startBtn.disabled) return;
     try {
       var res = await fetch('/auth/oauth/' + provider);
       var text = await res.text();
@@ -240,10 +267,39 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
       }
       if (data.status !== 'OK') {
         alert('Failed to start OAuth: ' + (data.error || data.message || ('HTTP ' + res.status)));
+        return;
       }
     } catch (err) {
       alert('Failed to start OAuth: ' + err.message);
+      return;
     }
+
+    // Session is created server-side by the OAuth callback in the system
+    // browser; poll /auth/api/status until it flips to signedIn=true, then
+    // leave the sign-in page. Time out after 3 minutes so an abandoned OAuth
+    // attempt doesn't leave the page stuck forever.
+    oauthShowWaiting(provider);
+    if (oauthPollInterval) clearInterval(oauthPollInterval);
+    oauthPollDeadline = Date.now() + 3 * 60 * 1000;
+    oauthPollInterval = setInterval(async function () {
+      if (Date.now() > oauthPollDeadline) {
+        clearInterval(oauthPollInterval);
+        oauthPollInterval = null;
+        var buttons = document.querySelectorAll('.oauth-btn');
+        for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = false; }
+        alert('Sign-in timed out. Try again.');
+        return;
+      }
+      try {
+        var r = await fetch('/auth/api/status');
+        var s = await r.json();
+        if (s.signedIn) {
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          window.location.href = '/accounts';
+        }
+      } catch (e) { /* transient -- keep polling */ }
+    }, 2000);
   }
   </script>
 </body>
@@ -382,119 +438,6 @@ _FORGOT_PASSWORD_TEMPLATE: Final[str] = (
 )
 
 
-_RESET_PASSWORD_TEMPLATE: Final[str] = (
-    """<!DOCTYPE html>
-<html>
-<head>
-  <title>Reset password</title>
-  <style>"""
-    + _AUTH_STYLES
-    + """</style>
-</head>
-<body>
-  <div class="auth-card">
-    <h1>Set new password</h1>
-    <p class="subtitle">Enter your new password</p>
-    <div id="error-msg" class="error-msg"></div>
-    <div id="success-msg" class="success-msg"></div>
-    <form onsubmit="return handleReset(event)">
-      <div class="form-group">
-        <label for="password">New password</label>
-        <input type="password" id="password" required minlength="8" autocomplete="new-password">
-      </div>
-      <div class="form-group">
-        <label for="confirm">Confirm password</label>
-        <input type="password" id="confirm" required minlength="8" autocomplete="new-password">
-      </div>
-      <button type="submit" class="btn-primary" id="submit-btn">Reset password</button>
-    </form>
-    <div class="toggle-link"><a href="/auth/login">Back to sign in</a></div>
-  </div>
-  <script>
-  async function handleReset(e) {
-    e.preventDefault();
-    var pw = document.getElementById('password').value;
-    var confirm = document.getElementById('confirm').value;
-    if (pw !== confirm) {
-      var el = document.getElementById('error-msg');
-      el.textContent = 'Passwords do not match';
-      el.style.display = 'block';
-      return false;
-    }
-    var btn = document.getElementById('submit-btn');
-    btn.disabled = true;
-    document.getElementById('error-msg').style.display = 'none';
-    try {
-      var res = await fetch('/auth/api/reset-password', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ token: {{ token | tojson }}, newPassword: pw })
-      });
-      var data = await res.json();
-      if (data.status === 'OK') {
-        var s = document.getElementById('success-msg');
-        s.textContent = 'Password reset successfully. Redirecting to sign in...';
-        s.style.display = 'block';
-        setTimeout(function() { window.location.href = '/auth/login'; }, 2000);
-      } else {
-        var el = document.getElementById('error-msg');
-        el.textContent = data.message;
-        el.style.display = 'block';
-      }
-    } catch (err) {
-      var el = document.getElementById('error-msg');
-      el.textContent = 'Network error';
-      el.style.display = 'block';
-    }
-    btn.disabled = false;
-    return false;
-  }
-  </script>
-</body>
-</html>"""
-)
-
-
-_VERIFY_EMAIL_SUCCESS_TEMPLATE: Final[str] = (
-    """<!DOCTYPE html>
-<html>
-<head>
-  <title>Email verified</title>
-  <style>"""
-    + _AUTH_STYLES
-    + """</style>
-</head>
-<body>
-  <div class="auth-card" style="text-align: center;">
-    <h1 style="color: #15803d;">Email verified</h1>
-    <p class="subtitle">Your email has been verified successfully.</p>
-    <div class="toggle-link"><a href="/">Go to home</a></div>
-  </div>
-</body>
-</html>"""
-)
-
-
-_VERIFY_EMAIL_FAILED_TEMPLATE: Final[str] = (
-    """<!DOCTYPE html>
-<html>
-<head>
-  <title>Verification failed</title>
-  <style>"""
-    + _AUTH_STYLES
-    + """</style>
-</head>
-<body>
-  <div class="auth-card" style="text-align: center;">
-    <h1 style="color: #dc2626;">Verification failed</h1>
-    <p class="subtitle">The verification link is invalid or expired. Please request a new one from the app.</p>
-    <div class="toggle-link"><a href="/auth/login">Go to sign in</a></div>
-  </div>
-</body>
-</html>"""
-)
-
-
 _SETTINGS_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
@@ -594,24 +537,6 @@ def render_oauth_close_page(email: str, display_name: str | None = None) -> str:
 def render_forgot_password_page() -> str:
     """Render the forgot password page."""
     template = _JINJA_ENV.from_string(_FORGOT_PASSWORD_TEMPLATE)
-    return template.render()
-
-
-def render_reset_password_page(token: str = "") -> str:
-    """Render the password reset page."""
-    template = _JINJA_ENV.from_string(_RESET_PASSWORD_TEMPLATE)
-    return template.render(token=token)
-
-
-def render_verify_email_success_page() -> str:
-    """Render the email verified successfully page."""
-    template = _JINJA_ENV.from_string(_VERIFY_EMAIL_SUCCESS_TEMPLATE)
-    return template.render()
-
-
-def render_verify_email_failed_page() -> str:
-    """Render the email verification failed page."""
-    template = _JINJA_ENV.from_string(_VERIFY_EMAIL_FAILED_TEMPLATE)
     return template.render()
 
 

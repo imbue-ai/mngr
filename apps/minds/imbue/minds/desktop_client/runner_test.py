@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from pydantic import AnyUrl
@@ -43,32 +42,13 @@ def test_agent_discovery_handler_callable() -> None:
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_uses_supplied_url_and_env_auth() -> None:
-    """The forwarding URL is passed in; auth fields come from env (or are None)."""
-    for key in ("CLOUDFLARE_FORWARDING_USERNAME", "CLOUDFLARE_FORWARDING_SECRET", "OWNER_EMAIL"):
-        os.environ.pop(key, None)
-    os.environ["CLOUDFLARE_FORWARDING_USERNAME"] = "user"
-    os.environ["CLOUDFLARE_FORWARDING_SECRET"] = "secret"
-    os.environ["OWNER_EMAIL"] = "owner@example.com"
-    try:
-        result = _build_cloudflare_client(AnyUrl("https://example.com/"))
-        assert str(result.forwarding_url) == "https://example.com/"
-        assert result.username == "user"
-        assert result.secret == "secret"
-        assert result.owner_email == "owner@example.com"
-    finally:
-        for key in ("CLOUDFLARE_FORWARDING_USERNAME", "CLOUDFLARE_FORWARDING_SECRET", "OWNER_EMAIL"):
-            os.environ.pop(key, None)
-
-
-def test_build_cloudflare_client_without_basic_auth_env_omits_auth_fields() -> None:
-    """When no Basic-Auth env vars are set, the returned client has None auth fields."""
-    for key in ("CLOUDFLARE_FORWARDING_USERNAME", "CLOUDFLARE_FORWARDING_SECRET", "OWNER_EMAIL"):
-        os.environ.pop(key, None)
+def test_build_cloudflare_client_holds_only_connector_url() -> None:
+    """The shared client only carries the remote service connector URL; per-request auth is added later."""
     result = _build_cloudflare_client(AnyUrl("https://example.com/"))
-    assert result.username is None
-    assert result.secret is None
-    assert result.owner_email is None
+    assert str(result.connector_url) == "https://example.com/"
+    assert result.supertokens_token is None
+    assert result.supertokens_user_id_prefix is None
+    assert result.supertokens_email is None
 
 
 def test_agent_discovery_handler_default_mngr_host_dir() -> None:

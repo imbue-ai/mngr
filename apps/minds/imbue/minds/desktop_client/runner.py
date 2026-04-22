@@ -11,16 +11,6 @@ import uvicorn
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
-from supertokens_python import InputAppInfo
-from supertokens_python import SupertokensConfig
-from supertokens_python import init as supertokens_init
-from supertokens_python.recipe import emailpassword
-from supertokens_python.recipe import emailverification
-from supertokens_python.recipe import session as session_recipe
-from supertokens_python.recipe import thirdparty
-from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderInput
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
@@ -28,13 +18,11 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
-from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
-from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -143,27 +131,24 @@ def start_desktop_client(
     tunnel_manager = SSHTunnelManager()
 
     minds_config = MindsConfig(data_dir=data_directory)
-    cloudflare_client = _build_cloudflare_client(minds_config.cloudflare_forwarding_url)
+    cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
+    auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(paths=paths)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
     # Initialize multi-account session store
-    session_store = MultiAccountSessionStore(data_dir=data_directory)
+    session_store = MultiAccountSessionStore(
+        data_dir=data_directory,
+        auth_backend_client=auth_backend_client,
+    )
 
     # Initialize request inbox from stored response events
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
         request_inbox = request_inbox.add_response(resp)
-
-    # Initialize SuperTokens SDK if configured
-    _init_supertokens(
-        connection_uri=str(minds_config.supertokens_connection_uri),
-        host=host,
-        port=port,
-    )
 
     # Generate a one-time login URL for the user
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
@@ -206,6 +191,7 @@ def start_desktop_client(
         paths=paths,
         stream_manager=stream_manager,
         session_store=session_store,
+        auth_backend_client=auth_backend_client,
         minds_config=minds_config,
         request_inbox=request_inbox,
         server_port=port,
@@ -229,104 +215,14 @@ def start_desktop_client(
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
-def _init_supertokens(
-    connection_uri: str,
-    host: str,
-    port: int,
-) -> None:
-    """Initialize the SuperTokens SDK using the supplied core URI.
+def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
+    """Build a shared CloudflareClient holding only the remote service connector URL.
 
-    ``connection_uri`` is resolved upstream by ``MindsConfig.supertokens_connection_uri``
-    (env > config.toml > built-in default), so this function always has a
-    URI to point at. The API key and OAuth client credentials remain
-    env-var-only since they are secrets.
+    Per-request auth (SuperTokens token, user-id prefix, email) is attached in
+    ``api_v1.get_cf_client_with_auth`` from the caller's signed-in account.
     """
-    api_key = os.environ.get("SUPERTOKENS_API_KEY")
-    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-    github_client_id = os.environ.get("GITHUB_CLIENT_ID")
-    github_client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
-
-    # Build OAuth provider list
-    providers: list[ProviderInput] = []
-    if google_client_id and google_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="google",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=google_client_id,
-                            client_secret=google_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-    if github_client_id and github_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="github",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=github_client_id,
-                            client_secret=github_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-
-    api_domain = f"http://{host}:{port}"
-
-    supertokens_init(
-        supertokens_config=SupertokensConfig(
-            connection_uri=connection_uri,
-            api_key=api_key,
-        ),
-        app_info=InputAppInfo(
-            app_name="Minds",
-            api_domain=api_domain,
-            website_domain=api_domain,
-            api_base_path="/auth",
-            website_base_path="/auth",
-        ),
-        framework="fastapi",
-        recipe_list=[
-            session_recipe.init(),
-            emailpassword.init(),
-            thirdparty.init(
-                sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=providers),
-            )
-            if providers
-            else thirdparty.init(),
-            emailverification.init(mode="REQUIRED"),
-        ],
-        mode="asgi",
-    )
-
-    logger.info("SuperTokens initialized (core: {})", connection_uri)
-
-
-def _build_cloudflare_client(forwarding_url: AnyUrl) -> CloudflareForwardingClient:
-    """Build a CloudflareForwardingClient from the config URL + env-var-only auth fields.
-
-    The forwarding URL comes from ``MindsConfig.cloudflare_forwarding_url``
-    (env > config.toml > built-in default) and always has a value. Basic Auth
-    fields (username, secret, owner_email) stay env-var-only because they are
-    secrets and are only used as a fallback when per-account SuperTokens auth
-    is not available.
-    """
-    username = os.environ.get("CLOUDFLARE_FORWARDING_USERNAME")
-    secret = os.environ.get("CLOUDFLARE_FORWARDING_SECRET")
-    owner_email = os.environ.get("OWNER_EMAIL")
-
-    return CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl(str(forwarding_url)),
-        username=CloudflareUsername(username) if username else None,
-        secret=CloudflareSecret(secret) if secret else None,
-        owner_email=OwnerEmail(owner_email) if owner_email else None,
+    return CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
     )
 
 

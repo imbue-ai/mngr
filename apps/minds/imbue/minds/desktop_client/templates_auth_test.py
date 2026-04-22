@@ -2,10 +2,7 @@ from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
-from imbue.minds.desktop_client.templates_auth import render_reset_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
-from imbue.minds.desktop_client.templates_auth import render_verify_email_failed_page
-from imbue.minds.desktop_client.templates_auth import render_verify_email_success_page
 
 
 def test_render_auth_page_defaults_to_signup() -> None:
@@ -63,12 +60,6 @@ def test_render_forgot_password_page() -> None:
     assert "Send reset link" in html
 
 
-def test_render_reset_password_page_includes_token() -> None:
-    html = render_reset_password_page(token="my-reset-token")
-    assert "my-reset-token" in html
-    assert "New password" in html
-
-
 def test_render_settings_page() -> None:
     html = render_settings_page(
         email="user@example.com",
@@ -104,17 +95,3 @@ def test_render_settings_page_oauth_provider_hides_password_link() -> None:
         user_id_prefix="a1b2c3d4e5f67890",
     )
     assert "Change password" not in html
-
-
-def test_render_verify_email_success_page() -> None:
-    html = render_verify_email_success_page()
-    assert "Email verified" in html
-    assert "verified successfully" in html
-    assert "Go to home" in html
-
-
-def test_render_verify_email_failed_page() -> None:
-    html = render_verify_email_failed_page()
-    assert "Verification failed" in html
-    assert "invalid or expired" in html
-    assert "Go to sign in" in html
