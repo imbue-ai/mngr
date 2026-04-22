@@ -52,7 +52,13 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(3))
+    # Bumped by one for the intentional catch-all wrapping the creation
+    # thread's body in agent_manager._run_creation. The thread runs with
+    # is_checked=False, so any exception that escapes is silently swallowed;
+    # without that catch-all a bug anywhere inside leaves the client's
+    # ChatPanel stuck on "Creating agent..." because proto_agent_completed
+    # never fires. Treat this one as load-bearing rather than sloppy.
+    rc.check_broad_exception_catch(_DIR, snapshot(4))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -67,7 +73,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(8))
+    rc.check_inline_imports(_DIR, snapshot(7))
 
 
 def test_prevent_relative_imports() -> None:

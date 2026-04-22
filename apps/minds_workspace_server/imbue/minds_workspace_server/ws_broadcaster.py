@@ -2,11 +2,47 @@ import json
 import queue
 import threading
 from typing import Any
+from typing import Final
 
 from loguru import logger as _loguru_logger
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.mutable_model import MutableModel
+
+
+def _summary_agents(message: dict[str, Any]) -> str:
+    return f"n_agents={len(message.get('agents', []))}"
+
+
+def _summary_applications(message: dict[str, Any]) -> str:
+    names = [a.get("name", "?") for a in message.get("applications", [])]
+    return f"apps={names}"
+
+
+def _summary_proto_created(message: dict[str, Any]) -> str:
+    return f"agent_id={message.get('agent_id', '?')}"
+
+
+def _summary_proto_completed(message: dict[str, Any]) -> str:
+    return f"agent_id={message.get('agent_id', '?')} success={message.get('success')}"
+
+
+# One-liner summary builders for every WS message type. The dispatch-by-type
+# pattern keeps the telemetry readable without an if/elif chain.
+_BROADCAST_DETAIL_BUILDERS: Final[dict[str, Any]] = {
+    "agents_updated": _summary_agents,
+    "applications_updated": _summary_applications,
+    "proto_agent_created": _summary_proto_created,
+    "proto_agent_completed": _summary_proto_completed,
+}
+
+
+def _summarize_broadcast(message: dict[str, Any], target_count: int) -> str:
+    msg_type = message.get("type", "<unknown>")
+    build_detail = _BROADCAST_DETAIL_BUILDERS.get(msg_type)
+    detail = build_detail(message) if build_detail is not None else ""
+    base = f"type={msg_type} targets={target_count}"
+    return f"{base} {detail}" if detail else base
 
 
 class WebSocketBroadcaster(MutableModel):
@@ -40,6 +76,13 @@ class WebSocketBroadcaster(MutableModel):
         """Serialize and send a message to all connected clients. Thread-safe."""
         text = json.dumps(message)
         with self._lock:
+            # Diagnostic logging for the "missing items in cloudflare dropdown"
+            # bug: record the shape of every broadcast so we can correlate
+            # with what the client receives (or doesn't).
+            _loguru_logger.info(
+                "[ws.broadcast] {}",
+                _summarize_broadcast(message, target_count=len(self._client_queues)),
+            )
             for q in self._client_queues:
                 try:
                     q.put_nowait(text)

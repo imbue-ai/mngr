@@ -10,8 +10,8 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
-from watchdog.events import DirModifiedEvent
-from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
+from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
 
@@ -37,6 +37,51 @@ from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
+_APPLICATIONS_TOML_BASENAME = "applications.toml"
+
+
+_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS = 5.0
+
+
+def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Non-blocking put for a creation-log queue.
+
+    The creation thread must never block on individual log lines. If the
+    WebSocket client streaming proto-agent logs disconnects mid-creation,
+    nothing is draining the queue, and a blocking ``put`` would hang the
+    thread at the next log line -- which in turn prevents
+    ``proto_agent_completed`` from ever firing. We drop log lines on a
+    full queue; callers that need delivery guarantees for sentinels
+    (``done: True`` + the ``None`` terminator) should use
+    :func:`_completion_signal_put` instead.
+    """
+    try:
+        log_queue.put_nowait(message)
+    except queue.Full:
+        _loguru_logger.trace("Creation log queue full; dropping line")
+
+
+def _completion_signal_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Blocking put (with timeout) for completion sentinels.
+
+    Unlike per-line log writes, the completion sentinel + None terminator
+    must reach the consumer -- otherwise ``_proto_agent_logs_endpoint``
+    loops forever on ``queue.get()`` and the log WebSocket never closes.
+    We therefore block briefly (bounded by
+    ``_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS``) to give a slow consumer
+    time to drain. If the queue is still full at the deadline, log at
+    warning level and drop -- the out-of-band
+    ``broadcast_proto_agent_completed`` WS broadcast is the authoritative
+    signal to the main UI, so the log-channel sentinel being dropped
+    only degrades the dedicated log view, not overall correctness.
+    """
+    try:
+        log_queue.put(message, block=True, timeout=_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS)
+    except queue.Full:
+        _loguru_logger.warning(
+            "Creation log queue full; dropping completion sentinel. "
+            "The log WebSocket consumer may hang until the queue is garbage-collected."
+        )
 
 
 class _LogQueueCallback(MutableModel):
@@ -47,17 +92,35 @@ class _LogQueueCallback(MutableModel):
     log_queue: queue.Queue[str | None] = Field(description="Queue to write log lines into")
 
     def __call__(self, line: str, _is_stdout: bool) -> None:
-        self.log_queue.put(json.dumps({"line": line.rstrip("\n")}))
+        _safe_log_put(self.log_queue, json.dumps({"line": line.rstrip("\n")}))
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on modifications to applications.toml."""
+    """Watchdog handler that triggers on any change to applications.toml.
+
+    Uses ``on_any_event`` rather than ``on_modified`` because scripts/forward_port.py
+    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``. Atomic replaces
+    surface through watchdog as moved/created events, not modified events, so a
+    handler that only overrides ``on_modified`` would silently miss every
+    service registration after the watcher starts.
+
+    Events are filtered to only those whose src or dest path basename is
+    ``applications.toml``. Without this filter we'd also fire on every write
+    to forward_port.py's ``applications.toml.*.tmp`` scratch files, which is
+    correctness-neutral (the re-read is idempotent) but produces a broadcast
+    storm per upsert.
+    """
 
     agent_id: str
     on_change: Any
 
-    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
-        if not event.is_directory:
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        paths = [event.src_path]
+        if isinstance(event, FileMovedEvent):
+            paths.append(event.dest_path)
+        if any(os.path.basename(p) == _APPLICATIONS_TOML_BASENAME for p in paths):
             self.on_change(self.agent_id)
 
 
@@ -369,49 +432,83 @@ class AgentManager:
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
     ) -> None:
-        """Run mngr create in the background and capture output."""
-        cmd_str = shlex.join(cmd)
-        header_line = f"[cwd: {work_dir}] {cmd_str}"
-        log_queue.put(json.dumps({"line": header_line}))
+        """Run mngr create in the background, capture output, and always emit completion.
 
+        This thread is started with ``is_checked=False``, so any exception
+        that escaped here was silently swallowed -- which left the client's
+        ChatPanel stuck on "Creating agent..." forever, because neither the
+        log stream's ``{done: true}`` sentinel nor the WS
+        ``proto_agent_completed`` broadcast fired.
+
+        The whole body runs inside a single catch-all so that *no matter
+        what* the subprocess, its callbacks, or the pydantic / broadcaster
+        calls below throw, the proto-agent entry is always cleared on the
+        client and any error is surfaced as a string to the UI. The
+        catch-all is intentional belt-and-suspenders: see
+        ``test_prevent_broad_exception_catch``'s snapshot bump.
+        """
         success = False
         error: str | None = None
 
         try:
-            result = run_local_command_modern_version(
-                command=cmd,
-                cwd=work_dir,
-                is_checked=False,
-                trace_output=True,
-                trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
-                shutdown_event=self._shutdown_event,
-            )
-            success = result.returncode == 0
-            if not success:
-                error = f"mngr create exited with code {result.returncode}"
-        except (OSError, ConcurrencyGroupError) as e:
-            error = str(e)
-            _loguru_logger.exception("Error creating agent {}", agent_id)
+            cmd_str = shlex.join(cmd)
+            header_line = f"[cwd: {work_dir}] {cmd_str}"
+            _safe_log_put(log_queue, json.dumps({"line": header_line}))
 
-        log_queue.put(json.dumps({"done": True, "success": success, "error": error}))
-        log_queue.put(None)
-
-        with self._lock:
-            self._proto_agents.pop(agent_id, None)
-            self._log_queues.pop(agent_id, None)
-
-            if success:
-                self._agents[agent_id] = AgentStateItem(
-                    id=agent_id,
-                    name=agent_name,
-                    state="RUNNING",
-                    labels=labels,
-                    work_dir=str(work_dir),
+            try:
+                result = run_local_command_modern_version(
+                    command=cmd,
+                    cwd=work_dir,
+                    is_checked=False,
+                    trace_output=True,
+                    trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
+                    shutdown_event=self._shutdown_event,
                 )
+                success = result.returncode == 0
+                if not success:
+                    error = f"mngr create exited with code {result.returncode}"
+            except (OSError, ConcurrencyGroupError) as e:
+                error = str(e)
+                _loguru_logger.exception("Error creating agent {}", agent_id)
+
+            with self._lock:
+                self._proto_agents.pop(agent_id, None)
+                self._log_queues.pop(agent_id, None)
+                if success:
+                    self._agents[agent_id] = AgentStateItem(
+                        id=agent_id,
+                        name=agent_name,
+                        state="RUNNING",
+                        labels=labels,
+                        work_dir=str(work_dir),
+                    )
+        except Exception as e:
+            # Force-demote success: the happy path sets success=True before
+            # constructing AgentStateItem, so if pydantic validation (or
+            # anything else after the subprocess returned 0) raises, success
+            # would still be True while _agents was never populated. That
+            # would broadcast a contradictory proto_agent_completed(success=
+            # True, error="Unexpected ..."). The catch-all's contract is
+            # "something unexpected happened, surface it as a clean
+            # failure", so force success=False regardless of prior state.
+            success = False
+            error = f"Unexpected {type(e).__name__}: {e}"
+            _loguru_logger.exception("Unexpected error creating agent {}", agent_id)
+            # The proto-agent entry may still be sitting in _proto_agents if
+            # the exception fired before the cleanup block. Try once more,
+            # safely, before we broadcast completion.
+            try:
+                with self._lock:
+                    self._proto_agents.pop(agent_id, None)
+                    self._log_queues.pop(agent_id, None)
+            except (OSError, RuntimeError):
+                _loguru_logger.exception("Failed to clean proto-agent entry for {}", agent_id)
+
+        _completion_signal_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
+        _completion_signal_put(log_queue, None)
 
         if success:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
         self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
     def _initial_discover(self) -> None:
@@ -644,7 +741,8 @@ class AgentManager:
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""
         apps: list[ApplicationEntry] = []
-        if toml_path.exists():
+        file_exists = toml_path.exists()
+        if file_exists:
             try:
                 data = tomllib.loads(toml_path.read_text())
                 for entry in data.get("applications", []):
@@ -657,3 +755,14 @@ class AgentManager:
 
         with self._lock:
             self._applications = apps
+
+        # Diagnostic logging for the "missing items in cloudflare dropdown" bug:
+        # record what the server believes applications.toml contains after
+        # each read. Tells us whether the watcher is seeing the file update
+        # at all, and whether the parsed result has the entries we expect.
+        _loguru_logger.info(
+            "[applications.read] path={} exists={} names={}",
+            toml_path,
+            file_exists,
+            [a.name for a in apps],
+        )

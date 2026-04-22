@@ -39,7 +39,6 @@ class FakeCloudflareOps:
         self.dns_records: list[dict[str, Any]] = []
         self.access_apps: dict[str, dict[str, Any]] = {}
         self.access_policies: dict[str, list[dict[str, Any]]] = {}
-        self.kv_store: dict[str, str] = {}
         self._next_tunnel_id = 1
         self._next_record_id = 1
         self._next_access_app_id = 1
@@ -95,15 +94,41 @@ class FakeCloudflareOps:
     def delete_dns_record(self, record_id: str) -> None:
         self.dns_records = [r for r in self.dns_records if r["id"] != record_id]
 
-    def create_access_app(self, hostname: str, app_name: str, allowed_idps: list[str] | None = None) -> dict[str, Any]:
+    def create_access_app(
+        self,
+        hostname: str,
+        app_name: str,
+        allowed_idps: list[str] | None = None,
+        self_hosted_domains: list[str] | None = None,
+    ) -> dict[str, Any]:
         app_id = f"access-app-{self._next_access_app_id}"
         self._next_access_app_id += 1
-        access_app: dict[str, Any] = {"id": app_id, "domain": hostname, "name": app_name}
+        # Mirror Cloudflare's behaviour: `self_hosted_domains` always
+        # includes the primary `domain`, and if the caller didn't pass a
+        # list we default it to just the primary domain.
+        if self_hosted_domains is None:
+            shd = [hostname]
+        else:
+            shd = list(self_hosted_domains)
+            if hostname not in shd:
+                shd = [hostname, *shd]
+        access_app: dict[str, Any] = {
+            "id": app_id,
+            "domain": hostname,
+            "name": app_name,
+            "self_hosted_domains": shd,
+        }
         if allowed_idps is not None:
             access_app["allowed_idps"] = allowed_idps
         self.access_apps[app_id] = access_app
         self.access_policies[app_id] = []
         return access_app
+
+    def update_access_app(self, app_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        app = self.access_apps.get(app_id)
+        assert app is not None, f"access app {app_id} not found"
+        app.update(patch)
+        return app
 
     def delete_access_app(self, app_id: str) -> None:
         self.access_apps.pop(app_id, None)
@@ -114,6 +139,15 @@ class FakeCloudflareOps:
             if access_app["domain"] == hostname:
                 return access_app
         return None
+
+    def get_access_app_by_name(self, name: str) -> dict[str, Any] | None:
+        for access_app in self.access_apps.values():
+            if access_app.get("name") == name:
+                return access_app
+        return None
+
+    def list_access_apps(self) -> list[dict[str, Any]]:
+        return list(self.access_apps.values())
 
     def list_access_policies(self, app_id: str) -> list[dict[str, Any]]:
         return list(self.access_policies.get(app_id, []))
@@ -138,15 +172,6 @@ class FakeCloudflareOps:
     def delete_access_policy(self, app_id: str, policy_id: str) -> None:
         if app_id in self.access_policies:
             self.access_policies[app_id] = [p for p in self.access_policies[app_id] if p["id"] != policy_id]
-
-    def kv_get(self, key: str) -> str | None:
-        return self.kv_store.get(key)
-
-    def kv_put(self, key: str, value: str) -> None:
-        self.kv_store[key] = value
-
-    def kv_delete(self, key: str) -> None:
-        self.kv_store.pop(key, None)
 
     def create_service_token(self, name: str) -> dict[str, Any]:
         token_id = f"svc-token-{self._next_policy_id}"
