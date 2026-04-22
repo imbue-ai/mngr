@@ -80,9 +80,9 @@ class RequestEvent(EventEnvelope):
 
 
 class SharingRequestEvent(RequestEvent):
-    """A request to modify sharing settings for a server."""
+    """A request to modify sharing settings for a service."""
 
-    server_name: str = Field(description="Name of the server to share")
+    service_name: str = Field(description="Name of the service to share")
     current_status: SharingStatusSnapshot | None = Field(
         default=None, description="Current sharing state for pre-populating the form"
     )
@@ -102,13 +102,13 @@ class RequestResponseEvent(EventEnvelope):
     request_event_id: str = Field(description="event_id of the original request")
     status: str = Field(description="Resolution status: 'GRANTED' or 'DENIED'")
     agent_id: str = Field(description="Agent ID the request was for")
-    server_name: str | None = Field(default=None, description="Server name (for sharing requests)")
+    service_name: str | None = Field(default=None, description="Service name (for sharing requests)")
     request_type: str = Field(description="Type of request that was responded to")
 
 
 def create_sharing_request_event(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     is_user_requested: bool = False,
     current_status: SharingStatusSnapshot | None = None,
     suggested_emails: list[str] | None = None,
@@ -122,7 +122,7 @@ def create_sharing_request_event(
         agent_id=agent_id,
         request_type=str(RequestType.SHARING),
         is_user_requested=is_user_requested,
-        server_name=server_name,
+        service_name=service_name,
         current_status=current_status,
         suggested_emails=suggested_emails or [],
     )
@@ -133,7 +133,7 @@ def create_request_response_event(
     status: RequestStatus,
     agent_id: str,
     request_type: str,
-    server_name: str | None = None,
+    service_name: str | None = None,
 ) -> RequestResponseEvent:
     """Create a new request response event."""
     return RequestResponseEvent(
@@ -144,21 +144,21 @@ def create_request_response_event(
         request_event_id=request_event_id,
         status=str(status),
         agent_id=agent_id,
-        server_name=server_name,
+        service_name=service_name,
         request_type=request_type,
     )
 
 
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
     """Compute the deduplication key for a request or response event."""
-    server_name: str | None = None
+    service_name: str | None = None
     if isinstance(event, SharingRequestEvent):
-        server_name = event.server_name
+        service_name = event.service_name
     elif isinstance(event, RequestResponseEvent):
-        server_name = event.server_name
+        service_name = event.service_name
     else:
         pass
-    return (event.agent_id, server_name, event.request_type)
+    return (event.agent_id, service_name, event.request_type)
 
 
 class RequestInbox(FrozenModel):

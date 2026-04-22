@@ -133,7 +133,7 @@ def start_desktop_client(
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
-    agent_creator = AgentCreator(paths=paths)
+    agent_creator = AgentCreator(paths=paths, server_port=port)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
@@ -150,10 +150,16 @@ def start_desktop_client(
     for resp in response_events:
         request_inbox = request_inbox.add_response(resp)
 
-    # Generate a one-time login URL for the user
+    # Generate a one-time login URL for the user. The URL hostname is
+    # always ``localhost`` (not the internal bind address) so that the
+    # session cookie issued by /authenticate -- which sets
+    # ``Domain=localhost`` when the request host is on localhost -- is
+    # valid on every ``<agent-id>.localhost`` subdomain the desktop
+    # client forwards to. uvicorn binding 127.0.0.1 still accepts the
+    # localhost-addressed requests because localhost resolves there.
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
     auth_store.add_one_time_code(code=code)
-    login_url = "http://{}:{}/login?one_time_code={}".format(host, port, code)
+    login_url = "http://localhost:{}/login?one_time_code={}".format(port, code)
 
     # Log to stderr (always)
     logger.info("Login URL (one-time use): {}", login_url)

@@ -24,17 +24,27 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     # GPU to be present in the sandbox. Modal offload sandboxes do not ship
     # the nvidia-container-runtime, so docker run would reject `--gpus all`
     # with "could not select device driver" and this test would spuriously
-    # fail in no-GPU environments. `-e MNGR_START_ARG=smoke` is accepted by
-    # docker run everywhere and proves the same thing: mngr threads `-s`
-    # arguments through to `docker run`.
+    # fail in no-GPU environments. `--hostname=...` is accepted by docker
+    # run everywhere and proves the same thing (mngr threads `-s` arguments
+    # through to `docker run`), with the added benefit that the post-create
+    # `mngr exec my-task hostname` call below can read back the value and
+    # confirm the arg actually took effect.
     e2e.write_tutorial_block("""
     # some providers (like docker), take "start" args as well as build args:
     mngr create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
     result = e2e.run(
-        'mngr create my-task --provider docker -s "-e MNGR_START_ARG=smoke" --no-connect --no-ensure-clean',
+        'mngr create my-task --provider docker -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean',
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,
     )
     expect(result).to_succeed()
+
+    # Verify the start arg was passed through to docker run
+    hostname_result = e2e.run(
+        "mngr exec my-task hostname",
+        comment="verify start arg was applied to the container",
+    )
+    expect(hostname_result).to_succeed()
+    expect(hostname_result.stdout).to_contain("mngr-start-arg-test")

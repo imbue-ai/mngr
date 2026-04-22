@@ -80,20 +80,20 @@ def _get_own_agent_id() -> str:
     return agent_id
 
 
-def _cloudflare_url(server_name: str) -> str:
+def _cloudflare_url(service_name: str) -> str:
     """Build the desktop client API URL for a server's Cloudflare forwarding."""
     base_url = _read_minds_api_url()
     agent_id = _get_own_agent_id()
-    return f"{base_url}/api/v1/agents/{agent_id}/servers/{server_name}/cloudflare"
+    return f"{base_url}/api/v1/agents/{agent_id}/services/{service_name}/cloudflare"
 
 
-def get_sharing_status(server_name: str) -> SharingStatus:
+def get_sharing_status(service_name: str) -> SharingStatus:
     """Fetch the current Cloudflare forwarding status for a server.
 
     Queries the desktop client's GET cloudflare endpoint, which returns
     ``{"enabled": bool, "url": str | null}``.
     """
-    url = _cloudflare_url(server_name)
+    url = _cloudflare_url(service_name)
     headers = _get_desktop_client_auth_headers()
 
     try:
@@ -128,7 +128,7 @@ def _extract_emails_from_auth_rules(auth_rules: list[dict[str, object]]) -> list
     return emails
 
 
-def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> None:
+def request_sharing_edit(service_name: str, is_user_requested: bool = True) -> None:
     """Create a sharing request event for editing sharing settings.
 
     Reads the current status via the desktop client API, then writes a
@@ -141,7 +141,7 @@ def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> No
     current_status_dict: dict[str, object] | None = None
     suggested_emails: list[str] = []
     try:
-        status = get_sharing_status(server_name)
+        status = get_sharing_status(service_name)
         current_status_dict = {
             "enabled": status.enabled,
             "url": status.url,
@@ -154,7 +154,7 @@ def request_sharing_edit(server_name: str, is_user_requested: bool = True) -> No
 
     write_sharing_request(
         agent_id=agent_id,
-        server_name=server_name,
+        service_name=service_name,
         is_user_requested=is_user_requested,
         current_status=current_status_dict,
         suggested_emails=suggested_emails,
