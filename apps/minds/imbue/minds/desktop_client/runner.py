@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.desktop_client.latchkey_gateway import LatchkeyGatewayDestructionHandler
 from imbue.minds.desktop_client.latchkey_gateway import LatchkeyGatewayDiscoveryHandler
 from imbue.minds.desktop_client.latchkey_gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey_gateway import LatchkeyGatewayReconcileCallback
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -145,7 +146,7 @@ def start_desktop_client(
     stream_manager = MngrStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
     latchkey_gateway_manager = LatchkeyGatewayManager()
-    latchkey_gateway_manager.start()
+    latchkey_gateway_manager.start(data_dir=data_directory)
 
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.cloudflare_forwarding_url)
@@ -202,6 +203,15 @@ def start_desktop_client(
     latchkey_destruction_handler = LatchkeyGatewayDestructionHandler(gateway_manager=latchkey_gateway_manager)
     stream_manager.add_on_agent_discovered_callback(latchkey_discovery_handler)
     stream_manager.add_on_agent_destroyed_callback(latchkey_destruction_handler)
+
+    # Once the initial mngr-observe snapshot arrives, reconcile any adopted
+    # gateways whose agent is no longer known so orphans from the previous
+    # desktop-client session are cleaned up.
+    reconcile_callback = LatchkeyGatewayReconcileCallback(
+        gateway_manager=latchkey_gateway_manager,
+        resolver=backend_resolver,
+    )
+    backend_resolver.add_on_change_callback(reconcile_callback)
 
     stream_manager.start()
 
