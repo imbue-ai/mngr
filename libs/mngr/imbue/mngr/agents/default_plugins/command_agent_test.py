@@ -99,3 +99,18 @@ def test_assemble_command_concatenates_config_command_and_agent_args(
     agent = _make_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
     cmd = agent.assemble_command(local_host, agent_args=("--bind", "0.0.0.0"), command_override=None)
     assert cmd == CommandString("python -m http.server --bind 0.0.0.0")
+
+
+def test_assemble_command_inserts_cli_args_between_command_and_agent_args(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """agent_config.cli_args sit between the base command and agent_args (matches BaseAgent.assemble_command)."""
+    config = CommandAgentConfig(
+        command=CommandString("python -m http.server"),
+        cli_args=("--bind", "0.0.0.0"),
+    )
+    agent = _make_command_agent(local_host, temp_mngr_ctx, tmp_path, agent_config=config)
+    cmd = agent.assemble_command(local_host, agent_args=("--extra",), command_override=None)
+    assert cmd == CommandString("python -m http.server --bind 0.0.0.0 --extra")

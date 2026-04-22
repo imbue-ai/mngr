@@ -47,15 +47,18 @@ class CommandAgent(BaseAgent[CommandAgentConfig]):
     ) -> CommandString:
         if command_override is not None:
             return command_override
-        parts: list[str] = []
-        if self.agent_config.command is not None:
-            parts.append(str(self.agent_config.command))
-        parts.extend(agent_args)
-        if not parts:
+        base = str(self.agent_config.command) if self.agent_config.command is not None else None
+        if base is None and not agent_args:
             raise UserInputError(
                 "--type command requires a command after `--` (or `command = ...` set on the agent type), "
                 "e.g. `mngr create foo --type command -- sleep 99999`"
             )
+        parts: list[str] = []
+        if base is not None:
+            parts.append(base)
+        if self.agent_config.cli_args:
+            parts.extend(self.agent_config.cli_args)
+        parts.extend(agent_args)
         return CommandString(" ".join(parts))
 
 
