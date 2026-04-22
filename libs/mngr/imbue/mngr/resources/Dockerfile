@@ -49,11 +49,11 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# copy in all of our code:
-COPY . /code/
-
-# extract our code into the project directory
-RUN mkdir -p /code/mngr/ && tar -xzf /code/current.tar.gz -C /code/mngr/ && rm /code/*.tar.gz && git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/
+# Offload exports the repo tree at the checkpoint commit as the build context.
+COPY . /code/mngr/
+# Initialize a git repo so that git ls-files works (needed by ratchet tests)
+# and so offload's thin diff (git apply --3way) can apply cleanly.
+RUN git config --global user.email "offload@ci" && git config --global user.name "offload" && git config --global --add safe.directory /code/mngr/ && cd /code/mngr/ && git init -q && git add -A && git commit -q --allow-empty -m "base" && chown -R root:root /code/mngr/
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run
