@@ -9,7 +9,6 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
@@ -98,7 +97,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       </thead>
       <tbody>
         {% for agent_id in agent_ids %}
-        <tr onclick="window.location='/forwarding/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
+        <tr onclick="window.location='http://{{ agent_id }}.localhost:' + window.location.port + '/'" data-agent-id="{{ agent_id }}">
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
@@ -463,111 +462,6 @@ def render_auth_error_page(message: str) -> str:
     return template.render(message=message)
 
 
-_AGENT_SERVICES_TEMPLATE: Final[str] = """<!DOCTYPE html>
-<html>
-<head>
-  <title>Servers - {{ agent_id }}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
-    h1 { margin-bottom: 8px; color: rgb(26, 26, 46); }
-    .subtitle { margin-bottom: 24px; color: gray; font-size: 14px; }
-    .server-list { list-style: none; }
-    .server-list li {
-      margin-bottom: 12px; padding: 12px 16px;
-      background: white; border: 1px solid rgb(220, 220, 230); border-radius: 8px;
-      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    }
-    .server-name {
-      font-weight: bold; font-size: 16px; color: rgb(26, 26, 46);
-      min-width: 100px;
-    }
-    .server-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .server-links a {
-      display: inline-block; padding: 6px 12px;
-      background: rgb(26, 26, 46); color: white; text-decoration: none;
-      border-radius: 4px; font-size: 13px;
-    }
-    .server-links a:hover { background: rgb(42, 42, 78); }
-    .server-links a.global-link {
-      background: rgb(37, 99, 235);
-    }
-    .server-links a.global-link:hover { background: rgb(29, 78, 216); }
-    .toggle-btn {
-      padding: 4px 10px; border-radius: 4px; font-size: 12px;
-      border: 1px solid rgb(200, 200, 210); cursor: pointer;
-      background: white; color: rgb(60, 60, 80);
-    }
-    .toggle-btn:hover { background: rgb(240, 240, 245); }
-    .toggle-btn.enabled { background: rgb(220, 252, 231); border-color: rgb(134, 239, 172); color: rgb(22, 101, 52); }
-    .empty-state { color: gray; font-size: 16px; }
-    .back-link { margin-top: 24px; }
-    .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <h1>{{ agent_id }}</h1>
-  <p class="subtitle">Available servers</p>
-  {% if service_names %}
-  <ul class="server-list">
-    {% for service_name in service_names %}
-    <li>
-      <span class="server-name">{{ service_name }}</span>
-      <div class="server-links">
-        <a href="/forwarding/{{ agent_id }}/{{ service_name }}/">Local</a>
-        {% if cf_services and service_name in cf_services %}
-        <a href="https://{{ cf_services[service_name] }}" class="global-link" target="_blank">Global</a>
-        <button class="toggle-btn enabled" onclick="toggleGlobal('{{ agent_id }}', '{{ service_name }}', false)">Disable global</button>
-        {% else %}
-        <button class="toggle-btn" onclick="toggleGlobal('{{ agent_id }}', '{{ service_name }}', true)">Enable global</button>
-        {% endif %}
-      </div>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p class="empty-state">
-    No servers are currently running for this agent.
-  </p>
-  {% endif %}
-  <div class="back-link"><a href="/">Back to all projects</a></div>
-  <script>
-  async function toggleGlobal(agentId, serviceName, enable) {
-    try {
-      const resp = await fetch('/forwarding/' + agentId + '/servers/' + serviceName + '/global', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({enabled: enable})
-      });
-      if (resp.ok) {
-        window.location.reload();
-      } else {
-        const data = await resp.json();
-        alert('Failed: ' + (data.error || resp.statusText));
-      }
-    } catch (e) {
-      alert('Failed: ' + e.message);
-    }
-  }
-  </script>
-</body>
-</html>"""
-
-
-@pure
-def render_agent_services_page(
-    agent_id: AgentId,
-    service_names: Sequence[ServiceName],
-    cf_services: dict[str, str] | None = None,
-) -> str:
-    """Render a page listing all available servers for a specific agent.
-
-    cf_services maps server names to their cloudflare hostnames (if globally forwarded).
-    """
-    template = _JINJA_ENV.from_string(_AGENT_SERVICES_TEMPLATE)
-    return template.render(agent_id=agent_id, service_names=service_names, cf_services=cf_services or {})
-
-
 # -- Chrome (persistent shell) templates --
 
 _CHROME_TITLEBAR_HEIGHT: Final[int] = 38
@@ -757,7 +651,7 @@ function toggleSidebar() {
 }
 
 function selectWorkspace(agentId) {
-  navigateContent('/forwarding/' + agentId + '/');
+  navigateContent('http://' + agentId + '.localhost:' + window.location.port + '/');
   // Close sidebar. In Electron, navigate-content already removes the sidebar
   // WebContentsView on the main process side, so only reset the local state flag
   // without sending another toggle-sidebar IPC (which would re-create it).
@@ -982,7 +876,7 @@ function escapeHtml(s) {
 }
 
 function selectWorkspace(agentId) {
-  if (isElectron) window.minds.navigateContent('/forwarding/' + agentId + '/');
+  if (isElectron) window.minds.navigateContent('http://' + agentId + '.localhost:' + window.location.port + '/');
 }
 
 function openInNewWindow(agentId) {
@@ -1230,7 +1124,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ service_name }}</code>
-      in <a href="/forwarding/{{ agent_id }}/" style="font-size:20px;">{{ ws_name or agent_id }}</a>
+      in <a href="#" onclick="window.location='http://{{ agent_id }}.localhost:' + window.location.port + '/'; return false;" style="font-size:20px;">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
 
     {% if not has_account %}
@@ -1299,7 +1193,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     var h = document.getElementById('page-heading');
     if (!h) return;
     var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serviceName + '</code>';
-    var ws = '<a href="/forwarding/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
+    var ws = '<a href="http://' + agentId + '.localhost:' + window.location.port + '/" style="font-size:20px;">' + wsName + '</a>';
     var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
     if (isEnabled) {
       h.innerHTML = code + ' shared in ' + ws + acct;
