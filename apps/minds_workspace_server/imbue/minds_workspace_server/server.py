@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import FileResponse
@@ -43,6 +44,7 @@ from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
@@ -63,15 +65,36 @@ _DEFAULT_TAIL_COUNT = 50
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """FastAPI lifespan.
+
+    Reads ``application.state.preconfigured_agent_manager`` (set up by
+    ``create_application``). When present, the lifespan reuses that
+    manager and does not call ``start()`` / ``stop()`` -- this is the
+    hook tests use to seed the service registry without spawning the
+    real ``mngr observe`` pipeline. When absent, the lifespan builds a
+    fresh manager and owns its lifecycle.
+    """
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
     application.state.watchers = {}
 
-    broadcaster = WebSocketBroadcaster()
-    agent_manager = AgentManager.build(broadcaster)
+    preconfigured_agent_manager: AgentManager | None = application.state.preconfigured_agent_manager
+    if preconfigured_agent_manager is None:
+        broadcaster = WebSocketBroadcaster()
+        agent_manager = AgentManager.build(broadcaster)
+        agent_manager.start()
+    else:
+        agent_manager = preconfigured_agent_manager
+        broadcaster = agent_manager._broadcaster
+
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager
-    agent_manager.start()
+
+    # Single shared httpx client for the /service/<name>/ forwarding layer.
+    application.state.http_client = httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=30.0,
+    )
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.register_event_broadcaster(broadcaster=event_queues.broadcast)
@@ -85,7 +108,8 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         def _graceful_shutdown_handler(signum: int, frame: object) -> None:
             event_queues.shutdown()
             broadcaster.shutdown()
-            agent_manager.stop()
+            if preconfigured_agent_manager is None:
+                agent_manager.stop()
             _stop_all_watchers(application)
             handler = original_sigint_handler
             if callable(handler):
@@ -97,8 +121,10 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     event_queues.shutdown()
     broadcaster.shutdown()
-    agent_manager.stop()
+    if preconfigured_agent_manager is None:
+        agent_manager.stop()
     _stop_all_watchers(application)
+    await application.state.http_client.aclose()
     if is_main_thread and original_sigint_handler is not None:
         signal.signal(signal.SIGINT, original_sigint_handler)
 
@@ -659,8 +685,10 @@ def create_application(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    agent_manager: AgentManager | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
+    application.state.preconfigured_agent_manager = agent_manager
     application.state.config = config or Config()
     application.state.provider_names = provider_names
     application.state.include_filters = include_filters
@@ -697,6 +725,11 @@ def create_application(
     assets_directory = STATIC_DIRECTORY / "assets"
     if assets_directory.is_dir():
         application.mount("/assets", StaticFiles(directory=assets_directory), name="assets")
+
+    # Service forwarding routes: /service/<name>/... forwards to the service's
+    # local backend (from runtime/applications.toml) with path rewriting,
+    # cookie scoping, WS shim, and a scoped service worker.
+    register_service_routes(application)
 
     application.add_api_route("/{path:path}", _index, methods=["GET"])
 

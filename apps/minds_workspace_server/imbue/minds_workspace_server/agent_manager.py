@@ -233,6 +233,19 @@ class AgentManager:
         with self._lock:
             return [{"name": app.name, "url": app.url} for app in self._applications]
 
+    def get_service_url(self, service_name: str) -> str | None:
+        """Return the local backend URL for a service, or None if it isn't registered."""
+        with self._lock:
+            for app in self._applications:
+                if app.name == service_name:
+                    return app.url
+            return None
+
+    def list_service_names(self) -> tuple[str, ...]:
+        """Return the names of all currently registered services, sorted alphabetically."""
+        with self._lock:
+            return tuple(sorted(app.name for app in self._applications))
+
     def get_agents_serialized(self) -> list[dict[str, Any]]:
         """Return agent list serialized for JSON."""
         with self._lock:
