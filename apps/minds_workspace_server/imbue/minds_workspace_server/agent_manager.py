@@ -485,6 +485,24 @@ class AgentManager:
             return Path(agent_state_dir) / "workspace_server" / "observe"
         return Path.home() / ".mngr" / "workspace_server" / "observe"
 
+    def _resolve_observe_cwd(self) -> Path:
+        """Return the cwd for the mngr observe subprocess.
+
+        Prefers ``MNGR_AGENT_WORK_DIR`` so observe picks up the same
+        project-local ``.mngr/settings.toml`` that agent-creation commands
+        run against -- the things observe lists should match what the
+        primary agent could create. Falls back to ``$HOME`` when the work
+        dir is unset or does not exist (e.g. tests that stub the env var
+        with a non-existent path); ``$HOME`` avoids inheriting whatever
+        project config happens to live under the spawning process's cwd.
+        """
+        work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
+        if work_dir:
+            candidate = Path(work_dir)
+            if candidate.is_dir():
+                return candidate
+        return Path.home()
+
     def _build_observe_command(self) -> list[str]:
         """Build the argv for the mngr observe discovery-only subprocess.
 
@@ -510,14 +528,17 @@ class AgentManager:
         self._observe_cg.__enter__()
 
         try:
-            # Run from $HOME so mngr picks up the user's global config instead
-            # of any project-local .mngr/settings.toml (or settings.local.toml)
-            # that happens to live in the current working directory, which
-            # would otherwise override the user config and change which agents
-            # observe reports.
+            # Run from the primary agent's work dir so observe inherits the
+            # same project-local .mngr/settings.toml that mngr create uses --
+            # otherwise observe picks up ~/.mngr config, which inside a Docker
+            # agent typically has providers enabled (e.g. modal) that are not
+            # authenticated. Provider errors make `list_agents` error out,
+            # which in turn prevents periodic DISCOVERY_FULL snapshots from
+            # being written, so the workspace server's agent list drifts out
+            # of sync with reality whenever an individual event is missed.
             process = self._observe_cg.run_process_in_background(
                 command=cmd,
-                cwd=Path.home(),
+                cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
             )

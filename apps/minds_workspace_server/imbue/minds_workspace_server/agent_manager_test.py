@@ -653,6 +653,52 @@ def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroa
         manager.stop()
 
 
+def test_resolve_observe_cwd_prefers_existing_work_dir(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``MNGR_AGENT_WORK_DIR`` points at a real directory, observe runs there."""
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == tmp_path
+    finally:
+        manager.stop()
+
+
+def test_resolve_observe_cwd_falls_back_when_work_dir_missing(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``MNGR_AGENT_WORK_DIR`` is set but the path does not exist, use ``$HOME``.
+
+    Guards the fallback that keeps observe runnable in tests that stub the env
+    var with a non-existent path (e.g. the shared ``agent_manager`` fixture).
+    """
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(missing))
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == Path.home()
+    finally:
+        manager.stop()
+
+
+def test_resolve_observe_cwd_falls_back_when_work_dir_unset(
+    broadcaster: WebSocketBroadcaster,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``MNGR_AGENT_WORK_DIR`` unset, observe runs from ``$HOME``."""
+    monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == Path.home()
+    finally:
+        manager.stop()
+
+
 def test_start_observe_spawns_long_lived_subprocess(
     broadcaster: WebSocketBroadcaster,
     tmp_path: Path,
@@ -668,6 +714,10 @@ def test_start_observe_spawns_long_lived_subprocess(
         pytest.skip("mngr binary not on PATH")
 
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    # Point the subprocess at a clean cwd with no project-local .mngr/settings.toml;
+    # otherwise running pytest from inside a mngr-managed worktree would inherit
+    # a config with ``is_allowed_in_pytest = false`` and the child would abort.
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
     manager = AgentManager.build(broadcaster)
     try:
         manager._start_observe()
@@ -725,6 +775,8 @@ def test_start_observe_watchdog_stays_quiet_on_clean_shutdown(
         pytest.skip("mngr binary not on PATH")
 
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    # See test_start_observe_spawns_long_lived_subprocess for why this is needed.
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
     manager = AgentManager.build(broadcaster)
     manager._start_observe()
     # ``_start_observe`` only returns after ``run_process_in_background``
