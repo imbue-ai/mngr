@@ -143,6 +143,58 @@ def test_cli_create_via_subprocess(
         )
 
 
+def test_cli_create_rejects_dirty_tree_by_default(
+    temp_git_repo: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+) -> None:
+    """Without --no-ensure-clean, create should fail if the source git repo has uncommitted changes."""
+    agent_name = f"test-dirty-{int(time.time())}"
+
+    (temp_git_repo / "untracked-file.txt").write_text("")
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "add", "untracked-file.txt"],
+        check=True,
+        capture_output=True,
+    )
+
+    env = os.environ.copy()
+    env["MNGR_HOST_DIR"] = str(temp_host_dir)
+    env["MNGR_PREFIX"] = mngr_test_prefix
+    env["MNGR_ROOT_NAME"] = mngr_test_root_name
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "create",
+            "--name",
+            agent_name,
+            "--command",
+            "sleep 99999",
+            "--source",
+            str(temp_git_repo),
+            "--no-connect",
+            "--disable-plugin",
+            "modal",
+            "--disable-plugin",
+            "docker",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode != 0, f"Expected create to fail on dirty tree, got {result.returncode}"
+    combined = (result.stdout + result.stderr).lower()
+    assert "uncommitted changes" in combined or "ensure-clean" in combined, (
+        f"Expected ensure-clean error message. stderr: {result.stderr}\nstdout: {result.stdout}"
+    )
+
+
 @pytest.mark.tmux
 def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_work_dir: Path,
@@ -1360,3 +1412,52 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
     )
     assert result.exit_code != 0
     assert "not supported" in result.output.lower() or "remote provider" in result.output.lower()
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+@pytest.mark.timeout(300)
+def test_cli_create_from_git_url(
+    cli_runner: CliRunner,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """create --source <git URL> clones the repo and produces an agent with the repo contents.
+
+    Uses this project's own public GitHub URL. Network access is required; the
+    assertion is against a long-stable top-level file (CLAUDE.md) so the test
+    does not break on repo layout churn.
+    """
+    agent_name = f"test-git-url-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = cli_runner.invoke(
+            create,
+            [
+                "--name",
+                agent_name,
+                "--command",
+                "sleep 963823",
+                "--source",
+                "https://github.com/imbue-ai/mngr",
+                "--no-connect",
+            ],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+
+        clones_dir = temp_host_dir / "clones"
+        clone_entries = list(clones_dir.iterdir())
+        assert any(p.name.startswith(f"{agent_name}-") for p in clone_entries), (
+            f"Expected a clone under {clones_dir}, got {clone_entries}"
+        )
+
+        worktrees_dir = temp_host_dir / "worktrees"
+        worktree_entries = list(worktrees_dir.iterdir())
+        matching_worktrees = [p for p in worktree_entries if p.name.startswith(f"{agent_name}-")]
+        assert matching_worktrees, f"Expected a worktree under {worktrees_dir}, got {worktree_entries}"
+        assert (matching_worktrees[0] / "CLAUDE.md").exists()

@@ -472,6 +472,33 @@ def test_resolve_source_location_with_auto_start_enabled(
     assert result.agent is None
 
 
+def test_resolve_source_location_clones_git_url(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+    temp_git_repo: Path,
+) -> None:
+    """A git URL --source is cloned to <host_dir>/clones/<name>-<hex>/ and resolved to that path."""
+    url = f"file://{temp_git_repo}"
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, url),
+        to_update(default_create_cli_opts.field_ref().positional_name, "clone-target"),
+    )
+
+    result = _resolve_source_location(
+        opts,
+        agent_and_host_loader=lambda: {},
+        mngr_ctx=temp_mngr_ctx,
+        is_start_desired=True,
+    )
+
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path.parent == temp_host_dir / "clones"
+    assert result.location.path.name.startswith("clone-target-")
+    assert (result.location.path / ".git").exists()
+    assert result.agent is None
+
+
 def test_resolve_target_host_with_auto_start_enabled(
     temp_mngr_ctx: MngrContext,
 ) -> None:

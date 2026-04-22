@@ -4,10 +4,10 @@ Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
 and the auto-open behavior for the requests panel.
 
-Also exposes the ``cloudflare_forwarding_url`` (which now doubles as the auth
-backend URL) used by the desktop client to talk to the backing service. The
-URL follows env > file > default precedence so ops can point a local build at
-a different deployment without editing code.
+Also exposes the ``remote_service_connector_url`` (the backend that fronts
+Cloudflare tunnels and the auth backend) used by the desktop client to talk
+to the backing service. The URL follows env > file > default precedence so
+ops can point a local build at a different deployment without editing code.
 """
 
 import os
@@ -27,13 +27,13 @@ from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME = "config.toml"
 
-DEFAULT_CLOUDFLARE_FORWARDING_URL: Final[str] = (
-    "https://joshalbrecht--cloudflare-forwarding-production-fastapi-app.modal.run"
+DEFAULT_REMOTE_SERVICE_CONNECTOR_URL: Final[str] = (
+    "https://joshalbrecht--remote-service-connector-production-fastapi-app.modal.run"
 )
 
-_CLOUDFLARE_FORWARDING_URL_ENV: Final[str] = "CLOUDFLARE_FORWARDING_URL"
+_REMOTE_SERVICE_CONNECTOR_URL_ENV: Final[str] = "REMOTE_SERVICE_CONNECTOR_URL"
 
-_CLOUDFLARE_FORWARDING_URL_KEY: Final[str] = "cloudflare_forwarding_url"
+_REMOTE_SERVICE_CONNECTOR_URL_KEY: Final[str] = "remote_service_connector_url"
 
 _URL_VALIDATOR: Final[TypeAdapter[AnyUrl]] = TypeAdapter(AnyUrl)
 
@@ -141,13 +141,13 @@ class MindsConfig(MutableModel):
         return _validate_url(default, source=f"{file_key} default")
 
     @property
-    def cloudflare_forwarding_url(self) -> AnyUrl:
-        """Base URL of the Cloudflare forwarding API (also hosts the auth backend).
+    def remote_service_connector_url(self) -> AnyUrl:
+        """Base URL of the remote service connector (Cloudflare tunnel API + auth backend).
 
-        Precedence: ``$CLOUDFLARE_FORWARDING_URL`` > ``config.toml`` > built-in default.
+        Precedence: ``$REMOTE_SERVICE_CONNECTOR_URL`` > ``config.toml`` > built-in default.
         """
         return self._resolve_url_setting(
-            env_var=_CLOUDFLARE_FORWARDING_URL_ENV,
-            file_key=_CLOUDFLARE_FORWARDING_URL_KEY,
-            default=DEFAULT_CLOUDFLARE_FORWARDING_URL,
+            env_var=_REMOTE_SERVICE_CONNECTOR_URL_ENV,
+            file_key=_REMOTE_SERVICE_CONNECTOR_URL_KEY,
+            default=DEFAULT_REMOTE_SERVICE_CONNECTOR_URL,
         )

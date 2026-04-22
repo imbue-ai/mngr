@@ -21,8 +21,8 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -131,8 +131,8 @@ def start_desktop_client(
     tunnel_manager = SSHTunnelManager()
 
     minds_config = MindsConfig(data_dir=data_directory)
-    cloudflare_client = _build_cloudflare_client(minds_config.cloudflare_forwarding_url)
-    auth_backend_client = AuthBackendClient(base_url=minds_config.cloudflare_forwarding_url)
+    cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
+    auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(paths=paths)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
@@ -215,14 +215,14 @@ def start_desktop_client(
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
-def _build_cloudflare_client(forwarding_url: AnyUrl) -> CloudflareForwardingClient:
-    """Build a shared CloudflareForwardingClient holding only the forwarding URL.
+def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
+    """Build a shared CloudflareClient holding only the remote service connector URL.
 
     Per-request auth (SuperTokens token, user-id prefix, email) is attached in
     ``api_v1.get_cf_client_with_auth`` from the caller's signed-in account.
     """
-    return CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl(str(forwarding_url)),
+    return CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
     )
 
 

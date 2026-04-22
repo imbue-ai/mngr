@@ -111,7 +111,7 @@ class AuthTestFixture:
         auth_store.add_one_time_code(code=code)
 
         minds_config = MindsConfig(data_dir=self.tmp_dir)
-        auth_backend_client = AuthBackendClient(base_url=AnyUrl(str(minds_config.cloudflare_forwarding_url)))
+        auth_backend_client = AuthBackendClient(base_url=AnyUrl(str(minds_config.remote_service_connector_url)))
 
         session_store = MultiAccountSessionStore(
             data_dir=self.tmp_dir,

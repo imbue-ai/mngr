@@ -115,10 +115,10 @@ the two copies never collide. Standalone `mngr` invocations ignore
 `~/.<MINDS_ROOT_NAME>/config.toml` is optional. When present, it may set:
 
 ```toml
-cloudflare_forwarding_url = "https://..."
+remote_service_connector_url = "https://..."
 ```
 
-The `CLOUDFLARE_FORWARDING_URL` environment variable overrides the file.
+The `REMOTE_SERVICE_CONNECTOR_URL` environment variable overrides the file.
 The field has a built-in default that points at the current dev-deployed
 server, so packaged minds works out of the box with no config file. The
 SuperTokens core URI and API key are configured on the backend server

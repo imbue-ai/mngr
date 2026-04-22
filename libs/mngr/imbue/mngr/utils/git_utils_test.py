@@ -7,7 +7,9 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -17,6 +19,7 @@ from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
 from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_git_repository
+from imbue.mngr.utils.git_utils import is_git_url
 from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
 
@@ -566,3 +569,81 @@ def test_mirror_push_refspecs_do_not_push_remote_tracking_refs(temp_git_repo: Pa
     assert target_refs.stdout.strip() == "", (
         f"Remote-tracking refs should NOT be pushed to the target, but found:\n{target_refs.stdout}"
     )
+
+
+# =============================================================================
+# is_git_url Tests
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/owner/repo",
+        "https://github.com/owner/repo.git",
+        "http://example.com/owner/repo",
+        "https://gitlab.com/group/subgroup/repo.git",
+        "https://self-hosted.example.com:8080/team/repo.git",
+        "git@github.com:owner/repo.git",
+        "git@github.com:owner/repo",
+        "git@gitlab.com:group/subgroup/repo.git",
+        "ssh://git@github.com/owner/repo.git",
+        "ssh://user@host.example.com:22/owner/repo",
+        "git://github.com/owner/repo.git",
+        "file:///tmp/local/repo.git",
+    ],
+)
+def test_is_git_url_recognizes_git_urls(url: str) -> None:
+    """is_git_url accepts all standard git URL shapes."""
+    assert is_git_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "foo",
+        "my-agent",
+        "my-agent@my-host",
+        "my-agent@my-host.modal",
+        "/abs/path",
+        "./rel",
+        "../rel",
+        ":path",
+        "@host:/path",
+        "user@host:file",
+    ],
+)
+def test_is_git_url_rejects_non_urls(value: str) -> None:
+    """is_git_url returns False for agent addresses, paths, and empty strings."""
+    assert is_git_url(value) is False
+
+
+# =============================================================================
+# clone_git_url_to_managed_dir Tests
+# =============================================================================
+
+
+def test_clone_git_url_to_managed_dir_clones_local_repo(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """clone_git_url_to_managed_dir produces a working clone at <base>/<name>-<hex>."""
+    base_dir = tmp_path / "clones"
+    dest = clone_git_url_to_managed_dir(str(temp_git_repo), base_dir, "my-agent", cg)
+
+    assert dest.parent == base_dir
+    assert dest.name.startswith("my-agent-")
+    assert (dest / ".git").exists()
+
+
+def test_clone_git_url_to_managed_dir_raises_on_invalid_url(
+    cg: ConcurrencyGroup, tmp_path: Path, setup_git_config: None
+) -> None:
+    """clone_git_url_to_managed_dir raises UserInputError when git clone fails."""
+    base_dir = tmp_path / "clones"
+    with pytest.raises(UserInputError, match="Failed to clone"):
+        clone_git_url_to_managed_dir(str(tmp_path / "does-not-exist"), base_dir, "agent", cg)
+
+    # The failed-clone destination should not be left behind.
+    if base_dir.exists():
+        assert list(base_dir.iterdir()) == []

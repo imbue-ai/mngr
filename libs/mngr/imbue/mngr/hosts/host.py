@@ -94,6 +94,7 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
+from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -1254,17 +1255,38 @@ class Host(BaseHost, OnlineHostInterface):
         return self.provider_instance.get_host_resources(self)
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
-        """Set tags via the provider."""
+        """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)
+        certified_data = self.get_certified_data()
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, dict(tags)),
+            )
+        )
         logger.trace("Set {} tag(s) on host {}", len(tags), self.id)
 
     def add_tags(self, tags: Mapping[str, str]) -> None:
-        """Add tags via the provider."""
+        """Add tags via the provider and sync to certified data."""
         self.provider_instance.add_tags_to_host(self, tags)
+        certified_data = self.get_certified_data()
+        merged_tags = {**certified_data.user_tags, **tags}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, merged_tags),
+            )
+        )
 
     def remove_tags(self, keys: Sequence[str]) -> None:
-        """Remove tags by key via the provider."""
+        """Remove tags by key via the provider and sync to certified data."""
         self.provider_instance.remove_tags_from_host(self, keys)
+        certified_data = self.get_certified_data()
+        keys_to_remove = set(keys)
+        filtered_tags = {k: v for k, v in certified_data.user_tags.items() if k not in keys_to_remove}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, filtered_tags),
+            )
+        )
 
     # =========================================================================
     # Agent Information
@@ -2060,7 +2082,7 @@ class Host(BaseHost, OnlineHostInterface):
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            agent_name = options.name or AgentName("agent")
+            agent_name = options.name or AgentName(GENERIC_AGENT_NAME_HINT)
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
             work_dir_path = worktree_base / work_dir_dir_name

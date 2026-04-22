@@ -38,7 +38,7 @@ from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -364,7 +364,7 @@ async def _handle_agent_servers_page(
 
     server_names = backend_resolver.list_servers_for_agent(parsed_id)
 
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
     cf_services: dict[str, str] | None = None
     if cf_client is not None:
         cf_services = await asyncio.get_running_loop().run_in_executor(None, cf_client.list_services, parsed_id)
@@ -1821,7 +1821,7 @@ def create_desktop_client(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
-    cloudflare_client: CloudflareForwardingClient | None = None,
+    cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
@@ -1890,7 +1890,7 @@ def create_desktop_client(
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
-    # Mount the auth routes (proxy to the cloudflare_forwarding auth backend)
+    # Mount the auth routes (proxy to the remote_service_connector auth backend)
     if session_store is not None and auth_backend_client is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,

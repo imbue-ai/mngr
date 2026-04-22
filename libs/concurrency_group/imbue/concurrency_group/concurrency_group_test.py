@@ -11,6 +11,7 @@ from imbue.concurrency_group.concurrency_group import AncestorConcurrentFailure
 from imbue.concurrency_group.concurrency_group import ChildConcurrencyGroupDidNotExitError
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.concurrency_group.concurrency_group import ConcurrentShutdownError
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.concurrency_group import StrandTimedOutError
@@ -364,6 +365,44 @@ def test_parent_failures_propagate_recursively() -> None:
     assert outer_thread is not None
     outer_thread.join()
     assert closure["i"] == 2
+
+
+def _enter_child_group_on_thread(
+    parent: ConcurrencyGroup,
+    child_entered: Event,
+    release: Event,
+) -> None:
+    with parent.make_concurrency_group(name="sibling_child") as child_cg:
+        child_cg.start_new_thread(target=lambda: release.wait(timeout=5.0))
+        child_entered.set()
+        release.wait(timeout=5.0)
+
+
+def test_parent_exit_waits_for_child_group_on_other_thread_to_exit() -> None:
+    # When a child CG is created on a worker thread (sibling-hierarchy pattern),
+    # parent.__exit__ on the main thread must wait for the child to finish its own
+    # __exit__ before checking the child's state, otherwise a spurious
+    # ChildConcurrencyGroupDidNotExitError can be raised.
+    release = Event()
+    child_entered = Event()
+    top = ConcurrencyGroup(name="top", exit_timeout_seconds=5.0)
+    top.__enter__()
+    thread = ObservableThread(target=_enter_child_group_on_thread, args=(top, child_entered, release), daemon=True)
+    thread.start()
+    try:
+        child_entered.wait(timeout=5.0)
+        # Release the worker on a separate thread so the main thread reaches __exit__ first
+        # and has to wait for the child to settle.
+        releaser = ObservableThread(target=release.set, daemon=True)
+        releaser.start()
+        try:
+            top.__exit__(None, None, None)
+            assert top._children[0].state == ConcurrencyGroupState.EXITED
+        finally:
+            releaser.join(timeout=5.0)
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
 
 
 def test_exhausted_concurrency_group_cannot_be_entered_again() -> None:

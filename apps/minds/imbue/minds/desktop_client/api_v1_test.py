@@ -13,8 +13,8 @@ from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
@@ -26,10 +26,10 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 
-def _make_cloudflare_client() -> CloudflareForwardingClient:
-    """Create a CloudflareForwardingClient pointed at a non-listening port (will fail fast)."""
-    return CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+def _make_cloudflare_client() -> CloudflareClient:
+    """Create a CloudflareClient pointed at a non-listening port (will fail fast)."""
+    return CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"),
     )
 
 
@@ -37,7 +37,7 @@ def _create_test_api_client_with_cloudflare(
     tmp_path: Path,
     agent_id: AgentId,
 ) -> tuple[TestClient, str, WorkspacePaths]:
-    """Create a client with a configured (but non-functional) CloudflareForwardingClient.
+    """Create a client with a configured (but non-functional) CloudflareClient.
 
     Seeds a signed-in SuperTokens session and associates the workspace with it
     so that Cloudflare requests pass the auth gate and can exercise the
@@ -727,8 +727,8 @@ def test_telegram_setup_with_non_dict_json_body(tmp_path: Path) -> None:
 # -- Cloudflare success path tests --
 
 
-class _AlwaysSucceedCloudflareClient(CloudflareForwardingClient):
-    """CloudflareForwardingClient subclass that always returns True without making HTTP calls."""
+class _AlwaysSucceedCloudflareClient(CloudflareClient):
+    """CloudflareClient subclass that always returns True without making HTTP calls."""
 
     def create_tunnel(self, agent_id: AgentId) -> tuple[str | None, str]:
         return "fake-token", "Tunnel created"
@@ -747,7 +747,7 @@ def _create_test_api_client_with_succeeding_cloudflare(
     tmp_path: Path,
     agent_id: AgentId,
 ) -> tuple[TestClient, str, WorkspacePaths]:
-    """Create a client with a CloudflareForwardingClient that always succeeds.
+    """Create a client with a CloudflareClient that always succeeds.
 
     Pre-stores a tunnel token so that inject_tunnel_token_into_agent is not
     called during tests (it runs mngr exec which is not safe in unit tests).
@@ -780,7 +780,7 @@ def _create_test_api_client_with_succeeding_cloudflare(
     )
     notification_dispatcher = NotificationDispatcher(is_electron=True)
     cloudflare_client = _AlwaysSucceedCloudflareClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"),
     )
 
     app = create_desktop_client(

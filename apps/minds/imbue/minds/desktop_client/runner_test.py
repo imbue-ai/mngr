@@ -42,10 +42,10 @@ def test_agent_discovery_handler_callable() -> None:
     tunnel_manager.cleanup()
 
 
-def test_build_cloudflare_client_holds_only_forwarding_url() -> None:
-    """The shared client only carries the forwarding URL; per-request auth is added later."""
+def test_build_cloudflare_client_holds_only_connector_url() -> None:
+    """The shared client only carries the remote service connector URL; per-request auth is added later."""
     result = _build_cloudflare_client(AnyUrl("https://example.com/"))
-    assert str(result.forwarding_url) == "https://example.com/"
+    assert str(result.connector_url) == "https://example.com/"
     assert result.supertokens_token is None
     assert result.supertokens_user_id_prefix is None
     assert result.supertokens_email is None
