@@ -360,41 +360,35 @@ def test_build_diagnose_prompt_contains_version_and_traceback() -> None:
 # =============================================================================
 
 
-def test_write_diagnose_prompt_file_writes_prompt_text() -> None:
+def test_write_diagnose_prompt_file_writes_prompt_text(tmp_path: Path) -> None:
     path = write_diagnose_prompt_file(
         traceback_str="Traceback:\n  ValueError: oops",
         mngr_version="0.2.4",
         error_type="ValueError",
         error_message="oops",
+        base_dir=tmp_path,
     )
     assert path.exists()
     content = path.read_text()
     assert "0.2.4" in content
     assert "ValueError: oops" in content
     assert "Traceback:\n  ValueError: oops" in content
-    # Clean up
-    path.unlink(missing_ok=True)
 
 
-def test_write_diagnose_prompt_file_deterministic_name() -> None:
+def test_write_diagnose_prompt_file_deterministic_name(tmp_path: Path) -> None:
     """Same inputs produce the same file path (content-addressed)."""
-    path1 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg")
-    path2 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg")
+    path1 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg", base_dir=tmp_path)
     assert path1 == path2
     assert path1.name.startswith("mngr-diagnose-prompt-")
     assert path1.name.endswith(".txt")
-    # Clean up
-    path1.unlink(missing_ok=True)
 
 
-def test_write_diagnose_prompt_file_different_inputs() -> None:
+def test_write_diagnose_prompt_file_different_inputs(tmp_path: Path) -> None:
     """Different inputs produce different file paths."""
-    path1 = write_diagnose_prompt_file("tb1", "0.2.4", "Err", "msg1")
-    path2 = write_diagnose_prompt_file("tb2", "0.2.4", "Err", "msg2")
+    path1 = write_diagnose_prompt_file("tb1", "0.2.4", "Err", "msg1", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("tb2", "0.2.4", "Err", "msg2", base_dir=tmp_path)
     assert path1 != path2
-    # Clean up
-    path1.unlink(missing_ok=True)
-    path2.unlink(missing_ok=True)
 
 
 # =============================================================================

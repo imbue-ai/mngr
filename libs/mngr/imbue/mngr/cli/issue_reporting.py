@@ -287,11 +287,13 @@ def write_diagnose_prompt_file(
     mngr_version: str,
     error_type: str,
     error_message: str,
+    base_dir: Path = Path("/tmp"),
 ) -> Path:
     """Write a diagnostic-agent prompt to a temp file for `mngr create --message-file`.
 
-    Returns the path to the written file. Content-addressed so repeated calls
-    with the same inputs produce the same path.
+    Returns the path to the written file under ``base_dir``. Content-addressed
+    so repeated calls with the same inputs produce the same path. ``base_dir``
+    is overridable for tests; production callers use the default /tmp location.
     """
     prompt = build_diagnose_prompt(
         error_type=error_type,
@@ -300,7 +302,7 @@ def write_diagnose_prompt_file(
         mngr_version=mngr_version,
     )
     content_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
-    path = Path(f"/tmp/mngr-diagnose-prompt-{content_hash}.txt")
+    path = base_dir / f"mngr-diagnose-prompt-{content_hash}.txt"
     path.write_text(prompt)
     return path
 
