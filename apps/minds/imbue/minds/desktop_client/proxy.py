@@ -167,9 +167,10 @@ def rewrite_location_header(
 
     Without this, a backend returning ``Location: /foo`` causes the browser to resolve
     the redirect against the document origin, escaping the proxy prefix and landing on
-    the desktop client root. Relative paths resolve correctly via the injected
-    ``<base>`` tag, so they are left untouched. Absolute URLs (with scheme or
-    protocol-relative ``//``) and already-prefixed paths are also left unchanged.
+    the desktop client root. Relative paths are left untouched because the browser
+    resolves a relative ``Location`` against the request URL, which already lives under
+    the proxied prefix. Absolute URLs (with scheme or protocol-relative ``//``) and
+    already-prefixed paths are also left unchanged.
     """
     parts = urlsplit(location_header)
     # Absolute URL (e.g., https://example.com/...) or protocol-relative (//host/...).
