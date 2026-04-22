@@ -66,6 +66,19 @@ ENV UV_LINK_MODE=copy
 # copy in all of our code (offload exports the repo tree as the build context).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
+
+# mngr_schedule release tests pass a context_dir containing a `current.tar.gz`
+# (the packaged mngr monorepo) instead of a raw checkout, so the COPY above
+# lands just the tarball + its .checkpoint marker. Extract it in-place so the
+# rest of the Dockerfile sees a real source tree. When the context already is
+# a full checkout (offload release + local docker builds), this step is a
+# no-op because current.tar.gz is absent.
+RUN if [ -f /code/mngr/current.tar.gz ]; then \
+        echo "Expanding /code/mngr/current.tar.gz produced by mngr_schedule packaging" ; \
+        cd /code/mngr && \
+        tar xzf current.tar.gz && \
+        rm -f current.tar.gz *.checkpoint ; \
+    fi
 # --system writes to /etc/gitconfig so the exemption survives tests that
 # redirect HOME to a tmp dir (isolate_home). Tests that also set
 # GIT_CONFIG_NOSYSTEM=1 still need a per-test-home .gitconfig, which
