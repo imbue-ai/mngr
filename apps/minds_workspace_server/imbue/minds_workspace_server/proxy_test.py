@@ -7,6 +7,7 @@ from imbue.minds_workspace_server.proxy import generate_service_worker_js
 from imbue.minds_workspace_server.proxy import generate_websocket_shim_js
 from imbue.minds_workspace_server.proxy import rewrite_absolute_paths_in_html
 from imbue.minds_workspace_server.proxy import rewrite_cookie_path
+from imbue.minds_workspace_server.proxy import rewrite_location_header
 from imbue.minds_workspace_server.proxy import rewrite_proxied_html
 
 _TEST_SERVICE: ServiceName = ServiceName("web")
@@ -153,6 +154,99 @@ def test_rewrite_absolute_paths_handles_single_quotes() -> None:
         service_name=_TEST_SERVICE,
     )
     assert result == snapshot("<a href='/service/web/hello.txt'>link</a>")
+
+
+# -- Location header rewriting --
+
+
+def test_rewrite_location_header_with_site_absolute_path() -> None:
+    result = rewrite_location_header(
+        location_header="/foo",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == snapshot("/service/web/foo")
+
+
+def test_rewrite_location_header_with_site_absolute_root() -> None:
+    result = rewrite_location_header(
+        location_header="/",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == snapshot("/service/web/")
+
+
+def test_rewrite_location_header_preserves_query_string() -> None:
+    result = rewrite_location_header(
+        location_header="/foo?bar=1&baz=2",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == snapshot("/service/web/foo?bar=1&baz=2")
+
+
+def test_rewrite_location_header_preserves_fragment() -> None:
+    result = rewrite_location_header(
+        location_header="/foo#section",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == snapshot("/service/web/foo#section")
+
+
+def test_rewrite_location_header_does_not_double_prefix() -> None:
+    already_prefixed = f"/service/{_TEST_SERVICE}/foo"
+    result = rewrite_location_header(
+        location_header=already_prefixed,
+        service_name=_TEST_SERVICE,
+    )
+    assert result == already_prefixed
+
+
+def test_rewrite_location_header_does_not_double_prefix_exact_match() -> None:
+    prefix = f"/service/{_TEST_SERVICE}"
+    result = rewrite_location_header(
+        location_header=prefix,
+        service_name=_TEST_SERVICE,
+    )
+    assert result == prefix
+
+
+def test_rewrite_location_header_preserves_relative_path() -> None:
+    result = rewrite_location_header(
+        location_header="foo",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == "foo"
+
+
+def test_rewrite_location_header_preserves_dot_relative_path() -> None:
+    result = rewrite_location_header(
+        location_header="./foo",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == "./foo"
+
+
+def test_rewrite_location_header_preserves_protocol_relative_url() -> None:
+    result = rewrite_location_header(
+        location_header="//example.com/page",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == "//example.com/page"
+
+
+def test_rewrite_location_header_preserves_absolute_url() -> None:
+    result = rewrite_location_header(
+        location_header="https://example.com/page",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == "https://example.com/page"
+
+
+def test_rewrite_location_header_preserves_fragment_only() -> None:
+    result = rewrite_location_header(
+        location_header="#anchor",
+        service_name=_TEST_SERVICE,
+    )
+    assert result == "#anchor"
 
 
 # -- Full proxied HTML rewriting --

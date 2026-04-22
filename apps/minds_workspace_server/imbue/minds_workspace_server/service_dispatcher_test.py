@@ -18,6 +18,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import PlainTextResponse
+from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocket
@@ -103,6 +104,19 @@ def _build_stub_backend() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @stub.post("/redirect-absolute")
+    def redirect_absolute() -> RedirectResponse:
+        # Simulates a FastAPI 303-after-POST returning a site-absolute Location.
+        return RedirectResponse(url="/landed", status_code=303)
+
+    @stub.post("/redirect-relative")
+    def redirect_relative() -> RedirectResponse:
+        return RedirectResponse(url="./landed", status_code=303)
+
+    @stub.post("/redirect-absolute-url")
+    def redirect_absolute_url() -> RedirectResponse:
+        return RedirectResponse(url="https://example.com/landed", status_code=303)
 
     @stub.websocket("/ws-echo")
     async def ws_echo(websocket: WebSocket) -> None:
@@ -224,6 +238,39 @@ def test_set_cookie_is_rewritten_to_service_path(workspace_client: TestClient) -
     assert response.status_code == 200
     set_cookie = response.headers.get("set-cookie", "")
     assert "Path=/service/web/" in set_cookie
+
+
+def test_site_absolute_redirect_location_is_rewritten(workspace_client: TestClient) -> None:
+    """A backend 303-after-POST with site-absolute Location gets rewritten to the service prefix."""
+    response = workspace_client.post(
+        "/service/web/redirect-absolute",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/service/web/landed"
+
+
+def test_relative_redirect_location_is_preserved(workspace_client: TestClient) -> None:
+    """Relative Location values pass through; the browser resolves them against the request URL."""
+    response = workspace_client.post(
+        "/service/web/redirect-relative",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "./landed"
+
+
+def test_external_absolute_url_redirect_is_preserved(workspace_client: TestClient) -> None:
+    """Location headers pointing to an external origin are left unchanged."""
+    response = workspace_client.post(
+        "/service/web/redirect-absolute-url",
+        cookies={"sw_installed_web": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://example.com/landed"
 
 
 def test_unknown_service_returns_loading_page_for_html(workspace_client: TestClient) -> None:
