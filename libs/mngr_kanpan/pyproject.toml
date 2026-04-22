@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-kanpan"
-version = "0.2.4"
+version = "0.2.5"
 description = "All-seeing agent tracker"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.4",
+    "imbue-mngr==0.2.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
 ]
@@ -33,18 +33,12 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.mngr_kanpan",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=85",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -72,3 +66,6 @@ venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.12"
 strict = ["**/*.py"]
+
+[tool.coverage.report]
+fail_under = 85

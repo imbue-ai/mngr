@@ -8,7 +8,6 @@ Marked with @pytest.mark.docker_sdk and @pytest.mark.acceptance so they only
 run in CI acceptance test shards (not in the default local test suite).
 """
 
-from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -18,7 +17,6 @@ import docker.errors
 import docker.models.containers
 import pytest
 
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
@@ -32,7 +30,6 @@ from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
 from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import build_container_labels
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.acceptance]
@@ -44,11 +41,6 @@ DOCKER_TEST_TIMEOUT = 120
 # which matters a lot when using the VFS storage driver (full copy per container).
 # All commands used in tests (echo, cat, tr, false, sleep, tail) are busybox builtins.
 TEST_IMAGE = "busybox:latest"
-
-
-@pytest.fixture
-def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
-    yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
 def _create_test_container(

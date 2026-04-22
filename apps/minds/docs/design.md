@@ -46,7 +46,7 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-When the desktop client is configured with Cloudflare credentials (via `CLOUDFLARE_FORWARDING_URL`, `CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, and `OWNER_EMAIL` environment variables), it creates a Cloudflare tunnel for each new agent. The tunnel provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
+The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
 
 The per-agent servers page shows both local forwarding links and global Cloudflare links, with toggle controls for enabling/disabling global forwarding per service.
 

@@ -217,11 +217,22 @@ def load_config(
     final_config = MngrConfig.model_validate(config_dict)
 
     # check whether we're in pytest
-    if not final_config.is_allowed_in_pytest:
-        if "PYTEST_CURRENT_TEST" in os.environ:
+    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
+        if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. This can happen when tests are poorly written, and load the .mngr/settings.toml file from the root of the mngr project"
+                "Running mngr within pytest is not allowed by the current configuration. "
+                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
+                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
+                "cannot mutate real mngr state."
             )
+        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
+        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
+        # test_schedule_add.py's local-dev path intentionally runs against the
+        # developer's real ~/.mngr so the subprocess can pick up their Modal
+        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
+        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
+        # which rejects env names that don't match TEST_ENV_PATTERN during
+        # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config

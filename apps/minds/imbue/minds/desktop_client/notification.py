@@ -39,6 +39,31 @@ class NotificationUrgency(UpperCaseStrEnum):
     CRITICAL = auto()
 
 
+class DispatchChannel(UpperCaseStrEnum):
+    """Channel a NotificationDispatcher routes a notification to.
+
+    Electron takes priority when the server is running inside the desktop app;
+    otherwise macOS native notifications are used on Darwin, and tkinter toasts
+    elsewhere.
+    """
+
+    ELECTRON = auto()
+    MACOS = auto()
+    TKINTER = auto()
+
+
+def _select_dispatch_channel(is_electron: bool, is_macos: bool) -> DispatchChannel:
+    """Pick the dispatch channel for the given platform flags.
+
+    Priority: Electron > macOS native > tkinter toast.
+    """
+    if is_electron:
+        return DispatchChannel.ELECTRON
+    if is_macos:
+        return DispatchChannel.MACOS
+    return DispatchChannel.TKINTER
+
+
 class NotificationRequest(FrozenModel):
     """A notification to display to the user."""
 
@@ -47,6 +72,10 @@ class NotificationRequest(FrozenModel):
     urgency: NotificationUrgency = Field(
         default=NotificationUrgency.NORMAL,
         description="Urgency level (low, normal, critical)",
+    )
+    url: str | None = Field(
+        default=None,
+        description="URL to navigate to when the notification is clicked",
     )
 
 
@@ -69,6 +98,8 @@ def _dispatch_electron_notification(
     }
     if request.title is not None:
         data["title"] = request.title
+    if request.url is not None:
+        data["url"] = request.url
     emit_event("notification", data, OutputFormat.JSONL)
 
 
@@ -206,17 +237,25 @@ def _run_macos_notification_subprocess(script: str) -> None:
         logger.warning("Failed to show macOS notification: {}", e)
 
 
-def _dispatch_macos_notification(
+def _build_osascript_notification(
     request: NotificationRequest,
     agent_display_name: str,
-) -> None:
-    """Display a native macOS notification via osascript on a background thread."""
+) -> str:
+    """Build the AppleScript command that displays a native macOS notification."""
     display_title = request.title or f"Notification from {agent_display_name}"
     # Escape double quotes for AppleScript string literals
     escaped_title = display_title.replace('"', '\\"')
     escaped_message = request.message.replace('"', '\\"')
     escaped_subtitle = f"From: {agent_display_name}".replace('"', '\\"')
-    script = f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
+    return f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
+
+
+def _dispatch_macos_notification(
+    request: NotificationRequest,
+    agent_display_name: str,
+) -> None:
+    """Display a native macOS notification via osascript on a background thread."""
+    script = _build_osascript_notification(request, agent_display_name)
     thread = threading.Thread(
         target=_run_macos_notification_subprocess,
         args=(script,),
@@ -265,9 +304,11 @@ class NotificationDispatcher(FrozenModel):
 
         Priority: Electron > macOS native > tkinter toast.
         """
-        if self.is_electron:
-            _dispatch_electron_notification(request, agent_display_name)
-        elif self.is_macos:
-            _dispatch_macos_notification(request, agent_display_name)
-        else:
-            _show_tkinter_toast(request, agent_display_name, tk=self._tk)
+        channel = _select_dispatch_channel(is_electron=self.is_electron, is_macos=self.is_macos)
+        match channel:
+            case DispatchChannel.ELECTRON:
+                _dispatch_electron_notification(request, agent_display_name)
+            case DispatchChannel.MACOS:
+                _dispatch_macos_notification(request, agent_display_name)
+            case DispatchChannel.TKINTER:
+                _show_tkinter_toast(request, agent_display_name, tk=self._tk)

@@ -2,6 +2,8 @@
 
 The Modal provider creates agents in [Modal](https://modal.com) sandboxes. Each sandbox runs sshd and is accessed via SSH.
 
+For a step-by-step walkthrough of running coding agents on Modal, see the [Modal usage guide](../../concepts/modal_usage.md).
+
 ## Usage
 
 ```bash

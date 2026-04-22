@@ -60,6 +60,7 @@ from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
+from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
 from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
@@ -71,6 +72,7 @@ from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
 from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
+from imbue.mngr_claude.plugin import _rewrite_known_marketplaces_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
@@ -3324,6 +3326,127 @@ def test_generate_installed_plugins_content_returns_none_when_no_file(tmp_path: 
 
 
 # =============================================================================
+# _rewrite_known_marketplaces_paths / _generate_known_marketplaces_content Tests
+# =============================================================================
+
+
+def test_rewrite_known_marketplaces_paths_rebases_install_location() -> None:
+    """installLocation values under local_claude_dir are rebased onto remote_config_dir."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/mngr/agents/abc123/plugin/claude/anthropic")
+    content = json.dumps(
+        {
+            "imbue-code-guardian": {
+                "source": {"source": "github", "repo": "imbue-ai/code-guardian"},
+                "installLocation": "/Users/testuser/.claude/plugins/marketplaces/imbue-code-guardian",
+                "lastUpdated": "2026-04-08T23:35:41.300Z",
+            }
+        }
+    )
+
+    result = json.loads(_rewrite_known_marketplaces_paths(content, local_claude_dir, remote_config_dir))
+
+    assert (
+        result["imbue-code-guardian"]["installLocation"]
+        == "/mngr/agents/abc123/plugin/claude/anthropic/plugins/marketplaces/imbue-code-guardian"
+    )
+
+
+def test_rewrite_known_marketplaces_paths_handles_multiple_marketplaces() -> None:
+    """All marketplaces in the file have their installLocation rewritten."""
+    local_claude_dir = Path("/home/user/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "org-a": {
+                "installLocation": "/home/user/.claude/plugins/marketplaces/org-a",
+            },
+            "org-b": {
+                "installLocation": "/home/user/.claude/plugins/marketplaces/org-b",
+            },
+        }
+    )
+
+    result = json.loads(_rewrite_known_marketplaces_paths(content, local_claude_dir, remote_config_dir))
+
+    assert result["org-a"]["installLocation"] == "/remote/config/plugins/marketplaces/org-a"
+    assert result["org-b"]["installLocation"] == "/remote/config/plugins/marketplaces/org-b"
+
+
+def test_rewrite_known_marketplaces_paths_best_effort_for_non_matching_prefix() -> None:
+    """installLocation from a different base path is rewritten using /plugins/ marker."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "best-of-n": {
+                "installLocation": "/Users/other/.mngr/agents/old-agent/plugin/claude/anthropic/plugins/marketplaces/best-of-n",
+            }
+        }
+    )
+
+    result = json.loads(_rewrite_known_marketplaces_paths(content, local_claude_dir, remote_config_dir))
+
+    assert result["best-of-n"]["installLocation"] == "/remote/config/plugins/marketplaces/best-of-n"
+
+
+def test_rewrite_known_marketplaces_paths_preserves_other_fields() -> None:
+    """Fields other than installLocation are preserved unchanged."""
+    local_claude_dir = Path("/Users/testuser/.claude")
+    remote_config_dir = Path("/remote/config")
+    content = json.dumps(
+        {
+            "my-marketplace": {
+                "source": {"source": "github", "repo": "org/repo"},
+                "installLocation": "/Users/testuser/.claude/plugins/marketplaces/my-marketplace",
+                "lastUpdated": "2026-01-01T00:00:00.000Z",
+            }
+        }
+    )
+
+    result = json.loads(_rewrite_known_marketplaces_paths(content, local_claude_dir, remote_config_dir))
+
+    assert result["my-marketplace"]["source"] == {"source": "github", "repo": "org/repo"}
+    assert result["my-marketplace"]["lastUpdated"] == "2026-01-01T00:00:00.000Z"
+
+
+def test_generate_known_marketplaces_content_rewrites_paths(tmp_path: Path) -> None:
+    """_generate_known_marketplaces_content rewrites installLocation from source to target."""
+    source_claude_dir = tmp_path / "source_claude"
+    plugins_dir = source_claude_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    target_config_dir = tmp_path / "target"
+
+    (plugins_dir / "known_marketplaces.json").write_text(
+        json.dumps(
+            {
+                "test-marketplace": {
+                    "installLocation": f"{source_claude_dir}/plugins/marketplaces/test-marketplace",
+                }
+            }
+        )
+    )
+
+    content = _generate_known_marketplaces_content(source_claude_dir, target_config_dir)
+
+    assert content is not None
+    result = json.loads(content)
+    assert result["test-marketplace"]["installLocation"] == str(
+        target_config_dir / "plugins" / "marketplaces" / "test-marketplace"
+    )
+
+
+def test_generate_known_marketplaces_content_returns_none_when_no_file(tmp_path: Path) -> None:
+    """_generate_known_marketplaces_content returns None when file does not exist."""
+    source_claude_dir = tmp_path / "source_claude"
+    source_claude_dir.mkdir()
+    target_config_dir = tmp_path / "target"
+
+    result = _generate_known_marketplaces_content(source_claude_dir, target_config_dir)
+    assert result is None
+
+
+# =============================================================================
 # get_files_for_deploy sentinel rewrite Tests
 # =============================================================================
 
@@ -3362,6 +3485,40 @@ def test_get_files_for_deploy_rewrites_install_paths_to_sentinel(temp_mngr_ctx: 
     # No marker file should be present
     marker_key = Path("~/.claude/plugins/.installed_plugins_source_dir")
     assert marker_key not in result
+
+
+def test_get_files_for_deploy_rewrites_marketplace_paths_to_sentinel(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """get_files_for_deploy rewrites installLocation values in known_marketplaces.json to use the sentinel prefix."""
+    claude_dir = Path.home() / ".claude"
+    plugins_dir = claude_dir / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "known_marketplaces.json").write_text(
+        json.dumps(
+            {
+                "imbue-code-guardian": {
+                    "source": {"source": "github", "repo": "imbue-ai/code-guardian"},
+                    "installLocation": f"{claude_dir}/plugins/marketplaces/imbue-code-guardian",
+                    "lastUpdated": "2026-04-08T23:35:41.300Z",
+                }
+            }
+        )
+    )
+
+    result = get_files_for_deploy(
+        mngr_ctx=temp_mngr_ctx, include_user_settings=True, include_project_settings=False, repo_root=tmp_path
+    )
+
+    marketplaces_json_key = Path("~/.claude/plugins/known_marketplaces.json")
+    assert marketplaces_json_key in result
+    marketplaces_json_content = result[marketplaces_json_key]
+    assert isinstance(marketplaces_json_content, str)
+    data = json.loads(marketplaces_json_content)
+    assert (
+        data["imbue-code-guardian"]["installLocation"]
+        == "/__mngr_plugins_source__/plugins/marketplaces/imbue-code-guardian"
+    )
 
 
 # =============================================================================
@@ -3644,4 +3801,34 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
 
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
+    assert json.loads(source_file.read_text()) == {"original": True}
+
+
+def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """When a generated file targets a path that is a symlink, the symlink is broken and a regular file is written.
+
+    This prevents corruption of the source file (e.g. ~/.claude/plugins/known_marketplaces.json)
+    when _sync_user_resources creates child-level symlinks and a generated file needs to overwrite one.
+    """
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_file = source_dir / "known_marketplaces.json"
+    source_file.write_text('{"original": true}')
+
+    config_dir = tmp_path / "config"
+    plugins_dir = config_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    symlink = plugins_dir / "known_marketplaces.json"
+    symlink.symlink_to(source_file)
+
+    host = cast(OnlineHostInterface, FakeHost())
+    rewritten_content = '{"rewritten": true}'
+    generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
+
+    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+
+    # The symlink should be replaced with a regular file containing the rewritten content
+    assert not symlink.is_symlink()
+    assert symlink.read_text() == rewritten_content
+    # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}

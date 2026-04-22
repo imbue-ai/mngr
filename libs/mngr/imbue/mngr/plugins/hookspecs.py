@@ -518,3 +518,15 @@ def on_error(command_name: str, command_params: dict[str, Any], error: BaseExcep
 @hookspec
 def on_shutdown() -> None:
     """[experimental] Called when mngr is shutting down, after the command has completed."""
+
+
+@hookspec
+def register_hookspecs() -> Any | None:
+    """Register additional hookspec modules with the plugin manager.
+
+    Plugins that define their own hooks should implement this to return
+    a module containing @hookspec-decorated functions. The module will be
+    passed to pm.add_hookspecs() after all plugins are loaded.
+
+    Return a module object, or None if not contributing any hookspecs.
+    """

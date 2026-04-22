@@ -36,6 +36,12 @@ class MngrCommandError(MindError):
     ...
 
 
+class MindsConfigError(MindError):
+    """Raised when minds config cannot be parsed or validated."""
+
+    ...
+
+
 class TelegramError(MindError):
     """Base exception for all telegram-related errors."""
 
