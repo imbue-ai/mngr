@@ -9,22 +9,22 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
-from imbue.minds.desktop_client.backend_resolver import ServerLogParseError
-from imbue.minds.desktop_client.backend_resolver import ServerLogRecord
+from imbue.minds.desktop_client.backend_resolver import ServiceLogParseError
+from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import parse_agent_ids_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
-from imbue.minds.desktop_client.backend_resolver import parse_server_log_records
+from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
-from imbue.minds.desktop_client.conftest import make_server_log
-from imbue.minds.primitives import ServerName
+from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
-_SERVER_WEB: ServerName = ServerName("web")
-_SERVER_API: ServerName = ServerName("api")
+_SERVER_WEB: ServiceName = ServiceName("web")
+_SERVER_API: ServiceName = ServiceName("api")
 
 
 # -- StaticBackendResolver tests --
@@ -32,7 +32,7 @@ _SERVER_API: ServerName = ServerName("api")
 
 def test_static_get_backend_url_returns_url_for_known_agent_and_server() -> None:
     resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(_AGENT_A): {"web": "http://localhost:3001"}},
+        url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
     url = resolver.get_backend_url(_AGENT_A, _SERVER_WEB)
     assert url == "http://localhost:3001"
@@ -40,7 +40,7 @@ def test_static_get_backend_url_returns_url_for_known_agent_and_server() -> None
 
 def test_static_get_backend_url_returns_none_for_unknown_agent() -> None:
     resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(_AGENT_A): {"web": "http://localhost:3001"}},
+        url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
     url = resolver.get_backend_url(_AGENT_B, _SERVER_WEB)
     assert url is None
@@ -48,7 +48,7 @@ def test_static_get_backend_url_returns_none_for_unknown_agent() -> None:
 
 def test_static_get_backend_url_returns_none_for_unknown_server() -> None:
     resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(_AGENT_A): {"web": "http://localhost:3001"}},
+        url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
     )
     url = resolver.get_backend_url(_AGENT_A, _SERVER_API)
     assert url is None
@@ -56,7 +56,7 @@ def test_static_get_backend_url_returns_none_for_unknown_server() -> None:
 
 def test_static_list_known_agent_ids_returns_sorted_ids() -> None:
     resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(_AGENT_B): {"web": "http://localhost:3002"},
             str(_AGENT_A): {"web": "http://localhost:3001"},
         },
@@ -66,55 +66,55 @@ def test_static_list_known_agent_ids_returns_sorted_ids() -> None:
 
 
 def test_static_list_known_agent_ids_returns_empty_tuple_when_no_agents() -> None:
-    resolver = StaticBackendResolver(url_by_agent_and_server={})
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
     ids = resolver.list_known_agent_ids()
     assert ids == ()
 
 
 def test_static_list_servers_for_agent_returns_sorted_names() -> None:
     resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(_AGENT_A): {"web": "http://localhost:3001", "api": "http://localhost:3002"},
         },
     )
-    servers = resolver.list_servers_for_agent(_AGENT_A)
+    servers = resolver.list_services_for_agent(_AGENT_A)
     assert servers == (_SERVER_API, _SERVER_WEB)
 
 
 def test_static_list_servers_for_agent_returns_empty_for_unknown_agent() -> None:
-    resolver = StaticBackendResolver(url_by_agent_and_server={})
-    servers = resolver.list_servers_for_agent(_AGENT_A)
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    servers = resolver.list_services_for_agent(_AGENT_A)
     assert servers == ()
 
 
-# -- parse_server_log_records tests --
+# -- parse_service_log_records tests --
 
 
 def test_parse_server_log_records_parses_valid_jsonl() -> None:
-    text = '{"server": "web", "url": "http://127.0.0.1:9100"}\n'
-    records = parse_server_log_records(text)
+    text = '{"service": "web", "url": "http://127.0.0.1:9100"}\n'
+    records = parse_service_log_records(text)
 
     assert len(records) == 1
-    assert isinstance(records[0], ServerLogRecord)
-    assert records[0].server == ServerName("web")
+    assert isinstance(records[0], ServiceLogRecord)
+    assert records[0].service == ServiceName("web")
     assert records[0].url == "http://127.0.0.1:9100"
 
 
 def test_parse_server_log_records_returns_empty_for_empty_input() -> None:
-    assert parse_server_log_records("") == []
-    assert parse_server_log_records("\n") == []
+    assert parse_service_log_records("") == []
+    assert parse_service_log_records("\n") == []
 
 
 def test_parse_server_log_records_raises_on_invalid_json() -> None:
-    text = 'bad line\n{"server": "web", "url": "http://127.0.0.1:9100"}\n'
+    text = 'bad line\n{"service": "web", "url": "http://127.0.0.1:9100"}\n'
     with pytest.raises(json.JSONDecodeError):
-        parse_server_log_records(text)
+        parse_service_log_records(text)
 
 
 def test_parse_server_log_records_raises_on_missing_fields() -> None:
-    text = '{"server": "web"}\n'
-    with pytest.raises(ServerLogParseError, match="missing required fields"):
-        parse_server_log_records(text)
+    text = '{"service": "web"}\n'
+    with pytest.raises(ServiceLogParseError, match="missing required fields"):
+        parse_service_log_records(text)
 
 
 def test_parse_server_log_records_ignores_envelope_fields() -> None:
@@ -122,30 +122,30 @@ def test_parse_server_log_records_ignores_envelope_fields() -> None:
         json.dumps(
             {
                 "timestamp": "2026-01-01T00:00:00.000000000Z",
-                "type": "server_registered",
+                "type": "service_registered",
                 "event_id": "evt-abc123",
-                "source": "servers",
-                "server": "web",
+                "source": "services",
+                "service": "web",
                 "url": "http://127.0.0.1:9100",
             }
         )
         + "\n"
     )
-    records = parse_server_log_records(text)
+    records = parse_service_log_records(text)
 
     assert len(records) == 1
-    assert isinstance(records[0], ServerLogRecord)
-    assert records[0].server == ServerName("web")
+    assert isinstance(records[0], ServiceLogRecord)
+    assert records[0].service == ServiceName("web")
     assert records[0].url == "http://127.0.0.1:9100"
 
 
 def test_parse_server_log_records_returns_multiple_records() -> None:
-    text = '{"server": "web", "url": "http://127.0.0.1:9100"}\n{"server": "api", "url": "http://127.0.0.1:9200"}\n'
-    records = parse_server_log_records(text)
+    text = '{"service": "web", "url": "http://127.0.0.1:9100"}\n{"service": "api", "url": "http://127.0.0.1:9200"}\n'
+    records = parse_service_log_records(text)
 
     assert len(records) == 2
-    assert records[0].server == ServerName("web")
-    assert records[1].server == ServerName("api")
+    assert records[0].service == ServiceName("web")
+    assert records[1].service == ServiceName("api")
 
 
 # -- parse_agent_ids_from_json tests --
@@ -172,7 +172,7 @@ def test_parse_agent_ids_from_json_returns_empty_for_invalid_json() -> None:
 
 def test_mngr_cli_resolver_returns_url_for_specific_server() -> None:
     resolver = make_resolver_with_data(
-        server_logs={str(_AGENT_A): make_server_log("web", "http://127.0.0.1:9100")},
+        service_logs={str(_AGENT_A): make_service_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
     )
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
@@ -180,21 +180,21 @@ def test_mngr_cli_resolver_returns_url_for_specific_server() -> None:
 
 def test_mngr_cli_resolver_returns_none_for_unknown_server_name() -> None:
     resolver = make_resolver_with_data(
-        server_logs={str(_AGENT_A): make_server_log("web", "http://127.0.0.1:9100")},
+        service_logs={str(_AGENT_A): make_service_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
     )
     assert resolver.get_backend_url(_AGENT_A, _SERVER_API) is None
 
 
 def test_mngr_cli_resolver_returns_none_for_unknown_agent() -> None:
-    resolver = make_resolver_with_data(server_logs={}, agents_json=make_agents_json())
+    resolver = make_resolver_with_data(service_logs={}, agents_json=make_agents_json())
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
 
 
 def test_mngr_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
-    log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("api", "http://127.0.0.1:9200")
+    log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
-        server_logs={str(_AGENT_A): log_content},
+        service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
@@ -202,27 +202,27 @@ def test_mngr_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
 
 
 def test_mngr_cli_resolver_later_entry_overrides_earlier_for_same_server() -> None:
-    log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("web", "http://127.0.0.1:9200")
+    log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("web", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
-        server_logs={str(_AGENT_A): log_content},
+        service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
 
 
 def test_mngr_cli_resolver_lists_servers_for_agent() -> None:
-    log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("api", "http://127.0.0.1:9200")
+    log_content = make_service_log("web", "http://127.0.0.1:9100") + make_service_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
-        server_logs={str(_AGENT_A): log_content},
+        service_logs={str(_AGENT_A): log_content},
         agents_json=make_agents_json(_AGENT_A),
     )
-    servers = resolver.list_servers_for_agent(_AGENT_A)
+    servers = resolver.list_services_for_agent(_AGENT_A)
     assert servers == (_SERVER_API, _SERVER_WEB)
 
 
 def test_mngr_cli_resolver_lists_known_agents() -> None:
     resolver = make_resolver_with_data(
-        server_logs={},
+        service_logs={},
         agents_json=make_agents_json(_AGENT_A, _AGENT_B),
     )
     ids = resolver.list_known_agent_ids()
@@ -231,7 +231,7 @@ def test_mngr_cli_resolver_lists_known_agents() -> None:
 
 
 def test_mngr_cli_resolver_returns_empty_when_no_agents() -> None:
-    resolver = make_resolver_with_data(server_logs={}, agents_json=make_agents_json())
+    resolver = make_resolver_with_data(service_logs={}, agents_json=make_agents_json())
     assert resolver.list_known_agent_ids() == ()
 
 
@@ -264,14 +264,14 @@ def test_mngr_cli_resolver_has_completed_initial_discovery() -> None:
     assert resolver.has_completed_initial_discovery()
 
 
-def test_mngr_cli_resolver_update_servers_replaces_state() -> None:
-    """Calling update_servers replaces the server map for that agent."""
+def test_mngr_cli_resolver_update_services_replaces_state() -> None:
+    """Calling update_services replaces the service map for that agent."""
     resolver = MngrCliBackendResolver()
 
-    resolver.update_servers(_AGENT_A, {"web": "http://127.0.0.1:9100"})
+    resolver.update_services(_AGENT_A, {"web": "http://127.0.0.1:9100"})
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
 
-    resolver.update_servers(_AGENT_A, {"web": "http://127.0.0.1:9200"})
+    resolver.update_services(_AGENT_A, {"web": "http://127.0.0.1:9200"})
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
 
 
@@ -389,7 +389,7 @@ def test_mngr_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
         "key_path": "/tmp/test_key",
     }
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
-    resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)
+    resolver = make_resolver_with_data(service_logs={}, agents_json=agents_json)
 
     ssh_info = resolver.get_ssh_info(_AGENT_A)
     assert ssh_info is not None
@@ -399,14 +399,14 @@ def test_mngr_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
 
 def test_mngr_cli_resolver_get_ssh_info_returns_none_for_local_agent() -> None:
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), None))
-    resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)
+    resolver = make_resolver_with_data(service_logs={}, agents_json=agents_json)
 
     assert resolver.get_ssh_info(_AGENT_A) is None
 
 
 def test_mngr_cli_resolver_get_ssh_info_returns_none_for_unknown_agent() -> None:
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), None))
-    resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)
+    resolver = make_resolver_with_data(service_logs={}, agents_json=agents_json)
 
     assert resolver.get_ssh_info(_AGENT_B) is None
 
@@ -418,13 +418,13 @@ def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
     """The base class default get_ssh_info returns None for all agents."""
 
     class MinimalResolver(BackendResolverInterface):
-        def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+        def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
             return None
 
         def list_known_agent_ids(self) -> tuple[AgentId, ...]:
             return ()
 
-        def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+        def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
             return ()
 
     resolver = MinimalResolver()
@@ -436,7 +436,7 @@ def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
 
 def test_mngr_cli_resolver_get_agent_display_info_returns_info_for_known_agent() -> None:
     agents_json = make_agents_json(_AGENT_A)
-    resolver = make_resolver_with_data(agents_json=agents_json, server_logs={})
+    resolver = make_resolver_with_data(agents_json=agents_json, service_logs={})
 
     info = resolver.get_agent_display_info(_AGENT_A)
     assert info is not None
@@ -446,7 +446,7 @@ def test_mngr_cli_resolver_get_agent_display_info_returns_info_for_known_agent()
 
 def test_mngr_cli_resolver_get_agent_display_info_returns_none_for_unknown_agent() -> None:
     agents_json = make_agents_json(_AGENT_A)
-    resolver = make_resolver_with_data(agents_json=agents_json, server_logs={})
+    resolver = make_resolver_with_data(agents_json=agents_json, service_logs={})
 
     assert resolver.get_agent_display_info(_AGENT_B) is None
 
@@ -458,13 +458,13 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_info_
     """The base class default get_agent_display_info returns info using agent_id as name."""
 
     class MinimalResolver(BackendResolverInterface):
-        def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+        def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
             return None
 
         def list_known_agent_ids(self) -> tuple[AgentId, ...]:
             return (_AGENT_A,)
 
-        def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+        def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
             return ()
 
     resolver = MinimalResolver()
@@ -478,13 +478,13 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_none_
     """The base class default get_agent_display_info returns None for unknown agents."""
 
     class MinimalResolver(BackendResolverInterface):
-        def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+        def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
             return None
 
         def list_known_agent_ids(self) -> tuple[AgentId, ...]:
             return ()
 
-        def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+        def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
             return ()
 
     resolver = MinimalResolver()
@@ -537,9 +537,9 @@ def test_stream_manager_handle_discovery_line_ignores_invalid_json() -> None:
 
 def test_stream_manager_on_events_stream_output_updates_servers() -> None:
     manager = _make_stream_manager()
-    manager._events_servers[str(_AGENT_A)] = {}
+    manager._events_services[str(_AGENT_A)] = {}
 
-    server_line = json.dumps({"server": "web", "url": "http://127.0.0.1:9100"})
+    server_line = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
     manager._on_events_stream_output(server_line, is_stdout=True, agent_id=_AGENT_A)
 
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
@@ -547,7 +547,7 @@ def test_stream_manager_on_events_stream_output_updates_servers() -> None:
 
 def test_stream_manager_on_events_stream_output_ignores_stderr() -> None:
     manager = _make_stream_manager()
-    manager._events_servers[str(_AGENT_A)] = {}
+    manager._events_services[str(_AGENT_A)] = {}
 
     manager._on_events_stream_output("stderr noise", is_stdout=False, agent_id=_AGENT_A)
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
@@ -555,7 +555,7 @@ def test_stream_manager_on_events_stream_output_ignores_stderr() -> None:
 
 def test_stream_manager_on_events_stream_output_ignores_invalid_json() -> None:
     manager = _make_stream_manager()
-    manager._events_servers[str(_AGENT_A)] = {}
+    manager._events_services[str(_AGENT_A)] = {}
 
     manager._on_events_stream_output("not json", is_stdout=True, agent_id=_AGENT_A)
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
@@ -564,10 +564,10 @@ def test_stream_manager_on_events_stream_output_ignores_invalid_json() -> None:
 def test_stream_manager_on_events_stream_output_accumulates_servers() -> None:
     """Multiple server records for the same agent accumulate in the server map."""
     manager = _make_stream_manager()
-    manager._events_servers[str(_AGENT_A)] = {}
+    manager._events_services[str(_AGENT_A)] = {}
 
-    web_line = json.dumps({"server": "web", "url": "http://127.0.0.1:9100"})
-    api_line = json.dumps({"server": "api", "url": "http://127.0.0.1:9200"})
+    web_line = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
+    api_line = json.dumps({"service": "api", "url": "http://127.0.0.1:9200"})
 
     manager._on_events_stream_output(web_line, is_stdout=True, agent_id=_AGENT_A)
     manager._on_events_stream_output(api_line, is_stdout=True, agent_id=_AGENT_A)
@@ -579,10 +579,10 @@ def test_stream_manager_on_events_stream_output_accumulates_servers() -> None:
 def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() -> None:
     """A later server record for the same server name replaces the earlier URL."""
     manager = _make_stream_manager()
-    manager._events_servers[str(_AGENT_A)] = {}
+    manager._events_services[str(_AGENT_A)] = {}
 
-    line1 = json.dumps({"server": "web", "url": "http://127.0.0.1:9100"})
-    line2 = json.dumps({"server": "web", "url": "http://127.0.0.1:9200"})
+    line1 = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
+    line2 = json.dumps({"service": "web", "url": "http://127.0.0.1:9200"})
 
     manager._on_events_stream_output(line1, is_stdout=True, agent_id=_AGENT_A)
     manager._on_events_stream_output(line2, is_stdout=True, agent_id=_AGENT_A)
@@ -894,7 +894,7 @@ def test_stream_manager_agent_destroyed_clears_servers() -> None:
         manager._handle_discovery_line(full_line)
 
         # Add server data
-        server_line = json.dumps({"server": "web", "url": "http://127.0.0.1:9100"})
+        server_line = json.dumps({"service": "web", "url": "http://127.0.0.1:9100"})
         manager._on_events_stream_output(server_line, is_stdout=True, agent_id=_AGENT_A)
         assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
 

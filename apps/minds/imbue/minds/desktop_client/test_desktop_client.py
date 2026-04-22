@@ -17,10 +17,10 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.conftest import DEFAULT_SERVER_NAME
+from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
-from imbue.minds.desktop_client.conftest import make_server_log
+from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -30,7 +30,7 @@ from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServerName
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 
@@ -101,7 +101,7 @@ def _create_test_desktop_client(
 
 def _setup_test_server(
     tmp_path: Path,
-    server_name: ServerName = DEFAULT_SERVER_NAME,
+    service_name: ServiceName = DEFAULT_SERVICE_NAME,
 ) -> tuple[TestClient, FileAuthStore, AgentId]:
     """Set up a desktop client with a test backend for proxy testing."""
     agent_id = AgentId()
@@ -113,7 +113,7 @@ def _setup_test_server(
     )
 
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {str(server_name): "http://test-backend"}},
+        url_by_agent_and_service={str(agent_id): {str(service_name): "http://test-backend"}},
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -242,7 +242,7 @@ def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
 def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id): {"web": "http://test-backend:9100"},
         },
     )
@@ -261,7 +261,7 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"web": "http://test-backend"}},
+        url_by_agent_and_service={str(agent_id): {"web": "http://test-backend"}},
     )
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -279,7 +279,7 @@ def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
 def test_agent_servers_page_lists_available_servers(tmp_path: Path) -> None:
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id): {"web": "http://test-backend:9100", "api": "http://test-backend:9200"},
         },
     )
@@ -300,7 +300,7 @@ def test_agent_servers_page_lists_available_servers(tmp_path: Path) -> None:
 
 def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) -> None:
     agent_id = AgentId()
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={str(agent_id): {}})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -316,7 +316,7 @@ def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) ->
 def test_agent_servers_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"web": "http://test-backend"}},
+        url_by_agent_and_service={str(agent_id): {"web": "http://test-backend"}},
     )
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -328,13 +328,13 @@ def test_agent_servers_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
     assert response.status_code == 403
 
 
-# -- Proxy tests (now with server_name in URL) --
+# -- Proxy tests (now with service_name in URL) --
 
 
 def test_agent_proxy_rejects_unauthenticated_requests(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
 
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/")
     assert response.status_code == 403
 
 
@@ -343,7 +343,7 @@ def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> Non
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Electron/32.0.0",
@@ -360,7 +360,7 @@ def test_browser_navigation_serves_bootstrap_directly(tmp_path: Path) -> None:
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/",
         headers={
             "sec-fetch-mode": "navigate",
             "user-agent": "Mozilla/5.0 Firefox/130.0",
@@ -375,7 +375,7 @@ def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/__sw.js")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/__sw.js")
     assert response.status_code == 200
     assert "application/javascript" in response.headers["content-type"]
     assert "skipWaiting" in response.text
@@ -385,9 +385,9 @@ def test_agent_proxy_forwards_get_request_to_backend(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -396,10 +396,10 @@ def test_agent_proxy_forwards_post_request_to_backend(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     response = client.post(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/echo",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/echo",
         content=b"test-body-content",
     )
     assert response.status_code == 200
@@ -410,9 +410,9 @@ def test_agent_proxy_injects_websocket_shim_into_html_responses(tmp_path: Path) 
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/")
     assert response.status_code == 200
     assert "OrigWebSocket" in response.text
     assert "Hello from backend" in response.text
@@ -424,7 +424,7 @@ def _setup_test_server_without_backend(
     """Set up a desktop client with no backends for testing error paths."""
     agent_id = AgentId()
 
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -439,10 +439,10 @@ def _setup_test_server_without_backend(
 def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server_without_backend(tmp_path)
 
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/",
         headers={"Accept": "text/html"},
     )
     assert response.status_code == 200
@@ -458,10 +458,10 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
 def test_agent_proxy_returns_502_for_unknown_backend_non_html(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server_without_backend(tmp_path)
 
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/status",
         headers={"Accept": "application/json"},
     )
     assert response.status_code == 502
@@ -487,7 +487,7 @@ def test_websocket_proxy_rejects_unauthenticated_connection(tmp_path: Path) -> N
     client, _, agent_id = _setup_test_server(tmp_path)
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
+        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/ws"):
             pass
 
     assert exc_info.value.code == 4003
@@ -497,7 +497,7 @@ def test_websocket_proxy_rejects_unknown_backend(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server_without_backend(tmp_path)
 
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/ws"):
+        with client.websocket_connect(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/ws"):
             pass
 
     assert exc_info.value.code == 4004
@@ -507,7 +507,7 @@ def test_websocket_proxy_rejects_unknown_backend(tmp_path: Path) -> None:
 
 
 def test_proxy_routes_to_correct_server_for_multi_server_agent(tmp_path: Path) -> None:
-    """When an agent has multiple servers, each server_name routes to the correct backend."""
+    """When an agent has multiple servers, each service_name routes to the correct backend."""
     agent_id = AgentId()
 
     # Create two distinct backends
@@ -526,7 +526,7 @@ def test_proxy_routes_to_correct_server_for_multi_server_agent(tmp_path: Path) -
     test_http_client = _create_multi_backend_http_client(web_app=web_backend, api_app=api_backend)
 
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id): {
                 "web": "http://web-backend",
                 "api": "http://api-backend",
@@ -556,7 +556,7 @@ def test_agent_auth_covers_all_servers(tmp_path: Path) -> None:
     """Authenticating for an agent grants access to all of that agent's servers."""
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id): {
                 "web": "http://test-backend",
                 "api": "http://test-backend",
@@ -612,7 +612,7 @@ def test_mngr_cli_resolver_proxies_to_backend_discovered_via_mngr_cli(tmp_path: 
     )
 
     backend_resolver = make_resolver_with_data(
-        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
+        service_logs={str(agent_id): make_service_log("web", "http://test-backend")},
         agents_json=make_agents_json(agent_id),
     )
     client, auth_store = _create_test_desktop_client(
@@ -621,7 +621,7 @@ def test_mngr_cli_resolver_proxies_to_backend_discovered_via_mngr_cli(tmp_path: 
         http_client=test_http_client,
     )
 
-    assert backend_resolver.get_backend_url(agent_id, ServerName("web")) == "http://test-backend"
+    assert backend_resolver.get_backend_url(agent_id, ServiceName("web")) == "http://test-backend"
     assert agent_id in backend_resolver.list_known_agent_ids()
 
     _authenticate_client(client=client, auth_store=auth_store)
@@ -644,7 +644,7 @@ def test_mngr_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
-    log_content = make_server_log("web", "http://web-backend") + make_server_log("api", "http://api-backend")
+    log_content = make_service_log("web", "http://web-backend") + make_service_log("api", "http://api-backend")
 
     # Create distinct backends for web and api
     web_backend = FastAPI()
@@ -662,7 +662,7 @@ def test_mngr_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     test_http_client = _create_multi_backend_http_client(web_app=web_backend, api_app=api_backend)
 
     backend_resolver = make_resolver_with_data(
-        server_logs={str(agent_id): log_content},
+        service_logs={str(agent_id): log_content},
         agents_json=make_agents_json(agent_id),
     )
     client, auth_store = _create_test_desktop_client(
@@ -672,9 +672,9 @@ def test_mngr_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     )
 
     # Verify resolver sees both servers
-    servers = backend_resolver.list_servers_for_agent(agent_id)
-    assert ServerName("web") in servers
-    assert ServerName("api") in servers
+    servers = backend_resolver.list_services_for_agent(agent_id)
+    assert ServiceName("web") in servers
+    assert ServiceName("api") in servers
 
     _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
@@ -717,7 +717,7 @@ def test_mngr_cli_resolver_landing_page_lists_single_discovered_agent(tmp_path: 
     data_dir = tmp_path / "minds_data"
 
     backend_resolver = make_resolver_with_data(
-        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
+        service_logs={str(agent_id): make_service_log("web", "http://test-backend")},
         agents_json=make_agents_json(agent_id),
     )
     client, auth_store = _create_test_desktop_client(
@@ -738,10 +738,10 @@ def test_mngr_cli_resolver_agent_servers_page_via_mngr_cli(tmp_path: Path) -> No
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
-    log_content = make_server_log("web", "http://test:9100") + make_server_log("api", "http://test:9200")
+    log_content = make_service_log("web", "http://test:9100") + make_service_log("api", "http://test:9200")
 
     backend_resolver = make_resolver_with_data(
-        server_logs={str(agent_id): log_content},
+        service_logs={str(agent_id): log_content},
         agents_json=make_agents_json(agent_id),
     )
     client, auth_store = _create_test_desktop_client(
@@ -779,7 +779,7 @@ class _RemoteStaticBackendResolver(StaticBackendResolver):
     ssh_info: RemoteSSHInfo
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        if self.url_by_agent_and_server.get(str(agent_id)) is not None:
+        if self.url_by_agent_and_service.get(str(agent_id)) is not None:
             return self.ssh_info
         return None
 
@@ -798,7 +798,7 @@ def _setup_failing_tunnel_server(
     """Set up a desktop client with a tunnel manager that always fails."""
     agent_id = AgentId()
     backend_resolver = _RemoteStaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {"web": "http://127.0.0.1:9100"}},
+        url_by_agent_and_service={str(agent_id): {"web": "http://127.0.0.1:9100"}},
         ssh_info=_TEST_SSH_INFO,
     )
     auth_dir = tmp_path / "auth"
@@ -840,9 +840,9 @@ def test_http_proxy_without_tunnel_manager_works_for_local_backend(tmp_path: Pat
     """When no tunnel_manager is provided, local backends work normally."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -870,7 +870,7 @@ def _setup_disconnecting_backend_server(
     """Set up a desktop client whose backend always raises RemoteProtocolError."""
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {str(DEFAULT_SERVER_NAME): "http://test-backend"}},
+        url_by_agent_and_service={str(agent_id): {str(DEFAULT_SERVICE_NAME): "http://test-backend"}},
     )
     http_client = httpx.AsyncClient(transport=_DisconnectingTransport(), base_url="http://test-backend")
     client, auth_store = _create_test_desktop_client(
@@ -885,10 +885,10 @@ def _setup_disconnecting_backend_server(
 def test_http_proxy_returns_loading_page_when_backend_disconnects_html(tmp_path: Path) -> None:
     """When the backend hangs up without sending a response, HTML requests get the loading page."""
     client, _, agent_id = _setup_disconnecting_backend_server(tmp_path)
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/",
         headers={"Accept": "text/html"},
     )
     assert response.status_code == 200
@@ -899,10 +899,10 @@ def test_http_proxy_returns_loading_page_when_backend_disconnects_html(tmp_path:
 def test_http_proxy_returns_502_when_backend_disconnects_non_html(tmp_path: Path) -> None:
     """When the backend hangs up without sending a response, non-HTML requests get a 502."""
     client, _, agent_id = _setup_disconnecting_backend_server(tmp_path)
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     response = client.get(
-        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status",
+        f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/status",
         headers={"Accept": "application/json"},
     )
     assert response.status_code == 502
@@ -933,7 +933,7 @@ def test_proxy_combines_stored_and_request_query_strings(tmp_path: Path) -> None
 
     # Register backend with query string in the URL (like ttyd ?arg=chat dispatch)
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id): {"chat": "http://test-backend?arg=chat"},
         },
     )
@@ -962,10 +962,10 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
     """Backend URLs without query strings still work correctly (regression test)."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
-    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVICE_NAME}", "1")
 
     # Existing test: plain backend URL with request query
-    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/api/status", params={"foo": "bar"})
+    response = client.get(f"/forwarding/{agent_id}/{DEFAULT_SERVICE_NAME}/api/status", params={"foo": "bar"})
     assert response.status_code == 200
 
 
@@ -990,7 +990,7 @@ def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path
 
 def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path: Path) -> None:
     """After discovery completes with no agents, show the create form."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1006,7 +1006,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
     """The create form pre-fills the git URL from a query parameter."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1021,7 +1021,7 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
 
 def test_create_page_shows_form(tmp_path: Path) -> None:
     """GET /create shows the agent creation form."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1048,7 +1048,7 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id_1): {"web": "http://test:9100"},
             str(agent_id_2): {"web": "http://test:9200"},
         },
@@ -1068,7 +1068,7 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
 
 def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """POST /create returns 501 when no agent_creator is configured."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1082,7 +1082,7 @@ def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) ->
 
 def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """POST /api/create-agent returns 501 when no agent_creator is configured."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1096,7 +1096,7 @@ def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> N
 
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1116,7 +1116,7 @@ def _create_test_server_with_agent_creator(
 
     The returned client is already authenticated with a global session.
     """
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     agent_creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
@@ -1260,7 +1260,7 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={
+        url_by_agent_and_service={
             str(agent_id_1): {"web": "http://test:9100"},
             str(agent_id_2): {"web": "http://test:9200"},
         },
@@ -1279,7 +1279,7 @@ def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Pat
 
 def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /create returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1292,7 +1292,7 @@ def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
 
 def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
     """POST /create returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1305,7 +1305,7 @@ def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
 
 def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
     """POST /api/create-agent returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1318,7 +1318,7 @@ def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
 
 def test_creation_status_api_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/status returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1331,7 +1331,7 @@ def test_creation_status_api_rejects_unauthenticated(tmp_path: Path) -> None:
 
 def test_creation_logs_sse_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/logs returns 501 when no agent_creator."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1345,7 +1345,7 @@ def test_creation_logs_sse_returns_501_without_agent_creator(tmp_path: Path) -> 
 
 def test_creation_logs_sse_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/logs returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1378,7 +1378,7 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /creating/{id} returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, _ = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
@@ -1454,7 +1454,7 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     """Unhandled exceptions in routes produce a 500 response with the error message."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     app = create_desktop_client(
@@ -1522,7 +1522,7 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     """
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
-        url_by_agent_and_server={str(agent_id): {str(DEFAULT_SERVER_NAME): "http://test-backend"}},
+        url_by_agent_and_service={str(agent_id): {str(DEFAULT_SERVICE_NAME): "http://test-backend"}},
     )
 
     workspaces = _build_workspace_list(backend_resolver)
@@ -1543,7 +1543,7 @@ def _create_test_client_with_stores(
     minds_config = MindsConfig(data_dir=tmp_path)
     request_inbox = RequestInbox()
 
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -1632,12 +1632,12 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # Build the app inline so we can seed the inbox before creating the
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
-    event = create_sharing_request_event(agent_id=agent_id, server_name="web")
+    event = create_sharing_request_event(agent_id=agent_id, service_name="web")
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = MultiAccountSessionStore(data_dir=tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
     request_inbox = RequestInbox().add_request(event)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,

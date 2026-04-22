@@ -16,7 +16,7 @@ The desktop client (`minds forward`) provides:
 - A per-agent servers page showing local and global (Cloudflare) URLs with toggle controls
 - Service Worker-based path rewriting for transparent URL multiplexing
 
-Each workspace may run multiple web servers on separate ports. The desktop client multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{server_name}/`).
+Each workspace may run multiple web servers on separate ports. The desktop client multiplexes access to all of them under path prefixes (e.g. `/agents/{agent_id}/{service_name}/`).
 
 ### Agent container (runs in Docker)
 
@@ -48,7 +48,7 @@ global = true
 ```
 
 Each application gets two URLs:
-1. **Local**: `http://localhost:8420/agents/{agent_id}/{server_name}/` (via desktop client)
+1. **Local**: `http://localhost:8420/agents/{agent_id}/{service_name}/` (via desktop client)
 2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
 
 The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The desktop client's toggle controls are authoritative for the actual state.

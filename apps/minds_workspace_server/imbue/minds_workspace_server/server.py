@@ -623,24 +623,24 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 
 
-async def _get_sharing_status_endpoint(server_name: str) -> JSONResponse:
+async def _get_sharing_status_endpoint(service_name: str) -> JSONResponse:
     """Get the Cloudflare forwarding status for a server."""
     try:
-        status = await run_in_threadpool(get_sharing_status, server_name)
+        status = await run_in_threadpool(get_sharing_status, service_name)
         return JSONResponse(content=status.model_dump())
     except SharingProxyError as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
-async def _request_sharing_edit_endpoint(server_name: str) -> JSONResponse:
+async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
     """Create a sharing request event for editing sharing settings.
 
     Writes a request event to requests/events.jsonl so the desktop client
     can handle the actual sharing changes. Returns success immediately.
     """
     try:
-        await run_in_threadpool(request_sharing_edit, server_name, True)
+        await run_in_threadpool(request_sharing_edit, service_name, True)
         return JSONResponse(content={"ok": True, "message": "Sharing request sent"})
     except (SharingProxyError, RuntimeError) as e:
         error = ErrorResponse(detail=str(e))
@@ -682,8 +682,8 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
-    application.add_api_route("/api/sharing/{server_name}", _get_sharing_status_endpoint, methods=["GET"])
-    application.add_api_route("/api/sharing/{server_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
+    application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )

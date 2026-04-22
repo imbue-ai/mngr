@@ -2174,13 +2174,13 @@ class Host(BaseHost, OnlineHostInterface):
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             # _mkdirs uses mkdir -p, which is idempotent for existing directories
             events_dir = state_dir / "events"
-            servers_events_dir = events_dir / "servers"
+            services_events_dir = events_dir / "services"
             requests_events_dir = events_dir / "requests"
             self._mkdirs(
                 [
                     state_dir,
                     events_dir,
-                    servers_events_dir,
+                    services_events_dir,
                     requests_events_dir,
                     state_dir / "activity",
                     state_dir / "commands",
@@ -2190,9 +2190,9 @@ class Host(BaseHost, OnlineHostInterface):
             # Pre-create empty events.jsonl files so that `mngr events --follow`
             # finds the sources immediately on startup, rather than waiting for a
             # 10-second rescan after the agent's services start writing events.
-            servers_events_file = servers_events_dir / "events.jsonl"
+            services_events_file = services_events_dir / "events.jsonl"
             requests_events_file = requests_events_dir / "events.jsonl"
-            self.execute_idempotent_command(f"touch '{servers_events_file}' '{requests_events_file}'")
+            self.execute_idempotent_command(f"touch '{services_events_file}' '{requests_events_file}'")
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:

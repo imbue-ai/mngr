@@ -44,7 +44,7 @@ function getAccessMode(): AccessMode {
     return "cloudflare";
   }
   // Local mode: the desktop client proxy injects a <base> tag with
-  // href="/forwarding/{agentId}/{serverName}/" into the HTML.
+  // href="/forwarding/{agentId}/{serviceName}/" into the HTML.
   if (getForwardingPrefix() !== null) {
     return "local";
   }
@@ -123,7 +123,7 @@ let destroyTargetPanelId: string | null = null;
 
 // Share modal state
 let showShareModal = false;
-let shareServerName: string | null = null;
+let shareServiceName: string | null = null;
 
 interface SavedLayout {
   dockview: SerializedDockview;
@@ -225,10 +225,10 @@ function createCustomTab(options: { id: string; name: string }): {
 
       // Share button -- only on iframe/application tabs
       if (panelType === "iframe") {
-        const serverName = pp?.title ?? "web";
+        const serviceName = pp?.title ?? "web";
         actions.appendChild(
           createTabActionButton("Share", SVG_SHARE, () => {
-            shareServerName = serverName;
+            shareServiceName = serviceName;
             showShareModal = true;
             m.redraw();
           }),
@@ -832,12 +832,12 @@ export const DockviewWorkspace: m.Component = {
             })
           : null,
 
-        showShareModal && shareServerName
+        showShareModal && shareServiceName
           ? m(ShareModal, {
-              serverName: shareServerName,
+              serviceName: shareServiceName,
               onClose() {
                 showShareModal = false;
-                shareServerName = null;
+                shareServiceName = null;
               },
             })
           : null,

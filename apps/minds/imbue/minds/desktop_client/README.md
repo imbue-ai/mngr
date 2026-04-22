@@ -54,15 +54,15 @@ Authentication is global (one session grants access to all agents). The desktop 
 `/agents/{agent_id}/servers/` route (requires auth):
     shows a page listing all known server names for the agent (discovered via `mngr events`)
 
-`/agents/{agent_id}/{server_name}/{path}` route (requires auth):
+`/agents/{agent_id}/{service_name}/{path}` route (requires auth):
     proxies any request from the user to the specific server's backend URL
     uses Service Workers for transparent path rewriting
 
 ## Proxying design
 
-Since we can't control DNS or use subdomains, we multiplex workspaces under URL path prefixes (`/agents/{agent_id}/{server_name}/`). Each server for an agent gets its own prefix and Service Worker scope. This requires a combination of Service Workers, script injection, and rewriting:
+Since we can't control DNS or use subdomains, we multiplex workspaces under URL path prefixes (`/agents/{agent_id}/{service_name}/`). Each server for an agent gets its own prefix and Service Worker scope. This requires a combination of Service Workers, script injection, and rewriting:
 
-- On first navigation, a bootstrap page installs a Service Worker scoped to `/agents/{agent_id}/{server_name}/`
+- On first navigation, a bootstrap page installs a Service Worker scoped to `/agents/{agent_id}/{service_name}/`
 - The SW intercepts all same-origin requests and rewrites paths to include the prefix
 - HTML responses have a WebSocket shim injected to rewrite WS URLs
 - Cookie paths in Set-Cookie headers are rewritten to scope under the server prefix

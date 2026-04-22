@@ -1,7 +1,7 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.templates import render_agent_servers_page
+from imbue.minds.desktop_client.templates import render_agent_services_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -11,7 +11,7 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServerName
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -68,9 +68,9 @@ def test_agent_id_accepts_valid_format() -> None:
 # -- Agent servers page tests --
 
 
-def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
-    server_names = (ServerName("api"), ServerName("web"))
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
+def test_render_agent_services_page_with_servers_lists_them_as_links() -> None:
+    service_names = (ServiceName("api"), ServiceName("web"))
+    html = render_agent_services_page(agent_id=_AGENT_A, service_names=service_names)
     assert f"/forwarding/{_AGENT_A}/api/" in html
     assert f"/forwarding/{_AGENT_A}/web/" in html
     assert "api" in html
@@ -78,31 +78,31 @@ def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
     assert str(_AGENT_A) in html
 
 
-def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
+def test_render_agent_services_page_with_no_servers_shows_empty_state() -> None:
+    html = render_agent_services_page(agent_id=_AGENT_A, service_names=())
     assert "No servers are currently running" in html
     assert str(_AGENT_A) in html
 
 
-def test_render_agent_servers_page_has_back_link() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
+def test_render_agent_services_page_has_back_link() -> None:
+    html = render_agent_services_page(agent_id=_AGENT_A, service_names=())
     assert 'href="/"' in html
     assert "Back to all projects" in html
 
 
-def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
-    server_names = (ServerName("web"), ServerName("terminal"))
+def test_render_agent_services_page_with_cf_services_shows_global_links() -> None:
+    service_names = (ServiceName("web"), ServiceName("terminal"))
     cf_services = {"web": "web--agent-123--josh.forward.example.com"}
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services)
+    html = render_agent_services_page(agent_id=_AGENT_A, service_names=service_names, cf_services=cf_services)
     assert "Global" in html
     assert "web--agent-123--josh.forward.example.com" in html
     assert "Disable global" in html
     assert "Enable global" in html
 
 
-def test_render_agent_servers_page_without_cf_services_shows_enable_buttons() -> None:
-    server_names = (ServerName("web"),)
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
+def test_render_agent_services_page_without_cf_services_shows_enable_buttons() -> None:
+    service_names = (ServiceName("web"),)
+    html = render_agent_services_page(agent_id=_AGENT_A, service_names=service_names)
     assert "Enable global" in html
     assert "Global" not in html or "Enable global" in html
 
