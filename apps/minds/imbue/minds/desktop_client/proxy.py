@@ -205,9 +205,23 @@ def _inject_into_head(html_content: str, injection: str) -> str:
 _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 
 
-_CONVENTION_SERVERS: Final[tuple[ServerName, ...]] = (
-    ServerName("terminal"),
+# Preferred display order for known servers on the loading page. Not
+# a promise that these are always registered -- we intersect with the
+# caller's `other_servers` (= registered) so users don't click a link
+# that routes to a server that doesn't exist and hangs on Loading...
+#
+# "system_interface" = minds_workspace_server dashboard (polished
+#   web UI with chat, ticket tracker, agent controls).
+# "agent" = ttyd attached to the agent's primary tmux session where
+#   claude is running. Dropped by mngr_ttyd as commands/ttyd/agent.sh.
+# "web" = template's free slot for whatever web UI the template
+#   author wants (placeholder, custom dashboard, etc.)
+# "terminal" = ttyd raw shell into the VM (always from mngr_ttyd).
+_CONVENTION_SERVER_ORDER: Final[tuple[ServerName, ...]] = (
+    ServerName("system_interface"),
     ServerName("agent"),
+    ServerName("web"),
+    ServerName("terminal"),
 )
 
 
@@ -223,19 +237,21 @@ def generate_backend_loading_html(
     "Loading..." message and uses JavaScript to reload the page after 1 second,
     which will either succeed (backend is now up) or return this page again.
 
-    When ``agent_id`` is provided, the page unconditionally includes links to
-    the terminal and agent servers (convention-based, always present) plus any
-    additional servers from ``other_servers``. These links go through the
-    desktop client proxy, so clicking one before the target server is ready
-    simply shows that server's own auto-retrying loading page.
+    When ``agent_id`` is provided, the page shows links to the other
+    registered servers for that agent. The order follows
+    ``_CONVENTION_SERVER_ORDER`` (system_interface, agent, web,
+    terminal) for familiar names, with any remaining registered
+    servers appended. We only link to servers that actually appear in
+    ``other_servers`` so clicking a link never routes to a server that
+    does not exist (which would hang forever on this same Loading...
+    page).
     """
     links_html = ""
     if agent_id is not None:
-        # Build the set of servers to link: convention-based servers
-        # (always shown) plus any additional registered servers.
+        registered = {s for s in other_servers if s != current_server}
         servers_to_show: list[ServerName] = []
-        for s in _CONVENTION_SERVERS:
-            if s != current_server:
+        for s in _CONVENTION_SERVER_ORDER:
+            if s in registered and s not in servers_to_show:
                 servers_to_show.append(s)
         for s in other_servers:
             if s != current_server and s not in servers_to_show:
@@ -281,6 +297,32 @@ setTimeout(function() {{ location.reload(); }}, {interval});
 </html>""".format(interval=_BACKEND_LOADING_RETRY_INTERVAL_MS, links=links_html)
 
 
+_BASE_PATH_META_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r'(<meta\s+name="minds-workspace-server-base-path"\s+content=")[^"]*(")',
+    re.IGNORECASE,
+)
+
+
+@pure
+def rewrite_base_path_meta(html_content: str, agent_id: AgentId, server_name: ServerName) -> str:
+    """Populate the `minds-workspace-server-base-path` <meta> tag with the proxy prefix.
+
+    The minds_workspace_server frontend reads this meta at page load and
+    prepends its content to every relative API URL it constructs (see
+    `apiUrl()` in `frontend/src/base-path.ts`). When the server is directly
+    accessed, content is empty -- URLs like `/api/agents/.../screen` resolve
+    against the document origin. But when we proxy it under
+    `/forwarding/{agent}/system_interface/`, that root-relative fetch bypasses
+    our `<base>` tag (which only applies to `<a href>`, `<img src>`, etc. --
+    not to fetch/XHR) and lands on the desktop client's backend, which has
+    no such route and returns 404. Populating this meta with our proxy
+    prefix makes the frontend build fully-prefixed URLs that route through
+    the proxy correctly.
+    """
+    prefix = _get_server_prefix(agent_id, server_name)
+    return _BASE_PATH_META_PATTERN.sub(rf"\g<1>{prefix}\g<2>", html_content, count=1)
+
+
 @pure
 def rewrite_proxied_html(
     html_content: str,
@@ -300,6 +342,10 @@ def rewrite_proxied_html(
         agent_id=agent_id,
         server_name=server_name,
     )
+
+    # Populate the minds_workspace_server base-path meta tag so the frontend
+    # builds prefixed URLs for fetch/XHR (which ignore <base>).
+    rewritten = rewrite_base_path_meta(rewritten, agent_id, server_name)
 
     # Build the injection: base tag + WS shim
     base_tag = f'<base href="{prefix}/">'

@@ -84,6 +84,23 @@ def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
     assert str(_AGENT_A) in html
 
 
+def test_render_agent_servers_page_with_no_servers_does_not_auto_reload() -> None:
+    """The servers-listing page is only reached by explicit user navigation;
+    it should render an honest empty-state snapshot, not a self-healing
+    loader. The loading-until-servers-arrive UX lives in
+    `_handle_agent_default_redirect` (which returns `generate_backend_loading_html`
+    instead of redirecting here on empty).
+    """
+    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
+    assert "No servers are currently running" in html
+    # No auto-reload / retry loop on this page. The `toggleGlobal` handler
+    # reloads after a successful enable/disable click but that's not a
+    # timer-driven retry -- no setTimeout/setInterval anywhere.
+    assert "setTimeout" not in html
+    assert "setInterval" not in html
+    assert "sessionStorage" not in html
+
+
 def test_render_agent_servers_page_has_back_link() -> None:
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
     assert 'href="/"' in html
@@ -129,9 +146,9 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_local_by_default() -> None:
+def test_render_create_form_selects_lima_by_default() -> None:
     html = render_create_form()
-    assert 'value="LOCAL" selected' in html
+    assert 'value="LIMA" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:

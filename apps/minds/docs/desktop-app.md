@@ -152,15 +152,17 @@ pnpm exec todesktop build         # Upload to ToDesktop for native builds
 
 ToDesktop builds native installers (.dmg for macOS, .AppImage for Linux), handles code signing, notarization, and auto-update infrastructure.
 
-The build script (`scripts/build.js`) strips the `[tool.uv.sources]` section from the standalone pyproject.toml when copying it to resources, so the packaged app resolves the `minds` package from PyPI instead of a local path.
+The build script (`scripts/build.js`) builds a wheel for every workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` in the staged `resources/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock` against the rewritten pyproject. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
 
 ### Updating the Python package
 
-1. Bump the version pin in `electron/pyproject/pyproject.toml`
-2. Regenerate the lockfile: `uv lock --project electron/pyproject`
-3. Run `pnpm exec todesktop build` to publish
+All workspace packages must be listed as direct dependencies in `electron/pyproject/pyproject.toml` — uv ignores `[tool.uv.sources]` path overrides for transitive-only packages and will silently fall back to stale PyPI versions. Keep the dependencies list in sync with `WORKSPACE_PACKAGES` in `scripts/build.js`.
 
-The new lockfile is shipped in the app bundle. On next launch, `uv sync` installs the updated packages.
+To ship a change:
+
+1. Edit the Python source in the monorepo as usual
+2. If adding a new workspace package, add it to both `electron/pyproject/pyproject.toml` (as a direct dep + `[tool.uv.sources]` entry) and `WORKSPACE_PACKAGES` in `scripts/build.js`
+3. Run `pnpm exec todesktop build` to publish — `build.js` rebuilds all wheels and regenerates the lockfile automatically
 
 ## File structure
 

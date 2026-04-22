@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import httpx
@@ -240,6 +241,9 @@ def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
 
 
 def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
+    # forever-claude-template registers its primary server as "web" via
+    # services.toml + forward_port.py. System_interface is absent, so the
+    # default redirect should fall through to "web".
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={
@@ -255,7 +259,144 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+
+
+def test_agent_default_page_prefers_system_interface_when_present(tmp_path: Path) -> None:
+    # "system_interface" is the minds_workspace_server dashboard, a
+    # polished web UI with chat + agent controls. We prefer it over
+    # "agent" (raw ttyd CLI) and "web" (template free slot) so fresh
+    # users land on the app-like UI rather than a terminal or a
+    # placeholder.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {
+                "agent": "http://test-backend:9000",
+                "system_interface": "http://test-backend:9100",
+                "web": "http://test-backend:9200",
+            },
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
     assert response.headers["location"] == f"/forwarding/{agent_id}/system_interface/"
+
+
+def test_agent_default_page_falls_back_to_agent(tmp_path: Path) -> None:
+    # If "system_interface" is not registered yet (e.g. workspace-server
+    # service hasn't come up), fall back to "agent" -- the ttyd chat
+    # with the running agent still lets the user interact.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {
+                "agent": "http://test-backend:9000",
+                "web": "http://test-backend:9200",
+            },
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/agent/"
+
+
+def test_agent_default_page_falls_back_to_web(tmp_path: Path) -> None:
+    # If only "web" is registered, still route there rather than
+    # dropping to the servers-listing page.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {
+                "web": "http://test-backend:9200",
+            },
+        },
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
+
+
+def test_agent_default_page_shows_loading_when_no_known_servers(tmp_path: Path) -> None:
+    # During the tiny window between agent-creation success and the first
+    # discovery cycle populating the server map, we have nothing to redirect
+    # to. Render the shared "Loading..." page that auto-reloads this same
+    # URL: as soon as the first server registration lands, the next reload
+    # falls through to the preferred-server 307. We deliberately don't
+    # redirect to the /servers/ listing page -- its "No servers are
+    # currently running" empty-state reads as a failure to users who just
+    # created an agent and expect to land somewhere useful.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    assert "location.reload()" in response.text
+
+
+def test_agent_default_page_waits_for_preferred_when_only_non_preferred_registered(
+    tmp_path: Path,
+) -> None:
+    # Right after `status=DONE`, registration events arrive out of order:
+    # `terminal` (from mngr_ttyd, nearly instant) typically beats
+    # `system_interface` (which waits on minds-workspace-server startup).
+    # If the default redirect falls back to `known_servers[0]` when the
+    # preference list doesn't match yet, users silently land on a shell
+    # instead of the chat UI they just created.
+    #
+    # Render the Loading page instead so the next reload promotes to the
+    # preferred server as soon as it registers. Include the
+    # already-registered non-preferred servers as escape-hatch links so
+    # users who DO want to jump to the shell (or anywhere else) can still
+    # do so deliberately.
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"terminal": "http://test-backend:7681"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
+    # Must NOT silently 307 to /terminal/.
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    # The escape-hatch link to terminal must still be present so the user
+    # can opt into the shell deliberately.
+    assert f"/forwarding/{agent_id}/terminal/" in response.text
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
@@ -448,11 +589,11 @@ def test_agent_proxy_returns_loading_page_for_unknown_backend(tmp_path: Path) ->
     assert response.status_code == 200
     assert "Loading..." in response.text
     assert "location.reload()" in response.text
-    # Convention links (terminal and agent) are always shown, even before those
-    # servers have registered with the backend resolver.
-    assert f"/forwarding/{agent_id}/terminal/" in response.text
-    assert f"/forwarding/{agent_id}/agent/" in response.text
-    assert 'target="_top"' in response.text
+    # Before any servers register, there are no links to show. Linking to
+    # an unregistered server would route users to the same dead-end
+    # Loading... page on the other side (see proxy_test.py::
+    # test_generate_backend_loading_html_omits_unregistered_convention_servers).
+    assert f"/forwarding/{agent_id}/" not in response.text
 
 
 def test_agent_proxy_returns_502_for_unknown_backend_non_html(tmp_path: Path) -> None:
@@ -1705,3 +1846,102 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_auto_open_requests_panel() is False
+
+
+# -- Workspace delete tests --
+
+
+def _install_fake_mngr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exit_code: int = 0) -> Path:
+    """Install a fake `mngr` on PATH that records its args and exits with the given code."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log_path = bin_dir / "mngr.log"
+    fake_mngr = bin_dir / "mngr"
+    fake_mngr.write_text(
+        '#!/bin/bash\n'
+        'printf "%s\\n" "$@" >> "{}"\n'
+        'exit {}\n'.format(log_path, exit_code)
+    )
+    fake_mngr.chmod(0o755)
+    monkeypatch.setenv("PATH", "{}:{}".format(bin_dir, os.environ.get("PATH", "")))
+    return log_path
+
+
+def test_delete_workspace_rejects_unauthenticated_requests(tmp_path: Path) -> None:
+    """POST /workspace/{id}/delete without auth returns 403."""
+    # _create_test_server_with_agent_creator auto-authenticates; for the
+    # unauthenticated case we build the client without calling through it.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    agent_creator = AgentCreator(paths=WorkspacePaths(data_dir=tmp_path / "minds"))
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        agent_creator=agent_creator,
+    )
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 403
+
+
+def test_delete_workspace_invokes_mngr_destroy_and_returns_redirect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful delete runs `mngr destroy --yes --gc --remove-created-branch`
+    and returns 200 with a redirect URL."""
+    log_path = _install_fake_mngr(monkeypatch, tmp_path, exit_code=0)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "DELETED"
+    assert data["redirect_url"] == "/"
+
+    assert log_path.is_file(), "fake mngr should have been invoked"
+    args = log_path.read_text().strip().split("\n")
+    assert args[0] == "destroy"
+    assert args[1] == str(agent_id)
+    assert "--force" in args
+    assert "--gc" in args
+    assert "--remove-created-branch" in args
+
+
+def test_delete_workspace_returns_500_on_mngr_destroy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When `mngr destroy` exits non-zero, the handler returns 500 with the error."""
+    _install_fake_mngr(monkeypatch, tmp_path, exit_code=1)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 500
+    assert "Failed to destroy workspace" in response.json()["error"]
+
+
+def test_delete_workspace_removes_minds_data_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On success, the per-agent minds data dir (api_key_hash, etc.) is removed."""
+    _install_fake_mngr(monkeypatch, tmp_path, exit_code=0)
+    client, auth_store, _ = _create_test_server_with_agent_creator(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    agent_id = AgentId()
+
+    # Seed a fake agent directory the way save_api_key_hash would. The fixture
+    # puts AgentCreator.paths.data_dir at tmp_path/"minds".
+    agent_dir = tmp_path / "minds" / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "api_key_hash").write_text("deadbeef")
+
+    response = client.post("/workspace/{}/delete".format(agent_id))
+    assert response.status_code == 200
+    assert not agent_dir.exists(), "per-agent minds dir should be removed after delete"

@@ -117,8 +117,12 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
 
         uvBin = uvPath;
         args = [
+          // -v lifts INFO-level logs (lifecycle: "mngr observe started",
+          // "observe exited unexpectedly", etc.) into minds.log so user bug
+          // reports contain enough context to debug "Discovering agents..."
+          // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
-          'minds', '--format', 'jsonl',
+          'minds', '-v', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
@@ -126,9 +130,22 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           '--no-browser',
         ];
         cwd = pyprojectDir;
+        // LaunchServices-started apps inherit a minimal PATH without
+        // /opt/homebrew/bin or /usr/local/bin, so user-installed tools
+        // cannot be resolved. Prepend our lazy-installed lima dir and
+        // the common macOS Homebrew bin dirs so mngr's lima provider
+        // finds limactl regardless of how the user installed it.
+        const systemPath = process.env.PATH || '';
+        const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
+          (p) => !systemPath.split(':').includes(p)
+        ).join(':');
+        const augmentedSystemPath = homebrewPaths
+          ? `${systemPath}:${homebrewPaths}`
+          : systemPath;
+        const limaBinDir = paths.getLimaBinDir();
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',

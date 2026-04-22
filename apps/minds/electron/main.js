@@ -1,12 +1,44 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, dialog, ipcMain, net, shell, app } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const limaInstall = require('./lima-install');
 
-todesktop.init();
+// Suppress ToDesktop's built-in blocking modal; we surface update-ready
+// state via a non-blocking "Update" button in the chrome titlebar instead.
+// See the `update-downloaded` listener below and `ipcMain.on('install-update')`.
+//
+// Only init when packaged: in dev (`pnpm start`), `electron.autoUpdater`
+// is undefined on macOS (Squirrel is not linked in the unsigned dev
+// binary), and todesktop's constructor throws trying to subscribe to
+// it. Skipping init keeps dev launches working; the auto-updater is
+// never useful in dev anyway.
+let updateReady = false;
+
+if (app.isPackaged) {
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'never',
+      showNotification: 'never',
+    },
+  });
+
+  if (todesktop.autoUpdater) {
+    todesktop.autoUpdater.on('update-downloaded', () => {
+      updateReady = true;
+      for (const b of bundles) {
+        if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
+          b.chromeView.webContents.send('update-ready');
+        }
+      }
+    });
+  }
+} else {
+  console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
@@ -202,12 +234,26 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      // Preload on the content view so the create form can invoke
+      // ensure-lima / is-lima-available IPC during LIMA lazy install.
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+
+  // Auto-open DevTools when MINDS_OPEN_DEVTOOLS=1 is set. The built-in
+  // cmd+opt+I shortcut hits an Electron menu handler that assumes a
+  // BrowserWindow (we use BaseWindow + WebContentsViews) and crashes;
+  // this env var is the escape hatch for dev-time inspection.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    contentView.webContents.once('did-finish-load', () => {
+      contentView.webContents.openDevTools({ mode: 'detach' });
+    });
+  }
+
   return { chromeView, contentView };
 }
 
@@ -982,6 +1028,81 @@ async function onReady() {
   await runStartupSequence(initialBundle);
 }
 
+// User-initiated update check from File > Check for Updates. ToDesktop's
+// auto-updater runs on launch + every autoCheckInterval, but this menu
+// item lets the user trigger it on demand (useful right after a release
+// ships, or to confirm "up to date" when you're not sure).
+async function triggerUpdateCheck() {
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: 'This build is running in draft mode; the auto-updater is disabled until the build is released to the latest channel.',
+    });
+    return;
+  }
+  // Every path must surface SOMETHING to the user -- silent no-ops are the
+  // single biggest UX complaint here. We suppress todesktop's built-in
+  // Notifier modal (see the `todesktop.init` call up top), so the four
+  // outcomes of checkForUpdates() need explicit dialogs:
+  //   1. already up to date       -> "You're up to date"
+  //   2. update available          -> "Downloading; titlebar Update button will appear when ready"
+  //   3. update already downloaded -> "Click the Update button to restart and install"
+  //   4. error / checkForUpdates throws -> error dialog
+  const onNotAvailable = () => {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'You\'re up to date.',
+      detail: 'No updates are currently available.',
+    });
+  };
+  const onAvailable = (info) => {
+    const v = info && (info.version || info.releaseName);
+    dialog.showMessageBox({
+      type: 'info',
+      message: v ? `Update ${v} available.` : 'Update available.',
+      detail: 'Downloading in the background. When ready, an Update button will appear in the titlebar -- click it to restart and install.',
+    });
+  };
+  const onDownloaded = () => {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update ready to install.',
+      detail: 'Click the Update button in the titlebar to restart and apply the update.',
+    });
+  };
+  const onError = (err) => {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  };
+  autoUpdater.once('update-not-available', onNotAvailable);
+  autoUpdater.once('update-available', onAvailable);
+  autoUpdater.once('update-downloaded', onDownloaded);
+  autoUpdater.once('error', onError);
+  try {
+    await autoUpdater.checkForUpdates({ source: 'menu' });
+    // If an update is already-downloaded from a previous check (e.g. the
+    // auto-check on launch fired before the user clicked), no new event
+    // fires -- surface the in-memory `updateReady` flag.
+    if (updateReady) onDownloaded();
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  } finally {
+    autoUpdater.removeListener('update-not-available', onNotAvailable);
+    autoUpdater.removeListener('update-available', onAvailable);
+    autoUpdater.removeListener('update-downloaded', onDownloaded);
+    autoUpdater.removeListener('error', onError);
+  }
+}
+
 function installApplicationMenu() {
   if (!isMac || process.env.MINDS_HIDE_MENU === '1') {
     // On Windows/Linux the frame is custom-drawn; on macOS with MINDS_HIDE_MENU
@@ -997,6 +1118,8 @@ function installApplicationMenu() {
       label: app.name || 'Minds',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -1027,6 +1150,33 @@ function installApplicationMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          // Default Electron binding (`role: 'toggleDevTools'`) targets the
+          // focused BrowserWindow's contents; we use BaseWindow with multiple
+          // WebContentsViews, so call toggleDevTools explicitly on the
+          // focused bundle's content view.
+          accelerator: 'Alt+Cmd+I',
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1343,6 +1493,58 @@ ipcMain.on('retry', async (event) => {
 ipcMain.on('open-log-file', () => {
   const logPath = path.join(paths.getLogDir(), 'minds.log');
   shell.openPath(logPath);
+});
+
+// Non-blocking auto-update: the chrome titlebar polls this on load so it
+// can show the "Update" button if the download completed before the
+// chrome finished loading, and otherwise listens for 'update-ready'.
+ipcMain.handle('is-update-ready', () => updateReady);
+
+ipcMain.on('install-update', () => {
+  // restartAndInstall() throws "Cannot restart and install. There is
+  // no update downloaded" if called before `update-downloaded` has
+  // fired. The chrome button is hidden in that state, but guard anyway
+  // so a stale click doesn't surface Electron's uncaught-exception dialog.
+  if (!updateReady || !todesktop.autoUpdater) {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'No update to install.',
+      detail: 'The app is already up to date, or the new version has not finished downloading yet. Try the app menu > Check for Updates...',
+    });
+    return;
+  }
+  try {
+    todesktop.autoUpdater.restartAndInstall();
+  } catch (err) {
+    console.error('[update] restartAndInstall failed:', err);
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update failed to install.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
+});
+
+// -- Lima lazy install --
+// The renderer (create form) calls ensure-lima when the user picks LIMA
+// mode. We emit lima-progress events during download so the form can
+// show an inline progress pill. Resolves immediately if limactl is
+// already cached or installed on the system PATH.
+ipcMain.handle('ensure-lima', async (event) => {
+  try {
+    const result = await limaInstall.ensureLima((pct) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('lima-progress', pct);
+      }
+    });
+    return { ok: true, source: result.source };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('is-lima-available', async () => {
+  return { available: limaInstall.isLimaAvailable() };
 });
 
 ipcMain.on('window-minimize', (event) => {

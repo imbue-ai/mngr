@@ -209,6 +209,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
             <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
           </select>
+          <span id="lima-status" style="margin-left:8px;font-size:12px;color:#94a3b8;"></span>
         </div>
       </div>
       <div class="form-group">
@@ -222,6 +223,67 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       </div>
     </form>
   </div>
+  <script>
+    // When LIMA mode is selected, kick off a background download of the
+    // bundled limactl (a no-op if it is already cached or a system
+    // install is on PATH). The submit handler awaits this promise so
+    // users can click Create before the download finishes.
+    var limaInstallPromise = null;
+
+    function startLimaInstallIfNeeded() {
+      if (typeof window.minds === "undefined" || !window.minds.ensureLima) {
+        return;
+      }
+      if (limaInstallPromise) return;
+      var status = document.getElementById("lima-status");
+      if (status) status.textContent = "Checking lima...";
+      limaInstallPromise = window.minds.ensureLima().then(function (result) {
+        if (!result || !result.ok) {
+          if (status) {
+            status.textContent = "Lima install failed: " +
+              (result && result.error ? result.error : "unknown error");
+            status.style.color = "#b91c1c";
+          }
+          throw new Error(result && result.error || "lima install failed");
+        }
+        if (status) status.textContent = "";
+      });
+      limaInstallPromise.catch(function () {
+        // Reset so a retry (mode change) can try again.
+        limaInstallPromise = null;
+      });
+    }
+
+    if (typeof window.minds !== "undefined" && window.minds.onLimaProgress) {
+      window.minds.onLimaProgress(function (pct) {
+        var status = document.getElementById("lima-status");
+        if (status) status.textContent = "Installing lima... " + pct + "%";
+      });
+    }
+
+    var launchModeSelect = document.getElementById("launch_mode");
+    if (launchModeSelect) {
+      launchModeSelect.addEventListener("change", function () {
+        if (launchModeSelect.value === "LIMA") startLimaInstallIfNeeded();
+      });
+      if (launchModeSelect.value === "LIMA") startLimaInstallIfNeeded();
+    }
+
+    var createForm = document.getElementById("create-form");
+    if (createForm) {
+      createForm.addEventListener("submit", function (e) {
+        if (launchModeSelect && launchModeSelect.value === "LIMA" &&
+            limaInstallPromise) {
+          e.preventDefault();
+          limaInstallPromise.then(function () {
+            createForm.submit();
+          }).catch(function () {
+            // error already shown in status pill
+          });
+        }
+      });
+    }
+  </script>
 </body>
 </html>"""
 )
@@ -402,7 +464,7 @@ def render_create_form(
     git_url: str = "",
     agent_name: str = "",
     branch: str = "",
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode = LaunchMode.LIMA,
 ) -> str:
     """Render the agent creation form page.
 
@@ -630,6 +692,17 @@ body {
 }
 .minds-user-btn:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
 
+#update-btn {
+  -webkit-app-region: no-drag;
+  display: none;
+  width: auto !important; height: auto !important;
+  background: #3b82f6; color: #fff !important;
+  cursor: pointer; padding: 4px 10px; border-radius: 4px;
+  font-size: 12px; font-family: inherit; white-space: nowrap;
+  margin-right: 6px; border: none;
+}
+#update-btn:hover { background: #2563eb; }
+
 .minds-wc { display: flex; }
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
 .minds-wc button { border-radius: 0; width: 36px; height: """
@@ -695,6 +768,7 @@ body {
     </button>
   </div>
   <span class="minds-title" id="page-title">Minds</span>
+  <button id="update-btn" title="A new version is ready. Click to restart and apply." style="display:none;">Update</button>
   <div class="minds-user-area">
     <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>
@@ -784,6 +858,23 @@ if (isElectron) {
   document.getElementById('content-frame').style.display = 'none';
   // Hide browser sidebar panel in Electron (separate WebContentsView)
   document.getElementById('sidebar-panel').style.display = 'none';
+}
+
+// -- Non-blocking auto-update button (Electron only) --
+// The "Update" button stays hidden until ToDesktop reports that an update
+// has finished downloading. Clicking it restarts the app and applies the
+// update. Handles the race where the update finished before this page
+// loaded by querying current state once on load.
+if (isElectron) {
+  var updateBtn = document.getElementById('update-btn');
+  updateBtn.onclick = function() { window.minds.installUpdate(); };
+  function showUpdateButton() { updateBtn.style.display = 'inline-block'; }
+  window.minds.onUpdateReady(showUpdateButton);
+  if (window.minds.isUpdateReady) {
+    window.minds.isUpdateReady().then(function(ready) {
+      if (ready) showUpdateButton();
+    });
+  }
 }
 
 // -- Title tracking + auth refresh on navigation --
@@ -1571,7 +1662,8 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
     <h2>Danger Zone</h2>
     <p style="color:#94a3b8;font-size:13px;margin-bottom:8px;">
       Permanently delete this workspace and all its data.</p>
-    <button class="btn btn-danger" onclick="alert('Not implemented')">Delete workspace</button>
+    <button class="btn btn-danger" id="delete-workspace-btn" onclick="submitDeleteWorkspace()">Delete workspace</button>
+    <span id="delete-workspace-spinner" style="display:none;margin-left:8px;color:#94a3b8;">Deleting...</span>
 
     <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
   </div>
@@ -1593,6 +1685,37 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
         spinner.style.display = 'none';
         section.style.opacity = '1';
         section.style.pointerEvents = 'auto';
+      });
+  }
+
+  function submitDeleteWorkspace() {
+    // mngr destroy is not reversible: the Lima VM, host record, agent
+    // state, and mngr/<name> git branch all go away. Confirm hard.
+    if (!confirm("Permanently delete this workspace?\\n\\n" +
+                 "This destroys the VM, removes the agent, and deletes the " +
+                 "mngr/<name> branch. It cannot be undone.")) {
+      return;
+    }
+    var btn = document.getElementById('delete-workspace-btn');
+    var spinner = document.getElementById('delete-workspace-spinner');
+    btn.disabled = true;
+    spinner.style.display = 'inline';
+    fetch('/workspace/{{ agent_id }}/delete', { method: 'POST' })
+      .then(function(resp) {
+        if (!resp.ok) {
+          return resp.json().then(function(data) {
+            throw new Error(data.error || ('HTTP ' + resp.status));
+          });
+        }
+        return resp.json();
+      })
+      .then(function(data) {
+        window.location.href = data.redirect_url || '/';
+      })
+      .catch(function(err) {
+        alert('Failed to delete workspace: ' + err.message);
+        btn.disabled = false;
+        spinner.style.display = 'none';
       });
   }
   {% if telegram_js %}

@@ -1,3 +1,4 @@
+import os
 import queue as queue_mod
 import threading
 from pathlib import Path
@@ -8,6 +9,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import WELCOME_INITIAL_MESSAGE
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
@@ -167,8 +169,20 @@ def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
         agent_id=AgentId(),
     )
     assert "--message" in cmd
-    # The welcome message is sent as the very first user prompt so a /welcome
-    # skill can produce a greeting without any other user interaction.
+    # The welcome message is sent as the very first user prompt so the agent
+    # renders a greeting without any other user interaction. We deliberately
+    # use the `/welcome` skill invocation (see `.agents/skills/welcome/`
+    # in forever-claude-template) so the template owns the greeting text
+    # and every new agent shows the same polished first response.
+    #
+    # An earlier iteration of this test asserted the message MUST NOT start
+    # with "/" out of concern that Claude Code would intercept slash
+    # commands locally and skip the `UserPromptSubmit` hook that mngr's
+    # send_message waits on, causing a create-time hang. Verified
+    # empirically against Claude Code v2.1.116 that the hook does fire for
+    # both recognized skills and unknown slash commands, so the guard was
+    # guarding against a failure mode that no longer manifests.
+    assert cmd[cmd.index("--message") + 1] == WELCOME_INITIAL_MESSAGE
     assert cmd[cmd.index("--message") + 1] == "/welcome"
 
 
@@ -236,6 +250,39 @@ def test_clone_git_repo_raises_on_bad_url(tmp_path: Path) -> None:
     dest = tmp_path / "dest"
     with pytest.raises(GitCloneError, match="git clone failed"):
         clone_git_repo(GitUrl("/nonexistent/path"), dest)
+
+
+def test_clone_git_repo_with_branch(tmp_path: Path) -> None:
+    """Verify clone_git_repo can clone a specific branch, even shallow."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "hello.txt").write_text("hello")
+    init_and_commit_git_repo(source, tmp_path)
+
+    # Create a feature branch with a new file
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    cg = ConcurrencyGroup(name="test-branch")
+    with cg:
+        cg.run_process_to_completion(["git", "checkout", "-b", "feature-x"], cwd=source)
+    (source / "feature.txt").write_text("feature")
+    cg = ConcurrencyGroup(name="test-commit")
+    with cg:
+        cg.run_process_to_completion(["git", "add", "."], cwd=source)
+        cg.run_process_to_completion(["git", "commit", "-m", "feature"], cwd=source, env=git_env)
+
+    # Clone with branch specified (don't need to switch back to the default
+    # branch -- we only care that the clone gets feature-x)
+    dest = tmp_path / "dest"
+    clone_git_repo(GitUrl(str(source)), dest, branch="feature-x")
+
+    assert dest.exists()
+    assert (dest / "feature.txt").read_text() == "feature"
 
 
 # -- checkout_branch tests --

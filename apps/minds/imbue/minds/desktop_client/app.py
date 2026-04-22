@@ -3,6 +3,7 @@ import html
 import json
 import os
 import queue
+import shutil
 import socket as socket_module
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
@@ -21,11 +22,14 @@ from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -338,16 +342,76 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
+# Order matters. Each template picks its own server name(s); the names
+# below are the well-known conventions minds knows about. We try them
+# in order and pick the first one the agent actually registered.
+#
+# - "system_interface": minds_workspace_server dashboard -- polished
+#   web UI with chat view, ticket tracker, agent controls. Best
+#   landing for a fresh agent create since it looks like an app.
+# - "agent": ttyd-attached to the agent's tmux session where claude
+#   is running. Raw CLI view; great for power users and debugging,
+#   but overwhelming as the default first-create experience.
+# - "web": per-template free slot for whatever web UI the template
+#   author wants (placeholder in forever-claude-template). Last
+#   resort -- routing here is better than dropping users on the
+#   servers-listing page, but content depends entirely on the
+#   template.
+_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "agent", "web")
+
+
 def _handle_agent_default_redirect(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Redirect to the agent's system_interface server by default."""
+    """Redirect to the agent's canonical primary server.
+
+    Picks the first registered server name that matches
+    ``_DEFAULT_SERVER_PREFERENCE`` (currently "system_interface"
+    first -- the workspace-server dashboard; then "agent" --
+    ttyd-attached chat; then "web" -- template's free slot). Falls
+    back to any registered server if none match, and to the
+    servers-listing page if the agent has no servers yet.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/system_interface/"})
+    parsed_id = AgentId(agent_id)
+    known_servers = backend_resolver.list_servers_for_agent(parsed_id)
+    known_server_names = {str(s) for s in known_servers}
+
+    preferred: str | None = None
+    for candidate in _DEFAULT_SERVER_PREFERENCE:
+        if candidate in known_server_names:
+            preferred = candidate
+            break
+
+    if preferred is None:
+        # No preferred server is registered yet. Don't fall back to
+        # `known_servers[0]` -- that would silently land users on whichever
+        # server happened to register first, which is almost always
+        # `terminal` (ttyd registers nearly instantly; `system_interface`
+        # takes longer because it has to boot minds-workspace-server).
+        # Users who just created an agent expect to land on the chat UI,
+        # not a shell.
+        #
+        # Render the shared Loading page instead. It auto-reloads this
+        # same URL, so once the in-VM `app-watcher` propagates the first
+        # preferred-server registration, the next reload promotes to it.
+        # Pass the already-registered non-preferred servers as
+        # `other_servers` so users who DO want a shell (or any other
+        # non-preferred server that's already up) have a clickable
+        # escape hatch at the bottom of the Loading page.
+        return HTMLResponse(
+            content=generate_backend_loading_html(
+                agent_id=parsed_id,
+                other_servers=known_servers,
+            )
+        )
+
+    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/{preferred}/"})
 
 
 async def _handle_agent_servers_page(
@@ -610,6 +674,17 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
+        # Diagnostics: nothing in the logs today tells us *why* we fell into
+        # the loading page. Surface which agent/server missed and what the
+        # resolver actually knows about.
+        known_servers = backend_resolver.list_servers_for_agent(parsed_id)
+        logger.warning(
+            "Proxy loading-page fallback: agent_id={} server={} not resolvable. known_servers={} path={}",
+            agent_id,
+            server_name,
+            known_servers,
+            path,
+        )
         # Return immediately instead of holding the connection open.
         # For HTML-accepting requests, return a loading page that retries
         # client-side after a short delay. This avoids saturating the
@@ -928,6 +1003,36 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "git_url is required"}',
             media_type="application/json",
         )
+
+    # Block creating an agent with a name that's already taken. We previously
+    # let the underlying `mngr create --reuse --update` path handle this,
+    # which appeared to "work" (the agent got reused) but broke on the
+    # git-mirror push -- mirror push with --prune wants to delete all
+    # non-matching refs, including the currently-checked-out branch on the
+    # existing agent's bare repo, which git refuses. The user-visible symptom
+    # was a cryptic "refusing to delete the current branch" failure rather
+    # than "name is taken, pick a different one". Fail fast at the API layer
+    # instead.
+    if agent_name:
+        backend_resolver = request.app.state.backend_resolver
+        existing_names: set[str] = set()
+        for existing_id in backend_resolver.list_known_workspace_ids():
+            existing_name = backend_resolver.get_workspace_name(existing_id)
+            if existing_name is not None:
+                existing_names.add(existing_name)
+        if agent_name in existing_names:
+            return Response(
+                status_code=409,
+                content=json.dumps(
+                    {
+                        "error": (
+                            "An agent named '{}' already exists. "
+                            "Pick a different name, or destroy the existing one first."
+                        ).format(agent_name)
+                    }
+                ),
+                media_type="application/json",
+            )
 
     agent_id = agent_creator.start_creation(
         git_url,
@@ -1417,19 +1522,104 @@ async def _handle_workspace_disassociate(
     """Disassociate a workspace from its account and tear down tunnels."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    if session_store:
-        account = session_store.get_account_for_workspace(agent_id)
-        if account:
-            # Tear down Cloudflare tunnel
-            cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-            if cf_client is not None:
-                try:
-                    cf_client.delete_tunnel(AgentId(agent_id))
-                except (httpx.HTTPError, ValueError, OSError) as e:
-                    logger.warning("Failed to delete tunnel during disassociation: {}", e)
-            session_store.disassociate_workspace(str(account.user_id), agent_id)
+    _disassociate_and_teardown_cf(request, agent_id)
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
+
+
+def _disassociate_and_teardown_cf(request: Request, agent_id: str) -> None:
+    """Tear down the Cloudflare tunnel for a workspace and detach it from its
+    supertokens account if associated. Shared by /disassociate and /delete.
+
+    Best-effort: any failure here is logged, not raised -- the caller wants to
+    proceed regardless.
+    """
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if session_store is None:
+        return
+    account = session_store.get_account_for_workspace(agent_id)
+    if account is None:
+        return
+    cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
+    if cf_client is not None:
+        try:
+            cf_client.delete_tunnel(AgentId(agent_id))
+        except (httpx.HTTPError, ValueError, OSError) as e:
+            logger.warning("Failed to delete CF tunnel for {}: {}", agent_id, e)
+    try:
+        session_store.disassociate_workspace(str(account.user_id), agent_id)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to disassociate workspace {}: {}", agent_id, e)
+
+
+async def _handle_workspace_delete(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Destroy a workspace: run `mngr destroy`, remove local state, tear down
+    tunnels and account association.
+
+    Returns JSON {"status": "DELETED", "redirect_url": "/"} on success, or
+    {"error": "..."} with a 4xx/5xx on failure. This is async-ish: the mngr
+    subprocess can take 10-30s for Lima VMs, so the caller UI should show a
+    spinner while this runs.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403, content='{"error": "Not authenticated"}', media_type="application/json"
+        )
+
+    # 1. Disassociate + tear down CF tunnel first so the UI stops trying to
+    #    route to an agent we're about to kill.
+    _disassociate_and_teardown_cf(request, agent_id)
+
+    # 2. Shell out to `mngr destroy` for the real VM / host / git-branch
+    #    cleanup. --force skips confirmation prompts and stops running
+    #    agents (the user just clicked the Danger Zone button). --gc cleans
+    #    up any orphaned resources the agent was holding.
+    #    --remove-created-branch deletes the mngr/<name> branch the agent
+    #    was working on so the source template's git repo doesn't
+    #    accumulate branches.
+    destroy_cmd = [
+        MNGR_BINARY,
+        "destroy",
+        agent_id,
+        "--force",
+        "--gc",
+        "--remove-created-branch",
+    ]
+    logger.info("Running: {}", " ".join(destroy_cmd))
+    cg = ConcurrencyGroup(name="workspace-delete")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=destroy_cmd,
+            is_checked_after=False,
+        )
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip() or "mngr destroy failed"
+        logger.error("Failed to destroy workspace {}: {}", agent_id, err)
+        return Response(
+            status_code=500,
+            content=json.dumps({"error": "Failed to destroy workspace: {}".format(err)}),
+            media_type="application/json",
+        )
+
+    # 3. Remove the per-agent minds data directory (api_key_hash, etc.). The
+    #    mngr destroy above handles everything on the mngr side; this covers
+    #    the minds-side state that mngr doesn't know about.
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is not None:
+        agent_dir = agent_creator.paths.data_dir / "agents" / agent_id
+        if agent_dir.is_dir():
+            try:
+                shutil.rmtree(agent_dir)
+            except OSError as e:
+                logger.warning("Failed to remove minds data dir for {}: {}", agent_id, e)
+
+    return Response(
+        content=json.dumps({"status": "DELETED", "redirect_url": "/"}),
+        media_type="application/json",
+    )
 
 
 # -- Requests panel routes --
@@ -1864,7 +2054,12 @@ def create_desktop_client(
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
         logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
-        return Response(status_code=500, content=f"Internal Server Error: {exc}")
+        # Return JSON so fetch callers (e.g. OAuth buttons that do `res.json()`)
+        # surface the real error instead of a JSON-parse error on plain text.
+        return JSONResponse(
+            status_code=500,
+            content={"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"},
+        )
 
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
@@ -1924,6 +2119,7 @@ def create_desktop_client(
     app.get("/workspace/{agent_id}/settings")(_handle_workspace_settings)
     app.post("/workspace/{agent_id}/associate")(_handle_workspace_associate)
     app.post("/workspace/{agent_id}/disassociate")(_handle_workspace_disassociate)
+    app.post("/workspace/{agent_id}/delete")(_handle_workspace_delete)
 
     # Request inbox routes
     app.get("/_chrome/requests-panel")(_handle_requests_panel)

@@ -223,19 +223,69 @@ def test_generate_backend_loading_html_no_agent_id_has_no_links() -> None:
     assert "/forwarding/" not in html
 
 
-def test_generate_backend_loading_html_with_agent_id_includes_convention_links() -> None:
-    html = generate_backend_loading_html(agent_id=_TEST_AGENT)
-    assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
+def test_generate_backend_loading_html_with_agent_id_orders_convention_links() -> None:
+    # When the registered servers include names from the convention order
+    # (system_interface, agent, web, terminal), those appear first and
+    # in that order regardless of the other_servers input order.
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(
+            ServerName("terminal"),
+            ServerName("web"),
+            ServerName("agent"),
+            ServerName("system_interface"),
+        ),
+    )
+    assert f"/forwarding/{_TEST_AGENT}/system_interface/" in html
     assert f"/forwarding/{_TEST_AGENT}/agent/" in html
+    assert f"/forwarding/{_TEST_AGENT}/web/" in html
+    assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
+    # Order: system_interface -> agent -> web -> terminal
+    assert (
+        html.index("/system_interface/")
+        < html.index("/agent/")
+        < html.index("/web/")
+        < html.index("/terminal/")
+    )
+
+
+def test_generate_backend_loading_html_appends_unknown_servers_after_conventions() -> None:
+    # A template that registers a server name minds doesn't know about
+    # still gets a working link; it just lands after all recognized
+    # conventions (in registration order).
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(
+            ServerName("custom_dashboard"),
+            ServerName("system_interface"),
+        ),
+    )
+    assert html.index("/system_interface/") < html.index("/custom_dashboard/")
+
+
+def test_generate_backend_loading_html_omits_unregistered_convention_servers() -> None:
+    # Lima agents register ('system_interface', 'terminal', 'web') -- no
+    # 'agent' server. Linking to an unregistered server would route users
+    # to a dead-end loading page. Only link to registered servers.
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(ServerName("terminal"), ServerName("web"), ServerName("system_interface")),
+    )
+    assert f"/forwarding/{_TEST_AGENT}/web/" in html
+    assert f"/forwarding/{_TEST_AGENT}/terminal/" in html
+    assert f"/forwarding/{_TEST_AGENT}/system_interface/" in html
+    assert f"/forwarding/{_TEST_AGENT}/agent/" not in html
 
 
 def test_generate_backend_loading_html_excludes_current_server_from_links() -> None:
     html = generate_backend_loading_html(
         agent_id=_TEST_AGENT,
         current_server=ServerName("terminal"),
+        other_servers=(ServerName("terminal"), ServerName("agent"), ServerName("web")),
     )
     assert f"/forwarding/{_TEST_AGENT}/terminal/" not in html
     assert f"/forwarding/{_TEST_AGENT}/agent/" in html
+    assert f"/forwarding/{_TEST_AGENT}/web/" in html
 
 
 def test_generate_backend_loading_html_includes_other_servers() -> None:
@@ -247,5 +297,15 @@ def test_generate_backend_loading_html_includes_other_servers() -> None:
 
 
 def test_generate_backend_loading_html_links_use_target_top() -> None:
-    html = generate_backend_loading_html(agent_id=_TEST_AGENT)
+    html = generate_backend_loading_html(
+        agent_id=_TEST_AGENT,
+        other_servers=(ServerName("web"),),
+    )
     assert 'target="_top"' in html
+
+
+def test_generate_backend_loading_html_with_no_registered_servers_has_no_links() -> None:
+    # If nothing is registered yet (e.g. VM still booting and app-watcher
+    # hasn't populated the server map), don't show any links.
+    html = generate_backend_loading_html(agent_id=_TEST_AGENT)
+    assert f"/forwarding/{_TEST_AGENT}/" not in html

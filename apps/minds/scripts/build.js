@@ -1,147 +1,148 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv and git binaries, copies the standalone
- * pyproject.toml + lockfile into the resources directory for packaging.
+ * Downloads platform-specific uv and git binaries, builds workspace Python
+ * packages as wheels, and stages a pyproject.toml + lockfile in the resources
+ * directory for packaging. On the user's first launch, `uv sync` installs the
+ * bundled wheels (plus their PyPI deps) into a venv.
+ *
+ * Binary downloads are handled by download-binaries.js (shared with the
+ * todesktop:beforeInstall hook for cross-platform builds).
+ *
+ * Requirements:
+ * - `uv` must be on PATH (used for `uv build` and `uv lock`)
+ * - Node 18+ (for fs.rmSync and modern child_process semantics)
+ * - Network access at build time (uv lock re-resolves PyPI deps)
  */
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
-const http = require('http');
 const { execSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
+const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 
-const UV_VERSION = '0.7.12';
+/**
+ * Workspace packages bundled into the standalone app. Each entry maps the
+ * package name (as it appears in `dependencies` / `[tool.uv.sources]`) to its
+ * path inside the monorepo.
+ *
+ * The packaged app only needs the transitive runtime closure of what minds
+ * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
+ * not included.
+ */
+const WORKSPACE_PACKAGES = {
+  'minds':             'apps/minds',
+  'imbue-mngr':        'libs/mngr',
+  'imbue-mngr-claude': 'libs/mngr_claude',
+  'imbue-mngr-lima':   'libs/mngr_lima',
+  'imbue-mngr-modal':  'libs/mngr_modal',
+  'imbue-common':      'libs/imbue_common',
+  'concurrency-group': 'libs/concurrency_group',
+  'resource-guards':   'libs/resource_guards',
+  'modal-proxy':       'libs/modal_proxy',
+};
 
-function getPlatformArch() {
-  const platform = process.platform;
-  const arch = process.arch;
+/**
+ * Build each workspace package as a wheel into `resources/wheels/`.
+ *
+ * Relies on each package's `pyproject.toml` (and hatchling's
+ * `[tool.hatch.build.targets.wheel]` config) to determine what goes into the
+ * wheel. In particular, the `exclude = [...]` line in each package's config
+ * is what keeps tests out of the wheel.
+ *
+ * Returns a map of package name → wheel filename, used downstream when
+ * rewriting `pyproject.toml` to reference the wheels.
+ */
+function buildWorkspaceWheels() {
+  const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
+  fs.mkdirSync(wheelsDir, { recursive: true });
 
-  if (platform === 'darwin' && arch === 'arm64') return { platform: 'darwin', arch: 'aarch64' };
-  if (platform === 'darwin' && arch === 'x64') return { platform: 'darwin', arch: 'x86_64' };
-  if (platform === 'linux' && arch === 'x64') return { platform: 'linux', arch: 'x86_64' };
-  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
-}
-
-function getUvDownloadUrl({ platform, arch }) {
-  const target = platform === 'darwin'
-    ? `uv-${arch}-apple-darwin`
-    : `uv-${arch}-unknown-linux-gnu`;
-  return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
-}
-
-function download(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // Drain the redirect response to free the connection
-        download(res.headers.location).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume(); // Drain the error response to free the connection
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-async function downloadUv({ platform, arch }) {
-  const uvDir = path.join(RESOURCES_DIR, 'uv');
-  fs.mkdirSync(uvDir, { recursive: true });
-
-  const url = getUvDownloadUrl({ platform, arch });
-  console.log(`Downloading uv from ${url}...`);
-
-  const tarball = await download(url);
-  const tarPath = path.join(uvDir, 'uv.tar.gz');
-  fs.writeFileSync(tarPath, tarball);
-
-  // Extract the tarball
-  execSync(`tar xzf "${tarPath}" -C "${uvDir}" --strip-components=1`, { stdio: 'inherit' });
-  fs.unlinkSync(tarPath);
-
-  // Verify the binary exists
-  const uvBinary = path.join(uvDir, 'uv');
-  if (!fs.existsSync(uvBinary)) {
-    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
+  const wheelByPackage = {};
+  for (const name of Object.keys(WORKSPACE_PACKAGES)) {
+    execSync(`uv build --package ${JSON.stringify(name)} --wheel --out-dir ${JSON.stringify(wheelsDir)}`, {
+      cwd: MONOREPO_ROOT, stdio: 'inherit',
+    });
+    // Wheel filenames follow PEP 427: `{name}-{version}-{py}-{abi}-{platform}.whl`
+    // where `name` has hyphens normalized to underscores. Since we build
+    // serially and clean RESOURCES_DIR at the top of main(), exactly one
+    // wheel per package should exist with the expected prefix.
+    const normalized = name.replace(/-/g, '_');
+    const matches = fs.readdirSync(wheelsDir).filter(
+      (f) => f.endsWith('.whl') && f.startsWith(normalized + '-'),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `Expected exactly one wheel for ${name} (prefix "${normalized}-") in ${wheelsDir}, ` +
+        `found ${matches.length}: ${JSON.stringify(matches)}`,
+      );
+    }
+    wheelByPackage[name] = matches[0];
+    console.log(`Built wheel for ${name}: ${matches[0]}`);
   }
-  fs.chmodSync(uvBinary, 0o755);
-  console.log(`uv binary installed at ${uvBinary}`);
+  return wheelByPackage;
 }
 
-async function downloadGit() {
-  const gitDir = path.join(RESOURCES_DIR, 'git');
-  const binDir = path.join(gitDir, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  // Copy the system git binary into the resources directory.
-  const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-  if (!systemGit) {
-    throw new Error('git not found on system -- install git first');
-  }
-
-  const destGit = path.join(binDir, 'git');
-  fs.copyFileSync(systemGit, destGit);
-  fs.chmodSync(destGit, 0o755);
-  console.log(`git binary copied to ${destGit}`);
-}
-
-function copyPyproject() {
+/**
+ * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
+ *
+ * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
+ * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
+ * and then runs `uv lock` in-place so the lockfile matches the rewritten
+ * pyproject. This re-resolves PyPI deps from scratch, which is fine — they're
+ * the same deps, just locked against the new workspace source definitions.
+ */
+function stageRuntimePyproject(wheelByPackage) {
   const srcDir = path.join(ROOT, 'electron', 'pyproject');
   const destDir = path.join(RESOURCES_DIR, 'pyproject');
   fs.mkdirSync(destDir, { recursive: true });
 
-  // Copy pyproject.toml, stripping any [tool.uv.sources] section that
-  // contains local editable paths (only valid in the monorepo layout)
   const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
-  if (fs.existsSync(pyprojectSrc)) {
-    let content = fs.readFileSync(pyprojectSrc, 'utf-8');
-    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, '').trimEnd() + '\n';
-    fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
-    console.log(`Copied pyproject.toml to ${destDir} (stripped local sources)`);
-  } else {
-    console.warn(`Warning: ${pyprojectSrc} not found`);
+  if (!fs.existsSync(pyprojectSrc)) {
+    throw new Error(`Source pyproject.toml not found at ${pyprojectSrc}`);
   }
+  let content = fs.readFileSync(pyprojectSrc, 'utf-8');
 
-  // Copy lockfile as-is
-  const lockSrc = path.join(srcDir, 'uv.lock');
-  if (fs.existsSync(lockSrc)) {
-    fs.copyFileSync(lockSrc, path.join(destDir, 'uv.lock'));
-    console.log(`Copied uv.lock to ${destDir}`);
-  } else {
-    console.warn(`Warning: ${lockSrc} not found`);
+  const sourceLines = ['[tool.uv.sources]'];
+  for (const [name, whlFile] of Object.entries(wheelByPackage)) {
+    sourceLines.push(`${name} = { path = "../wheels/${whlFile}" }`);
   }
+  const newSources = sourceLines.join('\n') + '\n';
+
+  if (content.match(/\[tool\.uv\.sources\]/)) {
+    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, newSources);
+  } else {
+    content = content.trimEnd() + '\n\n' + newSources;
+  }
+  fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
+  console.log(`Staged pyproject.toml at ${destDir}`);
+
+  // Regenerate the lockfile against the rewritten pyproject. This is simpler
+  // and more robust than string-surgery on the dev-time uv.lock: uv emits the
+  // exact right shape for wheel-path sources itself.
+  execSync('uv lock', { cwd: destDir, stdio: 'inherit' });
+  console.log(`Regenerated uv.lock at ${destDir}`);
 }
 
 async function main() {
   console.log('Building Minds desktop app...\n');
 
-  // Clean resources directory
   if (fs.existsSync(RESOURCES_DIR)) {
     fs.rmSync(RESOURCES_DIR, { recursive: true });
   }
   fs.mkdirSync(RESOURCES_DIR, { recursive: true });
 
-  const { platform, arch } = getPlatformArch();
-  console.log(`Platform: ${platform}, Architecture: ${arch}\n`);
+  // Download platform-specific binaries (uv, git) for the current platform.
+  // On ToDesktop build servers, the beforeInstall hook re-runs this for the
+  // target platform, replacing these with the correct binaries.
+  console.log('Downloading platform-specific binaries...');
+  execSync(`node "${path.join(__dirname, 'download-binaries.js')}" "${RESOURCES_DIR}"`, {
+    stdio: 'inherit',
+  });
 
-  // Download binaries and copy pyproject in parallel
-  await Promise.all([
-    downloadUv({ platform, arch }),
-    downloadGit(),
-  ]);
-
-  copyPyproject();
+  const wheelByPackage = buildWorkspaceWheels();
+  stageRuntimePyproject(wheelByPackage);
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);

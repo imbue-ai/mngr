@@ -72,6 +72,22 @@ function getVenvDir() {
   return path.join(getDataDir(), '.venv');
 }
 
+function getLimaHomeDir() {
+  return path.join(getDataDir(), 'lima');
+}
+
+function getLimaBinDir() {
+  return path.join(getLimaHomeDir(), 'bin');
+}
+
+function getLimaBinaryPath() {
+  return path.join(getLimaBinDir(), 'limactl');
+}
+
+function getLimaVersionFile() {
+  return path.join(getLimaHomeDir(), 'VERSION');
+}
+
 function getPyprojectDir() {
   if (isDev()) {
     return path.join(__dirname, 'pyproject');
@@ -101,4 +117,8 @@ module.exports = {
   getVenvDir,
   getPyprojectDir,
   getMonorepoRoot,
+  getLimaHomeDir,
+  getLimaBinDir,
+  getLimaBinaryPath,
+  getLimaVersionFile,
 };

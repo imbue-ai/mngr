@@ -73,19 +73,20 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 **Build flow:**
 
 1. `pnpm build` assembles the Electron app:
-   - Copies `electron/pyproject.toml` and its lockfile into the resources directory
-   - Downloads platform-specific `uv` and `git` binaries into the resources directory
+   - Builds a wheel for every monorepo workspace package into `resources/wheels/`
+   - Stages `resources/pyproject/pyproject.toml` from `electron/pyproject/pyproject.toml`, rewriting `[tool.uv.sources]` to reference the bundled wheels, and runs `uv lock` in-place to produce `resources/pyproject/uv.lock`
+   - Downloads platform-specific `uv` and `git` binaries into the resources directory (also invoked from the `todesktop:beforeInstall` hook so each ToDesktop build server gets platform-native binaries)
    - Packages the Electron code (main.js, preload.js, HTML pages, assets)
 2. `pnpm exec todesktop build` uploads the assembled app to ToDesktop, which:
    - Builds native installers for each target platform
    - Signs and notarizes the app
    - Publishes to the update server
 
-**Python packages are not bundled.** The app ships a `pyproject.toml` + lockfile that declares `imbue-minds` as a dependency. On first launch, `uv sync` installs Python and all packages from PyPI. This means:
+**Python packages are bundled as wheels.** The app ships `resources/wheels/*.whl` plus a `pyproject.toml` + lockfile whose sources resolve to those wheels. On first launch, `uv sync` installs Python and resolves all workspace packages from the bundled wheels (non-workspace deps still come from PyPI). This means:
 
-- `imbue-minds` must be published to PyPI (it transitively depends on `mngr`, which is already published)
+- No workspace package needs to be published to PyPI — every in-monorepo package is shipped as a local wheel
 - The lockfile pins exact versions, so every user gets the same environment
-- Updating the Electron app (via ToDesktop) delivers a new lockfile, and the next `uv sync` picks up the new versions
+- Updating the Electron app (via ToDesktop) delivers new wheels and a new lockfile; the next `uv sync` picks them up
 
 ## Bundled Binaries
 
@@ -397,19 +398,22 @@ This uses an OS-level lock (file lock on Linux, named mutex on macOS). No custom
 
 The update flow is:
 
-1. Developer bumps the `imbue-minds` version in `electron/pyproject.toml` and regenerates the lockfile
-2. Developer commits and runs `pnpm exec todesktop build`
-3. ToDesktop builds new installers, signs them, publishes to update server
-4. Running Minds apps check for updates in the background (ToDesktop handles this)
-5. On next launch, the new Electron app is loaded
-6. The new app's `uv sync` sees the updated lockfile and installs the new `imbue-minds` version
-7. The user sees a slightly longer loading screen while deps update, then the app is current
+1. Developer lands Python changes on main as usual (no per-release version bump required — wheels are rebuilt from source on every build)
+2. Developer runs `pnpm exec todesktop build`
+3. `scripts/build.js` rebuilds all workspace wheels and regenerates `resources/pyproject/uv.lock` against them
+4. ToDesktop builds new installers, signs them, publishes to update server
+5. Running Minds apps check for updates in the background (ToDesktop handles this)
+6. On next launch, the new Electron app is loaded
+7. The new app's `uv sync` sees the updated wheels + lockfile and installs them
+8. The user sees a slightly longer loading screen while deps update, then the app is current
 
 This coupling means Python and Electron updates are atomic from the user's perspective. There is no version skew between the Electron shell and the Python backend.
 
 ## Standalone pyproject.toml
 
-The file at `electron/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app:
+The file at `electron/pyproject/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app.
+
+Every monorepo workspace package must be listed as a direct dependency — uv ignores `[tool.uv.sources]` path overrides for transitive-only packages, so any unlisted workspace package silently falls back to PyPI. Keep this list in sync with `WORKSPACE_PACKAGES` in `scripts/build.js`.
 
 ```toml
 [project]
@@ -417,13 +421,26 @@ name = "minds-desktop"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-minds>=0.1.0",
+    "minds>=0.1.0",
+    "imbue-mngr>=0.2.0",
+    "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-lima>=0.1.0",
+    "imbue-mngr-modal>=0.2.0",
+    "imbue-common>=0.1.0",
+    "concurrency-group>=0.1.0",
+    "resource-guards>=0.1.0",
+    "modal-proxy>=0.1.0",
 ]
+
+[tool.uv.sources]
+# Dev-time path overrides (used only if a developer runs `uv sync` in
+# this directory directly). At build time, scripts/build.js rewrites
+# this section to point at wheels bundled under resources/wheels/.
+minds = { path = "../../../../apps/minds", editable = true }
+# ... one entry per workspace package
 ```
 
-This is intentionally minimal. `imbue-minds` transitively pulls in `mngr`, `mngr-claude-mind`, and all other Python dependencies. The lockfile (`uv.lock`) pins everything.
-
-When cutting a new release, the developer updates the version pin (e.g., `imbue-minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
+No `uv.lock` is committed at `electron/pyproject/`. `scripts/build.js` regenerates the lockfile at build time against the wheel-rewritten pyproject, and that generated lockfile is what ships in the bundle.
 
 ## App Identity
 

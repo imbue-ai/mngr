@@ -116,10 +116,12 @@ class CloudflareClient(FrozenModel):
     def list_services(self, agent_id: AgentId) -> dict[str, str] | None:
         """Query services registered on the agent's tunnel.
 
-        Returns a dict mapping service_name -> hostname, or None on failure.
+        Returns a dict mapping service_name -> hostname, or None on failure
+        (including when no auth/username is configured -- callers that just
+        want to display the listing treat None as "no cloudflare info").
         """
-        tunnel_name = self.make_tunnel_name(agent_id)
         try:
+            tunnel_name = self.make_tunnel_name(agent_id)
             response = httpx.get(
                 self._url(f"/tunnels/{tunnel_name}/services"),
                 headers={"Authorization": self._auth_header()},
@@ -135,8 +137,14 @@ class CloudflareClient(FrozenModel):
             if not isinstance(services, list):
                 services = []
             return {s["service_name"]: s["hostname"] for s in services if "service_name" in s and "hostname" in s}
+        except ValueError as e:
+            # Raised by _effective_username / _auth_header when the client has
+            # no credentials configured yet (e.g. user not logged in). Treat
+            # as "no tunnel info available" rather than a 500.
+            logger.debug("Skipping cloudflare list_services (no auth/username): {}", e)
+            return None
         except (httpx.HTTPError, KeyError, AttributeError) as e:
-            logger.warning("Failed to list services for {}: {}", tunnel_name, e)
+            logger.warning("Failed to list services: {}", e)
             return None
 
     def add_service(self, agent_id: AgentId, service_name: str, service_url: str) -> bool:

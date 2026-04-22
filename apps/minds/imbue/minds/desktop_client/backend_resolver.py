@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
@@ -326,8 +327,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe."""
         with self._lock:
+            was_already_done = self._initial_discovery_done
             self._agents_result = result
             self._initial_discovery_done = True
+        if not was_already_done:
+            # First-ever discovery update. Log at INFO so user bug reports
+            # that include minds.log clearly show whether discovery ever
+            # made forward progress vs. never returned an event at all.
+            logger.info(
+                "Initial agent discovery completed: {} agents discovered",
+                len(result.discovered_agents),
+            )
         self._fire_on_change()
 
     def update_servers(self, agent_id: AgentId, servers: dict[str, str]) -> None:
@@ -471,11 +481,23 @@ class MngrStreamManager(MutableModel):
         self._cg.__enter__()
         # Run from $HOME so mngr uses its global config, not any project-specific
         # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
+        command = [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+        logger.info("Starting agent discovery: {}", " ".join(command))
         self._observe_process = self._cg.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            command=command,
             on_output=self._on_discovery_stream_output,
             cwd=Path.home(),
         )
+        # Watcher thread: if the observe process dies before we get the first
+        # discovery event, the landing page is stuck on "Discovering agents..."
+        # forever. Log loudly so user bug reports ("stuck on discovering")
+        # include the actual exit code in minds.log.
+        watcher = threading.Thread(
+            target=self._watch_observe_process,
+            name="mngr-observe-watcher",
+            daemon=True,
+        )
+        watcher.start()
 
     def stop(self) -> None:
         """Stop all streaming subprocesses.
@@ -496,12 +518,40 @@ class MngrStreamManager(MutableModel):
         result.extend(self._events_processes.values())
         return result
 
+    def _watch_observe_process(self) -> None:
+        """Poll the observe process; log loudly if it exits before discovery completes.
+
+        A silent exit here is the single most common cause of the UI being
+        stuck on "Discovering agents..." forever (e.g. `mngr` crashes on
+        import because of missing workspace packages). Without this log,
+        user bug reports contain no signal at all about what went wrong.
+        """
+        process = self._observe_process
+        if process is None:
+            return
+        while not process.is_finished():
+            time.sleep(0.5)
+        returncode = process.returncode
+        if self.resolver.has_completed_initial_discovery():
+            logger.info("mngr observe exited after discovery completed (returncode={})", returncode)
+        else:
+            logger.error(
+                "mngr observe exited before initial discovery completed (returncode={}). "
+                "The UI will stay stuck on 'Discovering agents...'. "
+                "Check preceding 'mngr observe stderr' lines for the cause.",
+                returncode,
+            )
+
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
         """Handle a line of output from mngr observe --discovery-only."""
         if not is_stdout:
             stripped = line.strip()
             if stripped:
-                logger.debug("mngr observe stderr: {}", stripped)
+                # WARNING (not DEBUG) so that real errors from mngr surface
+                # in minds.log regardless of the verbosity the app was
+                # started with. Critical for debugging user "Discovering
+                # agents..." hangs where the only signal is on stderr.
+                logger.warning("mngr observe stderr: {}", stripped)
             return
         stripped = line.strip()
         if not stripped:

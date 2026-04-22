@@ -44,6 +44,7 @@ imbue-common = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py"]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

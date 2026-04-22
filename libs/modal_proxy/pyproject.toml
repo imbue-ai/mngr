@@ -18,6 +18,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py"]
 
 [tool.uv.sources]
 concurrency-group = { workspace = true }
