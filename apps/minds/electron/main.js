@@ -381,9 +381,12 @@ function registerShortcutsFor(bundle, wc) {
     if (input.type !== 'keyDown') return;
     const key = input.key ? input.key.toLowerCase() : '';
     const modifier = isMac ? input.meta : input.control;
+    // Match on `input.code` (physical key) rather than `input.key`: on macOS,
+    // holding Option transforms `key` into the Option-composed character
+    // (e.g. 'ˆ' or 'Dead' for Option+I), so `key === 'i'` never matches.
     const devTools =
-      (isMac && input.meta && input.alt && key === 'i') ||
-      (!isMac && input.control && input.shift && key === 'c');
+      (isMac && input.meta && input.alt && input.code === 'KeyI') ||
+      (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
       if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
