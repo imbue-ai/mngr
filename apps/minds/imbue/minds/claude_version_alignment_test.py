@@ -72,7 +72,15 @@ def _fetch_template_claude_version(token: str) -> str | None:
         settings_toml_text = base64.b64decode(content_b64).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
-    parsed = tomllib.loads(settings_toml_text)
+    # tomllib.loads raises tomllib.TOMLDecodeError (a ValueError subclass) on
+    # malformed content. Catch it so callers see the documented "return None on
+    # parse failure" behaviour instead of an opaque traceback -- a malformed
+    # response means we cannot verify the pin and the test assertion should
+    # surface that as its own clearer failure message.
+    try:
+        parsed = tomllib.loads(settings_toml_text)
+    except tomllib.TOMLDecodeError:
+        return None
     try:
         return str(parsed["agent_types"]["claude"]["version"])
     except KeyError:
