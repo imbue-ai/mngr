@@ -3832,3 +3832,91 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+# =============================================================================
+# modify_env_vars Tests
+# =============================================================================
+
+
+def test_modify_env_vars_sets_claude_config_dirs(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """modify_env_vars always writes CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(agent.get_claude_config_dir())
+    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir -- we
+    # only assert it is set to a non-empty string; the exact path depends on
+    # the running user's $HOME and is not load-bearing for this test.
+    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]
+
+
+def test_modify_env_vars_propagates_anthropic_api_key_from_os_environ(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ANTHROPIC_API_KEY is copied from os.environ into env_vars when absent.
+
+    Guards the load-bearing fix from commit fdc68196e: tmux panes on offload
+    sandboxes drop ANTHROPIC_API_KEY from inherited env, so modify_env_vars
+    writes it into the agent env file explicitly.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key-from-environ")
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["ANTHROPIC_API_KEY"] == "sk-test-key-from-environ"
+
+
+def test_modify_env_vars_skips_anthropic_api_key_when_absent_from_env(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ANTHROPIC_API_KEY is not in os.environ, it is not added to env_vars.
+
+    The caller may be intentionally running without a key (e.g. using
+    subscription auth via ~/.claude/.credentials.json) -- modify_env_vars
+    must not synthesize an empty key that would otherwise mask that path.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "ANTHROPIC_API_KEY" not in env_vars
+
+
+def test_modify_env_vars_respects_preexisting_anthropic_api_key(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already-set ANTHROPIC_API_KEY in env_vars is not overwritten by os.environ.
+
+    Callers like `mngr create --env ANTHROPIC_API_KEY=...` supply a key via
+    env_vars before modify_env_vars runs; that explicit value must win over
+    whatever os.environ happens to hold in the mngr process.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-environ")
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    env_vars: dict[str, str] = {"ANTHROPIC_API_KEY": "sk-from-env-vars"}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["ANTHROPIC_API_KEY"] == "sk-from-env-vars"
