@@ -343,7 +343,7 @@ def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResponse:
         return _agent_not_found_response(agent_id)
 
     if not agent_info.supports_interrupt:
-        error = ErrorResponse(detail=f"Agent type does not support interrupt: '{agent_info.name}'")
+        error = ErrorResponse(detail=f"Agent '{agent_info.name}' does not support interrupt")
         return JSONResponse(content=error.model_dump(), status_code=405)
 
     success, error_detail = interrupt_agent(agent_info.name)
