@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
@@ -135,6 +136,30 @@ def launch_browser(
         connect_options=connect_options,
         **kwargs,
     )
+
+
+@pytest.fixture
+def browser_context_args(
+    pytestconfig: pytest.Config,
+    playwright: Playwright,
+    device: str | None,
+    base_url: str | None,
+    _pw_artifacts_folder: tempfile.TemporaryDirectory,
+) -> dict[str, Any]:
+    # Mirrors pytest-playwright's upstream browser_context_args, overridden
+    # to function scope because it transitively depends on `playwright`,
+    # which we've pinned to function scope above. Without this override
+    # pytest raises ScopeMismatch at setup time for every test that uses
+    # `page` / `context` (i.e. the entire minds_workspace_server e2e suite).
+    context_args: dict[str, Any] = {}
+    if device:
+        context_args.update(playwright.devices[device])
+    if base_url:
+        context_args["base_url"] = base_url
+    video_option = pytestconfig.getoption("--video", default="off")
+    if video_option in ("on", "retain-on-failure"):
+        context_args["record_video_dir"] = _pw_artifacts_folder.name
+    return context_args
 
 
 @pytest.fixture
