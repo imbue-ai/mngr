@@ -42,13 +42,17 @@ def _deploy_echo_trigger(
 def test_run_local_trigger_executes_run_script(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Running a local trigger should execute its run.sh and return an exit code."""
+    """Running a local trigger should execute its run.sh and return its exit code."""
     _deploy_echo_trigger(temp_mngr_ctx)
-    # run.sh will fail (uv run mngr create isn't set up in test env) but
-    # the point is that it tried to execute the script. A non-zero exit
-    # code proves run.sh was invoked.
+
+    # Replace the generated run.sh with a deterministic script that exits
+    # with a distinctive code, so we can prove the script was actually run
+    # (not short-circuited to 0 or to a generic failure before exec).
+    run_script = get_local_trigger_run_script(temp_mngr_ctx, "test-trigger")
+    run_script.write_text("#!/bin/sh\nexit 42\n")
+
     exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.HUMAN)
-    assert isinstance(exit_code, int)
+    assert exit_code == 42
 
 
 def test_run_local_trigger_not_found_raises(
@@ -79,8 +83,14 @@ def test_run_local_trigger_disabled_still_runs(
 ) -> None:
     """A disabled trigger should still be run (with a warning)."""
     _deploy_echo_trigger(temp_mngr_ctx, "disabled-trigger", is_enabled=False)
+
+    # Overwrite run.sh with a script that exits with a distinctive code,
+    # so we can prove the script ran despite the trigger being disabled.
+    run_script = get_local_trigger_run_script(temp_mngr_ctx, "disabled-trigger")
+    run_script.write_text("#!/bin/sh\nexit 37\n")
+
     exit_code = run_local_trigger(temp_mngr_ctx, "disabled-trigger", OutputFormat.HUMAN)
-    assert isinstance(exit_code, int)
+    assert exit_code == 37
 
 
 def test_run_local_trigger_json_emits_parseable_object(
