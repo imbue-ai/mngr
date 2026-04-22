@@ -1,5 +1,4 @@
 import m from "mithril";
-import { getAgentById } from "../models/AgentManager";
 import { interruptAgent, sendMessage } from "../models/Response";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
@@ -67,8 +66,10 @@ export const MessageInput: m.Component<{ agentId: string | null }> = {
       }
       try {
         await interruptAgent(agentId);
-      } catch {
-        // Fire-and-forget: errors are non-fatal; user can retry.
+      } catch (err) {
+        const reqErr = err as { response?: { detail?: string }; message?: string };
+        const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
+        console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
       }
     }
 
@@ -80,7 +81,6 @@ export const MessageInput: m.Component<{ agentId: string | null }> = {
     }
 
     const hasMessageText = messageText.trim().length > 0;
-    const showStopButton = getAgentById(agentId)?.supports_interrupt === true;
 
     return m("div", { class: "message-input mx-auto w-full" }, [
       m("div", { class: "message-input-box flex flex-col" }, [
@@ -113,19 +113,17 @@ export const MessageInput: m.Component<{ agentId: string | null }> = {
           m(
             "div",
             { class: "message-input-toolbar-left" },
-            showStopButton
-              ? m(
-                  "button",
-                  {
-                    class: "message-input-stop-button",
-                    title: "Interrupt current turn",
-                    onclick: handleInterrupt,
-                  },
-                  m.trust(
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-                  ),
-                )
-              : null,
+            m(
+              "button",
+              {
+                class: "message-input-stop-button",
+                title: "Interrupt current turn",
+                onclick: handleInterrupt,
+              },
+              m.trust(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+              ),
+            ),
           ),
           hasMessageText
             ? m(

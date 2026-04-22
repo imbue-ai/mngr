@@ -12,7 +12,6 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import BaseMngrError
@@ -30,22 +29,6 @@ from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 
 _NOT_INTERRUPTIBLE_REASON = "Agent type does not support interrupt"
-
-
-def agent_type_supports_interrupt(agent_type: str | None) -> bool:
-    """Return True if the class registered for this agent type implements :class:`InterruptibleAgentMixin`.
-
-    Returns False for unknown types (the registry's default fallback class is
-    not interruptible) and for None. Requires that agent plugins have already
-    been loaded (``load_agents_from_plugins``).
-    """
-    if agent_type is None:
-        return False
-    try:
-        cls = get_agent_class(agent_type)
-    except MngrError:
-        return False
-    return issubclass(cls, InterruptibleAgentMixin)
 
 
 class InterruptResult(MutableModel):

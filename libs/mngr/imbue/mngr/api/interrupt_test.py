@@ -4,7 +4,6 @@ import pytest
 
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.interrupt import InterruptResult
-from imbue.mngr.api.interrupt import agent_type_supports_interrupt
 from imbue.mngr.api.interrupt import interrupt_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
@@ -14,33 +13,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-
-
-def test_agent_type_supports_interrupt_returns_false_for_none() -> None:
-    assert agent_type_supports_interrupt(None) is False
-
-
-def test_agent_type_supports_interrupt_returns_false_for_generic(temp_mngr_ctx: MngrContext) -> None:
-    """'generic' falls through to BaseAgent (the default), which is not interruptible.
-
-    ``temp_mngr_ctx`` is requested for its side-effect: it transitively
-    initializes the mngr plugin registry so that ``get_agent_class`` returns
-    ``BaseAgent`` as the default fallback instead of raising ``MngrError``.
-    Without it, the test would exercise the exception branch rather than the
-    default-class branch.
-    """
-    del temp_mngr_ctx
-    assert agent_type_supports_interrupt("generic") is False
-
-
-def test_agent_type_supports_interrupt_returns_false_for_unknown_type(temp_mngr_ctx: MngrContext) -> None:
-    """Unknown types fall through to the default class (BaseAgent), not interruptible.
-
-    See ``test_agent_type_supports_interrupt_returns_false_for_generic`` for
-    why ``temp_mngr_ctx`` is requested.
-    """
-    del temp_mngr_ctx
-    assert agent_type_supports_interrupt("never-heard-of-it") is False
 
 
 def test_interrupt_result_initializes_with_empty_lists() -> None:

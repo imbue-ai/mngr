@@ -201,15 +201,7 @@ def _discover_with_filters(request: Request) -> list[AgentInfo]:
 def _list_agents_endpoint(request: Request) -> JSONResponse:
     """List all mngr-managed agents."""
     agents = _discover_with_filters(request)
-    items = [
-        AgentListItem(
-            id=agent.id,
-            name=agent.name,
-            state=agent.state,
-            supports_interrupt=agent.supports_interrupt,
-        )
-        for agent in agents
-    ]
+    items = [AgentListItem(id=agent.id, name=agent.name, state=agent.state) for agent in agents]
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
@@ -242,7 +234,6 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
         claude_config_dir=claude_config_dir,
         labels=agent_state.labels,
         work_dir=agent_state.work_dir,
-        supports_interrupt=agent_state.supports_interrupt,
     )
 
 
@@ -334,17 +325,14 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
 def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResponse:
     """Interrupt an agent's current turn.
 
-    Returns 404 if the agent is unknown, 405 if its type does not support
-    interrupt, 500 on runtime failure, 200 otherwise. Idle agents return 200
-    because the underlying capability is a no-op when nothing is running.
+    Returns 404 if the agent is unknown, 500 on interrupt failure (including
+    when the agent type does not support interrupt), 200 otherwise. Idle
+    agents return 200 because the underlying capability is a no-op when
+    nothing is running.
     """
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
-
-    if not agent_info.supports_interrupt:
-        error = ErrorResponse(detail=f"Agent '{agent_info.name}' does not support interrupt")
-        return JSONResponse(content=error.model_dump(), status_code=405)
 
     success, error_detail = interrupt_agent(agent_info.name)
     if not success:

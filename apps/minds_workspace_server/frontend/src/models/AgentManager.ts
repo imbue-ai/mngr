@@ -12,7 +12,6 @@ export interface AgentState {
   state: string;
   labels: Record<string, string>;
   work_dir: string | null;
-  supports_interrupt: boolean;
 }
 
 export interface ApplicationEntry {

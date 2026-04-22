@@ -181,22 +181,6 @@ def test_interrupt_agent_returns_404_for_unknown_agent(client: TestClient) -> No
     assert response.status_code == 404
 
 
-def test_interrupt_agent_returns_405_for_non_interruptible_type(client: TestClient) -> None:
-    """Interrupting an agent whose type does not support interrupt returns 405."""
-    agent_info = AgentInfo(
-        id="agent-456",
-        name="codex-agent",
-        state="RUNNING",
-        agent_state_dir=Path("/tmp/test"),
-        claude_config_dir=Path("/tmp/.claude"),
-        supports_interrupt=False,
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        response = client.post("/api/agents/agent-456/interrupt")
-    assert response.status_code == 405
-    assert "does not support interrupt" in response.json()["detail"]
-
-
 def test_interrupt_agent_success(client: TestClient) -> None:
     """Interrupting a running interruptible agent returns 200."""
     agent_info = AgentInfo(
@@ -205,7 +189,6 @@ def test_interrupt_agent_success(client: TestClient) -> None:
         state="RUNNING",
         agent_state_dir=Path("/tmp/test"),
         claude_config_dir=Path("/tmp/.claude"),
-        supports_interrupt=True,
     )
     with (
         patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info),
@@ -218,15 +201,14 @@ def test_interrupt_agent_success(client: TestClient) -> None:
     mock_interrupt.assert_called_once_with("claude-agent")
 
 
-def test_interrupt_agent_returns_500_on_runtime_failure(client: TestClient) -> None:
-    """If the underlying interrupt call fails, return 500 with the error detail."""
+def test_interrupt_agent_returns_500_on_failure(client: TestClient) -> None:
+    """If the underlying interrupt call fails (runtime error or non-interruptible type), return 500 with the error detail."""
     agent_info = AgentInfo(
         id="agent-123",
         name="claude-agent",
         state="RUNNING",
         agent_state_dir=Path("/tmp/test"),
         claude_config_dir=Path("/tmp/.claude"),
-        supports_interrupt=True,
     )
     with (
         patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info),

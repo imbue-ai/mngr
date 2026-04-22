@@ -31,25 +31,12 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.interrupt import agent_type_supports_interrupt
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
-
-
-def _discovered_agent_supports_interrupt(agent: DiscoveredAgent) -> bool:
-    """Return True if the discovered agent's type implements the interrupt mixin.
-
-    `DiscoveredAgent.agent_type` returns an `AgentTypeName | None`; the
-    interrupt check accepts a plain ``str | None``, so we coerce in one place
-    to keep the call-sites uniform.
-    """
-    agent_type = agent.agent_type
-    return agent_type_supports_interrupt(str(agent_type) if agent_type is not None else None)
 
 
 class _LogQueueCallback(MutableModel):
@@ -193,7 +180,6 @@ class AgentManager:
                     "state": a.state,
                     "labels": a.labels,
                     "work_dir": a.work_dir,
-                    "supports_interrupt": a.supports_interrupt,
                 }
                 for a in self._agents.values()
             ]
@@ -219,7 +205,6 @@ class AgentManager:
     def create_worktree_agent(self, name: str, selected_agent_id: str) -> str:
         """Create a new worktree agent. Returns the pre-generated agent ID."""
         agent_id = str(AgentId())
-        agent_type = "claude"
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(selected_agent_id)
@@ -239,8 +224,6 @@ class AgentManager:
             name,
             "--id",
             agent_id,
-            "--type",
-            agent_type,
             "--transfer",
             "git-worktree",
             "--branch",
@@ -280,14 +263,13 @@ class AgentManager:
         labels = {"user_created": "true", "workspace": name}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
-        self._launch_creation_thread(agent_id, name, agent_type, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
     def create_chat_agent(self, name: str) -> str:
         """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID."""
         agent_id = str(AgentId())
-        agent_type = "claude"
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(self._own_agent_id)
@@ -304,8 +286,6 @@ class AgentManager:
             name,
             "--id",
             agent_id,
-            "--type",
-            agent_type,
             "--transfer",
             "none",
             "--template",
@@ -341,7 +321,7 @@ class AgentManager:
         for key in ("workspace", "project"):
             if key in primary_labels:
                 labels[key] = primary_labels[key]
-        self._launch_creation_thread(agent_id, name, agent_type, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
 
@@ -349,7 +329,6 @@ class AgentManager:
         self,
         agent_id: str,
         agent_name: str,
-        agent_type: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
@@ -358,7 +337,7 @@ class AgentManager:
         """Start a background thread to run agent creation and stream logs."""
         self._creation_cg.start_new_thread(
             target=self._run_creation,
-            args=(agent_id, agent_name, agent_type, cmd, work_dir, log_queue, labels),
+            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels),
             name=f"create-{agent_id[:8]}",
             is_checked=False,
         )
@@ -385,7 +364,6 @@ class AgentManager:
         self,
         agent_id: str,
         agent_name: str,
-        agent_type: str,
         cmd: list[str],
         work_dir: Path,
         log_queue: queue.Queue[str | None],
@@ -429,7 +407,6 @@ class AgentManager:
                     state="RUNNING",
                     labels=labels,
                     work_dir=str(work_dir),
-                    supports_interrupt=agent_type_supports_interrupt(agent_type),
                 )
 
         if success:
@@ -449,7 +426,6 @@ class AgentManager:
                         state=agent_info.state,
                         labels=agent_info.labels,
                         work_dir=agent_info.work_dir,
-                        supports_interrupt=agent_info.supports_interrupt,
                     )
                     self._agents[agent_info.id] = agent_state
 
@@ -471,7 +447,6 @@ class AgentManager:
                     state=agent_info.state,
                     labels=agent_info.labels,
                     work_dir=agent_info.work_dir,
-                    supports_interrupt=agent_info.supports_interrupt,
                 )
 
             with self._lock:
@@ -561,7 +536,6 @@ class AgentManager:
                 state="RUNNING",
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
-                supports_interrupt=_discovered_agent_supports_interrupt(agent),
             )
 
         with self._lock:
@@ -589,7 +563,6 @@ class AgentManager:
             state="RUNNING",
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
-            supports_interrupt=_discovered_agent_supports_interrupt(agent),
         )
 
         with self._lock:
