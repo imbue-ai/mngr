@@ -143,6 +143,58 @@ def test_cli_create_via_subprocess(
         )
 
 
+def test_cli_create_rejects_dirty_tree_by_default(
+    temp_git_repo: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+) -> None:
+    """Without --no-ensure-clean, create should fail if the source git repo has uncommitted changes."""
+    agent_name = f"test-dirty-{int(time.time())}"
+
+    (temp_git_repo / "untracked-file.txt").write_text("")
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "add", "untracked-file.txt"],
+        check=True,
+        capture_output=True,
+    )
+
+    env = os.environ.copy()
+    env["MNGR_HOST_DIR"] = str(temp_host_dir)
+    env["MNGR_PREFIX"] = mngr_test_prefix
+    env["MNGR_ROOT_NAME"] = mngr_test_root_name
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "create",
+            "--name",
+            agent_name,
+            "--command",
+            "sleep 99999",
+            "--source",
+            str(temp_git_repo),
+            "--no-connect",
+            "--disable-plugin",
+            "modal",
+            "--disable-plugin",
+            "docker",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode != 0, f"Expected create to fail on dirty tree, got {result.returncode}"
+    combined = (result.stdout + result.stderr).lower()
+    assert "uncommitted changes" in combined or "ensure-clean" in combined, (
+        f"Expected ensure-clean error message. stderr: {result.stderr}\nstdout: {result.stdout}"
+    )
+
+
 @pytest.mark.tmux
 def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_work_dir: Path,
