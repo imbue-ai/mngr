@@ -391,9 +391,16 @@ def _handle_agent_default_redirect(
         preferred = str(known_servers[0])
 
     if preferred is None:
-        # Nothing registered yet; send the user to the servers-listing page
-        # which itself renders a loading state until discovery catches up.
-        return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/servers/"})
+        # Nothing registered yet. Don't redirect to the servers-listing page
+        # -- its empty-state "No servers are currently running" is misleading
+        # during the common post-create race where `status=DONE` arrives at
+        # the UI before the in-VM `app-watcher` has propagated
+        # `server_registered` events back to us. Instead, render the same
+        # Loading page we use for "server registered but backend not
+        # listening yet" -- it auto-reloads this same URL, which re-enters
+        # this handler. As soon as the first registration lands, the next
+        # reload promotes to the preferred server.
+        return HTMLResponse(content=generate_backend_loading_html())
 
     return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/{preferred}/"})
 

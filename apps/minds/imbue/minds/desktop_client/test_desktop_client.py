@@ -338,11 +338,15 @@ def test_agent_default_page_falls_back_to_web(tmp_path: Path) -> None:
     assert response.headers["location"] == f"/forwarding/{agent_id}/web/"
 
 
-def test_agent_default_page_falls_back_to_servers_list_when_no_known_servers(tmp_path: Path) -> None:
+def test_agent_default_page_shows_loading_when_no_known_servers(tmp_path: Path) -> None:
     # During the tiny window between agent-creation success and the first
     # discovery cycle populating the server map, we have nothing to redirect
-    # to; send the user to the servers list page which renders its own
-    # loading state instead of a dead-end 307.
+    # to. Render the shared "Loading..." page that auto-reloads this same
+    # URL: as soon as the first server registration lands, the next reload
+    # falls through to the preferred-server 307. We deliberately don't
+    # redirect to the /servers/ listing page -- its "No servers are
+    # currently running" empty-state reads as a failure to users who just
+    # created an agent and expect to land somewhere useful.
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_server={str(agent_id): {}},
@@ -355,8 +359,9 @@ def test_agent_default_page_falls_back_to_servers_list_when_no_known_servers(tmp
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/forwarding/{agent_id}/", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == f"/forwarding/{agent_id}/servers/"
+    assert response.status_code == 200
+    assert "Loading..." in response.text
+    assert "location.reload()" in response.text
 
 
 def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:

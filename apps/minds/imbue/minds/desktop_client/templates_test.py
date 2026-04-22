@@ -84,32 +84,21 @@ def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
     assert str(_AGENT_A) in html
 
 
-def test_render_agent_servers_page_with_no_servers_auto_retries() -> None:
-    """Empty-state renders include a self-healing retry loop.
-
-    Right after agent-create completes, `status=DONE` arrives at minds before
-    the in-VM `app-watcher` has propagated its `server_registered` events, so
-    `_handle_agent_default_redirect` falls through to this page with no
-    servers. Without the retry, users see a dead "nothing running" message
-    and have to manually back-out and re-enter the agent. The retry script
-    reloads via `/forwarding/<id>/` (re-triggering the default-redirect),
-    which promotes to the preferred server as soon as events arrive.
+def test_render_agent_servers_page_with_no_servers_does_not_auto_reload() -> None:
+    """The servers-listing page is only reached by explicit user navigation;
+    it should render an honest empty-state snapshot, not a self-healing
+    loader. The loading-until-servers-arrive UX lives in
+    `_handle_agent_default_redirect` (which returns `generate_backend_loading_html`
+    instead of redirecting here on empty).
     """
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    # Redirects to the default-redirect URL (not /servers/), so the next
-    # render picks the preferred server once the resolver sees it.
-    assert f"/forwarding/' + AGENT_ID + '/" in html
-    assert "setTimeout" in html
-    # Retry counter lives in sessionStorage so reloads share it.
-    assert "sessionStorage" in html
-    # Page WITH servers shouldn't have the retry running -- it'd cause a
-    # redirect away from the user's current view. (Counter is cleared on a
-    # servers-present render.)
-    html_with_servers = render_agent_servers_page(agent_id=_AGENT_A, server_names=(ServerName("web"),))
-    # The "page with servers clears retry counter" branch must still be
-    # present, but the retry scheduling branch must be gated on presence
-    # of the empty-state element.
-    assert "server-list" in html_with_servers
+    assert "No servers are currently running" in html
+    # No auto-reload / retry loop on this page. The `toggleGlobal` handler
+    # reloads after a successful enable/disable click but that's not a
+    # timer-driven retry -- no setTimeout/setInterval anywhere.
+    assert "setTimeout" not in html
+    assert "setInterval" not in html
+    assert "sessionStorage" not in html
 
 
 def test_render_agent_servers_page_has_back_link() -> None:
