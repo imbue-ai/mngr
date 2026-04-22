@@ -28,7 +28,9 @@ to create a new one.
 
 The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
-directly to the agent command.
+directly to the agent command. To run a shell command with spaces or
+metacharacters, use the built-in 'command' agent type:
+`mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.

@@ -1114,12 +1114,11 @@ mngr create my-server python -- -m http.server 8080
 # run a long-running data pipeline
 mngr create etl-job python --idle-mode run --idle-timeout 60 -- etl_pipeline.py
 
-# run a dev server with extra tmux windows for logs (the first positional is the agent type;
-# define a type in config if you need a multi-word command)
-mngr create dev-env npm -w logs="tail -f /var/log/app.log" -- run dev
+# run a dev server with extra tmux windows for logs
+mngr create dev-env --type command -w logs="tail -f /var/log/app.log" -- npm run dev
 
 # use --idle-mode run so the host stops when the process finishes
-mngr create batch-job --provider modal bash --idle-mode run --idle-timeout 30 -- -c "python train.py && python evaluate.py"
+mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 -- bash -c "python train.py && python evaluate.py"
 # the container will be automatically snapshotted when completed, so you can later come back and connect (and start) to see the results:
 mngr conn batch-job
 

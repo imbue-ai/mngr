@@ -25,7 +25,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 
 
 class MngrListError(Exception):
@@ -131,7 +130,6 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
        - Idle snapshot (created during shutdown)
     """
     # Use a unique agent name for this test
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100112")
     agent_name = f"test-idle-snap-{get_short_random_string()}"
 
     source_dir = tmp_path / "source"
@@ -161,11 +159,11 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     # Create an agent with:
     # - Very short idle timeout (15 seconds) so it shuts down quickly
     # - Short sandbox timeout (120 seconds) with buffer time for clean shutdown
-    # - A long-running sleep as the agent command (from the test-sleep agent
-    #   type). idle-mode=boot only checks BOOT activity, which flips off once
-    #   the host finishes booting, so the sleep running indefinitely is fine.
-    # - idle-mode=boot (not PROCESS, which keeps updating while the tmux bash
-    #   shell is alive and would prevent the host from ever looking idle)
+    # - A long-running sleep as the command-agent's command, paired with
+    #   idle-mode=boot so only BOOT activity counts as activity. BOOT flips
+    #   off once the host finishes booting, so the sleep running indefinitely
+    #   does not keep the host looking busy. The default PROCESS mode would
+    #   keep updating while the tmux bash shell is alive and mask idleness.
     result = subprocess.run(
         [
             "uv",
@@ -173,7 +171,8 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            modal_test_sleep_agent_type,
+            "--type",
+            "command",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
@@ -194,6 +193,9 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "--file=libs/mngr/imbue/mngr/resources/Dockerfile",
             "-b",
             "context-dir=.mngr/dev/build/",
+            "--",
+            "sleep",
+            "100313",
         ],
         capture_output=True,
         text=True,

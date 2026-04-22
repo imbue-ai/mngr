@@ -1,6 +1,7 @@
 """Release tests for the snapshot CLI command on Modal."""
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,6 @@ import pytest
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 
 
 def _extract_json(output: str) -> dict[str, Any]:
@@ -30,7 +30,7 @@ def _create_modal_agent(
     agent_name: str,
     source_dir: Path,
     env: dict[str, str],
-    modal_test_sleep_agent_type: str,
+    agent_command: str,
 ) -> None:
     """Create a Modal agent via the CLI subprocess."""
     with log_span("Creating Modal agent for snapshot test", agent_name=agent_name):
@@ -42,11 +42,13 @@ def _create_modal_agent(
                 "create",
                 f"{agent_name}@.modal",
                 "--type",
-                modal_test_sleep_agent_type,
+                "command",
                 "--no-connect",
                 "--no-ensure-clean",
                 "--source",
                 str(source_dir),
+                "--",
+                *shlex.split(agent_command),
             ],
             capture_output=True,
             text=True,
@@ -81,11 +83,10 @@ def test_snapshot_create_then_list_on_modal(
 
     Creates a real Modal agent, takes a snapshot, lists it to verify it exists
     """
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100114")
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, modal_test_sleep_agent_type)
+    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400005")
     try:
         # Create a snapshot
         with log_span("Creating snapshot for Modal agent", agent_name=agent_name):
@@ -137,11 +138,10 @@ def test_snapshot_destroy_then_list_on_modal(
 
     Destroys all original snapshots and verifies they are gone.
     """
-    modal_test_sleep_agent_type = make_test_sleep_agent_type(modal_subprocess_env.host_dir, "sleep 100115")
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, modal_test_sleep_agent_type)
+    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400006")
     try:
         # Destroy all
         with log_span("Destroying snapshots for Modal agent", agent_name=agent_name):
