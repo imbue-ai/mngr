@@ -22,7 +22,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
+from collections.abc import Generator
 from pathlib import Path
 
 import dotenv
@@ -44,6 +46,96 @@ from imbue.minds.testing import clean_env
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"
 _SIGNAL_FILE = Path("/tmp/minds-e2e-done")
+
+# Minimal template repo config for the test fixture. Mirrors the shape of
+# forever-claude-template's `.mngr/settings.toml` (the templates and agent
+# types that `AgentCreator` references via `--template main --template dev`)
+# but omits the production-only `extra_provision_command` that expects a
+# populated `vendor/mngr/` submodule -- the test wants to exercise the minds
+# agent-creation plumbing, not the full template's provisioning script.
+_MINIMAL_TEMPLATE_SETTINGS = textwrap.dedent(
+    """\
+    [commands.create]
+    connect = false
+    ensure_clean = false
+    yes = true
+
+    [agent_types.claude]
+    auto_dismiss_dialogs = true
+    auto_allow_permissions = true
+    cli_args = "--dangerously-skip-permissions"
+
+    [agent_types.main]
+    parent_type = "claude"
+
+    # Disable providers the test doesn't exercise so their plugin init (e.g.
+    # modal auth token lookup) doesn't fail the agent-creation subprocess.
+    [providers.modal]
+    is_enabled = false
+
+    [providers.docker]
+    is_enabled = false
+
+    [create_templates.main]
+    type = "main"
+
+    [create_templates.dev]
+    provider = "local"
+
+    [create_templates.docker]
+    provider = "docker"
+    target_path = "/code/"
+    build_arg = ["--file=Dockerfile", "."]
+    idle_mode = "disabled"
+    """
+)
+
+
+@pytest.fixture
+def minds_template_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, None, None]:
+    """Create a controllable minds template repo for the e2e tests.
+
+    Writes a minimal `.{MNGR_ROOT_NAME}/settings.toml` defining the `main`,
+    `dev`, and `docker` templates that `AgentCreator._build_mngr_create_command`
+    passes to `mngr create`. Sets `MINDS_TEMPLATE_REPO` so the desktop client
+    uses the local path instead of cloning forever-claude-template from
+    GitHub; this sidesteps both the network clone and the fact that the
+    shared test fixtures pin `MNGR_ROOT_NAME` to a per-test `mngr-test-<id>`
+    (which would otherwise make mngr look for `.mngr-test-<id>/settings.toml`
+    inside a clone that only carries `.mngr/settings.toml`).
+    """
+    template_dir = tmp_path / "minds-template-repo"
+    template_dir.mkdir()
+    subprocess.run(["git", "init", "-q", str(template_dir)], check=True, capture_output=True)
+    # Claude-plugin provisioning refuses to start the agent if
+    # `.claude/settings.local.json` isn't gitignored, so pre-populate that.
+    (template_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    config_dir = template_dir / f".{root_name}"
+    config_dir.mkdir()
+    (config_dir / "settings.toml").write_text(_MINIMAL_TEMPLATE_SETTINGS)
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "minds-test",
+        "GIT_AUTHOR_EMAIL": "minds-test@test.invalid",
+        "GIT_COMMITTER_NAME": "minds-test",
+        "GIT_COMMITTER_EMAIL": "minds-test@test.invalid",
+    }
+    subprocess.run(
+        ["git", "-C", str(template_dir), "add", "-A"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(template_dir), "commit", "-q", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    monkeypatch.setenv("MINDS_TEMPLATE_REPO", str(template_dir))
+    yield template_dir
+
+
 _AGENT_NAME = "forever"
 
 
@@ -255,7 +347,7 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
 @pytest.mark.docker
 @pytest.mark.docker_sdk
 @pytest.mark.timeout(600)
-def test_create_agent_e2e(tmp_path: Path) -> None:
+def test_create_agent_e2e(tmp_path: Path, minds_template_repo: Path) -> None:
     """Create an agent and verify its web server is accessible through the desktop client."""
     _configure_logging()
     _load_env()
@@ -311,7 +403,7 @@ _DEV_AGENT_NAME = "forever-dev"
 @pytest.mark.docker
 @pytest.mark.docker_sdk
 @pytest.mark.timeout(120)
-def test_create_agent_dev_mode_e2e(tmp_path: Path) -> None:
+def test_create_agent_dev_mode_e2e(tmp_path: Path, minds_template_repo: Path) -> None:
     """Create a DEV-mode agent (local provider, no Docker) and verify its web server is proxied.
 
     This is faster than the Docker E2E test because it skips the Docker build.
