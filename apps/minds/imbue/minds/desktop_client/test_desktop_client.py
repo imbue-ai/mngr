@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -74,6 +75,19 @@ def _create_test_backend() -> FastAPI:
     async def backend_echo(request: FastAPIRequest) -> JSONResponse:
         body = await request.body()
         return JSONResponse({"echo": body.decode()})
+
+    @backend.post("/redirect-absolute")
+    def backend_redirect_absolute() -> RedirectResponse:
+        # Simulates a FastAPI 303-after-POST returning a site-absolute Location.
+        return RedirectResponse(url="/landed", status_code=303)
+
+    @backend.post("/redirect-relative")
+    def backend_redirect_relative() -> RedirectResponse:
+        return RedirectResponse(url="./landed", status_code=303)
+
+    @backend.post("/redirect-absolute-url")
+    def backend_redirect_absolute_url() -> RedirectResponse:
+        return RedirectResponse(url="https://example.com/landed", status_code=303)
 
     return backend
 
@@ -404,6 +418,48 @@ def test_agent_proxy_forwards_post_request_to_backend(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json() == {"echo": "test-body-content"}
+
+
+def test_agent_proxy_rewrites_site_absolute_redirect_location(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    response = client.post(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/redirect-absolute",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/landed"
+
+
+def test_agent_proxy_preserves_relative_redirect_location(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    response = client.post(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/redirect-relative",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "./landed"
+
+
+def test_agent_proxy_preserves_external_absolute_url_redirect(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    response = client.post(
+        f"/forwarding/{agent_id}/{DEFAULT_SERVER_NAME}/redirect-absolute-url",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://example.com/landed"
 
 
 def test_agent_proxy_injects_websocket_shim_into_html_responses(tmp_path: Path) -> None:

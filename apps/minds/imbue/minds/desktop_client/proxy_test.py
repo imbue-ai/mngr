@@ -6,6 +6,7 @@ from imbue.minds.desktop_client.proxy import generate_service_worker_js
 from imbue.minds.desktop_client.proxy import generate_websocket_shim_js
 from imbue.minds.desktop_client.proxy import rewrite_absolute_paths_in_html
 from imbue.minds.desktop_client.proxy import rewrite_cookie_path
+from imbue.minds.desktop_client.proxy import rewrite_location_header
 from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
@@ -168,6 +169,110 @@ def test_rewrite_absolute_paths_handles_single_quotes() -> None:
         server_name=_TEST_SERVER,
     )
     assert result == snapshot("<a href='/forwarding/agent-00000000000000000000000000000001/web/hello.txt'>link</a>")
+
+
+# -- Location header rewriting --
+
+
+def test_rewrite_location_header_with_site_absolute_path() -> None:
+    result = rewrite_location_header(
+        location_header="/foo",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == snapshot("/forwarding/agent-00000000000000000000000000000001/web/foo")
+
+
+def test_rewrite_location_header_with_site_absolute_root() -> None:
+    result = rewrite_location_header(
+        location_header="/",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == snapshot("/forwarding/agent-00000000000000000000000000000001/web/")
+
+
+def test_rewrite_location_header_preserves_query_string() -> None:
+    result = rewrite_location_header(
+        location_header="/foo?bar=1&baz=2",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == snapshot("/forwarding/agent-00000000000000000000000000000001/web/foo?bar=1&baz=2")
+
+
+def test_rewrite_location_header_preserves_fragment() -> None:
+    result = rewrite_location_header(
+        location_header="/foo#section",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == snapshot("/forwarding/agent-00000000000000000000000000000001/web/foo#section")
+
+
+def test_rewrite_location_header_does_not_double_prefix() -> None:
+    already_prefixed = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}/foo"
+    result = rewrite_location_header(
+        location_header=already_prefixed,
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == already_prefixed
+
+
+def test_rewrite_location_header_does_not_double_prefix_exact_match() -> None:
+    prefix = f"/forwarding/{_TEST_AGENT}/{_TEST_SERVER}"
+    result = rewrite_location_header(
+        location_header=prefix,
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == prefix
+
+
+def test_rewrite_location_header_preserves_relative_path() -> None:
+    result = rewrite_location_header(
+        location_header="foo",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == "foo"
+
+
+def test_rewrite_location_header_preserves_dot_relative_path() -> None:
+    result = rewrite_location_header(
+        location_header="./foo",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == "./foo"
+
+
+def test_rewrite_location_header_preserves_protocol_relative_url() -> None:
+    result = rewrite_location_header(
+        location_header="//example.com/page",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == "//example.com/page"
+
+
+def test_rewrite_location_header_preserves_absolute_url() -> None:
+    result = rewrite_location_header(
+        location_header="https://example.com/page",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == "https://example.com/page"
+
+
+def test_rewrite_location_header_preserves_fragment_only() -> None:
+    result = rewrite_location_header(
+        location_header="#anchor",
+        agent_id=_TEST_AGENT,
+        server_name=_TEST_SERVER,
+    )
+    assert result == "#anchor"
 
 
 # -- Full proxied HTML rewriting --
