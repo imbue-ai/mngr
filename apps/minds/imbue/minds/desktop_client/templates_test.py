@@ -19,8 +19,8 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"{_AGENT_A}.localhost" in html
-    assert f"{_AGENT_B}.localhost" in html
+    assert f"/goto/{_AGENT_A}/" in html
+    assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -35,7 +35,7 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "Discovering agents" in html
     assert "reload" in html
     assert "No projects yet" not in html
-    assert ".localhost" not in html
+    assert "/goto/" not in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:

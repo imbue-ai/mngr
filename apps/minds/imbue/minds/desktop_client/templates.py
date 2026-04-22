@@ -97,7 +97,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       </thead>
       <tbody>
         {% for agent_id in agent_ids %}
-        <tr onclick="window.location='http://{{ agent_id }}.localhost:' + window.location.port + '/'" data-agent-id="{{ agent_id }}">
+        <tr onclick="window.location='/goto/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
@@ -651,7 +651,7 @@ function toggleSidebar() {
 }
 
 function selectWorkspace(agentId) {
-  navigateContent('http://' + agentId + '.localhost:' + window.location.port + '/');
+  navigateContent('/goto/' + agentId + '/');
   // Close sidebar. In Electron, navigate-content already removes the sidebar
   // WebContentsView on the main process side, so only reset the local state flag
   // without sending another toggle-sidebar IPC (which would re-create it).
@@ -876,7 +876,7 @@ function escapeHtml(s) {
 }
 
 function selectWorkspace(agentId) {
-  if (isElectron) window.minds.navigateContent('http://' + agentId + '.localhost:' + window.location.port + '/');
+  if (isElectron) window.minds.navigateContent('/goto/' + agentId + '/');
 }
 
 function openInNewWindow(agentId) {
@@ -1124,7 +1124,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 <body>
   <div class="page">
     <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ service_name }}</code>
-      in <a href="#" onclick="window.location='http://{{ agent_id }}.localhost:' + window.location.port + '/'; return false;" style="font-size:20px;">{{ ws_name or agent_id }}</a>
+      in <a href="#" onclick="window.location='/goto/{{ agent_id }}/'; return false;" style="font-size:20px;">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
 
     {% if not has_account %}
@@ -1193,7 +1193,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     var h = document.getElementById('page-heading');
     if (!h) return;
     var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serviceName + '</code>';
-    var ws = '<a href="http://' + agentId + '.localhost:' + window.location.port + '/" style="font-size:20px;">' + wsName + '</a>';
+    var ws = '<a href="/goto/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
     var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
     if (isEnabled) {
       h.innerHTML = code + ' shared in ' + ws + acct;

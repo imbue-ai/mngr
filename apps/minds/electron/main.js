@@ -46,10 +46,14 @@ function parseWorkspaceId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    // Workspace URLs are now `<agent-id>.localhost:PORT/...`; the desktop
-    // client serves agent-neutral pages on the bare `localhost` host.
-    const m = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    return m ? m[1] : null;
+    // Final workspace URL: `<agent-id>.localhost:PORT/...`
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
+    // state before the subdomain cookie is installed. Recognising it lets
+    // findBundleForWorkspace de-dupe clicks during the redirect window.
+    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
   }
@@ -61,18 +65,12 @@ function toAbsoluteUrl(url) {
   return url;
 }
 
-// Build the root URL for an agent's workspace (served by the desktop client's
-// subdomain forwarding middleware). Returns null if the backend hasn't come up
-// yet, in which case the caller should wait.
+// Build the auth-bridge URL that, when loaded, installs a session cookie on
+// the agent's subdomain and redirects into the workspace's dockview UI.
+// Returns null if the backend hasn't come up yet.
 function workspaceUrlForAgent(agentId) {
   if (!agentId || !backendBaseUrl) return null;
-  try {
-    const parsed = new URL(backendBaseUrl);
-    parsed.hostname = `${agentId}.localhost`;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
+  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Final
+from urllib.parse import quote
 
 import httpx
 import paramiko
@@ -43,7 +44,9 @@ from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_token
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -248,26 +251,20 @@ def _handle_authenticate(
         html = render_auth_error_page(message="This login code is invalid or has already been used.")
         return HTMLResponse(content=html, status_code=403)
 
-    # Set global session cookie
+    # Set a host-only session cookie on the bare origin. We do NOT try to
+    # share the cookie across `<agent-id>.localhost` subdomains via
+    # ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
+    # a public suffix and refuse to send such cookies to subdomains. Each
+    # subdomain gets its own cookie set on first visit, minted via the
+    # ``/goto/{agent_id}/`` auth-bridge redirect below.
     signing_key = auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)
-
-    # Domain=localhost makes the cookie valid on `localhost` plus any
-    # `<agent-id>.localhost` subdomain the desktop client forwards to. Only
-    # emit it when the request host is actually on ``localhost`` (real
-    # deployments); other hosts (e.g. ``testserver`` in TestClient) fall back
-    # to host-only cookies, which Python's cookielib matches straightforwardly.
-    host_header = request.headers.get("host", "").split(":")[0].lower()
-    cookie_domain: str | None = (
-        "localhost" if host_header == "localhost" or host_header.endswith(".localhost") else None
-    )
 
     response = Response(status_code=307, headers={"Location": "/"})
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=cookie_value,
         path="/",
-        domain=cookie_domain,
         httponly=True,
         samesite="lax",
     )
@@ -393,6 +390,53 @@ def _get_tunnel_http_client(
     )
 
 
+# -- Auth bridge: bare origin -> per-subdomain session cookie --
+
+
+def _handle_goto_workspace(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Redirect an authenticated user from the bare origin to a workspace subdomain,
+    carrying a short-lived signed token that sets the subdomain's session cookie
+    on first landing.
+
+    Flow:
+      1. Landing page click fetches ``/goto/<agent-id>/``.
+      2. This handler verifies the bare-origin session cookie (fails back to
+         ``/`` for unauth users).
+      3. Mints a short-lived token and 302s to
+         ``http://<agent-id>.localhost:PORT/_subdomain_auth?token=...&next=/``.
+      4. The subdomain's ``/_subdomain_auth`` handler sets the subdomain cookie.
+
+    We route through this bridge because ``Domain=localhost`` cookies don't
+    cross from ``localhost`` into ``<agent>.localhost`` (public-suffix rule).
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=302, headers={"Location": "/"})
+
+    try:
+        parsed_id = AgentId(agent_id)
+    except ValueError:
+        return Response(status_code=404)
+
+    signing_key = auth_store.get_signing_key()
+    token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
+
+    # Preserve the user's desired landing path on the subdomain.
+    next_url = request.query_params.get("next", "/")
+    if not next_url.startswith("/"):
+        next_url = "/"
+
+    host_header = request.headers.get("host", "")
+    port = host_header.split(":")[-1] if ":" in host_header else str(request.app.state.auth_server_port or 8420)
+
+    encoded_next = quote(next_url, safe="")
+    location = f"http://{parsed_id}.localhost:{port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+    return Response(status_code=302, headers={"Location": location})
+
+
 # -- Subdomain forwarding to per-workspace minds_workspace_server --
 
 _WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -503,6 +547,43 @@ async def _forward_workspace_http(
     return response
 
 
+_SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
+
+
+def _handle_subdomain_auth_bridge(request: Request, agent_id: AgentId) -> Response:
+    """Validate an inbound ``/_subdomain_auth`` token and set a subdomain cookie.
+
+    The bare-origin ``/goto/{agent_id}/`` handler mints a short-lived signed
+    token and redirects the browser to ``http://<agent_id>.localhost:PORT/
+    _subdomain_auth?token=...&next=/...``. That's this handler. We verify the
+    token was issued for this specific agent, then set a host-only session
+    cookie on the subdomain and redirect to ``next``. Subsequent requests on
+    this subdomain carry the cookie and pass the normal auth check.
+
+    We do this dance because ``Domain=localhost`` cookies don't propagate to
+    subdomains in Chromium / curl (localhost is treated as a public suffix).
+    """
+    auth_store: AuthStoreInterface = request.app.state.auth_store
+    token = request.query_params.get("token", "")
+    next_url = request.query_params.get("next", "/")
+    if not next_url.startswith("/"):
+        next_url = "/"
+    signing_key = auth_store.get_signing_key()
+    if not verify_subdomain_auth_token(token=token, signing_key=signing_key, agent_id=str(agent_id)):
+        return Response(status_code=403, content="Invalid or expired subdomain auth token")
+
+    cookie_value = create_session_cookie(signing_key=signing_key)
+    response = Response(status_code=302, headers={"Location": next_url})
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=cookie_value,
+        path="/",
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
 async def _handle_workspace_forward_http(request: Request) -> Response:
     """Forward an HTTP request arriving at ``<agent-id>.localhost:8420`` to that
     workspace's minds_workspace_server. Called from subdomain-routing middleware.
@@ -511,6 +592,11 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     agent_id = _parse_workspace_subdomain(host_header)
     if agent_id is None:
         return Response(status_code=404)
+
+    # Auth-bridge: /_subdomain_auth?token=... sets the subdomain cookie. It
+    # must be handled BEFORE the auth check because there's no cookie yet.
+    if request.url.path == _SUBDOMAIN_AUTH_PATH:
+        return _handle_subdomain_auth_bridge(request, agent_id)
 
     auth_store: AuthStoreInterface = request.app.state.auth_store
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -1698,6 +1784,10 @@ def create_desktop_client(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
+
+    # Auth bridge: same-origin redirect to a workspace subdomain that
+    # installs a subdomain-scoped session cookie on first visit.
+    app.get("/goto/{agent_id}/")(_handle_goto_workspace)
 
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)
