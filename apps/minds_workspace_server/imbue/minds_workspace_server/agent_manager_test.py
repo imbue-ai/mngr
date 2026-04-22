@@ -410,7 +410,7 @@ def test_handle_full_snapshot(agent_manager: AgentManager, broadcaster: WebSocke
 
 
 def test_run_creation_logs_header_and_completion(agent_manager: AgentManager, tmp_path: Path) -> None:
-    """Creation thread logs a header line and a done message."""
+    """Creation thread logs a header line and a done message, and populates the agent map."""
     log_q: queue.Queue[str | None] = queue.Queue(maxsize=10000)
     cmd = ["true"]
 
@@ -430,6 +430,18 @@ def test_run_creation_logs_header_and_completion(agent_manager: AgentManager, tm
     done_msgs = [m for m in messages if "done" in m]
     assert len(done_msgs) == 1
     assert done_msgs[0]["success"] is True
+
+    # Successful creation must eagerly populate _agents with a record that
+    # carries the `supports_interrupt` attribute, so the UI can render the
+    # interrupt control immediately rather than waiting for the observe
+    # subprocess. The attribute's *value* depends on whether the mngr plugin
+    # registry has been initialized (only True when `claude` is registered),
+    # which this unit test does not exercise -- so we only assert the field
+    # is a bool, not its specific value.
+    created = agent_manager.get_agent_by_id("test-id")
+    assert created is not None
+    assert created.name == "test-agent"
+    assert isinstance(created.supports_interrupt, bool)
 
 
 def test_log_queue_callback_puts_json_line(
