@@ -18,6 +18,8 @@
   --color-accent-light: #e9f2ee;
   --color-surface: #ffffff;
   --color-surface-secondary: #f3f2ef;
+  --color-stop-button: #64748b;
+  --color-stop-button-hover: #475569;
   --font-family-base: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-family-heading: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-family-mono: "SF Mono", "Cascadia Code", ui-monospace, monospace;
@@ -229,7 +231,7 @@ body {
   height: 28px;
   padding: 0;
   color: #fff;
-  background: #64748b;
+  background: var(--color-stop-button);
   border: none;
   border-radius: 50%;
   cursor: pointer;
@@ -238,7 +240,7 @@ body {
 }
 
 .message-input-stop-button:hover:not(:disabled) {
-  background: #475569;
+  background: var(--color-stop-button-hover);
 }
 
 .message-input-logo {
