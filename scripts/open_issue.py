@@ -2,7 +2,7 @@
 """Open a pre-populated GitHub issue in the browser.
 
 Usage:
-    python scripts/open-issue.py --title "Bug: ..." body.md
+    python scripts/open_issue.py --title "Bug: ..." body.md
 
 The diagnostic agent calls this from its worktree to open the issue
 for user review before submission.

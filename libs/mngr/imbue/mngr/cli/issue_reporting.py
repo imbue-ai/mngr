@@ -301,7 +301,7 @@ def build_diagnose_prompt(
         "- Versions of any other tools relevant to the issue",
         "",
         "Write your issue body to a markdown file, then run:",
-        '  python scripts/open-issue.py --title "Your issue title" body.md',
+        '  python scripts/open_issue.py --title "Your issue title" body.md',
         "This will open the issue in the browser for the user to review before submission.",
         "",
         "## mngr Version",
