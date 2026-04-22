@@ -21,12 +21,25 @@ def test_agent_type_supports_interrupt_returns_false_for_none() -> None:
 
 
 def test_agent_type_supports_interrupt_returns_false_for_generic(temp_mngr_ctx: MngrContext) -> None:
-    """'generic' falls through to BaseAgent (the default), which is not interruptible."""
+    """'generic' falls through to BaseAgent (the default), which is not interruptible.
+
+    ``temp_mngr_ctx`` is requested for its side-effect: it transitively
+    initializes the mngr plugin registry so that ``get_agent_class`` returns
+    ``BaseAgent`` as the default fallback instead of raising ``MngrError``.
+    Without it, the test would exercise the exception branch rather than the
+    default-class branch.
+    """
+    del temp_mngr_ctx
     assert agent_type_supports_interrupt("generic") is False
 
 
 def test_agent_type_supports_interrupt_returns_false_for_unknown_type(temp_mngr_ctx: MngrContext) -> None:
-    """Unknown types fall through to the default class (BaseAgent), not interruptible."""
+    """Unknown types fall through to the default class (BaseAgent), not interruptible.
+
+    See ``test_agent_type_supports_interrupt_returns_false_for_generic`` for
+    why ``temp_mngr_ctx`` is requested.
+    """
+    del temp_mngr_ctx
     assert agent_type_supports_interrupt("never-heard-of-it") is False
 
 
