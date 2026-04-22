@@ -1121,6 +1121,33 @@ function installApplicationMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          // Default Electron binding (`role: 'toggleDevTools'`) targets the
+          // focused BrowserWindow's contents; we use BaseWindow with multiple
+          // WebContentsViews, so call toggleDevTools explicitly on the
+          // focused bundle's content view.
+          accelerator: 'Alt+Cmd+I',
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
