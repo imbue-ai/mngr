@@ -81,7 +81,7 @@ def schedule_remove(ctx: click.Context, **kwargs: Any) -> None:
                 write_human_line("  - {}", name)
         write_human_line("")
         if not click.confirm("Are you sure you want to continue?"):
-            raise SystemExit(0)
+            return
 
     # Remove each trigger
     for name in found_names:
