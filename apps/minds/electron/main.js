@@ -1042,11 +1042,34 @@ async function triggerUpdateCheck() {
     });
     return;
   }
+  // Every path must surface SOMETHING to the user -- silent no-ops are the
+  // single biggest UX complaint here. We suppress todesktop's built-in
+  // Notifier modal (see the `todesktop.init` call up top), so the four
+  // outcomes of checkForUpdates() need explicit dialogs:
+  //   1. already up to date       -> "You're up to date"
+  //   2. update available          -> "Downloading; titlebar Update button will appear when ready"
+  //   3. update already downloaded -> "Click the Update button to restart and install"
+  //   4. error / checkForUpdates throws -> error dialog
   const onNotAvailable = () => {
     dialog.showMessageBox({
       type: 'info',
       message: 'You\'re up to date.',
       detail: 'No updates are currently available.',
+    });
+  };
+  const onAvailable = (info) => {
+    const v = info && (info.version || info.releaseName);
+    dialog.showMessageBox({
+      type: 'info',
+      message: v ? `Update ${v} available.` : 'Update available.',
+      detail: 'Downloading in the background. When ready, an Update button will appear in the titlebar -- click it to restart and install.',
+    });
+  };
+  const onDownloaded = () => {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update ready to install.',
+      detail: 'Click the Update button in the titlebar to restart and apply the update.',
     });
   };
   const onError = (err) => {
@@ -1057,9 +1080,15 @@ async function triggerUpdateCheck() {
     });
   };
   autoUpdater.once('update-not-available', onNotAvailable);
+  autoUpdater.once('update-available', onAvailable);
+  autoUpdater.once('update-downloaded', onDownloaded);
   autoUpdater.once('error', onError);
   try {
     await autoUpdater.checkForUpdates({ source: 'menu' });
+    // If an update is already-downloaded from a previous check (e.g. the
+    // auto-check on launch fired before the user clicked), no new event
+    // fires -- surface the in-memory `updateReady` flag.
+    if (updateReady) onDownloaded();
   } catch (err) {
     dialog.showMessageBox({
       type: 'error',
@@ -1068,6 +1097,8 @@ async function triggerUpdateCheck() {
     });
   } finally {
     autoUpdater.removeListener('update-not-available', onNotAvailable);
+    autoUpdater.removeListener('update-available', onAvailable);
+    autoUpdater.removeListener('update-downloaded', onDownloaded);
     autoUpdater.removeListener('error', onError);
   }
 }
@@ -1116,8 +1147,6 @@ function installApplicationMenu() {
             if (target && !target.window.isDestroyed()) target.window.close();
           },
         },
-        { type: 'separator' },
-        { label: 'Check for Updates...', click: triggerUpdateCheck },
       ],
     },
     { role: 'editMenu' },
@@ -1480,7 +1509,7 @@ ipcMain.on('install-update', () => {
     dialog.showMessageBox({
       type: 'info',
       message: 'No update to install.',
-      detail: 'The app is already up to date, or the new version has not finished downloading yet. Try File > Check for Updates...',
+      detail: 'The app is already up to date, or the new version has not finished downloading yet. Try the app menu > Check for Updates...',
     });
     return;
   }
