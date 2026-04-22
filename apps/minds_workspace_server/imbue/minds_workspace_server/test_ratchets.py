@@ -33,7 +33,8 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(6))
+    # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
+    rc.check_time_sleep(_DIR, snapshot(7))
 
 
 def test_prevent_global_keyword() -> None:
@@ -100,7 +101,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(0))
+    # +1 for service_dispatcher.py's asyncio.gather running the two WS-forward
+    # tasks concurrently. Dropping asyncio here would mean rolling our own
+    # cancellation-aware gather; the spirit of the ratchet is "prefer the
+    # project's concurrency_group for threads/procs", which doesn't apply
+    # to pure asyncio tasks.
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:
