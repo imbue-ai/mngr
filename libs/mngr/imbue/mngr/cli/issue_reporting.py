@@ -24,8 +24,6 @@ from imbue.mngr.errors import BaseMngrError
 GITHUB_REPO: Final[str] = "imbue-ai/mngr"
 GITHUB_BASE_URL: Final[str] = f"https://github.com/{GITHUB_REPO}"
 ISSUE_TITLE_PREFIX: Final[str] = "[NotImplemented]"
-UNEXPECTED_ERROR_TITLE_PREFIX: Final[str] = "[Bug]"
-
 # Maximum URL length to stay within browser and GitHub limits
 _MAX_URL_LENGTH: Final[int] = 8000
 
@@ -227,36 +225,6 @@ def handle_not_implemented_error(error: NotImplementedError, is_interactive: boo
     _prompt_and_report_issue(title, body, error_message)
 
     raise SystemExit(1)
-
-
-# FIXME: actually, to make this sane, we want to search just for the type of error being raised, and the function it is being raised from (the lowest level one in the traceback that is actually from one of our libraries)
-#  otherwise we're likely to end up missing existing issues, esp if there is anything random or dynamic in the error message (e.g. memory addresses, random IDs, etc.) that would prevent matching against existing issues.
-@pure
-def build_unexpected_error_issue_title(error: Exception) -> str:
-    """Build a GitHub issue title from an unexpected error."""
-    error_type = type(error).__name__
-    error_message = str(error).strip().split("\n")[0] if str(error) else "No message"
-    return f"{UNEXPECTED_ERROR_TITLE_PREFIX} {error_type}: {error_message}"
-
-
-@pure
-def build_unexpected_error_issue_body(error: Exception, traceback_str: str) -> str:
-    """Build a GitHub issue body from an unexpected error with traceback."""
-    return (
-        "## Bug Report\n"
-        "\n"
-        "An unexpected error occurred during command execution.\n"
-        "\n"
-        "**Error:**\n"
-        f"```\n{type(error).__name__}: {error}\n```\n"
-        "\n"
-        "**Traceback:**\n"
-        f"```\n{traceback_str}\n```\n"
-        "\n"
-        "## Additional Context\n"
-        "\n"
-        "_Please describe what you were doing when this error occurred._\n"
-    )
 
 
 def get_mngr_version() -> str:
