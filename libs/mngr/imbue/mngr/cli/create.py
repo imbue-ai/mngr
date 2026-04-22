@@ -44,13 +44,13 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
 from imbue.mngr.cli.headless_runner import destroy_agent_on_exit
+from imbue.mngr.cli.headless_runner import is_streaming_headless_agent_type
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -166,10 +166,7 @@ def _resolve_agent_type_name(
 
     Precedence: --type flag > positional argument.
     """
-    resolved = type_flag
-    if positional_agent_type and resolved is None:
-        resolved = positional_agent_type
-    return resolved
+    return type_flag if type_flag is not None else positional_agent_type
 
 
 def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
@@ -622,10 +619,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
         resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
-        is_headless = False
-        if resolved_agent_type is not None:
-            agent_class = get_agent_class(resolved_agent_type)
-            is_headless = issubclass(agent_class, StreamingHeadlessAgentMixin)
+        is_headless = resolved_agent_type is not None and is_streaming_headless_agent_type(resolved_agent_type)
 
         if is_headless and not opts.foreground:
             raise UserInputError(
@@ -1674,12 +1668,19 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 
 
 def _apply_host_labels(host: OnlineHostInterface, label_strings: tuple[str, ...]) -> None:
-    """Parse KEY=VALUE host label strings and apply them to an existing host."""
+    """Parse KEY=VALUE host label strings and apply them to an existing host.
+
+    Raises UserInputError for any entry without '=', matching the validation
+    done for the new-host path in _parse_target_host. Silently dropping
+    malformed entries would hide user mistakes (especially on the headless
+    create path, where this is the only --host-label validator).
+    """
     labels_to_add: dict[str, str] = {}
     for label_string in label_strings:
-        if "=" in label_string:
-            key, value = label_string.split("=", 1)
-            labels_to_add[key.strip()] = value.strip()
+        if "=" not in label_string:
+            raise UserInputError(f"Host label must be in KEY=VALUE format, got: {label_string}")
+        key, value = label_string.split("=", 1)
+        labels_to_add[key.strip()] = value.strip()
     if labels_to_add:
         host.add_tags(labels_to_add)
 

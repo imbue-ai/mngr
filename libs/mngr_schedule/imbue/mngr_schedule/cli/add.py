@@ -3,6 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import assert_never
 from uuid import uuid4
 
 import click
@@ -269,6 +270,8 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
         _deploy_local(trigger, mngr_ctx, opts)
     elif isinstance(provider, ModalProviderInstance):
         _deploy_modal(trigger, mngr_ctx, opts, provider)
+    else:
+        assert_never(provider)
 
 
 def _deploy_local(

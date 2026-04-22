@@ -10,7 +10,6 @@ from imbue.mngr.cli.capture import capture
 from imbue.mngr.cli.create import create
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
-from imbue.mngr.utils.testing import make_test_sleep_agent_type
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -34,12 +33,10 @@ def test_capture_no_agent_headless_fails(
 def test_capture_outputs_pane_content(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
     temp_work_dir: Path,
     mngr_test_prefix: str,
 ) -> None:
     """Capture command should output the visible pane content for a running agent."""
-    agent_type = make_test_sleep_agent_type(temp_host_dir, "echo CAPTURE_TEST_MARKER && sleep 493827")
     agent_name = "test-capture-visible"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -50,12 +47,14 @@ def test_capture_outputs_pane_content(
                 "--name",
                 agent_name,
                 "--type",
-                agent_type,
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "echo CAPTURE_TEST_MARKER && sleep 493827",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

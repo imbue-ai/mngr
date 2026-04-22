@@ -10,6 +10,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.data_types import ScheduleCreationRecord
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
+from imbue.mngr_schedule.implementations.local.deploy import _get_records_dir
 from imbue.mngr_schedule.implementations.local.deploy import _save_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import _stage_env_file
 from imbue.mngr_schedule.implementations.local.deploy import build_wrapper_script
@@ -496,12 +497,13 @@ def test_get_local_schedule_creation_record_not_found(
 
 
 def test_get_local_schedule_creation_record_invalid_json(
-    tmp_path: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Looking up a trigger with invalid JSON should return None."""
-    records_dir = tmp_path / ".mngr" / "schedule" / "records"
-    records_dir.mkdir(parents=True)
+    # Resolve the records dir via the same helper the production code uses
+    # so this test does not silently decouple from a layout change.
+    records_dir = _get_records_dir(temp_mngr_ctx)
+    records_dir.mkdir(parents=True, exist_ok=True)
     (records_dir / "bad-trigger.json").write_text("not valid json")
 
     record = get_local_schedule_creation_record(temp_mngr_ctx, "bad-trigger")
