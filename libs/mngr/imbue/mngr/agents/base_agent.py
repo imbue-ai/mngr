@@ -99,10 +99,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     ) -> CommandString:
         """Default: ``command_override`` or ``agent_config.command`` as the base, then append ``cli_args`` and ``agent_args``.
 
-        The base must come from either ``command_override`` or the agent type's
-        ``command = "..."`` config. If neither is set, raises ``UserInputError``
-        unless ``agent_args`` is non-empty (in which case ``agent_args`` is used
-        as the whole command, which is the ``command`` agent type's usage).
+        The base comes from ``command_override`` if provided, otherwise
+        ``agent_config.command`` if set, otherwise nothing. After the base,
+        ``cli_args`` and then ``agent_args`` are appended (joined with spaces).
+        Raises ``UserInputError`` if the final command would be empty -- i.e.
+        no base, no ``cli_args``, and no ``agent_args``.
         """
         if command_override is not None:
             base = str(command_override)
