@@ -369,7 +369,7 @@ def test_write_diagnose_prompt_file_writes_prompt_text(tmp_path: Path) -> None:
         base_dir=tmp_path,
     )
     assert path.exists()
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     assert "0.2.4" in content
     assert "ValueError: oops" in content
     assert "Traceback:\n  ValueError: oops" in content

@@ -300,9 +300,9 @@ def write_diagnose_prompt_file(
         traceback_str=traceback_str,
         mngr_version=mngr_version,
     )
-    content_hash = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+    content_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
     path = base_dir / f"mngr-diagnose-prompt-{content_hash}.txt"
-    path.write_text(prompt)
+    path.write_text(prompt, encoding="utf-8")
     return path
 
 
