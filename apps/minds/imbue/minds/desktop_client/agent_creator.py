@@ -829,7 +829,7 @@ class AgentCreator(MutableModel):
         cg = ConcurrencyGroup(name="mngr-destroy")
         with cg:
             result = cg.run_process_to_completion(
-                command=[MNGR_BINARY, "destroy", str(agent_id), "--yes"],
+                command=[MNGR_BINARY, "destroy", str(agent_id), "-f"],
                 is_checked_after=False,
             )
         if result.returncode != 0:
