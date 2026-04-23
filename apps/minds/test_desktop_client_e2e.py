@@ -342,31 +342,29 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
 
 # docker / docker_sdk / tmux marks are required because `mngr create` shells
 # out to the docker binary, uses the Python docker SDK during provisioning,
-# and spawns the agent inside a tmux pane; the resource-guard PATH wrapper
-# blocks unannotated docker / tmux usage. Do not remove.
+# and spawns the agent inside a tmux pane.
 #
 # Skipped pending a separate root-cause for "TUI send enter and wait timeout"
 # seen in test-docker-release CI (ubuntu-latest with real dockerd). The tmux
 # pane reaches the `env claude --session-id ...` prompt fine, but the initial
-# Enter keypress never registers with claude's TUI -- pane content sits
-# unchanged for 90s.
+# Enter keypress doesn't appear to register with claude's TUI -- pane
+# content sits unchanged for the full 90s wait.
 #
 # Notes for the follow-up:
 #   - This is NOT the same silent-hang the b2036ed20 env-wrap fixed; the
 #     silent-hang was 0 bytes of both stdout and stderr. Here claude paints
-#     its prompt and stays alive; only the subsequent Enter is lost.
-#   - The test goes through minds' production `AgentCreator.run_mngr_create`
-#     which invokes `mngr create ... --message /welcome`. The `--message`
-#     flag folds the initial send into the create step and reuses the
-#     internal `_send_enter_and_wait` helper (libs/mngr/.../base_agent.py).
-#     It does NOT go through `mngr message` -- that'd be a separate CLI that
-#     the minds flow currently doesn't use. Part of the fix might be either
-#     (a) restoring the Left/Right tmux noop helper that used to sit between
-#     `send-keys -l <text>` and `send-keys Enter` in base_agent.py (last seen
-#     in commit 93f96a463, removed along the way) or (b) changing minds'
-#     creator to two-step (spawn without --message, wait-for-ready, then
-#     `mngr message`). (b) is a bigger product change but gets the message
-#     path retryable.
+#     its prompt and stays alive; only the subsequent Enter appears stuck.
+#   - The send flow here is already the shared `mngr message` internals --
+#     `mngr create --message /welcome` folds the initial send into the
+#     create step but reuses the same `_send_enter_and_wait` helper
+#     (libs/mngr/.../base_agent.py) that `mngr message` itself calls.
+#     Switching to an explicit two-step `mngr create` + `mngr message`
+#     wouldn't change the send path at all.
+#   - Most plausible cause is Modal-side weirdness around pty buffering
+#     and a notoriously slow sandbox filesystem: the send CAN go through,
+#     but sometimes not for well over 90s (the test's wait). Not a bug in
+#     the send flow so much as a bad fit between the test's timeout and
+#     Modal's worst-case latency here.
 #   - Ran green locally under offload-modal-release after b2036ed20
 #     (120/120), so the docker-release flavour is the only thing blocking.
 @pytest.mark.release
@@ -426,14 +424,14 @@ _DEV_AGENT_NAME = "forever-dev"
 # docker / docker_sdk / tmux marks are required because `mngr create` shells
 # out to the docker binary, uses the Python docker SDK during provisioning
 # (even in DEV mode, which runs the agent on the local provider), and spawns
-# the agent inside a tmux pane. The resource-guard PATH wrapper blocks
-# unannotated docker / tmux usage. Do not remove.
+# the agent inside a tmux pane.
 #
 # Skipped for the same reason as test_create_agent_e2e above (see its
-# inline comment for the full write-up): `mngr create --message` path's
-# tmux Enter keypress doesn't register with the claude TUI in
-# test-docker-release. Dev-mode exits via pytest-timeout at 120s because
-# the initial-message send never completes.
+# inline comment for the full write-up): Modal pty buffering + slow
+# sandbox filesystem make the initial `mngr create --message` send sit
+# apparently-stuck for well over the 90s wait, even though the same
+# send flow runs fine locally. Dev-mode exits via pytest-timeout at
+# 120s because the send hasn't completed by then.
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.docker_sdk
