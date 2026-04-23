@@ -283,10 +283,10 @@ def build_diagnose_prompt(
 
 
 def write_diagnose_prompt_file(
-    traceback_str: str,
-    mngr_version: str,
     error_type: str,
     error_message: str,
+    traceback_str: str,
+    mngr_version: str,
     base_dir: Path,
 ) -> Path:
     """Write a diagnostic-agent prompt to a temp file for `mngr create --message-file`.

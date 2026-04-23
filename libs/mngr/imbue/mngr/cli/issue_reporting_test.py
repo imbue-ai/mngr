@@ -377,8 +377,8 @@ def test_write_diagnose_prompt_file_writes_prompt_text(tmp_path: Path) -> None:
 
 def test_write_diagnose_prompt_file_deterministic_name(tmp_path: Path) -> None:
     """Same inputs produce the same file path (content-addressed)."""
-    path1 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg", base_dir=tmp_path)
-    path2 = write_diagnose_prompt_file("tb", "0.2.4", "Err", "msg", base_dir=tmp_path)
+    path1 = write_diagnose_prompt_file("Err", "msg", "tb", "0.2.4", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("Err", "msg", "tb", "0.2.4", base_dir=tmp_path)
     assert path1 == path2
     assert path1.name.startswith("mngr-diagnose-prompt-")
     assert path1.name.endswith(".txt")
@@ -386,8 +386,8 @@ def test_write_diagnose_prompt_file_deterministic_name(tmp_path: Path) -> None:
 
 def test_write_diagnose_prompt_file_different_inputs(tmp_path: Path) -> None:
     """Different inputs produce different file paths."""
-    path1 = write_diagnose_prompt_file("tb1", "0.2.4", "Err", "msg1", base_dir=tmp_path)
-    path2 = write_diagnose_prompt_file("tb2", "0.2.4", "Err", "msg2", base_dir=tmp_path)
+    path1 = write_diagnose_prompt_file("Err", "msg1", "tb1", "0.2.4", base_dir=tmp_path)
+    path2 = write_diagnose_prompt_file("Err", "msg2", "tb2", "0.2.4", base_dir=tmp_path)
     assert path1 != path2
 
 
