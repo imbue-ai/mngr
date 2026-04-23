@@ -10,7 +10,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import MNGR_REPO_URL
-from imbue.mngr.cli.issue_reporting import _offer_diagnose
+from imbue.mngr.cli.issue_reporting import _print_diagnose_instructions
 from imbue.mngr.cli.issue_reporting import build_diagnose_prompt
 from imbue.mngr.cli.issue_reporting import build_issue_body
 from imbue.mngr.cli.issue_reporting import build_issue_title
@@ -392,25 +392,25 @@ def test_write_diagnose_prompt_file_different_inputs(tmp_path: Path) -> None:
 
 
 # =============================================================================
-# Tests for _offer_diagnose
+# Tests for _print_diagnose_instructions
 # =============================================================================
 
 
-def test_offer_diagnose_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_offer_diagnose produces no output when IS_AUTONOMOUS=1."""
+def test_print_diagnose_instructions_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_print_diagnose_instructions produces no output when IS_AUTONOMOUS=1."""
     monkeypatch.setenv("IS_AUTONOMOUS", "1")
     with capture_loguru(level="INFO") as log_output:
-        _offer_diagnose(Path("/tmp/fake-prompt.txt"))
+        _print_diagnose_instructions(Path("/tmp/fake-prompt.txt"))
     assert log_output.getvalue() == ""
 
 
-def test_offer_diagnose_prints_create_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_offer_diagnose prints a `mngr create` command referencing the prompt file."""
+def test_print_diagnose_instructions_prints_create_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_print_diagnose_instructions prints a `mngr create` command referencing the prompt file."""
     # Clear any inherited IS_AUTONOMOUS so the suppress-when-autonomous branch doesn't fire.
     monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
     prompt_path = Path("/tmp/mngr-diagnose-prompt-abc123.txt")
     with capture_loguru(level="INFO") as log_output:
-        _offer_diagnose(prompt_path)
+        _print_diagnose_instructions(prompt_path)
     output = log_output.getvalue()
     assert "mngr create" in output
     assert f"--source {MNGR_REPO_URL}" in output

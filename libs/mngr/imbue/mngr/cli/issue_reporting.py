@@ -306,7 +306,7 @@ def write_diagnose_prompt_file(
     return path
 
 
-def _offer_diagnose(prompt_file_path: Path) -> None:
+def _print_diagnose_instructions(prompt_file_path: Path) -> None:
     """Print a `mngr create` command the user can run to launch a diagnostic agent."""
     if os.environ.get("IS_AUTONOMOUS", "0") == "1":
         return
@@ -350,6 +350,6 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
         error_message=error_message,
         base_dir=Path("/tmp"),
     )
-    _offer_diagnose(prompt_path)
+    _print_diagnose_instructions(prompt_path)
 
     raise SystemExit(1)
