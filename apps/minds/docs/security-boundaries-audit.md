@@ -18,27 +18,19 @@ The minds desktop app uses a layered proxy architecture:
 
 **Via JavaScript: NO.** Each agent runs on its own subdomain (`agent-A.localhost:PORT` vs `agent-B.localhost:PORT`). These are different origins, so the browser's same-origin policy prevents JavaScript on one agent's pages from accessing another agent's cookies, DOM, or storage.
 
-**Via the agent's backend code: YES -- the session cookie is fungible across agents.** This is the main finding of this audit.
+**Via the agent's backend code: Previously YES, now FIXED.** This was the main finding of this audit.
 
-Here's the issue: the desktop client sets a `minds_session` cookie on each agent's subdomain via the auth bridge (`/goto/{agent_id}/` -> `/_subdomain_auth`). The cookie is signed with `itsdangerous.URLSafeTimedSerializer` using a single signing key, and the payload is always the string `"authenticated"` (see `cookie_manager.py:14`). Every agent's subdomain gets an independently-minted cookie, but they are all functionally identical -- any one of them is valid on any other agent's subdomain.
+The desktop client sets a `minds_session` cookie on each agent's subdomain via the auth bridge (`/goto/{agent_id}/` -> `/_subdomain_auth`). The cookie is signed with `itsdangerous.URLSafeTimedSerializer` using a single signing key, and the payload is always the string `"authenticated"` (see `cookie_manager.py:14`). Every agent's subdomain gets an independently-minted cookie, but they are all functionally identical -- any one of them would be valid on any other agent's subdomain if it could be obtained.
 
-When the desktop client proxies an HTTP request from the browser to a workspace server (`app.py:483-553`, `_forward_workspace_http`), it forwards all request headers except `host`:
+Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all request headers except `host` to the workspace server, including the `minds_session` cookie. A malicious workspace server could have extracted the cookie and reused it against other agents.
 
-```python
-headers = dict(request.headers)
-headers.pop("host", None)
-body = await request.body()
-```
-
-This means the workspace server receives the `minds_session` cookie in the `Cookie` header. The workspace server is controlled by the agent (it runs inside the agent's container from template code). A malicious or compromised agent could extract the `minds_session` cookie from any incoming request and use it to make authenticated HTTP requests to another agent's subdomain (`agent-B.localhost:PORT`), bypassing the desktop client's auth check.
-
-**Severity: Medium.** Requires the agent's backend code to be actively malicious. In practice, agents are created from user-chosen template repos, so this is only exploitable if a template is backdoored or an agent is compromised. However, the architecture should not rely on agent code being trusted -- the desktop client is supposed to be the trust boundary.
+**Fix applied:** The proxy now strips the `minds_session` cookie from the `Cookie` header before forwarding to the workspace server (see `app.py`, `_forward_workspace_http`). Auth is fully handled by the desktop client's middleware before the request reaches the proxy, so the workspace server does not need to see the session cookie. Additionally, the Electron content views now use a separate session partition (`persist:workspace-content`), isolating the content cookie jar from the chrome/sidebar views.
 
 ## Question 2: Can an agent access localStorage created by another agent?
 
 **NO.** localStorage is origin-scoped. `agent-A.localhost:PORT` and `agent-B.localhost:PORT` are different origins, so they have completely separate localStorage, sessionStorage, and IndexedDB storage.
 
-Note: All `WebContentsView` instances in the Electron app share the **default session** (no `partition` is specified in `webPreferences` -- see `main.js:217-222`). However, even within a shared Electron session, web storage is still scoped by origin per Chromium's standard behavior. So while the cookie jar is technically shared at the Chromium layer, storage APIs remain isolated per-origin.
+Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while chrome, sidebar, and requests panel views use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
 
 ## Question 3: Can agents access cookies/localStorage used by the outer minds app?
 
@@ -67,7 +59,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 | Layer | Mechanism | Status |
 |-------|-----------|--------|
 | Between agents (browser-side) | Origin isolation: different subdomains | Secure |
-| Between agents (backend-side) | Session cookie is fungible | **Vulnerable** |
+| Between agents (backend-side) | Session cookie stripped by proxy before forwarding | Secure (fixed) |
 | Between services within an agent | Cookie `Path` rewriting (`/service/<name>/`) | Secure |
 | Between agents and desktop client | Host-only cookies, no `Domain=localhost` | Secure |
 | Service Worker cookies | Scoped to `/service/<name>/` path | Secure |
@@ -85,19 +77,19 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 | Component | Current state | Risk |
 |-----------|--------------|------|
-| WebContentsView session | All share default session (no `partition`) | Low -- origin isolation still applies |
+| WebContentsView session | Content views use `persist:workspace-content` partition; chrome/sidebar use default session | Secure -- cookie jars separated between content and chrome |
 | Content Security Policy | Not explicitly set by desktop client | Low -- agents control their own CSP |
 | contextIsolation | Enabled on all views | Secure |
 | nodeIntegration | Disabled on all views | Secure |
 | Preload script | Only on chrome/sidebar/requests views, NOT on contentView | Secure |
 
-## Options for fixing the session cookie fungibility
+## Options considered for fixing the session cookie fungibility
 
-### Option A: Strip the auth cookie in the proxy (recommended)
+### Option A: Strip the auth cookie in the proxy -- IMPLEMENTED
 
-The desktop client proxy (`_forward_workspace_http`) should strip the `minds_session` cookie from the `Cookie` header before forwarding to the workspace server. Auth is already fully handled by the desktop client's middleware before the request reaches the proxy -- the workspace server does not need to see or validate the session cookie.
+The desktop client proxy (`_forward_workspace_http`) strips the `minds_session` cookie from the `Cookie` header before forwarding to the workspace server. Auth is fully handled by the desktop client's middleware before the request reaches the proxy -- the workspace server does not need to see or validate the session cookie.
 
-Implementation: In `_forward_workspace_http`, parse the `Cookie` header, remove the `minds_session` cookie, and forward the rest. This is a small, surgical change.
+Implementation: In `_forward_workspace_http`, the `Cookie` header is parsed, the `minds_session` cookie is removed, and the remaining cookies are forwarded. Non-session cookies (e.g. service-specific cookies) are preserved.
 
 Pros:
 - Minimal code change
@@ -107,7 +99,7 @@ Pros:
 Cons:
 - If any workspace server feature ever needs to verify auth (currently none do), it would need an alternative mechanism
 
-### Option B: Per-agent session cookies
+### Option B: Per-agent session cookies (not implemented)
 
 Make each subdomain's session cookie cryptographically bound to that specific agent ID. Change the cookie payload from `"authenticated"` to something like `f"authenticated:{agent_id}"`, and verify the agent ID when checking cookies.
 
@@ -120,33 +112,25 @@ Cons:
 - The extracted cookie would still be usable against the same agent (less concerning)
 - Does not prevent the workspace server from seeing the cookie at all
 
-### Option C: Electron session partitioning
+### Option C (variant): Content session partitioning -- IMPLEMENTED
 
-Use per-agent `partition` in the contentView's `webPreferences`:
+Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. Chrome, sidebar, and requests panel views continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
 
-```javascript
-const contentView = new WebContentsView({
-    webPreferences: {
-        partition: `persist:${agentId}`,
-        contextIsolation: true,
-        nodeIntegration: false,
-    },
-});
-```
+This separates the content cookie jar from the chrome cookie jar, adding defense-in-depth. Agents remain origin-isolated within the content partition via standard Chromium same-origin policy.
 
 Pros:
-- Gives each agent a completely separate cookie jar, cache, and storage
-- Strongest isolation at the Electron layer
+- Separates content and chrome cookie jars
+- Simpler than per-agent partitions -- no need to track which partition each agent uses
+- Cookie sync keeps chrome views authenticated
 
 Cons:
-- Requires the auth bridge to work with per-partition sessions (cookies set in one partition aren't visible in another)
-- More complex window management (need to track which partition each content view uses)
-- May break session restore if agent IDs change
+- Agents share a single content partition (origin isolation still applies within it)
+- Adds complexity in cookie synchronization between partitions
 
-### Option D: Combine A + C (strongest)
+### Option D: Combine A + C (not implemented as originally described)
 
-Strip auth cookies in the proxy (Option A) AND partition Electron sessions (Option C). This provides defense-in-depth at both the proxy layer and the Electron layer.
+The implemented approach combines Option A with a variant of Option C -- cookie stripping in the proxy plus a shared content partition (rather than per-agent partitions).
 
-## Recommendation
+## What was implemented
 
-**Option A (strip auth cookies in the proxy) should be implemented first.** It is the simplest change, directly addresses the fungibility issue, and has no architectural side effects. Option C (session partitioning) is worth considering as a follow-up for defense-in-depth, but is not strictly necessary given that origin isolation already handles JavaScript-level storage separation.
+**Option A (cookie stripping) and a variant of Option C (shared content partition) are both implemented.** Option A directly prevents the session cookie from reaching workspace servers. The content partition provides defense-in-depth by separating content and chrome cookie jars at the Electron level.
