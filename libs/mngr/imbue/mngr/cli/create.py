@@ -964,9 +964,12 @@ def _stream_and_destroy_headless_agent(
     diverge after the agent has been created.
     """
     agent = create_result.agent
-    if not isinstance(agent, StreamingHeadlessAgentMixin):
-        raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
+    # Put the runtime isinstance check inside the destroy-on-exit scope so any
+    # failure after the agent has been created still triggers cleanup. Matches
+    # the same pattern in ``headless_agent_output`` in cli/headless_runner.py.
     with destroy_agent_on_exit(create_result.host, agent):
+        if not isinstance(agent, StreamingHeadlessAgentMixin):
+            raise MngrError(f"Expected streaming headless agent, got {type(agent).__name__}")
         stream_or_accumulate_response(
             chunks=agent.stream_output(),
             output_format=output_opts.output_format,
