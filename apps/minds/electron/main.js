@@ -392,6 +392,44 @@ function wireContentViewEvents(bundle, contentView) {
   });
 }
 
+// Ask the content view's renderer (the Dockview workspace) to close its
+// active tab via IPC. If the renderer didn't close anything -- no handler
+// registered, no active panel, or no response within the timeout -- fall
+// back to closing the window. Matches browser convention where closing the
+// last tab closes the window.
+const CLOSE_ACTIVE_TAB_TIMEOUT_MS = 500;
+let closeActiveTabRequestSeq = 0;
+
+async function requestCloseActiveTab(cv) {
+  if (!cv || cv.webContents.isDestroyed()) return false;
+  const requestId = `close-tab-${++closeActiveTabRequestSeq}`;
+  return new Promise((resolve) => {
+    let settled = false;
+    const onResponse = (_event, id, closed) => {
+      if (id !== requestId) return;
+      finish(!!closed);
+    };
+    const finish = (closed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ipcMain.removeListener('close-active-tab-response', onResponse);
+      resolve(closed);
+    };
+    const timer = setTimeout(() => finish(false), CLOSE_ACTIVE_TAB_TIMEOUT_MS);
+    ipcMain.on('close-active-tab-response', onResponse);
+    cv.webContents.send('close-active-tab-request', requestId);
+  });
+}
+
+async function closeActiveTabOrWindow(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const closed = await requestCloseActiveTab(bundle.contentView);
+  if (!closed && !bundle.window.isDestroyed()) {
+    bundle.window.close();
+  }
+}
+
 function registerShortcutsFor(bundle, wc) {
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
@@ -410,12 +448,18 @@ function registerShortcutsFor(bundle, wc) {
       }
       return;
     }
-    // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
-    // them here too would double-fire (e.g. two new windows per cmd+N).
+    // When the app menu is installed, it owns cmd+W / cmd+Shift+W / cmd+Q /
+    // cmd+N; handling them here too would double-fire (e.g. two new windows
+    // per cmd+N).
     if (appMenuInstalled) return;
-    if (modifier && !input.shift && !input.alt && key === 'w') {
+    if (modifier && input.shift && !input.alt && key === 'w') {
       event.preventDefault();
       if (!bundle.window.isDestroyed()) bundle.window.close();
+      return;
+    }
+    if (modifier && !input.shift && !input.alt && key === 'w') {
+      event.preventDefault();
+      closeActiveTabOrWindow(bundle);
       return;
     }
     if (modifier && !input.shift && !input.alt && key === 'q') {
@@ -1093,8 +1137,16 @@ function installApplicationMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Close Window',
+          label: 'Close Tab',
           accelerator: 'CmdOrCtrl+W',
+          click: () => {
+            const target = getMostRecentWindow();
+            if (target) closeActiveTabOrWindow(target);
+          },
+        },
+        {
+          label: 'Close Window',
+          accelerator: 'CmdOrCtrl+Shift+W',
           click: () => {
             const target = getMostRecentWindow();
             if (target && !target.window.isDestroyed()) target.window.close();

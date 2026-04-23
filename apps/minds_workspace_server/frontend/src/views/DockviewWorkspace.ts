@@ -262,9 +262,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
   // (reachable via the "New terminal" menu item further down). Everything
   // else, including the default "web" example server, is openable.
-  const apps = getApplications().filter(
-    (app) => app.name !== "system_interface" && app.name !== "terminal",
-  );
+  const apps = getApplications().filter((app) => app.name !== "system_interface" && app.name !== "terminal");
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getServiceUrl(app.name);
@@ -627,6 +625,17 @@ function initializeDockview(parentElement: HTMLElement): void {
   });
 
   dockview = dv;
+
+  // Register a handler so the Electron shell can forward cmd+w to close the
+  // active dockview tab. The handler returns true when a panel was closed;
+  // the shell falls back to closing the window otherwise.
+  const minds = (window as { minds?: { setCloseActiveTabHandler?: (handler: () => boolean) => void } }).minds;
+  minds?.setCloseActiveTabHandler?.(() => {
+    const active = dv.activePanel;
+    if (!active) return false;
+    active.api.close();
+    return true;
+  });
 
   // Listen for layout changes and auto-save
   _layoutChangeDisposable = dv.api.onDidLayoutChange(() => {
