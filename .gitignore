@@ -260,6 +260,7 @@
 # Autofix session artifacts
 **/.autofix/
 **/.reviewer/outputs/
+**/.reviewer/logs/
 **/.reviewer/settings.local.json
 **/.reviewer/.stop_hook_consecutive_blocks
 **/.reviews/
