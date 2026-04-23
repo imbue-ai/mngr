@@ -159,9 +159,11 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     # Create an agent with:
     # - Very short idle timeout (15 seconds) so it shuts down quickly
     # - Short sandbox timeout (120 seconds) with buffer time for clean shutdown
-    # - Echo command that exits immediately so the host becomes idle
-    # - idle-mode=boot so only BOOT activity is checked (not PROCESS which
-    #   keeps getting updated while the tmux bash shell is running)
+    # - A long-running sleep as the command-agent's command, paired with
+    #   idle-mode=boot so only BOOT activity counts as activity. BOOT flips
+    #   off once the host finishes booting, so the sleep running indefinitely
+    #   does not keep the host looking busy. The default PROCESS mode would
+    #   keep updating while the tmux bash shell is alive and mask idleness.
     result = subprocess.run(
         [
             "uv",
@@ -169,7 +171,8 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "generic",
+            "--type",
+            "command",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
@@ -179,7 +182,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "15",
             # Use boot idle mode so only BOOT activity is checked
             # (the default IO mode includes PROCESS which keeps getting
-            # updated while the tmux bash shell is alive after echo exits)
+            # updated while the tmux bash shell is alive)
             "--idle-mode",
             "boot",
             # Set sandbox timeout to 120 seconds via build args
@@ -191,7 +194,8 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "-b",
             "context-dir=.mngr/dev/build/",
             "--",
-            "echo hi && sleep 300",
+            "sleep",
+            "100313",
         ],
         capture_output=True,
         text=True,
@@ -222,10 +226,11 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
         f"Expected 'initial' snapshot after agent creation, but found snapshots: {initial_snapshot_names}"
     )
 
-    # Wait for the host to become idle and shut down
-    # The echo command exits immediately, so the host should become idle
-    # after the 15-second idle timeout, then the activity_watcher will
-    # call shutdown.sh which calls snapshot_and_shutdown
+    # Wait for the host to become idle and shut down.
+    # With idle-mode=boot, only BOOT activity is checked; once boot finishes
+    # the boot flag stops updating, so the host becomes idle after the
+    # 15-second idle timeout. The activity_watcher then calls shutdown.sh
+    # which calls snapshot_and_shutdown.
     #
     # Total wait time budget:
     # - ~15 seconds for idle timeout

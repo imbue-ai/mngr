@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from websockets import ClientConnection
 
@@ -76,6 +77,7 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.primitives import LaunchMode
@@ -503,6 +505,19 @@ async def _forward_workspace_http(
 
     headers = dict(request.headers)
     headers.pop("host", None)
+
+    # Strip the desktop client's session cookie so agent-controlled workspace
+    # servers cannot extract and reuse it against other agents.
+    raw_cookie = headers.get("cookie")
+    if raw_cookie is not None:
+        stripped = "; ".join(
+            c.strip() for c in raw_cookie.split(";") if not c.strip().startswith(SESSION_COOKIE_NAME + "=")
+        )
+        if stripped:
+            headers["cookie"] = stripped
+        else:
+            del headers["cookie"]
+
     body = await request.body()
 
     accept = request.headers.get("accept", "")
@@ -1154,7 +1169,12 @@ def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
 ) -> list[dict[str, str]]:
-    """Build a JSON-serializable list of workspaces from the backend resolver."""
+    """Build a JSON-serializable list of workspaces from the backend resolver.
+
+    Each entry carries a deterministic "accent" CSS color derived from the
+    agent id so the chrome and sidebar can render a per-workspace accent
+    without running a digest in JS.
+    """
     agent_ids = backend_resolver.list_known_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -1162,7 +1182,7 @@ def _build_workspace_list(
         if not ws_name:
             info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name}
+        entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -1241,40 +1261,10 @@ def _handle_workspace_settings(
 
     servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
 
-    # Telegram section
-    telegram_section = ""
-    telegram_js = ""
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_state: str | None = None
     if telegram_orchestrator is not None:
-        has_telegram = telegram_orchestrator.agent_has_telegram(AgentId(agent_id))
-        if has_telegram:
-            telegram_section = '<p style="color:#16a34a;">Telegram is active for this workspace.</p>'
-        else:
-            telegram_section = (
-                f'<button class="btn btn-primary" id="tg-btn" '
-                f"onclick=\"setupTelegram('{agent_id}')\">Setup Telegram</button>"
-            )
-            telegram_js = (
-                "async function setupTelegram(agentId) {"
-                '  var btn = document.getElementById("tg-btn");'
-                '  btn.disabled = true; btn.textContent = "Setting up...";'
-                "  try {"
-                '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
-                '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
-                '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
-                "    var interval = setInterval(async function() {"
-                '      try { var r = await fetch("/api/agents/" + agentId + "/telegram/status");'
-                "        if (!r.ok) return; var d = await r.json();"
-                '        if (d.status === "DONE") { clearInterval(interval);'
-                '          btn.textContent = "Telegram active"; btn.style.color = "#16a34a"; }'
-                '        else if (d.status === "FAILED") { clearInterval(interval);'
-                '          btn.textContent = "Setup failed"; btn.disabled = false; }'
-                "        else { btn.textContent = d.status; }"
-                "      } catch (e) {}"
-                "    }, 2000);"
-                '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
-                "}"
-            )
+        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -1282,8 +1272,7 @@ def _handle_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_section=telegram_section,
-        telegram_js=telegram_js,
+        telegram_state=telegram_state,
     )
     return HTMLResponse(content=html)
 
@@ -1905,6 +1894,15 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
+    # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
+    # (plain curl, no build step) and is gitignored; if it's missing, the
+    # mount still works and the server logs a hint at startup.
+    _static_dir = Path(__file__).resolve().parent / "static"
+    if not (_static_dir / "tailwind.js").exists():
+        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+    app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
 
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)

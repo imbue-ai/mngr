@@ -9,7 +9,9 @@
     "start": "electron .",
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
-    "todesktop:beforeInstall": "./scripts/download-binaries.js"
+    "todesktop:beforeInstall": "./scripts/download-binaries.js",
+    "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
+    "postinstall": "bash scripts/fetch_tailwind.sh"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0"

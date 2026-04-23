@@ -2997,6 +2997,7 @@ name = "resource-guards"
 version = "0.1.4"
 source = { editable = "libs/resource_guards" }
 dependencies = [
+    { name = "pluggy" },
     { name = "pytest" },
 ]
 
@@ -3008,6 +3009,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
+    { name = "pluggy", specifier = ">=1.5" },
     { name = "pytest", specifier = ">=9.0" },
 ]
 provides-extras = ["dev"]

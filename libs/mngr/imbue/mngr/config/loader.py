@@ -210,6 +210,7 @@ def load_config(
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
+    config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -374,7 +375,7 @@ def _parse_providers(
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -671,6 +672,7 @@ def parse_config(
     kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
+    kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
 
     if len(raw) > 0:
         if strict:

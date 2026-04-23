@@ -61,15 +61,17 @@ cd apps/minds && npm install && cd ../..
 
 ### 4. Find your Docker SSH key
 
-The Docker provider stores SSH keys at:
+Minds agents register their hosts under `~/.minds/mngr/`, not the default `~/.mngr/`, because the minds desktop client overrides `MNGR_HOST_DIR` (see `propagate_changes` lines ~43-46). The SSH key for a minds Docker agent lives at:
 ```
-~/.mngr/profiles/<profile_id>/providers/docker/docker/keys/docker_ssh_key
+~/.minds/mngr/profiles/<profile_id>/providers/docker/docker/keys/docker_ssh_key
 ```
 
 Find yours with:
 ```bash
-find ~/.mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
+find ~/.minds/mngr/profiles -path "*/docker/*/keys/docker_ssh_key"
 ```
+
+Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr agents and will silently fail with "Permission denied (publickey)".
 
 ### 5. Start the Electron app
 
@@ -86,7 +88,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
 (
   set -a
   source .env
-  source .test_env
+  [ -f .test_env ] && source .test_env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"

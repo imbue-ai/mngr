@@ -685,7 +685,7 @@ sudo poweroff
         return host_obj
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Permanently destroy a Lima VM and delete its snapshots."""
+        """Permanently destroy a Lima VM and mark the host as DESTROYED."""
         host_id = host.id if isinstance(host, HostInterface) else host
         logger.info("Destroying Lima VM: {}", host_id)
 
@@ -705,6 +705,7 @@ sudo poweroff
         if host_record is not None:
             updated_certified = host_record.certified_host_data.model_copy_update(
                 to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
+                to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
             )
             self._host_store.write_host_record(
                 host_record.model_copy_update(

@@ -595,12 +595,14 @@ def create_test_agent_via_cli(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
     agent_name: str,
-    agent_cmd: str = "sleep 482917",
+    command: str,
 ) -> str:
     """Create a test agent via the CLI and return the session name.
 
-    This encapsulates the common pattern of creating a source agent for
-    integration tests that need an existing agent (e.g., clone, migrate).
+    Uses the ``command`` agent type and passes ``command`` after ``--``
+    (typically ``"sleep <N>"`` with a pinned per-test value so leaked
+    processes grep back to the test). Used by integration tests that just
+    need an existing agent to operate on (e.g., clone, migrate, destroy).
 
     The caller should wrap this call inside a tmux_session_cleanup context
     manager to ensure the session is cleaned up even if assertions fail.
@@ -612,13 +614,15 @@ def create_test_agent_via_cli(
         [
             "--name",
             agent_name,
-            "--command",
-            agent_cmd,
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            *shlex.split(command),
         ],
         obj=plugin_manager,
         catch_exceptions=False,
