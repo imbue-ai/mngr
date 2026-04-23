@@ -16,21 +16,50 @@ _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(defaul
 
 
 # -- Per-workspace identity color --
-# The hue is a deterministic function of the agent id, so each workspace has
-# a stable visual accent across sidebar, titlebar, and in-workspace pages.
-# Shared between Python and JS so both sides pick the same color for a given
-# agent (JS version lives in the chrome template).
+# Each workspace gets a deterministic color from a curated palette. A continuous
+# hue-wheel hash looks fine in isolation but fails for small workspace counts:
+# two random hues often land in the same perceptual bucket (e.g. 326 and 13 are
+# both "warm red" at a glance). The palette below is hand-picked so any two
+# slots are distinguishable by hue AND by lightness/saturation, so adjacent
+# picks still read clearly apart.
+#
+# Shared with the JS side via the WORKSPACE_PALETTE export, which the chrome
+# and sidebar templates inline so the client never recomputes.
+
+_WORKSPACE_PALETTE: Final[tuple[str, ...]] = (
+    "hsl(212, 72%, 52%)",  # blue
+    "hsl(8, 75%, 55%)",  # red
+    "hsl(142, 55%, 42%)",  # forest green
+    "hsl(35, 85%, 52%)",  # amber
+    "hsl(280, 55%, 58%)",  # purple
+    "hsl(188, 72%, 42%)",  # teal
+    "hsl(330, 65%, 58%)",  # rose
+    "hsl(95, 50%, 42%)",  # olive
+    "hsl(248, 62%, 62%)",  # indigo
+    "hsl(22, 85%, 50%)",  # orange
+    "hsl(168, 58%, 38%)",  # deep teal
+    "hsl(312, 58%, 52%)",  # magenta
+)
 
 
 @pure
-def workspace_hue(agent_id: str) -> int:
-    """Deterministically map an agent id to an HSL hue in [0, 360).
-
-    Paired with fixed saturation/lightness in CSS so every workspace lands
-    in a readable mid-tone range -- no eye-searing yellows, no muddy browns.
-    """
+def workspace_accent(agent_id: str) -> str:
+    """Deterministically map an agent id to a CSS color from the workspace palette."""
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big") % 360
+    idx = int.from_bytes(digest[:4], "big") % len(_WORKSPACE_PALETTE)
+    return _WORKSPACE_PALETTE[idx]
+
+
+@pure
+def workspace_palette_size() -> int:
+    """Size of the workspace color palette (for the JS-side mapping)."""
+    return len(_WORKSPACE_PALETTE)
+
+
+# JS literal for the palette -- emitted into the chrome and sidebar templates
+# so the client picks the same color for a given workspace id that the server
+# would pick. Rendered as a simple array of color strings.
+_WORKSPACE_PALETTE_JS: Final[str] = "[" + ",".join(f'"{c}"' for c in _WORKSPACE_PALETTE) + "]"
 
 
 # -- Shared design tokens --
@@ -58,12 +87,12 @@ TOKENS: Final[str] = """
   --text-chrome: #e4e4e7;
   --text-chrome-muted: #a1a1aa;
 
-  /* The per-workspace accent must be expanded inline wherever it is used
-     (e.g. hsl(var(--workspace-hue, 235) 60% 55%)), NOT routed through a
-     secondary custom property declared here. Nested var() inside a custom
-     property on :root resolves against :root, so `var(--accent)` at a child
-     element would always use the :root fallback for --workspace-hue and
-     every workspace would render the same color. */
+  /* Workspace accent color. Set per element -- body for in-workspace pages,
+     per row for landing/sidebar -- and used via var(--workspace-accent)
+     directly. Do NOT introduce a separate --accent that wraps this via a
+     nested var(): nested var() inside a custom property on :root resolves
+     against :root, not against the element where the outer var() is used,
+     so every workspace would pick up the same fallback. */
   --link: #2563eb;
 
   --danger: #dc2626;
@@ -126,7 +155,7 @@ a:hover { text-decoration: underline; }
 .page-workspace::before {
   content: "";
   position: fixed; top: 0; left: 0; right: 0; height: 3px;
-  background: hsl(var(--workspace-hue, 235) 60% 55%);
+  background: var(--workspace-accent, hsl(235 60% 55%));
   z-index: 1000;
 }
 
@@ -244,7 +273,7 @@ code {
   display: inline-block;
   width: 10px; height: 10px;
   border-radius: 2px;
-  background: hsl(var(--workspace-hue, 235) 60% 55%);
+  background: var(--workspace-accent, hsl(235 60% 55%));
   vertical-align: middle;
   flex-shrink: 0;
 }
@@ -271,7 +300,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .project-row:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
     .project-row::before {
       content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-      background: hsl(var(--workspace-hue, 235) 60% 55%);
+      background: var(--workspace-accent, hsl(235 60% 55%));
     }
     .project-row__name { flex: 1; font-weight: 500; color: var(--text); padding-left: 4px; }
     .project-row__cog {
@@ -294,7 +323,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     <div class="project-list">
       {% for agent_id in agent_ids %}
       <div class="project-row"
-           style="--workspace-hue: {{ agent_hues.get(agent_id | string, 235) }};"
+           style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'hsl(235 60% 55%)') }};"
            data-agent-id="{{ agent_id }}"
            onclick="window.location='/goto/{{ agent_id }}/'">
         <span class="project-row__name">{{ agent_names.get(agent_id | string, agent_id) }}</span>
@@ -418,7 +447,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     }
   </style>
 </head>
-<body class="page-workspace" style="--workspace-hue: {{ hue }};">
+<body class="page-workspace" style="--workspace-accent: {{ accent }};">
   <div class="page">
     <h1 class="display">Creating your project</h1>
     <p class="subtitle">This usually takes 10-30 seconds.</p>
@@ -560,11 +589,11 @@ def render_landing_page(
     with auto-refresh instead of the empty state. This is used when the stream
     manager hasn't completed initial agent discovery yet.
     """
-    agent_hues = {str(aid): workspace_hue(str(aid)) for aid in accessible_agent_ids}
+    agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
     template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
     return template.render(
         agent_ids=accessible_agent_ids,
-        agent_hues=agent_hues,
+        agent_accents=agent_accents,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
@@ -626,7 +655,7 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
     return template.render(
         agent_id=agent_id,
         status_text=status_text,
-        hue=workspace_hue(str(agent_id)),
+        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -706,7 +735,7 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 }
 .minds-title-swatch {
   display: none; width: 10px; height: 10px; border-radius: 2px;
-  background: hsl(var(--workspace-hue, 235) 60% 55%);
+  background: var(--workspace-accent, hsl(235 60% 55%));
   flex-shrink: 0;
 }
 .minds-title-swatch.visible { display: inline-block; }
@@ -758,7 +787,7 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 }
 .sidebar-item::before {
   content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
-  border-radius: 2px; background: hsl(var(--workspace-hue, 235) 60% 55%);
+  border-radius: 2px; background: var(--workspace-accent, hsl(235 60% 55%));
   opacity: 0.55;
 }
 .sidebar-item:hover { background: var(--bg-chrome-hover); }
@@ -834,20 +863,26 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 <script>
 var isElectron = !!window.minds;
 
-// Stable workspace id -> HSL hue. Matches Python workspace_hue() in templates.py.
-// SHA-256 gives stable output across Python/JS; we only need the first 4 bytes.
-async function hueForAgentId(agentId) {
+// Curated workspace color palette. Must stay in sync with _WORKSPACE_PALETTE
+// in templates.py -- both sides hash the agent id the same way and index into
+// the same array, so the server and client pick identical colors.
+var WORKSPACE_PALETTE = """
+    + _WORKSPACE_PALETTE_JS
+    + """;
+
+// SHA-256 first-4-bytes mod palette-length, matching workspace_accent() in templates.py.
+async function accentForAgentId(agentId) {
   var enc = new TextEncoder().encode(agentId);
   var digest = await crypto.subtle.digest('SHA-256', enc);
   var view = new DataView(digest);
-  return view.getUint32(0, false) % 360;
+  var idx = view.getUint32(0, false) % WORKSPACE_PALETTE.length;
+  return WORKSPACE_PALETTE[idx];
 }
 
-// Cached hue map so we never pay the digest cost twice for the same id.
-var hueCache = {};
-function getHue(agentId, cb) {
-  if (hueCache[agentId] !== undefined) { cb(hueCache[agentId]); return; }
-  hueForAgentId(agentId).then(function(h) { hueCache[agentId] = h; cb(h); });
+var accentCache = {};
+function getAccent(agentId, cb) {
+  if (accentCache[agentId] !== undefined) { cb(accentCache[agentId]); return; }
+  accentForAgentId(agentId).then(function(c) { accentCache[agentId] = c; cb(c); });
 }
 
 // -- Navigation adapter --
@@ -894,14 +929,14 @@ function applyTitleSwatch(agentId) {
   var swatch = document.getElementById('title-swatch');
   if (!agentId) {
     swatch.classList.remove('visible');
-    document.documentElement.style.removeProperty('--workspace-hue');
+    document.documentElement.style.removeProperty('--workspace-accent');
     currentTitleAgentId = null;
     return;
   }
   currentTitleAgentId = agentId;
-  getHue(agentId, function(h) {
+  getAccent(agentId, function(c) {
     if (currentTitleAgentId !== agentId) return;
-    document.documentElement.style.setProperty('--workspace-hue', String(h));
+    document.documentElement.style.setProperty('--workspace-accent', c);
     swatch.classList.add('visible');
   });
 }
@@ -1019,10 +1054,10 @@ function renderWorkspaces(workspaces) {
       row.className = 'sidebar-item';
       row.textContent = w.name || w.id;
       row.setAttribute('data-agent-id', w.id);
-      if (typeof w.hue === 'number') {
-        row.style.setProperty('--workspace-hue', String(w.hue));
+      if (typeof w.accent === 'string') {
+        row.style.setProperty('--workspace-accent', w.accent);
       } else {
-        getHue(w.id, function(h) { row.style.setProperty('--workspace-hue', String(h)); });
+        getAccent(w.id, function(c) { row.style.setProperty('--workspace-accent', c); });
       }
       row.addEventListener('click', function() { selectWorkspace(w.id); });
       container.appendChild(row);
@@ -1097,7 +1132,7 @@ h2.sidebar-heading {
 }
 .sidebar-item::before {
   content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
-  border-radius: 2px; background: hsl(var(--workspace-hue, 235) 60% 55%);
+  border-radius: 2px; background: var(--workspace-accent, hsl(235 60% 55%));
   opacity: 0.55;
 }
 .sidebar-item.is-current::before { opacity: 1; }
@@ -1135,17 +1170,24 @@ h2.sidebar-heading {
 var isElectron = !!window.minds;
 var currentWorkspaceId = null;
 var lastWorkspaces = [];
-var hueCache = {};
+var accentCache = {};
 
-async function hueForAgentId(agentId) {
+// Curated workspace color palette. Must stay in sync with _WORKSPACE_PALETTE
+// in templates.py.
+var WORKSPACE_PALETTE = """
+    + _WORKSPACE_PALETTE_JS
+    + """;
+
+async function accentForAgentId(agentId) {
   var enc = new TextEncoder().encode(agentId);
   var digest = await crypto.subtle.digest('SHA-256', enc);
   var view = new DataView(digest);
-  return view.getUint32(0, false) % 360;
+  var idx = view.getUint32(0, false) % WORKSPACE_PALETTE.length;
+  return WORKSPACE_PALETTE[idx];
 }
-function getHue(agentId, cb) {
-  if (hueCache[agentId] !== undefined) { cb(hueCache[agentId]); return; }
-  hueForAgentId(agentId).then(function(h) { hueCache[agentId] = h; cb(h); });
+function getAccent(agentId, cb) {
+  if (accentCache[agentId] !== undefined) { cb(accentCache[agentId]); return; }
+  accentForAgentId(agentId).then(function(c) { accentCache[agentId] = c; cb(c); });
 }
 
 function selectWorkspace(agentId) {
@@ -1207,10 +1249,10 @@ function renderWorkspaces(workspaces) {
       label.textContent = w.name || w.id;
       row.appendChild(label);
       row.appendChild(buildOpenNewBtn(w.id));
-      if (typeof w.hue === 'number') {
-        row.style.setProperty('--workspace-hue', String(w.hue));
+      if (typeof w.accent === 'string') {
+        row.style.setProperty('--workspace-accent', w.accent);
       } else {
-        getHue(w.id, function(h) { row.style.setProperty('--workspace-hue', String(h)); });
+        getAccent(w.id, function(c) { row.style.setProperty('--workspace-accent', c); });
       }
       container.appendChild(row);
     });
@@ -1282,7 +1324,7 @@ if (isElectron && window.minds.onChromeEvent) {
 def render_chrome_page(
     is_mac: bool = False,
     is_authenticated: bool = False,
-    initial_workspaces: Sequence[dict[str, str | int]] | None = None,
+    initial_workspaces: Sequence[dict[str, str]] | None = None,
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1359,7 +1401,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     .acl-x:hover { color: var(--text-muted); }
   </style>
 </head>
-<body class="page-workspace" style="--workspace-hue: {{ hue }};">
+<body class="page-workspace" style="--workspace-accent: {{ accent }};">
   <div class="page">
     <h1 id="page-heading" class="display">Share <code>{{ service_name }}</code>
       in <a href="/goto/{{ agent_id }}/">{{ ws_name or agent_id }}</a>
@@ -1691,7 +1733,7 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        hue=workspace_hue(agent_id),
+        accent=workspace_accent(agent_id),
     )
 
 
@@ -1705,7 +1747,7 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
     + """
   </style>
 </head>
-<body class="page-workspace" style="--workspace-hue: {{ hue }};">
+<body class="page-workspace" style="--workspace-accent: {{ accent }};">
   <div class="page">
     <h1>{{ ws_name }}</h1>
     <p class="subtitle">{{ agent_id }}</p>
@@ -1793,7 +1835,7 @@ def render_workspace_settings(
         servers=servers,
         telegram_section=telegram_section,
         telegram_js=telegram_js,
-        hue=workspace_hue(agent_id),
+        accent=workspace_accent(agent_id),
     )
 
 
