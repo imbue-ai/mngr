@@ -15,9 +15,9 @@ def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
     e2e.write_tutorial_block("""
-    # any program on PATH can be used directly as an agent type (falls back to
-    # running the program as-is), and arguments to the program go after `--`:
-    mngr create my-task python -- my_script.py
+    # to run an arbitrary shell command, use the built-in `command` agent type
+    # and put the command (and its args) after `--`:
+    mngr create my-task --type command -- python my_script.py
     # remember that the arguments to the "agent" (or command) come after the `--` separator
     """)
     expect(
@@ -56,7 +56,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-    mngr create my-task python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
+    mngr create my-task --type command --idle-mode run --idle-timeout 60 -- python my_long_running_script.py extra-args
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """)
     # Idle timeout requires a remote provider (local provider rejects it).

@@ -174,91 +174,52 @@ def test_send_message_success(client: TestClient) -> None:
     mock_send.assert_called_once_with("test-agent", "hello")
 
 
-def test_get_layout_returns_404_for_unknown_agent(client: TestClient) -> None:
-    """Getting layout for a nonexistent agent returns 404."""
-    with patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]):
-        response = client.get("/api/agents/nonexistent/layout")
-    assert response.status_code == 404
-
-
-def test_get_layout_returns_404_when_no_layout_saved(client: TestClient, tmp_path: Path) -> None:
+def test_get_layout_returns_404_when_no_layout_saved(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Getting layout returns 404 when no layout file exists."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        response = client.get("/api/agents/agent-123/layout")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.get("/api/layout")
 
     assert response.status_code == 404
 
 
-def test_save_and_get_layout(client: TestClient, tmp_path: Path) -> None:
+def test_save_and_get_layout(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving and retrieving a layout round-trips correctly."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
 
     layout_data = {"dockview": {"panels": {}}, "panelParams": {"chat-1": {"panelType": "chat"}}}
 
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        save_response = client.post("/api/agents/agent-123/layout", json=layout_data)
-        assert save_response.status_code == 200
-        assert save_response.json()["status"] == "ok"
+    save_response = client.post("/api/layout", json=layout_data)
+    assert save_response.status_code == 200
+    assert save_response.json()["status"] == "ok"
 
-        get_response = client.get("/api/agents/agent-123/layout")
-        assert get_response.status_code == 200
-        assert get_response.json() == layout_data
+    get_response = client.get("/api/layout")
+    assert get_response.status_code == 200
+    assert get_response.json() == layout_data
 
 
-def test_save_layout_creates_directory(client: TestClient, tmp_path: Path) -> None:
+def test_save_layout_creates_directory(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving a layout creates the workspace_layout directory if needed."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
 
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        client.post("/api/agents/agent-123/layout", json={"test": True})
+    client.post("/api/layout", json={"test": True})
 
-    assert (agent_state_dir / "workspace_layout" / "layout.json").exists()
+    assert (tmp_path / "agents" / "agent-123" / "workspace_layout" / "layout.json").exists()
 
 
-def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path) -> None:
+def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving invalid JSON returns 400."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.post(
+        "/api/layout",
+        content=b"not valid json",
+        headers={"Content-Type": "application/json"},
     )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        response = client.post(
-            "/api/agents/agent-123/layout",
-            content=b"not valid json",
-            headers={"Content-Type": "application/json"},
-        )
 
     assert response.status_code == 400
 

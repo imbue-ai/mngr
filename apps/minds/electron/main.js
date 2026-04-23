@@ -46,8 +46,14 @@ function parseWorkspaceId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    const m = parsed.pathname.match(/^\/forwarding\/([^\/]+)(?:\/|$)/);
-    return m ? m[1] : null;
+    // Final workspace URL: `<agent-id>.localhost:PORT/...`
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
+    // state before the subdomain cookie is installed. Recognising it lets
+    // findBundleForWorkspace de-dupe clicks during the redirect window.
+    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
   }
@@ -57,6 +63,14 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
+}
+
+// Build the auth-bridge URL that, when loaded, installs a session cookie on
+// the agent's subdomain and redirects into the workspace's dockview UI.
+// Returns null if the backend hasn't come up yet.
+function workspaceUrlForAgent(agentId) {
+  if (!agentId || !backendBaseUrl) return null;
+  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -569,7 +583,7 @@ function openOrFocusWorkspace(agentId, url) {
     focusBundle(existing);
     return existing;
   }
-  const absolute = toAbsoluteUrl(url || ('/forwarding/' + agentId + '/'));
+  const absolute = toAbsoluteUrl(url || workspaceUrlForAgent(agentId));
   return openNewWindow(absolute);
 }
 
@@ -1086,7 +1100,10 @@ async function startBackendWithRetry() {
       (event) => handleAuthEvent(event),
     );
 
-    backendBaseUrl = `http://127.0.0.1:${port}`;
+    // Use `localhost` (not `127.0.0.1`) so the auth cookie, which is issued with
+    // `Domain=localhost`, is valid both here and on every `<agent-id>.localhost`
+    // subdomain the desktop client forwards to.
+    backendBaseUrl = `http://localhost:${port}`;
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
@@ -1280,7 +1297,7 @@ ipcMain.on('open-requests-panel', (event) => {
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
-  openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+  openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
   // The sidebar is the sender for both the hover-icon click and the native
   // context-menu "Open in new window" item; close it now that the action is done.
   const bundle = getBundleFromEvent(event);
@@ -1319,7 +1336,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     {
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
         closeSidebar(bundle);
       },
     },

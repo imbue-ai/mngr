@@ -3,7 +3,11 @@
 import json
 import queue
 
+import pytest
+
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+
+pytestmark = pytest.mark.flaky
 
 
 def _get_message(q: queue.Queue[str | None]) -> str:

@@ -75,7 +75,7 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
     echo "print('hello world')" > /tmp/my_random_folder/script.py
-    mngr create my-task --from /tmp/my_random_folder python -- script.py
+    mngr create my-task --from /tmp/my_random_folder --type command -- python script.py
     """)
     source_dir = tmp_path / "my_random_folder"
     source_dir.mkdir()
@@ -365,9 +365,10 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
+    # Pin a distinct sleep value for the cloned agent so leaked processes can be traced back to this call.
     expect(
         e2e.run(
-            "mngr create my-task --from other-agent --type command --no-ensure-clean -- sleep 100092",
+            "mngr create my-task --from other-agent --type command --no-ensure-clean -- sleep 100122",
             comment="you can clone from an existing agent's work directory",
         )
     ).to_succeed()

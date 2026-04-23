@@ -32,21 +32,12 @@ mngr create my-agent claude --idle-timeout 1h      # Override timeout
 
 ## Running a Custom Command
 
-Unlike the registered types (`claude`, `codex`, etc.), any other type name is looked up on `PATH` and run directly as the command:
+Use `--type command` with the command after `--` to run a literal command instead of using an agent type:
 
 ```bash
-mngr create my-agent python -- -m http.server 8080   # Run python with args
-mngr create my-agent my-script -- --flag             # Run a custom script
+mngr create my-agent --type command -- sleep 1000          # Run a simple command
+mngr create my-agent --type command -- ./my-script.sh      # Run a custom script
 ```
-
-Bare type names must be alphanumeric (with dashes/underscores). For anything that isn't -- paths, names with dots, or full shell commands with pipes / metacharacters -- use the built-in `command` agent type:
-
-```bash
-mngr create my-task --type command -- sleep 3600
-mngr create my-task --type command -- 'npm run dev | tee logs'
-```
-
-The arguments after `--` are joined with plain spaces to form the agent's command, so shell metacharacters (`&&`, `|`, `;`) must be inside a single quoted argument to survive intact.
 
 See [`mngr create`](../commands/primary/create.md) for all available options.
 

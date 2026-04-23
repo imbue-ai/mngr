@@ -96,8 +96,9 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     expect(result_full).to_succeed()
 
     # Test "mngr c <name>" short form (needs a different name since my-task already exists)
+    # Pinned sleep value distinct from the one above so leaked processes trace back to this call.
     result_short = e2e.run(
-        "mngr c my-other-task --type command --no-ensure-clean -- sleep 100072",
+        "mngr c my-other-task --type command --no-ensure-clean -- sleep 100117",
         comment="the above command is the same as these",
     )
     expect(result_short).to_succeed()
