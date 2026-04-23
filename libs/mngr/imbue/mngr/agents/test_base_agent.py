@@ -10,6 +10,7 @@ import pytest
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -481,16 +482,12 @@ def test_base_agent_assemble_command_with_args(
     assert command == CommandString("base --flag value")
 
 
-def test_base_agent_assemble_command_falls_back_to_agent_type(
+def test_base_agent_assemble_command_raises_when_no_base_and_no_args(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test assemble_command uses agent_type as command when no explicit command available.
-
-    This verifies the documented "Direct command" fallback behavior where an unrecognized
-    agent type is treated as a command to run.
-    """
+    """Test assemble_command raises when neither config command nor agent_args provide a base."""
     host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     host_id = host.id
 
@@ -516,9 +513,8 @@ def test_base_agent_assemble_command_falls_back_to_agent_type(
         mngr_ctx=temp_mngr_ctx,
     )
 
-    # When no command is defined, the agent type should be used as the command
-    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
-    assert command == "my-custom-type"
+    with pytest.raises(UserInputError, match=r"has no command configured"):
+        agent.assemble_command(host=host, agent_args=(), command_override=None)
 
 
 def test_base_agent_list_reported_plugin_files_empty(

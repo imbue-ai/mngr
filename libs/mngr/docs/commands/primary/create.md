@@ -26,9 +26,10 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Any command in your
-PATH can also be used as an agent type. Arguments after -- are passed
-directly to the agent command.
+The agent type defaults to 'claude' if not specified. Arguments after --
+are passed directly to the agent command. To run an arbitrary shell
+command, use the built-in 'command' agent type:
+`mngr create my-task --type command -- sleep 3600`.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
@@ -65,7 +66,6 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
-| `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
