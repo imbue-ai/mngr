@@ -501,6 +501,19 @@ async def _forward_workspace_http(
 
     headers = dict(request.headers)
     headers.pop("host", None)
+
+    # Strip the desktop client's session cookie so agent-controlled workspace
+    # servers cannot extract and reuse it against other agents.
+    raw_cookie = headers.get("cookie")
+    if raw_cookie is not None:
+        stripped = "; ".join(
+            c.strip() for c in raw_cookie.split(";") if not c.strip().startswith(SESSION_COOKIE_NAME + "=")
+        )
+        if stripped:
+            headers["cookie"] = stripped
+        else:
+            del headers["cookie"]
+
     body = await request.body()
 
     accept = request.headers.get("accept", "")
