@@ -86,9 +86,6 @@ _USER_ID_PREFIX_LENGTH = 16
 _DEFAULT_BUDGET_DOLLARS = 100.0
 _DEFAULT_BUDGET_RESET_DURATION = "1d"
 
-# SuperTokens tenant used by the auth flow. Matches the remote_service_connector.
-_AUTH_TENANT_ID = "public"
-
 
 # ---------------------------------------------------------------------------
 # Errors
