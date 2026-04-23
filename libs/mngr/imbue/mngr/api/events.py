@@ -966,8 +966,12 @@ def _tail_source_thread_local(
                 save_on_end=True,
                 read_from_end=False,
                 full_lines=True,
-                # files can and do get rotated, and we need to handle that
                 copytruncate=True,
+                # Rotated files are named events.jsonl.<timestamp>. Pygtail's
+                # built-in patterns only check for .1 and dateext with '-', so
+                # we add a custom glob so it can find the rotated file and read
+                # any events written between our last read and the rotation.
+                log_patterns=["%s.[0-9]*"],
             )
             for line in tail:
                 if stop_event.is_set():
