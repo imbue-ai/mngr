@@ -129,7 +129,9 @@ def _run_gc_machines(provider: MockProviderInstance, *, dry_run: bool = False) -
 def test_gc_machines_deletes_old_offline_host_with_no_agents(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Old offline hosts with no agents are deleted to prevent data accumulation."""
+    """Old offline hosts with no agents are reclaimed via destroy_host (kills
+    the VM + marks record DESTROYED), not delete_host (record-only wipe,
+    which would orphan the VM on disk)."""
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, days_old=14)
     gc_mock_provider.mock_hosts = [host]
 
@@ -137,7 +139,8 @@ def test_gc_machines_deletes_old_offline_host_with_no_agents(
 
     assert len(result.machines_deleted) == 1
     assert result.machines_deleted[0].host_id == host.id
-    assert gc_mock_provider.deleted_hosts == [host.id]
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
 
 
 def test_gc_machines_skips_recent_offline_host(
@@ -162,7 +165,9 @@ def _add_mock_agent(provider: MockProviderInstance) -> None:
 def test_gc_machines_deletes_old_crashed_host_with_agents(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Old offline hosts in CRASHED state are deleted even if they have agents."""
+    """Old offline hosts in CRASHED state are reclaimed via destroy_host even
+    if they still have agent refs (the agents are already unreachable on a
+    crashed host)."""
     # None stop_reason means the host CRASHED
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=None)
     _add_mock_agent(gc_mock_provider)
@@ -171,7 +176,8 @@ def test_gc_machines_deletes_old_crashed_host_with_agents(
     result = _run_gc_machines(gc_mock_provider)
 
     assert len(result.machines_deleted) == 1
-    assert gc_mock_provider.deleted_hosts == [host.id]
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
 
 
 def test_gc_machines_skips_old_stopped_host_with_agents(
@@ -188,23 +194,26 @@ def test_gc_machines_skips_old_stopped_host_with_agents(
     assert gc_mock_provider.deleted_hosts == []
 
 
-def test_gc_machines_dry_run_does_not_call_delete_host(
+def test_gc_machines_dry_run_does_not_reclaim_host(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Dry run identifies hosts for deletion but does not actually delete them."""
+    """Dry run identifies hosts for deletion but does not actually destroy or
+    delete them."""
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, days_old=14)
     gc_mock_provider.mock_hosts = [host]
 
     result = _run_gc_machines(gc_mock_provider, dry_run=True)
 
     assert len(result.machines_deleted) == 1
+    assert gc_mock_provider.destroyed_hosts == []
     assert gc_mock_provider.deleted_hosts == []
 
 
 def test_gc_machines_deletes_old_failed_host_with_agents(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Old offline hosts in FAILED state are deleted even if they have agents."""
+    """Old offline hosts in FAILED state are reclaimed via destroy_host even
+    if they still have agent refs."""
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, failure_reason="Build failed")
     _add_mock_agent(gc_mock_provider)
     gc_mock_provider.mock_hosts = [host]
@@ -212,13 +221,17 @@ def test_gc_machines_deletes_old_failed_host_with_agents(
     result = _run_gc_machines(gc_mock_provider)
 
     assert len(result.machines_deleted) == 1
-    assert gc_mock_provider.deleted_hosts == [host.id]
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
 
 
 def test_gc_machines_deletes_old_destroyed_host_with_agents(
     gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Old offline hosts in DESTROYED state are deleted even if they have agents."""
+    """Old offline hosts in DESTROYED state are reclaimed via destroy_host.
+    destroy_host is idempotent -- on an already-destroyed host the provider's
+    kill-the-VM call is a no-op (or swallowed error), so this path stays
+    symmetric with every other offline case."""
     host = _make_offline_host(gc_mock_provider, temp_mngr_ctx)
     # Make the provider not support snapshots and not support shutdown hosts
     # so the state resolves to DESTROYED
@@ -230,7 +243,75 @@ def test_gc_machines_deletes_old_destroyed_host_with_agents(
     result = _run_gc_machines(gc_mock_provider)
 
     assert len(result.machines_deleted) == 1
-    assert gc_mock_provider.deleted_hosts == [host.id]
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
+
+
+# =========================================================================
+# Orphan-prevention regression: gc must destroy (kill VM), not just delete
+# the record, for offline hosts that are still-live-on-provider.
+#
+# Regression for: "delete <agent>, other Lima VMs orphan and accumulate."
+# Before the fix, gc_machines' offline branch called provider.delete_host()
+# which on Lima removes mngr's JSON but does NOT invoke limactl_delete --
+# leaving the VM orphaned on disk. After the fix, the non-DESTROYED offline
+# path must call provider.destroy_host() so the underlying VM actually goes
+# away alongside the record.
+# =========================================================================
+
+
+def test_gc_machines_destroys_vm_for_old_offline_host_with_no_agents(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """gc must call destroy_host (not delete_host) for STOPPED hosts so the
+    underlying VM is actually reclaimed, not just mngr's record wiped."""
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, days_old=14)
+    gc_mock_provider.mock_hosts = [host]
+
+    _run_gc_machines(gc_mock_provider)
+
+    assert gc_mock_provider.destroyed_hosts == [host.id], (
+        "gc must call destroy_host (kills VM + marks record DESTROYED) for a "
+        "live-on-provider host it intends to reclaim, not delete_host (record-only "
+        "wipe, which orphans the VM)."
+    )
+    assert gc_mock_provider.deleted_hosts == [], (
+        "gc must not call delete_host for a non-DESTROYED offline host -- that "
+        "leaves the underlying VM orphaned on disk."
+    )
+
+
+def test_gc_machines_destroys_vm_for_old_crashed_host(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """CRASHED hosts exist (Lima sees 'Stopped' but mngr derives CRASHED when
+    stop_reason wasn't set by a graceful mngr-stop). These are exactly the
+    hosts the orphan-accumulation bug affected in production -- gc must
+    destroy them, not just wipe the record."""
+    # None stop_reason -> host state resolves to CRASHED
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, stop_reason=None)
+    _add_mock_agent(gc_mock_provider)
+    gc_mock_provider.mock_hosts = [host]
+
+    _run_gc_machines(gc_mock_provider)
+
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
+
+
+def test_gc_machines_destroys_vm_for_old_failed_host(
+    gc_mock_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """FAILED hosts are still live on the provider (the 'failure' is mngr-side);
+    gc must actually destroy them, not leak them."""
+    host = _make_offline_host(gc_mock_provider, temp_mngr_ctx, failure_reason="Build failed")
+    _add_mock_agent(gc_mock_provider)
+    gc_mock_provider.mock_hosts = [host]
+
+    _run_gc_machines(gc_mock_provider)
+
+    assert gc_mock_provider.destroyed_hosts == [host.id]
+    assert gc_mock_provider.deleted_hosts == []
 
 
 # =========================================================================
