@@ -100,6 +100,15 @@
         toggleBtn.textContent = isVisible ? 'Hide advanced options' : 'Show advanced options';
       });
 
+      var createForm = document.getElementById('create-form');
+      createForm.addEventListener('submit', function() {
+        var buttons = document.querySelectorAll('button[form="create-form"]');
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].disabled = true;
+          buttons[i].textContent = 'Creating...';
+        }
+      });
+
       var accountSelect = document.getElementById('account_id');
       var launchSelect = document.getElementById('launch_mode');
       var leasedTooltip = document.getElementById('leased-tooltip');

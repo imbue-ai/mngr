@@ -271,14 +271,14 @@ def _create_single_pool_host(
     # Use the host_id as a fallback for vps_instance_id
     vps_instance_id = host_id
 
-    ssh_key_path = _extract_ssh_key_path(agent_info)
-    if ssh_key_path is None:
+    container_key_path = _extract_ssh_key_path(agent_info)
+    if container_key_path is None:
         logger.warning("Could not extract SSH key path, skipping VPS key installation")
     else:
-        # Install management key on the VPS
+        vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
         _install_management_key_via_ssh(
             vps_ip=vps_ip,
-            ssh_key_path=ssh_key_path,
+            ssh_key_path=vps_key_path,
             management_public_key=management_public_key,
             port=22,
             user="root",
