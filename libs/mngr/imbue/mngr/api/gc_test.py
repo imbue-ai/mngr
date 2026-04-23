@@ -20,10 +20,12 @@ from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
 from imbue.mngr.api.gc import _clean_work_dir
 from imbue.mngr.api.gc import _discover_hosts_for_gc
 from imbue.mngr.api.gc import _gc_single_host_work_dir
+from imbue.mngr.api.gc import _get_orphaned_source_dirs
 from imbue.mngr.api.gc import _get_orphaned_work_dirs
 from imbue.mngr.api.gc import _handle_error
 from imbue.mngr.api.gc import _is_git_worktree
 from imbue.mngr.api.gc import _is_rotated_log_file
+from imbue.mngr.api.gc import _local_branches_not_on_any_remote_on_host
 from imbue.mngr.api.gc import _remove_directory
 from imbue.mngr.api.gc import _remove_git_worktree
 from imbue.mngr.api.gc import _remove_work_dir_from_certified_data
@@ -34,6 +36,7 @@ from imbue.mngr.api.gc import gc_machines
 from imbue.mngr.api.gc import gc_snapshots
 from imbue.mngr.api.gc import gc_volumes
 from imbue.mngr.api.gc import gc_work_dirs
+from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -1992,3 +1995,76 @@ def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, t
 
     # The directory should have been removed via rm -rf fallback.
     assert not work_dir.exists()
+
+
+# =========================================================================
+# Source dir GC tests (mngr-managed clones from --source <git-url>)
+# =========================================================================
+
+
+def _make_clone_with_remote(
+    source_upstream: Path, clone_path: Path, extra_local_branches: tuple[str, ...] = ()
+) -> None:
+    subprocess.run(
+        ["git", "clone", str(source_upstream), str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+    for branch_name in extra_local_branches:
+        subprocess.run(
+            ["git", "-C", str(clone_path), "checkout", "-b", branch_name],
+            check=True,
+            capture_output=True,
+        )
+        (clone_path / f"{branch_name.replace('/', '_')}.marker").write_text(branch_name)
+        subprocess.run(["git", "-C", str(clone_path), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(clone_path), "commit", "-m", f"local: {branch_name}"],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_local_branches_not_on_any_remote_empty_for_fresh_clone(
+    local_host: Host, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A fresh clone has no local branches missing from remotes."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone)
+    assert _local_branches_not_on_any_remote_on_host(local_host, clone) == []
+
+
+def test_local_branches_not_on_any_remote_finds_local_only_branch(
+    local_host: Host, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A local branch with a commit not present on any remote is flagged."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone, extra_local_branches=("local-only",))
+    unpushed = _local_branches_not_on_any_remote_on_host(local_host, clone)
+    assert "local-only" in unpushed
+
+
+def test_get_orphaned_source_dirs_deletes_clean_clone(
+    local_host: Host, local_provider: LocalProviderInstance, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A tracked clone with no unpushed branches and no referencing worktree is deletable."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone)
+    register_generated_source_dir(local_host, clone)
+
+    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    assert [info.path for info in deletable] == [clone]
+    assert kept == []
+
+
+def test_get_orphaned_source_dirs_keeps_clone_with_unpushed_branch(
+    local_host: Host, local_provider: LocalProviderInstance, temp_git_repo: Path, tmp_path: Path
+) -> None:
+    """A tracked clone with a local branch not on any remote is kept, not deleted."""
+    clone = tmp_path / "clone"
+    _make_clone_with_remote(temp_git_repo, clone, extra_local_branches=("mngr/x",))
+    register_generated_source_dir(local_host, clone)
+
+    deletable, kept = _get_orphaned_source_dirs(host=local_host, provider_name=local_provider.name)
+    assert deletable == []
+    assert [info.path for info in kept] == [clone]

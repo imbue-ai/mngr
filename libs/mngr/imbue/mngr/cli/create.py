@@ -37,6 +37,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import parse_source_string
 from imbue.mngr.api.find import resolve_source_location
+from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -1082,6 +1083,7 @@ def _resolve_source_location(
         clones_base = online_host.host_dir / "clones"
         name_hint = pick_agent_name_hint(opts.positional_name, opts.name, parse_project_name_from_url(opts.source))
         cloned_path = clone_git_url_to_managed_dir(opts.source, clones_base, name_hint, mngr_ctx.concurrency_group)
+        register_generated_source_dir(online_host, cloned_path)
         return ResolvedSource(location=HostLocation(host=online_host, path=cloned_path))
 
     # Parse the --from string once

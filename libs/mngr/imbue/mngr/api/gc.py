@@ -37,6 +37,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
 
 
@@ -232,6 +233,34 @@ def _gc_single_host_work_dir(
                     error_msg = f"Failed to clean {work_dir_info.path}: {e}"
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
+
+            # Source dirs (e.g. mngr-managed clones from --source <url>) are tracked
+            # separately and kept around while any worktree still points at them.
+            try:
+                deletable_source_dirs, kept_source_dirs = _get_orphaned_source_dirs(
+                    host=host, provider_name=provider_instance.name
+                )
+            except HostOfflineError:
+                logger.trace("Skipped source dir GC because host is offline", host_id=host.id)
+            except HostAuthenticationError:
+                logger.trace("Skipped source dir GC because host authentication failed", host_id=host.id)
+            else:
+                for info in kept_source_dirs:
+                    logger.warning(
+                        "Keeping source repo {} because it has local branches not on any remote. "
+                        "Push or delete them to allow future gc.",
+                        info.path,
+                    )
+                result.source_dirs_kept_due_to_unpushed_branches.extend(kept_source_dirs)
+                for source_dir_info in deletable_source_dirs:
+                    try:
+                        if not dry_run:
+                            _clean_source_dir(host=host, source_dir_path=source_dir_info.path)
+                        result.source_dirs_destroyed.append(source_dir_info)
+                    except MngrError as e:
+                        error_msg = f"Failed to clean source dir {source_dir_info.path}: {e}"
+                        result.errors.append(error_msg)
+                        _handle_error(error_msg, error_behavior, exc=e)
 
 
 def gc_machines(
@@ -701,6 +730,124 @@ def _remove_work_dir_from_certified_data(host: OnlineHostInterface, work_dir_pat
     )
 
     host.set_certified_data(updated_data)
+
+
+def register_generated_source_dir(host: OnlineHostInterface, source_dir: Path) -> None:
+    """Record `source_dir` as an mngr-managed source repo on `host` so GC can clean it later."""
+    certified_data = host.get_certified_data()
+    existing_dirs = set(certified_data.generated_source_dirs)
+    existing_dirs.add(str(source_dir))
+    updated_data = certified_data.model_copy_update(
+        to_update(certified_data.field_ref().generated_source_dirs, tuple(sorted(existing_dirs))),
+    )
+    host.set_certified_data(updated_data)
+
+
+def _get_orphaned_source_dirs(
+    host: OnlineHostInterface, provider_name: ProviderInstanceName
+) -> tuple[list[WorkDirInfo], list[WorkDirInfo]]:
+    """Partition mngr-tracked source repos into (safe-to-delete, kept-due-to-unpushed-branches).
+
+    A source repo is "in use" if a living agent's work_dir either is the source itself
+    or is a git worktree backed by it. Anything else is orphan; an orphan with no local
+    branches outside every remote is safe to delete.
+    """
+    certified_data = host.get_certified_data()
+    source_dirs = set(certified_data.generated_source_dirs)
+    if not source_dirs:
+        return [], []
+
+    in_use_sources: set[str] = set()
+    for agent in host.get_agents():
+        work_dir_str = str(agent.work_dir)
+        if work_dir_str in source_dirs:
+            in_use_sources.add(work_dir_str)
+            continue
+        source_of_worktree = find_source_repo_of_worktree(agent.work_dir)
+        if source_of_worktree is not None and str(source_of_worktree) in source_dirs:
+            in_use_sources.add(str(source_of_worktree))
+
+    deletable: list[WorkDirInfo] = []
+    kept: list[WorkDirInfo] = []
+    for source_dir_str in sorted(source_dirs - in_use_sources):
+        source_path = Path(source_dir_str)
+        info = _build_source_dir_info(host, provider_name, source_path)
+        unpushed = _local_branches_not_on_any_remote_on_host(host, source_path)
+        if unpushed:
+            logger.debug("Source {} has unpushed branches: {}", source_path, unpushed)
+            kept.append(info)
+        else:
+            deletable.append(info)
+    return deletable, kept
+
+
+def _local_branches_not_on_any_remote_on_host(host: OnlineHostInterface, repo_path: Path) -> list[str]:
+    """Return local branches in repo_path whose tip is not contained in any remote ref.
+
+    Runs git via host.execute_idempotent_command so this works for both local and remote
+    hosts. Failure is treated as "possibly unpushed" to stay on the safe side.
+    """
+    quoted_path = shlex.quote(str(repo_path))
+    list_result = host.execute_idempotent_command(
+        f"git -C {quoted_path} for-each-ref --format={shlex.quote('%(refname:short)')} refs/heads/"
+    )
+    if not list_result.success:
+        logger.debug("Failed to list local branches in {}: {}", repo_path, list_result.stderr.strip())
+        return []
+
+    unpushed: list[str] = []
+    for branch in list_result.stdout.splitlines():
+        branch = branch.strip()
+        if not branch:
+            continue
+        contains_result = host.execute_idempotent_command(
+            f"git -C {quoted_path} branch -r --contains {shlex.quote(branch)}"
+        )
+        if not contains_result.success or not contains_result.stdout.strip():
+            unpushed.append(branch)
+    return unpushed
+
+
+def _build_source_dir_info(
+    host: OnlineHostInterface, provider_name: ProviderInstanceName, source_path: Path
+) -> WorkDirInfo:
+    size = SizeBytes(0)
+    try:
+        result = host.execute_idempotent_command(f"du -sb {shlex.quote(str(source_path))} | cut -f1")
+        if result.success and result.stdout.strip():
+            size = SizeBytes(int(result.stdout.strip()))
+    except (ValueError, OSError):
+        pass
+
+    created_at = datetime.now(timezone.utc)
+    try:
+        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
+        if stat_result.success and stat_result.stdout.strip():
+            created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
+    except (ValueError, OSError):
+        pass
+
+    return WorkDirInfo(
+        path=source_path,
+        size_bytes=size,
+        host_id=host.id,
+        provider_name=provider_name,
+        is_local=host.is_local,
+        created_at=created_at,
+    )
+
+
+def _clean_source_dir(host: OnlineHostInterface, source_dir_path: Path) -> None:
+    """Remove a managed source repo and drop it from the host's certified data."""
+    with host.lock_cooperatively():
+        _remove_directory(host, source_dir_path)
+        certified_data = host.get_certified_data()
+        existing_dirs = set(certified_data.generated_source_dirs)
+        existing_dirs.discard(str(source_dir_path))
+        updated_data = certified_data.model_copy_update(
+            to_update(certified_data.field_ref().generated_source_dirs, tuple(sorted(existing_dirs))),
+        )
+        host.set_certified_data(updated_data)
 
 
 def _remove_directory(host: OnlineHostInterface, path: Path) -> None:
