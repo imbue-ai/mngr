@@ -11,6 +11,7 @@ via get_log_queue().
 
 import os
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -66,12 +67,28 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
+class AgentDestructionStatus(UpperCaseStrEnum):
+    """Status of a background agent destruction."""
+
+    DESTROYING = auto()
+    DONE = auto()
+    FAILED = auto()
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling."""
 
     agent_id: AgentId = Field(description="ID of the agent being created")
     status: AgentCreationStatus = Field(description="Current creation status")
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
+    error: str | None = Field(default=None, description="Error message, set when status is FAILED")
+
+
+class AgentDestructionInfo(FrozenModel):
+    """Snapshot of agent destruction state."""
+
+    agent_id: AgentId = Field(description="ID of the agent being destroyed")
+    status: AgentDestructionStatus = Field(description="Current destruction status")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
 
@@ -457,6 +474,52 @@ def _remove_lease_info(data_dir: Path, agent_id: AgentId) -> None:
         lease_file.unlink()
 
 
+_SEMVER_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(r"^refs/tags/(v\d+\.\d+\.\d+)$")
+
+
+def resolve_template_version(git_url: str, branch: str) -> str:
+    """Resolve the template version to use when leasing a host.
+
+    If branch is non-empty, the branch name is the version (dev workflow).
+    If branch is empty, uses ``git ls-remote --tags`` to find the latest
+    semver tag (e.g. ``v1.2.3``). Falls back to ``"main"`` if no tags found.
+    """
+    if branch:
+        return branch
+
+    cg = ConcurrencyGroup(name="git-ls-remote-tags")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "ls-remote", "--tags", git_url],
+            is_checked_after=False,
+        )
+
+    if result.returncode != 0:
+        logger.warning("git ls-remote --tags failed for {}, falling back to 'main'", git_url)
+        return "main"
+
+    tags: list[tuple[int, int, int, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) < 2:
+            continue
+        ref = parts[1].strip()
+        match = _SEMVER_TAG_PATTERN.match(ref)
+        if match:
+            tag = match.group(1)
+            version_parts = tag[1:].split(".")
+            tags.append((int(version_parts[0]), int(version_parts[1]), int(version_parts[2]), tag))
+
+    if not tags:
+        logger.debug("No semver tags found for {}, falling back to 'main'", git_url)
+        return "main"
+
+    tags.sort(reverse=True)
+    latest = tags[0][3]
+    logger.debug("Resolved latest semver tag for {}: {}", git_url, latest)
+    return latest
+
+
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path,
@@ -529,6 +592,8 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _destroy_statuses: dict[str, AgentDestructionStatus] = PrivateAttr(default_factory=dict)
+    _destroy_errors: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def start_creation(
         self,
@@ -539,6 +604,7 @@ class AgentCreator(MutableModel):
         include_env_file: bool = False,
         access_token: str = "",
         version: str = "",
+        account_id: str = "",
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -549,6 +615,9 @@ class AgentCreator(MutableModel):
 
         For ``LaunchMode.LEASED``, ``access_token`` and ``version`` are required
         to lease a pre-provisioned host from the pool.
+
+        When ``account_id`` is provided, the created agent will be associated with
+        that account after creation completes.
 
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
@@ -634,6 +703,78 @@ class AgentCreator(MutableModel):
                 logger.warning("Failed to release leased host {} for agent {}", host_db_id, agent_id)
         else:
             logger.warning("No host_pool_client configured, cannot release host {}", host_db_id)
+
+    def start_destruction(
+        self,
+        agent_id: AgentId,
+        access_token: str = "",
+    ) -> None:
+        """Start destroying an agent in a background thread.
+
+        Runs ``mngr destroy``, releases the leased host if applicable,
+        and updates the destruction status.
+        """
+        with self._lock:
+            self._destroy_statuses[str(agent_id)] = AgentDestructionStatus.DESTROYING
+
+        thread = threading.Thread(
+            target=self._destroy_agent_background,
+            args=(agent_id, access_token),
+            daemon=True,
+            name="agent-destroyer-{}".format(agent_id),
+        )
+        thread.start()
+        with self._lock:
+            self._threads.append(thread)
+
+    def get_destruction_info(self, agent_id: AgentId) -> AgentDestructionInfo | None:
+        """Get the current destruction status for an agent, or None if not tracked."""
+        with self._lock:
+            status = self._destroy_statuses.get(str(agent_id))
+            if status is None:
+                return None
+            return AgentDestructionInfo(
+                agent_id=agent_id,
+                status=status,
+                error=self._destroy_errors.get(str(agent_id)),
+            )
+
+    def _destroy_agent_background(
+        self,
+        agent_id: AgentId,
+        access_token: str,
+    ) -> None:
+        """Background thread that destroys an agent and releases leased resources."""
+        aid = str(agent_id)
+        try:
+            with log_span("Destroying agent {}", agent_id):
+                # Release leased host first (no-op if not a leased agent)
+                if access_token:
+                    self.release_leased_host(agent_id, access_token)
+
+                # Run mngr destroy
+                cg = ConcurrencyGroup(name="mngr-destroy")
+                with cg:
+                    result = cg.run_process_to_completion(
+                        command=[MNGR_BINARY, "destroy", aid, "--yes"],
+                        is_checked_after=False,
+                    )
+                if result.returncode != 0:
+                    logger.warning(
+                        "mngr destroy exited with code {} for {}: {}",
+                        result.returncode,
+                        agent_id,
+                        result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                    )
+
+                with self._lock:
+                    self._destroy_statuses[aid] = AgentDestructionStatus.DONE
+
+        except (MngrCommandError, HostPoolError, ValueError, OSError) as e:
+            logger.error("Failed to destroy agent {}: {}", agent_id, e)
+            with self._lock:
+                self._destroy_statuses[aid] = AgentDestructionStatus.FAILED
+                self._destroy_errors[aid] = str(e)
 
     def _create_agent_background(
         self,

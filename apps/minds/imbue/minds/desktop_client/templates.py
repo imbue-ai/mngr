@@ -94,10 +94,10 @@ _DEFAULT_GIT_URL: Final[str] = os.getenv(
 )
 
 
-_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "selene")
+_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "assistant")
 
 
-_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "main")
+_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "")
 
 
 @pure
@@ -106,18 +106,26 @@ def render_create_form(
     agent_name: str = "",
     branch: str = "",
     launch_mode: LaunchMode = LaunchMode.LOCAL,
+    accounts: Sequence[object] | None = None,
+    default_account_id: str = "",
 ) -> str:
     """Render the agent creation form page."""
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
     effective_branch = branch if branch else _DEFAULT_BRANCH
+    has_account = bool(default_account_id and accounts)
+    effective_mode = (
+        launch_mode if launch_mode != LaunchMode.LOCAL else (LaunchMode.LEASED if has_account else LaunchMode.LOCAL)
+    )
     template = JINJA_ENV.get_template("create.html")
     return template.render(
         git_url=effective_url,
         agent_name=effective_name,
         branch=effective_branch,
         launch_modes=list(LaunchMode),
-        selected_launch_mode=launch_mode.value,
+        selected_launch_mode=effective_mode.value,
+        accounts=accounts or [],
+        default_account_id=default_account_id,
     )
 
 
@@ -141,6 +149,12 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
         status_text=status_text,
         accent=workspace_accent(str(agent_id)),
     )
+
+
+@pure
+def render_welcome_page() -> str:
+    """Render the welcome/splash page for first-time users."""
+    return JINJA_ENV.get_template("welcome.html").render()
 
 
 @pure

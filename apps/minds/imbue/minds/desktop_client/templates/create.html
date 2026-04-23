@@ -13,50 +13,114 @@
           <label for="agent_name" class="text-sm text-zinc-900 font-medium block">Name</label>
         </div>
         <div class="flex-1">
-          {{ ui.text_input('agent_name', value=agent_name, placeholder='selene', id='agent_name', required=true) }}
+          {{ ui.text_input('agent_name', value=agent_name, placeholder='assistant', id='agent_name', required=true) }}
         </div>
       </div>
+
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
-          <label for="git_url" class="text-sm text-zinc-900 font-medium block">Repository</label>
-          <p class="mt-0.5 text-xs text-zinc-400">Git URL or local path</p>
+          <label for="account_id" class="text-sm text-zinc-900 font-medium block">Account</label>
         </div>
         <div class="flex-1">
-          {{ ui.text_input('git_url', value=git_url, placeholder='https://github.com/user/repo.git', id='git_url', required=true) }}
+          <select id="account_id" name="account_id"
+                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            {% for acct in accounts %}
+              <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+            {% endfor %}
+            <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
+          </select>
         </div>
       </div>
-      <div class="flex gap-6 mb-4 items-start">
-        <div class="basis-[200px] shrink-0 pt-2.5">
-          <label for="branch" class="text-sm text-zinc-900 font-medium block">Branch</label>
-          <p class="mt-0.5 text-xs text-zinc-400">Leave empty for default</p>
-        </div>
-        <div class="flex-1">
-          {{ ui.text_input('branch', value=branch, placeholder='main', id='branch') }}
-        </div>
-      </div>
+
       <div class="flex gap-6 mb-4 items-start">
         <div class="basis-[200px] shrink-0 pt-2.5">
           <label for="launch_mode" class="text-sm text-zinc-900 font-medium block">Launch mode</label>
-          <p class="mt-0.5 text-xs text-zinc-400">Local: Docker. Dev: this host.</p>
+          <p class="mt-0.5 text-xs text-zinc-400">How to run the agent</p>
         </div>
         <div class="flex-1">
           <select id="launch_mode" name="launch_mode"
                   class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
             {% for mode in launch_modes %}
-              <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+              <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
+                      {% if mode.value == 'LEASED' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
           </select>
+          <p id="leased-tooltip" class="hidden mt-1 text-xs text-amber-600">Leased mode requires an account.</p>
         </div>
       </div>
-      <div class="flex gap-6 mb-4 items-start">
-        <div class="basis-[200px] shrink-0 pt-2.5">
-          <label for="include_env_file" class="text-sm text-zinc-900 font-medium block">Include .env file</label>
-          <p class="mt-0.5 text-xs text-zinc-400">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+
+      <div class="mt-6 mb-4">
+        <button type="button" id="toggle-advanced"
+                class="text-sm text-zinc-500 hover:text-zinc-700 cursor-pointer transition-colors">
+          Show advanced options
+        </button>
+      </div>
+
+      <div id="advanced-options" class="hidden">
+        <div class="flex gap-6 mb-4 items-start">
+          <div class="basis-[200px] shrink-0 pt-2.5">
+            <label for="git_url" class="text-sm text-zinc-900 font-medium block">Repository</label>
+            <p class="mt-0.5 text-xs text-zinc-400">Git URL or local path</p>
+          </div>
+          <div class="flex-1">
+            {{ ui.text_input('git_url', value=git_url, placeholder='https://github.com/user/repo.git', id='git_url', required=true) }}
+          </div>
         </div>
-        <div class="flex-1 pt-2">
-          <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
+        <div class="flex gap-6 mb-4 items-start">
+          <div class="basis-[200px] shrink-0 pt-2.5">
+            <label for="branch" class="text-sm text-zinc-900 font-medium block">Branch</label>
+            <p class="mt-0.5 text-xs text-zinc-400">Leave empty for latest version</p>
+          </div>
+          <div class="flex-1">
+            {{ ui.text_input('branch', value=branch, placeholder='latest tag', id='branch') }}
+          </div>
+        </div>
+        <div class="flex gap-6 mb-4 items-start">
+          <div class="basis-[200px] shrink-0 pt-2.5">
+            <label for="include_env_file" class="text-sm text-zinc-900 font-medium block">Include .env file</label>
+            <p class="mt-0.5 text-xs text-zinc-400">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+          </div>
+          <div class="flex-1 pt-2">
+            <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
+          </div>
         </div>
       </div>
     </form>
   {% endcall %}
+{% endblock %}
+{% block scripts %}
+  <script>
+    (function() {
+      var toggleBtn = document.getElementById('toggle-advanced');
+      var advancedSection = document.getElementById('advanced-options');
+      var isVisible = false;
+      toggleBtn.addEventListener('click', function() {
+        isVisible = !isVisible;
+        advancedSection.classList.toggle('hidden', !isVisible);
+        toggleBtn.textContent = isVisible ? 'Hide advanced options' : 'Show advanced options';
+      });
+
+      var accountSelect = document.getElementById('account_id');
+      var launchSelect = document.getElementById('launch_mode');
+      var leasedTooltip = document.getElementById('leased-tooltip');
+
+      function updateLeasedState() {
+        var hasAccount = accountSelect.value !== '';
+        var leasedOption = launchSelect.querySelector('option[data-requires-account]');
+        if (leasedOption) {
+          leasedOption.disabled = !hasAccount;
+          if (!hasAccount && launchSelect.value === 'LEASED') {
+            launchSelect.value = 'LOCAL';
+          }
+        }
+        leasedTooltip.classList.toggle('hidden', hasAccount || launchSelect.value !== 'LEASED');
+      }
+
+      accountSelect.addEventListener('change', updateLeasedState);
+      launchSelect.addEventListener('change', function() {
+        leasedTooltip.classList.toggle('hidden', accountSelect.value !== '' || launchSelect.value !== 'LEASED');
+      });
+      updateLeasedState();
+    })();
+  </script>
 {% endblock %}

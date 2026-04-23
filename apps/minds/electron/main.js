@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -734,7 +734,16 @@ function saveSessionState() {
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
       if (!relative) continue;
-      state.push({ url: relative });
+      const bounds = b.window.getBounds();
+      const display = screen.getDisplayMatching(bounds);
+      state.push({
+        url: relative,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        displayId: display ? display.id : null,
+      });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -756,6 +765,36 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
     results.push(entry);
   }
   return results;
+}
+
+function restoreWindowBounds(bundle, entry) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (typeof entry.x !== 'number' || typeof entry.y !== 'number') return;
+  const width = typeof entry.width === 'number' ? entry.width : 1200;
+  const height = typeof entry.height === 'number' ? entry.height : 800;
+  const savedBounds = { x: entry.x, y: entry.y, width, height };
+
+  // Check if the saved display still exists
+  const displays = screen.getAllDisplays();
+  let targetDisplay = null;
+  if (entry.displayId) {
+    targetDisplay = displays.find((d) => d.id === entry.displayId);
+  }
+  if (!targetDisplay) {
+    // Saved monitor gone -- check if bounds are visible on any display
+    targetDisplay = screen.getDisplayMatching(savedBounds);
+    const db = targetDisplay.bounds;
+    const isVisible = savedBounds.x < db.x + db.width && savedBounds.x + savedBounds.width > db.x &&
+                      savedBounds.y < db.y + db.height && savedBounds.y + savedBounds.height > db.y;
+    if (!isVisible) {
+      // Place on primary display at a reasonable offset
+      const primary = screen.getPrimaryDisplay();
+      savedBounds.x = primary.bounds.x + 50;
+      savedBounds.y = primary.bounds.y + 50;
+    }
+  }
+
+  bundle.window.setBounds(savedBounds);
 }
 
 // ---------- Centralized chrome SSE ----------
@@ -1208,12 +1247,14 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // No valid session cookie -- route through loginUrl to consume the
-        // one-time code. Keep saved state on disk so the next quit-and-relaunch
-        // after auth can restore. Don't open any additional restored windows
-        // because they'd all 403.
+        // Not authenticated and no saved state: show the welcome splash page.
+        // Otherwise consume the one-time code via loginUrl.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(loginUrl);
+          if (savedState.length === 0) {
+            initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          } else {
+            initialBundle.contentView.webContents.loadURL(loginUrl);
+          }
         }
       } else if (restorable.length === 0) {
         // Authenticated, but nothing to restore -- land on the home page.
@@ -1221,10 +1262,13 @@ async function startBackendWithRetry() {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
+        // Restore saved windows with their positions and sizes
         const [first, ...rest] = restorable;
+        restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         for (const entry of rest) {
-          openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          restoreWindowBounds(bundle, entry);
         }
       }
     } else {
@@ -1417,6 +1461,16 @@ ipcMain.on('retry', async (event) => {
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();
+});
+
+ipcMain.on('close-workspace-windows', (_event, agentId) => {
+  if (!agentId) return;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.currentWorkspaceId === agentId) {
+      b.window.close();
+    }
+  }
 });
 
 ipcMain.on('open-log-file', () => {
