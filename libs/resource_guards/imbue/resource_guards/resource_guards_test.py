@@ -302,6 +302,46 @@ def test_start_and_stop_resource_guards_round_trip(
     assert request.config.pluginmanager.get_plugin("resource_guards") is outer_plugin
 
 
+def test_start_and_stop_resource_guards_owner_case_unregisters_plugin(
+    isolated_guard_state: None,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Owner case: when start_resource_guards() registers the plugin, stop_resource_guards()
+    must unregister it and clear the ownership globals.
+
+    Complements test_start_and_stop_resource_guards_round_trip, which covers the non-owner
+    case. Together they enforce the per-caller ownership invariant: start/stop are
+    symmetric, and stop only undoes what this particular start registered.
+    """
+    pluginmanager = request.config.pluginmanager
+    # Temporarily pull the outer session's plugin so start_resource_guards() sees an
+    # empty slot and takes the owner branch. Restore it in finally so subsequent tests
+    # keep their runtest_setup/teardown hooks.
+    outer_plugin = pluginmanager.get_plugin("resource_guards")
+    assert outer_plugin is not None
+    pluginmanager.unregister(outer_plugin)
+    try:
+        assert pluginmanager.get_plugin("resource_guards") is None
+
+        start_resource_guards(request.session)
+
+        assert resource_guards._owns_guard_plugin is True
+        assert resource_guards._guard_plugin is not None
+        assert resource_guards._guard_plugin is not outer_plugin
+        assert resource_guards._guard_plugin_manager is pluginmanager
+        assert pluginmanager.get_plugin("resource_guards") is resource_guards._guard_plugin
+
+        stop_resource_guards()
+
+        assert resource_guards._owns_guard_plugin is False
+        assert resource_guards._guard_plugin is None
+        assert resource_guards._guard_plugin_manager is None
+        assert pluginmanager.get_plugin("resource_guards") is None
+    finally:
+        if pluginmanager.get_plugin("resource_guards") is None:
+            pluginmanager.register(outer_plugin, "resource_guards")
+
+
 # ---------------------------------------------------------------------------
 # SDK guard lifecycle (unit tests)
 # ---------------------------------------------------------------------------
