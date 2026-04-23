@@ -591,7 +591,7 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
 
 
 def test_stream_manager_on_events_stream_output_dispatches_refresh_source() -> None:
-    """A refresh-source event fires the refresh callback, not the server update path."""
+    """A refresh-source event fires the refresh callback, not the service update path."""
     manager = _make_stream_manager()
     manager._events_services[str(_AGENT_A)] = {}
 
