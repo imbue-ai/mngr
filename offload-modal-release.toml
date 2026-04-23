@@ -17,6 +17,13 @@ PYTEST_MAX_DURATION_SECONDS = "900"
 enable_docker = true
 
 [checkpoint]
+# pyproject.toml + uv.lock are here because Python deps are installed
+# at image build time via `uv sync --all-packages` in the mngr Dockerfile.
+# If dep churn starts invalidating the checkpoint too often, the
+# alternative is to drop these two from build_inputs and move the
+# `uv sync` call out of the Dockerfile RUN into a sandbox-startup step
+# (e.g. offload's sandbox_init_cmd or the CMD). Trade-off is slower
+# per-sandbox startup vs faster warm-cache hit rate.
 build_inputs = [
     "libs/mngr/imbue/mngr/resources/Dockerfile",
     "libs/mngr/imbue/mngr/resources/Dockerfile.release.extras",
