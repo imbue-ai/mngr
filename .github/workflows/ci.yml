@@ -327,8 +327,11 @@ jobs:
   # Docker release tests - runs on a GitHub runner with a real Docker daemon,
   # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
   # Mirrors the `test-docker` job above but filters for release-marked tests.
+  # Gated to release-branch push only, matching test-release below -- these
+  # tests are slow (real docker + release path) and should only run when
+  # cutting a release, not on every PR.
   test-docker-release:
-    if: github.ref != 'refs/heads/release'
+    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
