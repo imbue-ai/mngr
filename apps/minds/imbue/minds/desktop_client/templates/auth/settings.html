@@ -1,0 +1,42 @@
+{% extends 'auth/_auth_base.html' %}
+{% block title %}Account settings{% endblock %}
+{% block card_extra %}max-w-[480px]{% endblock %}
+{% block card_content %}
+  <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Account settings</h1>
+  <p class="text-zinc-500 mb-6">Manage your Imbue account</p>
+  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+    <span class="text-sm text-zinc-500">Email</span>
+    <span class="text-zinc-900 font-medium">{{ email }}</span>
+  </div>
+  {% if display_name %}
+    <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+      <span class="text-sm text-zinc-500">Name</span>
+      <span class="text-zinc-900 font-medium">{{ display_name }}</span>
+    </div>
+  {% endif %}
+  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+    <span class="text-sm text-zinc-500">Auth provider</span>
+    <span class="text-zinc-900 font-medium">{{ provider }}</span>
+  </div>
+  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+    <span class="text-sm text-zinc-500">User ID prefix</span>
+    <span class="text-zinc-900 font-medium font-mono text-xs">{{ user_id_prefix }}</span>
+  </div>
+  <div class="mt-6 flex flex-col gap-2">
+    {% if provider == 'email' %}
+      <a href="/auth/forgot-password"
+         class="w-full text-center py-2.5 rounded-lg bg-white border border-zinc-200 text-zinc-900 text-sm cursor-pointer transition hover:bg-zinc-50 no-underline hover:no-underline">Change password</a>
+    {% endif %}
+    <button id="signout-btn"
+            class="w-full py-2.5 rounded-lg bg-white border border-red-200 text-red-600 text-sm cursor-pointer transition hover:bg-red-50">Sign out</button>
+  </div>
+  <div class="text-center mt-5 text-sm text-zinc-500"><a href="/" class="text-blue-600 font-medium hover:underline">Back to home</a></div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    document.getElementById('signout-btn').addEventListener('click', async function () {
+      await fetch('/auth/api/signout', { method: 'POST' });
+      window.location.href = '/';
+    });
+  </script>
+{% endblock %}

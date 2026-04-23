@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import html
 import json
 import os
@@ -26,6 +27,7 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from websockets import ClientConnection
 
@@ -72,6 +74,7 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.primitives import LaunchMode
@@ -196,9 +199,17 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
+    # Captured here so background callbacks (e.g. the mngr events refresh
+    # dispatch) can schedule async work on the server's running loop via
+    # asyncio.run_coroutine_threadsafe.
+    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
+        # Clear the captured loop reference first so background callbacks that
+        # race with shutdown see None and drop their events instead of trying
+        # to schedule on a loop that is about to close.
+        inner_app.state.event_loop = None
         for client in inner_app.state.ssh_http_clients.values():
             await client.aclose()
         inner_app.state.ssh_http_clients.clear()
@@ -499,6 +510,19 @@ async def _forward_workspace_http(
 
     headers = dict(request.headers)
     headers.pop("host", None)
+
+    # Strip the desktop client's session cookie so agent-controlled workspace
+    # servers cannot extract and reuse it against other agents.
+    raw_cookie = headers.get("cookie")
+    if raw_cookie is not None:
+        stripped = "; ".join(
+            c.strip() for c in raw_cookie.split(";") if not c.strip().startswith(SESSION_COOKIE_NAME + "=")
+        )
+        if stripped:
+            headers["cookie"] = stripped
+        else:
+            del headers["cookie"]
+
     body = await request.body()
 
     accept = request.headers.get("accept", "")
@@ -1128,7 +1152,12 @@ def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
 ) -> list[dict[str, str]]:
-    """Build a JSON-serializable list of workspaces from the backend resolver."""
+    """Build a JSON-serializable list of workspaces from the backend resolver.
+
+    Each entry carries a deterministic "accent" CSS color derived from the
+    agent id so the chrome and sidebar can render a per-workspace accent
+    without running a digest in JS.
+    """
     agent_ids = backend_resolver.list_known_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -1136,7 +1165,7 @@ def _build_workspace_list(
         if not ws_name:
             info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name}
+        entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -1215,40 +1244,10 @@ def _handle_workspace_settings(
 
     servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
 
-    # Telegram section
-    telegram_section = ""
-    telegram_js = ""
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_state: str | None = None
     if telegram_orchestrator is not None:
-        has_telegram = telegram_orchestrator.agent_has_telegram(AgentId(agent_id))
-        if has_telegram:
-            telegram_section = '<p style="color:#16a34a;">Telegram is active for this workspace.</p>'
-        else:
-            telegram_section = (
-                f'<button class="btn btn-primary" id="tg-btn" '
-                f"onclick=\"setupTelegram('{agent_id}')\">Setup Telegram</button>"
-            )
-            telegram_js = (
-                "async function setupTelegram(agentId) {"
-                '  var btn = document.getElementById("tg-btn");'
-                '  btn.disabled = true; btn.textContent = "Setting up...";'
-                "  try {"
-                '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
-                '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
-                '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
-                "    var interval = setInterval(async function() {"
-                '      try { var r = await fetch("/api/agents/" + agentId + "/telegram/status");'
-                "        if (!r.ok) return; var d = await r.json();"
-                '        if (d.status === "DONE") { clearInterval(interval);'
-                '          btn.textContent = "Telegram active"; btn.style.color = "#16a34a"; }'
-                '        else if (d.status === "FAILED") { clearInterval(interval);'
-                '          btn.textContent = "Setup failed"; btn.disabled = false; }'
-                "        else { btn.textContent = d.status; }"
-                "      } catch (e) {}"
-                "    }, 2000);"
-                '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
-                "}"
-            )
+        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -1256,8 +1255,7 @@ def _handle_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_section=telegram_section,
-        telegram_js=telegram_js,
+        telegram_state=telegram_state,
     )
     return HTMLResponse(content=html)
 
@@ -1669,6 +1667,7 @@ async def _handle_request_deny(
 
 
 _request_event_apps: dict[int, FastAPI] = {}
+_refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -1681,6 +1680,112 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
         if current_inbox is not None:
             app.state.request_inbox = current_inbox.add_request(event)
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+
+
+def _parse_refresh_service_name(raw_line: str) -> str | None:
+    """Extract service_name from a refresh event line, or None if unparseable."""
+    try:
+        data = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return None
+    service_name = data.get("service_name")
+    if not isinstance(service_name, str) or not service_name:
+        return None
+    return service_name
+
+
+async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
+    """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
+
+    Resolves the ``system_interface`` backend URL for the agent (going through
+    an SSH tunnel automatically for remote agents) and calls
+    ``/api/refresh-service/{service_name}/broadcast``. Errors are logged but
+    swallowed -- a missed refresh is never worth crashing on.
+    """
+    backend_resolver: BackendResolverInterface = app.state.backend_resolver
+    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    if backend_url is None:
+        logger.debug(
+            "No system_interface backend for agent {}; dropping refresh for service {}",
+            agent_id,
+            service_name,
+        )
+        return
+
+    url = f"{backend_url.rstrip('/')}/api/refresh-service/{service_name}/broadcast"
+    # Tunnel setup performs a blocking SSH handshake for remote agents, so
+    # run it in a thread pool to avoid stalling the desktop client's event
+    # loop (mirrors the approach used by the HTTP proxy path).
+    try:
+        tunnel_client = await asyncio.get_running_loop().run_in_executor(
+            None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
+        )
+    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
+        return
+    http_client = tunnel_client or app.state.http_client
+    try:
+        response = await http_client.post(url)
+        response.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
+    finally:
+        if tunnel_client is not None:
+            await tunnel_client.aclose()
+
+
+def _log_refresh_dispatch_result(
+    future: concurrent.futures.Future[None], agent_id_str: str, service_name: str
+) -> None:
+    """Surface any exception stashed on a scheduled refresh-dispatch future.
+
+    ``run_coroutine_threadsafe`` stores exceptions on the returned
+    ``concurrent.futures.Future``; if nothing calls ``.exception()`` they are
+    never logged. This callback runs when the coroutine finishes and logs
+    anything other than cancellation.
+    """
+    try:
+        exc = future.exception()
+    except asyncio.CancelledError:
+        logger.debug("Refresh dispatch cancelled for agent {} service {}", agent_id_str, service_name)
+        return
+    if exc is not None:
+        logger.warning("Refresh dispatch failed for agent {} service {}: {}", agent_id_str, service_name, exc)
+
+
+def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
+    """Fan a refresh event out to every registered app's workspace server.
+
+    Runs on the mngr-events reader thread, so the async POST is scheduled
+    on each app's captured event loop via run_coroutine_threadsafe.
+    """
+    service_name = _parse_refresh_service_name(raw_line)
+    if service_name is None:
+        logger.debug("Ignoring malformed refresh event from {}: {}", agent_id_str, raw_line[:200])
+        return
+    agent_id = AgentId(agent_id_str)
+    for app in _refresh_event_apps.values():
+        # event_loop is set to None in create_desktop_client and populated by
+        # _managed_lifespan on startup. In production, stream_manager.start()
+        # (which feeds this callback) runs before uvicorn.run(app) starts the
+        # lifespan, so there is a brief window during which refresh events
+        # can arrive before the loop is captured. Drop such events rather
+        # than crashing the reader thread with AttributeError. The same guard
+        # also covers loops that have already been closed (e.g. the app was
+        # torn down but its entry in _refresh_event_apps has not yet been
+        # removed) -- scheduling on a closed loop would raise RuntimeError
+        # and leak an unawaited coroutine.
+        loop: asyncio.AbstractEventLoop | None = app.state.event_loop
+        if loop is None or loop.is_closed():
+            logger.debug(
+                "Dropping refresh for agent {} service {}: app event loop unavailable",
+                agent_id_str,
+                service_name,
+            )
+            continue
+        future = asyncio.run_coroutine_threadsafe(_dispatch_refresh_broadcast(app, agent_id, service_name), loop)
+        future.add_done_callback(lambda f, aid=agent_id_str, sn=service_name: _log_refresh_dispatch_result(f, aid, sn))
+        logger.info("Scheduled refresh broadcast for agent {} service {}", agent_id_str, service_name)
 
 
 # -- App factory --
@@ -1764,6 +1869,11 @@ def create_desktop_client(
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    # Populated with the running loop by _managed_lifespan on startup. Defined
+    # up-front as None so background callbacks fired before startup (e.g. mngr
+    # events produced between stream_manager.start() and uvicorn.run()) see a
+    # valid attribute and can choose to drop the event instead of crashing.
+    app.state.event_loop = None
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
@@ -1773,6 +1883,8 @@ def create_desktop_client(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
+        _refresh_event_apps[id(backend_resolver)] = app
+        backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
     # Mount the auth routes (proxy to the remote_service_connector auth backend)
     if session_store is not None and auth_backend_client is not None:
@@ -1788,6 +1900,15 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
+    # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
+    # (plain curl, no build step) and is gitignored; if it's missing, the
+    # mount still works and the server logs a hint at startup.
+    _static_dir = Path(__file__).resolve().parent / "static"
+    if not (_static_dir / "tailwind.js").exists():
+        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+    app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
 
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)

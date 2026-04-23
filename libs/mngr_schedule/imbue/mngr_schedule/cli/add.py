@@ -3,6 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import assert_never
 from uuid import uuid4
 
 import click
@@ -10,12 +11,9 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -23,6 +21,7 @@ from imbue.mngr_schedule.cli.group import add_trigger_options
 from imbue.mngr_schedule.cli.group import resolve_positional_name
 from imbue.mngr_schedule.cli.group import schedule
 from imbue.mngr_schedule.cli.options import ScheduleAddCliOptions
+from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
 from imbue.mngr_schedule.data_types import VerifyMode
@@ -127,9 +126,17 @@ def check_safe_create_command(args: str) -> str | None:
     Currently checks:
     - Either --branch with a {DATE} placeholder in its NEW part, or --reuse
       must be specified, so that each scheduled run doesn't conflict.
+
+    Skipped entirely when --foreground is present: headless agents auto-destroy
+    after each run and never create persistent branches, so neither --branch
+    {DATE} nor --reuse is applicable (in fact both are rejected by the
+    headless path in create).
     """
     parts = shlex.split(args) if args else []
     mngr_args, _passthrough_args = _split_args_at_separator(parts)
+
+    if _has_flag(mngr_args, "--foreground"):
+        return None
 
     if _has_flag(mngr_args, "--reuse"):
         return None
@@ -234,16 +241,7 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--snapshot is not yet implemented for schedule add")
 
     # Load the provider instance
-    try:
-        provider = get_provider_instance(ProviderInstanceName(opts.provider), mngr_ctx)
-    except MngrError as e:
-        raise click.ClickException(f"Failed to load provider '{opts.provider}': {e}") from e
-
-    if not isinstance(provider, (LocalProviderInstance, ModalProviderInstance)):
-        raise click.ClickException(
-            f"Provider '{opts.provider}' (type {type(provider).__name__}) is not supported for schedules. "
-            "Supported providers: local, modal."
-        )
+    provider = load_schedule_provider(opts.provider, mngr_ctx)
 
     # Generate name if not provided
     trigger_name = opts.name if opts.name else f"trigger-{uuid4().hex[:8]}"
@@ -280,6 +278,8 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
         _deploy_local(trigger, mngr_ctx, opts)
     elif isinstance(provider, ModalProviderInstance):
         _deploy_modal(trigger, mngr_ctx, opts, provider)
+    else:
+        assert_never(provider)
 
 
 def _deploy_local(
