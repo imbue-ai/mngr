@@ -1014,6 +1014,51 @@ def test_mngr_config_merge_keeps_base_destroyed_host_persisted_seconds_when_over
     assert merged.default_destroyed_host_persisted_seconds == 86400.0
 
 
+# =============================================================================
+# Tests for min_online_host_age_seconds
+# =============================================================================
+
+
+def test_provider_instance_config_min_online_host_age_seconds_defaults_to_none() -> None:
+    config = ProviderInstanceConfig(backend=ProviderBackendName("test"))
+    assert config.min_online_host_age_seconds is None
+
+
+def test_provider_instance_config_merge_overrides_min_online_host_age_seconds() -> None:
+    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
+    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=600.0)
+    merged = base.merge_with(override)
+    assert merged.min_online_host_age_seconds == 600.0
+
+
+def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_none() -> None:
+    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
+    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=None)
+    merged = base.merge_with(override)
+    assert merged.min_online_host_age_seconds == 300.0
+
+
+def test_mngr_config_default_min_online_host_age_seconds_is_ten_minutes(mngr_test_prefix: str) -> None:
+    config = MngrConfig(prefix=mngr_test_prefix)
+    assert config.default_min_online_host_age_seconds == 60.0 * 10.0
+
+
+def test_mngr_config_merge_overrides_default_min_online_host_age_seconds(mngr_test_prefix: str) -> None:
+    base = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=600.0)
+    override = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=300.0)
+    merged = base.merge_with(override)
+    assert merged.default_min_online_host_age_seconds == 300.0
+
+
+def test_mngr_config_merge_keeps_base_min_online_host_age_seconds_when_override_none(
+    mngr_test_prefix: str,
+) -> None:
+    base = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=300.0)
+    override = MngrConfig.model_construct(prefix=mngr_test_prefix, default_min_online_host_age_seconds=None)
+    merged = base.merge_with(override)
+    assert merged.default_min_online_host_age_seconds == 300.0
+
+
 def test_mngr_config_merge_overrides_connect_command(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, connect_command="base-cmd")
     override = MngrConfig(prefix=mngr_test_prefix, connect_command="override-cmd")
