@@ -3,6 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import assert_never
 from uuid import uuid4
 
 import click
@@ -125,9 +126,17 @@ def check_safe_create_command(args: str) -> str | None:
     Currently checks:
     - Either --branch with a {DATE} placeholder in its NEW part, or --reuse
       must be specified, so that each scheduled run doesn't conflict.
+
+    Skipped entirely when --foreground is present: headless agents auto-destroy
+    after each run and never create persistent branches, so neither --branch
+    {DATE} nor --reuse is applicable (in fact both are rejected by the
+    headless path in create).
     """
     parts = shlex.split(args) if args else []
     mngr_args, _passthrough_args = _split_args_at_separator(parts)
+
+    if _has_flag(mngr_args, "--foreground"):
+        return None
 
     if _has_flag(mngr_args, "--reuse"):
         return None
@@ -269,6 +278,8 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
         _deploy_local(trigger, mngr_ctx, opts)
     elif isinstance(provider, ModalProviderInstance):
         _deploy_modal(trigger, mngr_ctx, opts, provider)
+    else:
+        assert_never(provider)
 
 
 def _deploy_local(
