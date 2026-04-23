@@ -221,10 +221,10 @@ def _reject_incompatible_headless_flags(
     ]
 
     # Boolean-pair flags: only the positive form conflicts with headless
-    # semantics. The --no-* form is redundant-but-compatible and is tolerated,
-    # matching the original --no-connect special case. Checks both
-    # is_param_explicit (to catch explicit use) and the resolved value (to
-    # distinguish --flag from --no-flag when they share a click param).
+    # semantics. The --no-* form is redundant-but-compatible and is tolerated.
+    # Checks both is_param_explicit (to catch explicit use) and the resolved
+    # value (to distinguish --flag from --no-flag when they share a click
+    # param).
     for param_name, value_getter, positive_display_name in _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS:
         if is_param_explicit(ctx, param_name) and value_getter(opts):
             explicit_flags.append(positive_display_name)
