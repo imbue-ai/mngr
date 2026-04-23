@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -12,6 +12,7 @@ const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
 const SIDEBAR_WIDTH = 260;
 const REQUESTS_PANEL_WIDTH = 320;
+const CONTENT_PARTITION = 'persist:workspace-content';
 
 // -- Per-window bundle registry --
 const bundles = new Set();
@@ -216,6 +217,7 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -648,6 +650,7 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
         },
@@ -988,9 +991,60 @@ if (!gotLock) {
   app.whenReady().then(onReady);
 }
 
+// -- Content partition cookie sync --
+// Auth happens in the contentView (which uses CONTENT_PARTITION). The main
+// process SSE and chrome/sidebar views use the default session. We sync
+// minds_session cookies from the content partition to the default session
+// so that chrome-level auth checks work.
+
+function setupContentPartitionCookieSync() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  contentSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    if (cookie.name !== 'minds_session' || removed) return;
+    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
+    const url = `http://${domain}`;
+    session.defaultSession.cookies.set({
+      url,
+      name: cookie.name,
+      value: cookie.value,
+      httpOnly: cookie.httpOnly,
+      path: cookie.path || '/',
+      sameSite: cookie.sameSite || 'lax',
+    }).then(() => {
+      kickChromeSSEReconnect();
+    }).catch(() => {});
+  });
+}
+
+async function syncContentCookiesToDefaultSession() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  let cookies;
+  try {
+    cookies = await contentSession.cookies.get({ name: 'minds_session' });
+  } catch {
+    return;
+  }
+  for (const cookie of cookies) {
+    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
+    const url = `http://${domain}`;
+    try {
+      await session.defaultSession.cookies.set({
+        url,
+        name: cookie.name,
+        value: cookie.value,
+        httpOnly: cookie.httpOnly,
+        path: cookie.path || '/',
+        sameSite: cookie.sameSite || 'lax',
+      });
+    } catch { /* noop */ }
+  }
+}
+
 async function onReady() {
   installApplicationMenu();
   installDockMenu();
+  setupContentPartitionCookieSync();
+  await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
   await runStartupSequence(initialBundle);

@@ -1238,3 +1238,80 @@ def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
     client.base_url = httpx.URL(f"http://{agent_id}.localhost")
     response = client.get("/")
     assert response.status_code == 404
+
+
+# -- Session cookie stripping tests --
+
+
+def _make_cookie_echo_backend() -> FastAPI:
+    """A workspace stub that echoes back the Cookie header it receives."""
+    stub = FastAPI()
+
+    @stub.get("/cookies")
+    def echo_cookies(request: FastAPIRequest) -> JSONResponse:
+        return JSONResponse({"cookie_header": request.headers.get("cookie")})
+
+    return stub
+
+
+def _create_cookie_echo_subdomain_client(
+    tmp_path: Path,
+    agent_id: AgentId,
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client that proxies to a cookie-echoing stub backend."""
+    workspace_transport = httpx.ASGITransport(app=_make_cookie_echo_backend())
+
+    class _WorkspaceRoutingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.host == "workspace-backend":
+                return await workspace_transport.handle_async_request(request)
+            return httpx.Response(502, content=b"unknown host")
+
+    routing_client = httpx.AsyncClient(transport=_WorkspaceRoutingTransport(), follow_redirects=False, timeout=5.0)
+
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+
+    discovered_agents = make_agents_json(agent_id)
+    resolver = make_resolver_with_data(
+        agents_json=discovered_agents,
+        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
+    )
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=routing_client,
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_strips_session_cookie(tmp_path: Path) -> None:
+    """The proxy must strip the minds_session cookie so workspace servers
+    cannot extract and reuse it against other agents."""
+    agent_id = AgentId()
+    client, auth_store = _create_cookie_echo_subdomain_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/cookies")
+    assert response.status_code == 200
+
+    received_cookie = response.json()["cookie_header"]
+    assert received_cookie is None or SESSION_COOKIE_NAME not in received_cookie
+
+
+def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None:
+    """The proxy must preserve cookies that are not the session cookie."""
+    agent_id = AgentId()
+    client, auth_store = _create_cookie_echo_subdomain_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    client.cookies.set("app_preference", "dark-mode-92741", path="/")
+
+    response = client.get("/cookies")
+    assert response.status_code == 200
+
+    received_cookie = response.json()["cookie_header"]
+    assert received_cookie is not None
+    assert "app_preference=dark-mode-92741" in received_cookie
+    assert SESSION_COOKIE_NAME not in received_cookie
