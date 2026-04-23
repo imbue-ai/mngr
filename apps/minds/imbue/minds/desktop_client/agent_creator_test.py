@@ -23,6 +23,8 @@ from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -599,3 +601,92 @@ def test_remove_lease_info_deletes_file(tmp_path: Path) -> None:
 
 def test_remove_lease_info_noop_for_missing(tmp_path: Path) -> None:
     _remove_lease_info(tmp_path, AgentId())
+
+
+# -- release_leased_host tests --
+
+
+def test_release_leased_host_with_pool_client(
+    tmp_path: Path,
+    fake_pool_server: HostPoolClient,
+) -> None:
+    """release_leased_host removes the dynamic host entry, calls release, and removes lease info."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId()
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+    )
+
+    # Set up state: lease info and a dynamic host entry
+    _save_lease_info(tmp_path, agent_id, 7)
+    dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
+    host_name = "leased-{}".format(agent_id)
+    _write_dynamic_host_entry(
+        dynamic_hosts_file=dynamic_hosts_file,
+        host_name=host_name,
+        address="10.0.0.1",
+        port=2222,
+        user="root",
+        key_file=Path("/tmp/key"),
+    )
+
+    creator.release_leased_host(agent_id, access_token="test-token")
+
+    # Lease info should be removed
+    assert _load_lease_info(tmp_path, agent_id) is None
+    # Dynamic host entry should be removed
+    content = tomllib.loads(dynamic_hosts_file.read_text())
+    assert host_name not in content
+
+
+def test_release_leased_host_noop_when_no_lease_info(tmp_path: Path) -> None:
+    """release_leased_host is a no-op when there is no lease info for the agent."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(paths=paths)
+    creator.release_leased_host(AgentId(), access_token="test-token")
+
+
+def test_release_leased_host_without_pool_client(tmp_path: Path) -> None:
+    """release_leased_host logs a warning but does not crash when host_pool_client is None."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId()
+    creator = AgentCreator(paths=paths)
+
+    _save_lease_info(tmp_path, agent_id, 7)
+    creator.release_leased_host(agent_id, access_token="test-token")
+
+    # Lease info should NOT be removed (release was not successful)
+    assert _load_lease_info(tmp_path, agent_id) == 7
+
+
+def test_agent_creator_has_host_pool_client_field(tmp_path: Path) -> None:
+    """AgentCreator accepts an optional host_pool_client field."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator_without = AgentCreator(paths=paths)
+    assert creator_without.host_pool_client is None
+
+    client = HostPoolClient(connector_url=RemoteServiceConnectorUrl("http://example.com"))
+    creator_with = AgentCreator(paths=paths, host_pool_client=client)
+    assert creator_with.host_pool_client is not None
+
+
+def test_start_creation_accepts_access_token_and_version(tmp_path: Path) -> None:
+    """start_creation accepts access_token and version kwargs without error."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    creator = AgentCreator(paths=paths)
+    # LEASED mode will fail in the background thread (no host_pool_client),
+    # but start_creation itself should return immediately with an agent ID.
+    agent_id = creator.start_creation(
+        repo_source="https://example.com/repo.git",
+        agent_name="test",
+        launch_mode=LaunchMode.LEASED,
+        access_token="test-token",
+        version="v0.1.0",
+    )
+    assert agent_id is not None
+    creator.wait_for_all(timeout=5.0)
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+    # Should fail because host_pool_client is None
+    assert info.status == AgentCreationStatus.FAILED
