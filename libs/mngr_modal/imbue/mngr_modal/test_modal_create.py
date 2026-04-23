@@ -115,6 +115,52 @@ def test_mngr_create_with_transfer_git_worktree_on_modal_raises_error(
 
 
 @pytest.mark.acceptance
+@pytest.mark.timeout(120)
+def test_mngr_create_with_invalid_snapshot_id_fails(
+    temp_source_dir: Path,
+    modal_subprocess_env: ModalSubprocessTestEnv,
+) -> None:
+    """Test that --snapshot with a non-existent snapshot ID fails with a snapshot-context error.
+
+    snap-123abc is a fake snapshot ID that does not exist. This verifies the
+    --snapshot flag is accepted and that create propagates a meaningful error
+    when the snapshot cannot be resolved. There is no companion success-path
+    test since that would require a pre-existing snapshot in Modal.
+    """
+    agent_name = f"test-modal-bad-snapshot-{get_short_random_string()}"
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "create",
+            agent_name,
+            "--provider",
+            "modal",
+            "--snapshot",
+            "snap-123abc",
+            "--no-connect",
+            "--no-ensure-clean",
+            "--source",
+            str(temp_source_dir),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+
+    assert result.returncode != 0, "Expected create with invalid snapshot ID to fail"
+    combined = (result.stdout + result.stderr).lower()
+    # Require contextual evidence that the failure is snapshot-related; a bare
+    # "snap-123abc" alternative would match command echoes on any unrelated failure.
+    assert "snapshot" in combined or "host creation failed" in combined, (
+        f"Expected snapshot-context error. stderr: {result.stderr}\nstdout: {result.stdout}"
+    )
+
+
+@pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_mngr_create_with_build_args_on_modal(
