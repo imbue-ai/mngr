@@ -310,7 +310,26 @@ def _list_agents_streaming(
     Fast providers fire on_agent callbacks while slow providers are still loading.
     """
     with log_span("Loading agents from all providers (streaming)"):
-        providers = get_all_provider_instances(mngr_ctx, provider_names, reset_caches=reset_caches)
+        # In CONTINUE mode, collect per-provider instantiation errors (e.g. Modal
+        # raising 'not authorized' from build_provider_instance when no token is
+        # configured) and record them in result.errors, so one misconfigured
+        # provider does not abort the whole listing.
+        instantiation_errors: list[tuple[ProviderInstanceName, MngrError]] | None = (
+            [] if params.error_behavior == ErrorBehavior.CONTINUE else None
+        )
+        providers = get_all_provider_instances(
+            mngr_ctx,
+            provider_names,
+            reset_caches=reset_caches,
+            instantiation_errors=instantiation_errors,
+        )
+        if instantiation_errors:
+            for provider_name, err in instantiation_errors:
+                error_info = ProviderErrorInfo.build_for_provider(err, provider_name)
+                with results_lock:
+                    result.errors.append(error_info)
+                if params.on_error:
+                    params.on_error(error_info)
         logger.trace("Found {} provider instances", len(providers))
 
         with ConcurrencyGroupExecutor(

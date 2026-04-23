@@ -111,6 +111,7 @@ def get_all_provider_instances(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None = None,
     reset_caches: bool = False,
+    instantiation_errors: list[tuple[ProviderInstanceName, MngrError]] | None = None,
 ) -> list[BaseProviderInstance]:
     """Get all available provider instances.
 
@@ -123,10 +124,26 @@ def get_all_provider_instances(
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
     - Providers not in provider_names (if provider_names is specified)
+
+    If ``instantiation_errors`` is provided, ``MngrError`` raised by any single
+    provider's ``build_provider_instance`` is captured into that list and the
+    function continues with the remaining providers. If it is None (default),
+    such errors propagate -- preserving back-compat for callers that want a
+    single-provider failure to abort. The list is appended to in the order
+    failures occur; callers own it and decide how to surface.
     """
     providers: list[BaseProviderInstance] = []
     seen_names: set[str] = set()
     disabled = mngr_ctx.config.disabled_plugins
+
+    def _instantiate(name: ProviderInstanceName) -> None:
+        try:
+            providers.append(get_provider_instance(name, mngr_ctx))
+        except MngrError as e:
+            if instantiation_errors is None:
+                raise
+            instantiation_errors.append((name, e))
+            logger.warning("Skipping provider {} after instantiation error: {}", name, e)
 
     # Convert provider_names to a set for efficient lookup
     provider_filter: set[str] | None = set(provider_names) if provider_names else None
@@ -146,7 +163,7 @@ def get_all_provider_instances(
         if not _is_backend_enabled(str(provider_config.backend), mngr_ctx):
             logger.trace("Skipped provider {} (backend {} not in enabled_backends)", name, provider_config.backend)
             continue
-        providers.append(get_provider_instance(name, mngr_ctx))
+        _instantiate(name)
 
     # Then, add default instances for backends not already configured (unless disabled)
     for backend_name in list_backends():
@@ -161,7 +178,7 @@ def get_all_provider_instances(
             continue
         if backend_name not in seen_names:
             provider_name = ProviderInstanceName(backend_name)
-            providers.append(get_provider_instance(provider_name, mngr_ctx))
+            _instantiate(provider_name)
             seen_names.add(backend_name)
 
     if reset_caches:
