@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Create or update .reviewer/settings.local.json with the given toggle values.
 #
-# Usage: create_reviewer_settings.sh [AUTOFIX_ENABLE] [CI_ENABLE] [VERIFY_CONVERSATION_ENABLE] [AUTOFIX_MINOR] [VERIFY_ARCHITECTURE_ENABLE]
+# Usage: create_reviewer_settings.sh [AUTOFIX_ENABLE] [CI_ENABLE] [VERIFY_CONVERSATION_ENABLE] [AUTOFIX_MINOR] [VERIFY_ARCHITECTURE_ENABLE] [STOP_HOOK_ENABLE]
 #
 # Each argument is 1 (enabled) or 0 (disabled), defaulting to 1 if not set.
 #   AUTOFIX_ENABLE            - autofix.is_enabled
@@ -13,17 +13,20 @@ set -euo pipefail
 #   VERIFY_CONVERSATION_ENABLE - verify_conversation.is_enabled
 #   AUTOFIX_MINOR             - 1: fix all issues, 0: only MAJOR/CRITICAL
 #   VERIFY_ARCHITECTURE_ENABLE - verify_architecture.is_enabled
+#   STOP_HOOK_ENABLE          - stop_hook.enabled_when ("true" when 1, "" when 0)
 
 AUTOFIX_ENABLE="${1:-1}"
 CI_ENABLE="${2:-1}"
 VERIFY_CONVERSATION_ENABLE="${3:-1}"
 AUTOFIX_MINOR="${4:-1}"
 VERIFY_ARCHITECTURE_ENABLE="${5:-1}"
+STOP_HOOK_ENABLE="${6:-1}"
 
 AUTOFIX_BOOL=$( [[ "$AUTOFIX_ENABLE" == "1" ]] && echo true || echo false )
 CI_BOOL=$( [[ "$CI_ENABLE" == "1" ]] && echo true || echo false )
 CONVO_BOOL=$( [[ "$VERIFY_CONVERSATION_ENABLE" == "1" ]] && echo true || echo false )
 ARCH_BOOL=$( [[ "$VERIFY_ARCHITECTURE_ENABLE" == "1" ]] && echo true || echo false )
+STOP_HOOK_ENABLED_WHEN=$( [[ "$STOP_HOOK_ENABLE" == "1" ]] && echo "true" || echo "" )
 
 PROMPT_ALL='Please autofix as normal, except: Never ask questions. You are running unattended and the user is not there to answer your questions. Instead, think hard about whether to accept each given patch. If you decide *not* to accept it, then create a *new* branch with that fix commit. Call the branch (current_branch_name)___(fix_description) *and be sure to push it remotely* then by sure to check the normal branch back out when you'\''re done. Also be sure to tell the user that you did this.'
 
@@ -43,10 +46,12 @@ jq -n \
     --argjson ci_enabled "$CI_BOOL" \
     --argjson convo_enabled "$CONVO_BOOL" \
     --argjson arch_enabled "$ARCH_BOOL" \
+    --arg stop_hook_enabled_when "$STOP_HOOK_ENABLED_WHEN" \
     --arg prompt "$PROMPT" \
     '$existing * {
         "autofix": {"is_enabled": $autofix_enabled, "append_to_prompt": $prompt},
         "verify_conversation": {"is_enabled": $convo_enabled},
         "ci": {"is_enabled": $ci_enabled},
-        "verify_architecture": {"is_enabled": $arch_enabled}
+        "verify_architecture": {"is_enabled": $arch_enabled},
+        "stop_hook": {"enabled_when": $stop_hook_enabled_when}
     }' > "${SETTINGS}.tmp" && mv "${SETTINGS}.tmp" "$SETTINGS"
