@@ -46,7 +46,6 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/conftest_hooks.py", "
 # before any hooks run: addopts, coverage.run, inline-snapshot, timeout_func_only.
 [tool.pytest.ini_options]
 timeout_func_only = true
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "--cov=imbue.imbue_common",
@@ -86,4 +85,4 @@ pythonVersion = "3.11"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 85

@@ -21,20 +21,6 @@ run target:
     exit 1; \
   fi
 
-# Generate .dockerignore from .gitignore: remove the current.tar.gz line
-# (needed in the Docker build context) and add tracked files that offload
-# modifies during builds (which causes Modal upload errors).
-[private]
-_generate-dockerignore:
-    # Strip current.tar.gz (needed in docker build context) and /.dockerignore
-    # (would cause .dockerignore to ignore itself when .gitignore lists it).
-    grep -vE 'current\.tar\.gz|^/?\.dockerignore$' .gitignore > .dockerignore
-    echo '.git/' >> .dockerignore
-    echo '.offload-image-cache' >> .dockerignore
-    # Glob covers .offload-cache-key and every per-target .offload-<target>-cache-key
-    # file so adding a new test-offload-<target> recipe doesn't require editing here.
-    echo '.offload-*cache-key' >> .dockerignore
-
 # Generate Dockerfile.release from Dockerfile + Dockerfile.release.extras so the
 # two Dockerfiles stay in sync without duplicating the base layers. Strips the
 # trailing CMD from Dockerfile; the .extras file provides its own CMD.
@@ -53,132 +39,24 @@ _generate-release-dockerfile:
 test-offload args="":
     #!/bin/bash
     set -ueo pipefail
-    BASE_COMMIT=$(cat .offload-base-commit | tr -d '[:space:]')
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
-
-    # Invalidate offload's image cache when build inputs change.
-    # Offload only caches by image ID and doesn't track Dockerfile or base commit changes.
-    CACHE_KEY=$(cat .offload-base-commit libs/mngr/imbue/mngr/resources/Dockerfile offload-modal.toml | shasum -a 256 | cut -d' ' -f1)
-    CACHE_KEY_FILE=".offload-cache-key"
-    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
-        echo "[test-offload] Image cache key matches, reusing cached image."
-    else
-        echo "[test-offload] Image cache key changed, clearing cached image."
-        rm -f .offload-image-cache
-        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
-    fi
-
-    just _generate-dockerignore
-
-    ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
-    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
-    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -f .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    ./scripts/generate_patch_for_offload.sh $BASE_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
-    cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
-    offload -c offload-modal.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" || [[ $? -eq 2 ]]
-
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
+    # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
+    offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
 
 # Run acceptance tests on Modal via Offload
 test-offload-acceptance args="":
     #!/bin/bash
     set -ueo pipefail
-    BASE_COMMIT=$(cat .offload-base-commit | tr -d '[:space:]')
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
-
-    # Invalidate offload's image cache when build inputs change. The
-    # acceptance config uses libs/mngr/imbue/mngr/resources/Dockerfile
-    # (the Docker startup scripts are only inputs for the release
-    # recipe, which uses Dockerfile.release and COPYs them in).
-    CACHE_KEY=$(cat .offload-base-commit \
-        libs/mngr/imbue/mngr/resources/Dockerfile \
-        offload-modal-acceptance.toml | shasum -a 256 | cut -d' ' -f1)
-    CACHE_KEY_FILE=".offload-acceptance-cache-key"
-    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
-        echo "[test-offload-acceptance] Image cache key matches, reusing cached image."
-    else
-        echo "[test-offload-acceptance] Image cache key changed, clearing cached image."
-        rm -f .offload-image-cache
-        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
-    fi
-
-    just _generate-dockerignore
-
-    ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
-    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
-    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -f .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    ./scripts/generate_patch_for_offload.sh $BASE_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
-    cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
-    # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
-    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
+    # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
+    offload -c offload-modal-acceptance.toml {{args}} run --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
 
 # Run release tests on Modal via Offload (with Docker-in-Docker)
 test-offload-release args="":
     #!/bin/bash
     set -ueo pipefail
-    BASE_COMMIT=$(cat .offload-base-commit | tr -d '[:space:]')
-    tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
-
-    # Regenerate Dockerfile.release from Dockerfile + Dockerfile.release.extras
-    # so the two stay in sync.
     just _generate-release-dockerfile
-
-    # Invalidate offload's image cache when build inputs change.
-    # Include the Docker startup scripts COPY'd into the image so that edits
-    # to those scripts also invalidate the cache.
-    CACHE_KEY=$(cat .offload-base-commit \
-        libs/mngr/imbue/mngr/resources/Dockerfile \
-        libs/mngr/imbue/mngr/resources/Dockerfile.release.extras \
-        libs/mngr/imbue/mngr/resources/start-dockerd.sh \
-        offload-modal-release.toml | shasum -a 256 | cut -d' ' -f1)
-    CACHE_KEY_FILE=".offload-release-cache-key"
-    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
-        echo "[test-offload-release] Image cache key matches, reusing cached image."
-    else
-        echo "[test-offload-release] Image cache key changed, clearing cached image."
-        rm -f .offload-image-cache
-        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
-    fi
-
-    just _generate-dockerignore
-
-    ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
-    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
-    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -f .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    ./scripts/generate_patch_for_offload.sh $BASE_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
-    cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz .dockerignore; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
-
-    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
+    # Run offload with checkpoint-based image caching (permit exit code 2 = flaky tests).
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
-    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" || [[ $? -eq 2 ]]
-
-    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
-    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
-    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
-        mkdir -p "$MAIN_WORKTREE/test-results"
-        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
-    fi
+    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" || [[ $? -eq 2 ]]
 
 # Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
 # so they don't leak into offload sandboxes (which run `-p no:xdist`).

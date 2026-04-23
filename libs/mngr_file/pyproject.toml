@@ -25,7 +25,6 @@ imbue-mngr = { workspace = true }
 
 [tool.pytest.ini_options]
 timeout_func_only = true
-junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "--cov=imbue.mngr_file",

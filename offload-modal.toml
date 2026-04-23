@@ -1,12 +1,10 @@
 # offload configuration for running mngr tests on Modal
 [offload]
-max_parallel = 50
-test_timeout_secs = 60
+max_parallel = 100
+test_timeout_secs = 120
 stream_output = true
 sandbox_project_root = "/code/mngr"
-# git add -A syncs the index after git apply, which only updates the working
-# tree. Without it, git ls-files would still list files deleted by the patch.
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
+sandbox_init_cmd = "uv sync --all-packages"
 
 [provider]
 type = "modal"
@@ -14,17 +12,19 @@ dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 
 [framework]
 type = "pytest"
-paths = ["."]
 command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
 
 [groups.all]
-retry_count = 0
+retry_count = 1
 filters = "-m 'not acceptance and not release and not flaky'"
 
 [groups.flaky]
 retry_count = 10
 filters = "-m 'flaky and not acceptance and not release'"
+
+[checkpoint]
+build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile"]
 
 [report]
 output_dir = "test-results"

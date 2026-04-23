@@ -18,7 +18,7 @@ jobs:
     # explicitly avoids depending on the repo-level default, which may be
     # restricted (contents: read only).
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -27,8 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
           fetch-depth: 0
+          # Check out PR branch tip (not GitHub's merge commit) so offload's
+          # checkpoint SHAs match git notes. Remove once offload has --first-parent.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -56,13 +58,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.6.2-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.6.2
+            cargo install offload@0.8.1
           fi
+
+      - name: Configure git identity for offload notes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Restore offload test durations from previous run
         uses: actions/cache/restore@v4
@@ -70,6 +77,19 @@ jobs:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
           restore-keys: offload-durations-${{ github.ref }}-
+
+      - name: Debug offload checkpoint state
+        run: |
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "Checkpoint commit (git log -m -n1 -- Dockerfile):"
+          git log --format=%H -n 1 --full-history -m -- libs/mngr/imbue/mngr/resources/Dockerfile || echo "none found"
+          echo "Fetching notes..."
+          git fetch origin refs/notes/offload-images:refs/notes/offload-images 2>&1 || echo "fetch failed"
+          echo "Notes list:"
+          git notes --ref=refs/notes/offload-images list 2>&1 || echo "no notes"
+          CKPT=$(git log --format=%H -n 1 --full-history -m -- libs/mngr/imbue/mngr/resources/Dockerfile)
+          echo "Note on checkpoint $CKPT:"
+          git notes --ref=refs/notes/offload-images show "$CKPT" 2>&1 || echo "no note on checkpoint"
 
       - name: Run tests via offload
         id: tests
@@ -199,8 +219,9 @@ jobs:
     # See note on `test-offload` above: the report-flaky-aware-tests
     # composite action needs `checks: write` to post both its junit-report
     # check-run and (on flaky-recovered runs) its neutral check-run.
+    # `contents: write` needed for offload to push image cache notes.
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -209,8 +230,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
           fetch-depth: 0
+          # Check out PR branch tip (not GitHub's merge commit) so offload's
+          # checkpoint SHAs match git notes. Remove once offload has --first-parent.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -238,13 +261,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.6.2-${{ runner.os }}
+          key: cargo-offload-0.8.1-${{ runner.os }}
 
       - name: Install offload
         run: |
           if ! command -v offload &> /dev/null; then
-            cargo install offload@0.6.2
+            cargo install offload@0.8.1
           fi
+
+      - name: Configure git identity for offload notes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Restore offload test durations from previous run
         uses: actions/cache/restore@v4

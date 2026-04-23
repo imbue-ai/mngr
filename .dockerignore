@@ -1,0 +1,45 @@
+# Virtual environments -- must be excluded to prevent macOS binaries
+# leaking into Linux Docker images via offload's copy_untracked_files.
+**/.venv
+**/.venv-*
+**/venv/
+**/env/
+
+# Git directory
+.git/
+
+# Build and cache artifacts
+**/__pycache__/
+**/*.py[codz]
+**/.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.cache
+**/.hypothesis/
+**/node_modules/
+**/frontend-dist/
+
+# IDE / editor
+**/.idea/
+**/.vscode/
+
+# Test output
+**/.test_output/
+**/test-results
+**/tmr_*/
+**/htmlcov/
+**/.coverage
+**/.coverage.*
+**/cov.xml
+
+# Offload / mngr local files
+**/.offload/**
+**/.mngr/dev/build/
+**/.mngr/dev/secrets/
+**/.claude/
+**/.autofix/
+**/.reviewer/
+**/.reviews/
+**/.demos/
+**/.external_worktrees/
+**/recordings
