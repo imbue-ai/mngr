@@ -26,7 +26,7 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     ).to_succeed()
 
     duplicate_result = e2e.run(
-        "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100099",
+        "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100123",
         comment="Attempt to create agent with duplicate name",
     )
     expect(duplicate_result).to_fail()

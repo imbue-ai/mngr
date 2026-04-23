@@ -309,15 +309,14 @@ def test_create_agent_state_persists_prompt_cat_in_command_for_headless_claude(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """End-to-end regression: Host.create_agent_state must thread
+    """End-to-end check: Host.create_agent_state must thread
     options.initial_message into HeadlessClaude.assemble_command so the
     persisted command (in data.json) actually cats the staged prompt.
 
-    Unit tests on assemble_command alone cannot catch a regression where
-    create_agent_state forgets to forward initial_message -- that is the
-    original bug this test pins down. Reading the command back from
-    data.json mirrors what start_agents does in production via
-    _get_agent_command.
+    Unit tests on assemble_command alone cannot catch a case where
+    create_agent_state forgets to forward initial_message. Reading the
+    command back from data.json mirrors what start_agents does in
+    production via _get_agent_command.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)

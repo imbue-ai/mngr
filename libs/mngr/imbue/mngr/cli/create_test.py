@@ -66,6 +66,11 @@ from imbue.mngr.utils.toml_config import save_config_file
 
 
 def _write_agent_type_to_settings_toml(settings_path: Path, type_name: str, command: str) -> None:
+    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+
+    Inlines the load / setdefault("agent_types") / save dance so tests that
+    declare a lightweight agent type do not need a top-level helper.
+    """
     settings_doc = load_config_file_tomlkit(settings_path)
     agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
     type_table = tomlkit.table()
@@ -1072,9 +1077,9 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
 # _create_agent calls _apply_host_labels on resolved online hosts so that
 # --host-label KEY=VALUE entries are honored for both headless and
 # interactive create (both for existing/local hosts and as a second,
-# idempotent application on newly-created hosts). These tests pin down the
-# helper's behavior so a refactor cannot silently re-introduce the
-# silent-drop bug that the headless path originally had.
+# idempotent application on newly-created hosts). These tests pin down
+# that behavior so a refactor cannot silently skip the host-label
+# application on any of those paths.
 
 
 def test_apply_host_labels_adds_tags_to_local_host(
@@ -1567,7 +1572,7 @@ def test_create_rejects_update_without_reuse(
     """--update without --reuse should fail with a clear error."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--update", "--type", "true", "--no-connect"],
+        ["my-agent", "--update", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1587,7 +1592,7 @@ def test_create_rejects_positional_and_name_together(
     """Providing both a positional address and --name should fail."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1607,7 +1612,7 @@ def test_create_edit_message_error_not_swallowed(
     """
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect", "--edit-message"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect", "--edit-message"],
         obj=plugin_manager,
     )
 
@@ -1629,11 +1634,13 @@ def test_create_accepts_name_flag_alone(
             "--name",
             "@.local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1660,11 +1667,13 @@ def test_create_provider_flag_sets_provider(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1679,7 +1688,7 @@ def test_create_provider_flag_conflicts_with_address_provider(
     """--provider that conflicts with the address provider should abort."""
     result = cli_runner.invoke(
         create,
-        ["my-agent@.modal", "--provider", "docker", "--type", "true", "--no-connect"],
+        ["my-agent@.modal", "--provider", "docker", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1701,11 +1710,13 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )

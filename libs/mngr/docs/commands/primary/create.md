@@ -26,10 +26,9 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Any command in your
-PATH can also be used as an agent type. Arguments after -- are passed
-directly to the agent command. To run a shell command with spaces or
-metacharacters, use the built-in 'command' agent type:
+The agent type defaults to 'claude' if not specified. Arguments after --
+are passed directly to the agent command. To run an arbitrary shell
+command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
@@ -37,9 +36,11 @@ like headless_command and headless_claude) require the --foreground flag.
 This runs the headless flow: source resolution, transfer, git,
 environment, and provisioning all work the same as non-headless create,
 but the agent streams its output to stdout and is destroyed when done
-instead of being connected to. Only connect/attach-phase flags (e.g.
---reconnect, --attach-command, --reuse) are rejected as incompatible.
-Pass --transfer=none to run the agent in-place at the source directory.
+instead of being connected to. Flags that do not fit this one-shot model
+are rejected: connect/attach-phase flags (e.g. --reconnect,
+--attach-command), send-message-based delivery (--edit-message), and
+long-lived-agent flags (e.g. --reuse, --start-on-boot). Pass
+--transfer=none to run the agent in-place at the source directory.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
