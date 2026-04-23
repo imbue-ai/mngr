@@ -12,7 +12,8 @@ ipcRenderer.on('close-active-tab-request', async (_event, requestId) => {
     if (typeof closeActiveTabHandler === 'function') {
       closed = !!(await closeActiveTabHandler());
     }
-  } catch {
+  } catch (err) {
+    console.error('close-active-tab handler threw:', err);
     closed = false;
   }
   ipcRenderer.send('close-active-tab-response', requestId, closed);
