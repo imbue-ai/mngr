@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -133,7 +134,8 @@ def start_desktop_client(
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
-    agent_creator = AgentCreator(paths=paths, server_port=port)
+    host_pool_client = _build_host_pool_client(minds_config.remote_service_connector_url)
+    agent_creator = AgentCreator(paths=paths, server_port=port, host_pool_client=host_pool_client)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
@@ -219,6 +221,13 @@ def start_desktop_client(
     # quickly, giving the lifespan shutdown hook time to run within
     # electron's 5-second SIGKILL window.
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+
+
+def _build_host_pool_client(connector_url: AnyUrl) -> HostPoolClient:
+    """Build a HostPoolClient from the remote service connector URL."""
+    return HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
+    )
 
 
 def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
