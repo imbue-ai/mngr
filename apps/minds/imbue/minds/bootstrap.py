@@ -62,7 +62,17 @@ def _ensure_mngr_settings(root_name: str) -> None:
     Only adds the SSH provider section if it is missing -- does not
     overwrite any existing configuration.
     """
-    settings_dir = mngr_host_dir_for(root_name)
+    mngr_host_dir = mngr_host_dir_for(root_name)
+    root_config_path = mngr_host_dir / "config.toml"
+    if not root_config_path.exists():
+        return
+    root_config = tomllib.loads(root_config_path.read_text())
+    profile_id = root_config.get("profile")
+    if not profile_id:
+        return
+    settings_dir = mngr_host_dir / "profiles" / profile_id
+    if not settings_dir.exists():
+        return
     settings_path = settings_dir / "settings.toml"
 
     data_dir = minds_data_dir_for(root_name)
@@ -72,7 +82,11 @@ def _ensure_mngr_settings(root_name: str) -> None:
         existing = tomllib.loads(settings_path.read_text())
         providers = existing.get("providers", {})
         ssh_config = providers.get("ssh", {})
-        if ssh_config.get("backend") == "ssh" and ssh_config.get("dynamic_hosts_file") == expected_dynamic_hosts_file:
+        if (
+            ssh_config.get("backend") == "ssh"
+            and ssh_config.get("dynamic_hosts_file") == expected_dynamic_hosts_file
+            and ssh_config.get("host_dir") == "/mngr"
+        ):
             return
     else:
         existing = {}
@@ -82,6 +96,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
         "providers": {
             "ssh": {
                 "backend": "ssh",
+                "host_dir": "/mngr",
                 "dynamic_hosts_file": expected_dynamic_hosts_file,
             },
         },
