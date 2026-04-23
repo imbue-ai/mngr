@@ -29,8 +29,8 @@ class CommandAgent(BaseAgent[CommandAgentConfig]):
         parent_type = "command"
         command = "python -m http.server 8080"
 
-    Then ``mngr create web my_server`` runs ``python -m http.server 8080``,
-    and ``mngr create web my_server -- --bind 0.0.0.0`` runs
+    Then ``mngr create my-task my_server`` runs ``python -m http.server 8080``,
+    and ``mngr create my-task my_server -- --bind 0.0.0.0`` runs
     ``python -m http.server 8080 --bind 0.0.0.0``.
 
     Because args are joined with plain spaces, shell metacharacters like
