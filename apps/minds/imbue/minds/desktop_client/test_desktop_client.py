@@ -942,7 +942,8 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     response = client.get("/_chrome/sidebar")
     assert response.status_code == 200
     assert "sidebar-workspaces" in response.text
-    assert "EventSource" in response.text
+    # Interactivity including the SSE fallback has moved to the external JS.
+    assert "/_static/sidebar.js" in response.text
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
