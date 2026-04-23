@@ -2,7 +2,6 @@ import json
 import os
 import queue
 import shlex
-import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -10,15 +9,18 @@ from typing import Any
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
-from watchdog.events import DirModifiedEvent
-from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
+from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer as _Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.concurrency_group.errors import EnvironmentStoppedError
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.event_utils import ShutdownEvent
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds_workspace_server.agent_discovery import discover_agents
@@ -37,6 +39,52 @@ from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
+_APPLICATIONS_TOML_BASENAME = "applications.toml"
+_DEFAULT_MNGR_BINARY = "mngr"
+
+
+_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS = 5.0
+
+
+def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Non-blocking put for a creation-log queue.
+
+    The creation thread must never block on individual log lines. If the
+    WebSocket client streaming proto-agent logs disconnects mid-creation,
+    nothing is draining the queue, and a blocking ``put`` would hang the
+    thread at the next log line -- which in turn prevents
+    ``proto_agent_completed`` from ever firing. We drop log lines on a
+    full queue; callers that need delivery guarantees for sentinels
+    (``done: True`` + the ``None`` terminator) should use
+    :func:`_completion_signal_put` instead.
+    """
+    try:
+        log_queue.put_nowait(message)
+    except queue.Full:
+        _loguru_logger.trace("Creation log queue full; dropping line")
+
+
+def _completion_signal_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
+    """Blocking put (with timeout) for completion sentinels.
+
+    Unlike per-line log writes, the completion sentinel + None terminator
+    must reach the consumer -- otherwise ``_proto_agent_logs_endpoint``
+    loops forever on ``queue.get()`` and the log WebSocket never closes.
+    We therefore block briefly (bounded by
+    ``_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS``) to give a slow consumer
+    time to drain. If the queue is still full at the deadline, log at
+    warning level and drop -- the out-of-band
+    ``broadcast_proto_agent_completed`` WS broadcast is the authoritative
+    signal to the main UI, so the log-channel sentinel being dropped
+    only degrades the dedicated log view, not overall correctness.
+    """
+    try:
+        log_queue.put(message, block=True, timeout=_COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS)
+    except queue.Full:
+        _loguru_logger.warning(
+            "Creation log queue full; dropping completion sentinel. "
+            "The log WebSocket consumer may hang until the queue is garbage-collected."
+        )
 
 
 class _LogQueueCallback(MutableModel):
@@ -47,17 +95,35 @@ class _LogQueueCallback(MutableModel):
     log_queue: queue.Queue[str | None] = Field(description="Queue to write log lines into")
 
     def __call__(self, line: str, _is_stdout: bool) -> None:
-        self.log_queue.put(json.dumps({"line": line.rstrip("\n")}))
+        _safe_log_put(self.log_queue, json.dumps({"line": line.rstrip("\n")}))
 
 
 class _ApplicationsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that triggers on modifications to applications.toml."""
+    """Watchdog handler that triggers on any change to applications.toml.
+
+    Uses ``on_any_event`` rather than ``on_modified`` because scripts/forward_port.py
+    upserts atomically via ``tempfile.mkstemp`` + ``os.replace``. Atomic replaces
+    surface through watchdog as moved/created events, not modified events, so a
+    handler that only overrides ``on_modified`` would silently miss every
+    service registration after the watcher starts.
+
+    Events are filtered to only those whose src or dest path basename is
+    ``applications.toml``. Without this filter we'd also fire on every write
+    to forward_port.py's ``applications.toml.*.tmp`` scratch files, which is
+    correctness-neutral (the re-read is idempotent) but produces a broadcast
+    storm per upsert.
+    """
 
     agent_id: str
     on_change: Any
 
-    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
-        if not event.is_directory:
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        paths = [event.src_path]
+        if isinstance(event, FileMovedEvent):
+            paths.append(event.dest_path)
+        if any(os.path.basename(p) == _APPLICATIONS_TOML_BASENAME for p in paths):
             self.on_change(self.agent_id)
 
 
@@ -91,11 +157,17 @@ class AgentManager:
     _own_work_dir: str
     _shutdown_event: ShutdownEvent
     _observe_cg: ConcurrencyGroup | None
+    _observe_process: RunningProcess | None
     _creation_cg: ConcurrencyGroup
+    _mngr_binary: str
 
     @classmethod
-    def build(cls, broadcaster: WebSocketBroadcaster) -> "AgentManager":
-        """Build an AgentManager with the given broadcaster."""
+    def build(cls, broadcaster: WebSocketBroadcaster, mngr_binary: str = _DEFAULT_MNGR_BINARY) -> "AgentManager":
+        """Build an AgentManager with the given broadcaster.
+
+        ``mngr_binary`` is the path or name of the mngr executable used for
+        the discovery-only observe subprocess and for agent-creation commands.
+        """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
@@ -108,8 +180,10 @@ class AgentManager:
         manager._own_work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
         manager._shutdown_event = ShutdownEvent.build_root()
         manager._observe_cg = None
+        manager._observe_process = None
         manager._creation_cg = ConcurrencyGroup(name="agent-creation")
         manager._creation_cg.__enter__()
+        manager._mngr_binary = mngr_binary
         return manager
 
     def start(self) -> None:
@@ -137,6 +211,14 @@ class AgentManager:
         for observer in self._app_observers.values():
             observer.join(timeout=5)
         self._app_observers.clear()
+
+    @property
+    def broadcaster(self) -> WebSocketBroadcaster:
+        """The WebSocketBroadcaster this manager owns. Primarily useful to
+        callers that need to reuse the same broadcaster across related
+        application state (e.g. the workspace_server lifespan when an
+        externally-constructed AgentManager is injected for tests)."""
+        return self._broadcaster
 
     def get_agents(self) -> list[AgentStateItem]:
         """Return current agent list."""
@@ -169,6 +251,19 @@ class AgentManager:
         """Return the primary agent's application list serialized for JSON."""
         with self._lock:
             return [{"name": app.name, "url": app.url} for app in self._applications]
+
+    def get_service_url(self, service_name: str) -> str | None:
+        """Return the local backend URL for a service, or None if it isn't registered."""
+        with self._lock:
+            for app in self._applications:
+                if app.name == service_name:
+                    return app.url
+            return None
+
+    def list_service_names(self) -> tuple[str, ...]:
+        """Return the names of all currently registered services, sorted alphabetically."""
+        with self._lock:
+            return tuple(sorted(app.name for app in self._applications))
 
     def get_agents_serialized(self) -> list[dict[str, Any]]:
         """Return agent list serialized for JSON."""
@@ -219,7 +314,7 @@ class AgentManager:
         new_branch = f"mngr/{name}"
 
         cmd = [
-            "mngr",
+            self._mngr_binary,
             "create",
             name,
             "--id",
@@ -281,7 +376,7 @@ class AgentManager:
             raise AgentCreationError(msg)
 
         cmd = [
-            "mngr",
+            self._mngr_binary,
             "create",
             name,
             "--id",
@@ -369,49 +464,83 @@ class AgentManager:
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
     ) -> None:
-        """Run mngr create in the background and capture output."""
-        cmd_str = shlex.join(cmd)
-        header_line = f"[cwd: {work_dir}] {cmd_str}"
-        log_queue.put(json.dumps({"line": header_line}))
+        """Run mngr create in the background, capture output, and always emit completion.
 
+        This thread is started with ``is_checked=False``, so any exception
+        that escaped here was silently swallowed -- which left the client's
+        ChatPanel stuck on "Creating agent..." forever, because neither the
+        log stream's ``{done: true}`` sentinel nor the WS
+        ``proto_agent_completed`` broadcast fired.
+
+        The whole body runs inside a single catch-all so that *no matter
+        what* the subprocess, its callbacks, or the pydantic / broadcaster
+        calls below throw, the proto-agent entry is always cleared on the
+        client and any error is surfaced as a string to the UI. The
+        catch-all is intentional belt-and-suspenders: see
+        ``test_prevent_broad_exception_catch``'s snapshot bump.
+        """
         success = False
         error: str | None = None
 
         try:
-            result = run_local_command_modern_version(
-                command=cmd,
-                cwd=work_dir,
-                is_checked=False,
-                trace_output=True,
-                trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
-                shutdown_event=self._shutdown_event,
-            )
-            success = result.returncode == 0
-            if not success:
-                error = f"mngr create exited with code {result.returncode}"
-        except (OSError, ConcurrencyGroupError) as e:
-            error = str(e)
-            _loguru_logger.exception("Error creating agent {}", agent_id)
+            cmd_str = shlex.join(cmd)
+            header_line = f"[cwd: {work_dir}] {cmd_str}"
+            _safe_log_put(log_queue, json.dumps({"line": header_line}))
 
-        log_queue.put(json.dumps({"done": True, "success": success, "error": error}))
-        log_queue.put(None)
-
-        with self._lock:
-            self._proto_agents.pop(agent_id, None)
-            self._log_queues.pop(agent_id, None)
-
-            if success:
-                self._agents[agent_id] = AgentStateItem(
-                    id=agent_id,
-                    name=agent_name,
-                    state="RUNNING",
-                    labels=labels,
-                    work_dir=str(work_dir),
+            try:
+                result = run_local_command_modern_version(
+                    command=cmd,
+                    cwd=work_dir,
+                    is_checked=False,
+                    trace_output=True,
+                    trace_on_line_callback=_LogQueueCallback(log_queue=log_queue),
+                    shutdown_event=self._shutdown_event,
                 )
+                success = result.returncode == 0
+                if not success:
+                    error = f"mngr create exited with code {result.returncode}"
+            except (OSError, ConcurrencyGroupError) as e:
+                error = str(e)
+                _loguru_logger.exception("Error creating agent {}", agent_id)
+
+            with self._lock:
+                self._proto_agents.pop(agent_id, None)
+                self._log_queues.pop(agent_id, None)
+                if success:
+                    self._agents[agent_id] = AgentStateItem(
+                        id=agent_id,
+                        name=agent_name,
+                        state="RUNNING",
+                        labels=labels,
+                        work_dir=str(work_dir),
+                    )
+        except Exception as e:
+            # Force-demote success: the happy path sets success=True before
+            # constructing AgentStateItem, so if pydantic validation (or
+            # anything else after the subprocess returned 0) raises, success
+            # would still be True while _agents was never populated. That
+            # would broadcast a contradictory proto_agent_completed(success=
+            # True, error="Unexpected ..."). The catch-all's contract is
+            # "something unexpected happened, surface it as a clean
+            # failure", so force success=False regardless of prior state.
+            success = False
+            error = f"Unexpected {type(e).__name__}: {e}"
+            _loguru_logger.exception("Unexpected error creating agent {}", agent_id)
+            # The proto-agent entry may still be sitting in _proto_agents if
+            # the exception fired before the cleanup block. Try once more,
+            # safely, before we broadcast completion.
+            try:
+                with self._lock:
+                    self._proto_agents.pop(agent_id, None)
+                    self._log_queues.pop(agent_id, None)
+            except (OSError, RuntimeError):
+                _loguru_logger.exception("Failed to clean proto-agent entry for {}", agent_id)
+
+        _completion_signal_put(log_queue, json.dumps({"done": True, "success": success, "error": error}))
+        _completion_signal_put(log_queue, None)
 
         if success:
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
         self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
     def _initial_discover(self) -> None:
@@ -463,20 +592,43 @@ class AgentManager:
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Agent refresh failed")
 
-    def _start_observe(self) -> None:
-        """Start the mngr observe subprocess."""
+    def _resolve_observe_events_dir(self) -> Path:
+        """Return the path to the mngr observe events directory.
+
+        Does not create the directory; ``_start_observe`` creates it before
+        spawning the subprocess.
+        """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
-            events_dir = Path(agent_state_dir) / "workspace_server" / "observe"
-        else:
-            events_dir = Path.home() / ".mngr" / "workspace_server" / "observe"
+            return Path(agent_state_dir) / "workspace_server" / "observe"
+        return Path.home() / ".mngr" / "workspace_server" / "observe"
 
-        events_dir.mkdir(parents=True, exist_ok=True)
+    def _resolve_observe_cwd(self) -> Path:
+        """Return the cwd for the mngr observe subprocess.
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "imbue.mngr",
+        Prefers ``MNGR_AGENT_WORK_DIR`` so observe picks up the same
+        project-local ``.mngr/settings.toml`` that agent-creation commands
+        run against -- the things observe lists should match what the
+        primary agent could create. Falls back to ``$HOME`` when the work
+        dir is unset or does not exist (e.g. tests that stub the env var
+        with a non-existent path); ``$HOME`` avoids inheriting whatever
+        project config happens to live under the spawning process's cwd.
+        """
+        work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
+        if work_dir:
+            candidate = Path(work_dir)
+            if candidate.is_dir():
+                return candidate
+        return Path.home()
+
+    def _build_observe_command(self) -> list[str]:
+        """Build the argv for the mngr observe discovery-only subprocess.
+
+        Pure: no side effects (does not create the events directory).
+        """
+        events_dir = self._resolve_observe_events_dir()
+        return [
+            self._mngr_binary,
             "observe",
             "--discovery-only",
             "--on-error",
@@ -485,12 +637,26 @@ class AgentManager:
             str(events_dir),
         ]
 
+    def _start_observe(self) -> None:
+        """Start the mngr observe subprocess and a watchdog for early exit."""
+        self._resolve_observe_events_dir().mkdir(parents=True, exist_ok=True)
+        cmd = self._build_observe_command()
+
         self._observe_cg = ConcurrencyGroup(name="agent-manager-observe")
         self._observe_cg.__enter__()
 
         try:
-            self._observe_cg.run_process_in_background(
+            # Run from the primary agent's work dir so observe inherits the
+            # same project-local .mngr/settings.toml that mngr create uses --
+            # otherwise observe picks up ~/.mngr config, which inside a Docker
+            # agent typically has providers enabled (e.g. modal) that are not
+            # authenticated. Provider errors make `list_agents` error out,
+            # which in turn prevents periodic DISCOVERY_FULL snapshots from
+            # being written, so the workspace server's agent list drifts out
+            # of sync with reality whenever an individual event is missed.
+            process = self._observe_cg.run_process_in_background(
                 command=cmd,
+                cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
             )
@@ -500,11 +666,53 @@ class AgentManager:
             )
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
+            return
 
-    def _handle_observe_output_line(self, line: str, _is_stdout: bool) -> None:
-        """Parse and dispatch a single line of output from mngr observe."""
+        self._observe_process = process
+
+        # ``run_process_in_background`` returns immediately even if the spawned
+        # binary exits with a non-zero code (e.g. import failure). Attach a
+        # watchdog so a silently-dying subprocess surfaces as a loud error
+        # instead of a stale agent list.
+        self._observe_cg.start_new_thread(
+            target=self._watch_observe_process,
+            args=(process,),
+            name="observe-watchdog",
+            is_checked=False,
+        )
+
+    def _watch_observe_process(self, process: RunningProcess) -> None:
+        """Log an error if the observe subprocess exits before shutdown."""
+        try:
+            process.wait()
+        except (ProcessError, EnvironmentStoppedError) as e:
+            if self._shutdown_event.is_set():
+                return
+            _loguru_logger.error("mngr observe subprocess failed: {}", e)
+            return
+
+        if self._shutdown_event.is_set():
+            return
+
+        stderr = process.read_stderr().strip()
+        _loguru_logger.error(
+            "mngr observe subprocess exited unexpectedly (returncode={}). "
+            "Agent lifecycle events will no longer be detected. stderr: {}",
+            process.returncode,
+            stderr if stderr else "(empty)",
+        )
+
+    def _handle_observe_output_line(self, line: str, is_stdout: bool) -> None:
+        """Parse and dispatch a single line of output from mngr observe.
+
+        stderr lines are surfaced as warnings so startup failures from the
+        subprocess (import errors, bad flags, etc.) are not lost.
+        """
         stripped = line.strip()
         if not stripped:
+            return
+        if not is_stdout:
+            _loguru_logger.warning("mngr observe stderr: {}", stripped)
             return
         try:
             event = parse_discovery_event_line(stripped)

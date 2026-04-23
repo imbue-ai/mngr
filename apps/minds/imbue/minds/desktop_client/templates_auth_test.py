@@ -6,7 +6,7 @@ from imbue.minds.desktop_client.templates_auth import render_settings_page
 
 
 def test_render_auth_page_defaults_to_signup() -> None:
-    html = render_auth_page(default_to_signup=True, server_port=8080)
+    html = render_auth_page(default_to_signup=True)
     assert "Create account" in html
     assert "signup-form" in html
     # Sign-in tab should be hidden
@@ -14,24 +14,24 @@ def test_render_auth_page_defaults_to_signup() -> None:
 
 
 def test_render_auth_page_defaults_to_signin() -> None:
-    html = render_auth_page(default_to_signup=False, server_port=8080)
+    html = render_auth_page(default_to_signup=False)
     assert "Sign in" in html
     assert 'id="signin-tab"' in html
 
 
 def test_render_auth_page_includes_message() -> None:
-    html = render_auth_page(message="Please sign in to share", server_port=8080)
+    html = render_auth_page(message="Please sign in to share")
     assert "Please sign in to share" in html
 
 
 def test_render_auth_page_includes_oauth_buttons() -> None:
-    html = render_auth_page(server_port=8080)
+    html = render_auth_page()
     assert "Continue with Google" in html
     assert "Continue with GitHub" in html
 
 
 def test_render_auth_page_includes_toggle_links() -> None:
-    html = render_auth_page(server_port=8080)
+    html = render_auth_page()
     assert "Already have an account?" in html
     assert "Don&#39;t have an account?" in html or "Don't have an account?" in html
 

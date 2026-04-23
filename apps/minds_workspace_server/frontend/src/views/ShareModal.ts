@@ -8,7 +8,7 @@ import m from "mithril";
 import { apiUrl } from "../base-path";
 
 interface ShareModalAttrs {
-  serverName: string;
+  serviceName: string;
   onClose: () => void;
 }
 
@@ -49,12 +49,12 @@ function extractEmails(status: SharingStatus): string[] {
   return emails;
 }
 
-async function fetchStatus(serverName: string): Promise<void> {
+async function fetchStatus(serviceName: string): Promise<void> {
   modalLoading = true;
   modalError = null;
   m.redraw();
   try {
-    const response = await fetch(apiUrl(`/api/sharing/${encodeURIComponent(serverName)}`));
+    const response = await fetch(apiUrl(`/api/sharing/${encodeURIComponent(serviceName)}`));
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       modalError = (data as { detail?: string }).detail ?? `HTTP ${response.status}`;
@@ -68,11 +68,11 @@ async function fetchStatus(serverName: string): Promise<void> {
   m.redraw();
 }
 
-async function requestEdit(serverName: string, onClose: () => void): Promise<void> {
+async function requestEdit(serviceName: string, onClose: () => void): Promise<void> {
   modalRequestInProgress = true;
   m.redraw();
   try {
-    const response = await fetch(apiUrl(`/api/sharing/${encodeURIComponent(serverName)}/request`), {
+    const response = await fetch(apiUrl(`/api/sharing/${encodeURIComponent(serviceName)}/request`), {
       method: "POST",
     });
     if (!response.ok) {
@@ -112,17 +112,17 @@ function renderEmailList(emails: string[]): m.Vnode {
 
 export const ShareModal: m.Component<ShareModalAttrs> = {
   view(vnode) {
-    const { serverName, onClose } = vnode.attrs;
+    const { serviceName, onClose } = vnode.attrs;
 
-    if (modalFetchedFor !== serverName) {
+    if (modalFetchedFor !== serviceName) {
       resetModalState();
-      modalFetchedFor = serverName;
-      fetchStatus(serverName);
+      modalFetchedFor = serviceName;
+      fetchStatus(serviceName);
     }
 
     const emails = modalStatus ? extractEmails(modalStatus) : [];
     const isEnabled = modalStatus?.enabled ?? false;
-    const title = isEnabled ? `${serverName} sharing` : `${serverName} sharing`;
+    const title = isEnabled ? `${serviceName} sharing` : `${serviceName} sharing`;
 
     const close = () => {
       resetModalState();
@@ -157,7 +157,7 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                     m(
                       "button.share-modal-btn.share-modal-btn-secondary",
                       {
-                        onclick: () => fetchStatus(serverName),
+                        onclick: () => fetchStatus(serviceName),
                       },
                       "Retry",
                     ),
@@ -195,21 +195,21 @@ export const ShareModal: m.Component<ShareModalAttrs> = {
                           "button.share-modal-btn.share-modal-btn",
                           {
                             disabled: modalRequestInProgress,
-                            onclick: () => requestEdit(serverName, onClose),
+                            onclick: () => requestEdit(serviceName, onClose),
                           },
                           modalRequestInProgress ? "Sending..." : "Edit sharing",
                         ),
                       ]),
                     ])
                   : m("div", [
-                      m("p", { style: "padding: 8px 0; color: #666;" }, "Sharing is not enabled for this server."),
+                      m("p", { style: "padding: 8px 0; color: #666;" }, "Sharing is not enabled for this service."),
                       m("div.share-modal-footer", [
                         m("button.share-modal-btn.share-modal-btn-secondary", { onclick: close }, "Close"),
                         m(
                           "button.share-modal-btn.share-modal-btn",
                           {
                             disabled: modalRequestInProgress,
-                            onclick: () => requestEdit(serverName, onClose),
+                            onclick: () => requestEdit(serviceName, onClose),
                           },
                           modalRequestInProgress ? "Sending..." : "Enable sharing",
                         ),

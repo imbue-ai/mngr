@@ -1,0 +1,22 @@
+{#
+  Standalone sidebar page served into the Electron sidebar WebContentsView.
+  Same SSE subscription as the chrome-embedded sidebar but stripped down
+  (no titlebar/iframe). All interactivity in /_static/sidebar.js.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Projects</title>
+<script src="/_static/tailwind.js"></script>
+<link rel="stylesheet" href="/_static/tokens.css">
+</head>
+<body class="bg-zinc-900 font-sans antialiased overflow-y-auto">
+  <h2 class="text-sm text-zinc-200 p-3 m-0 border-b border-white/10 font-medium">Projects</h2>
+  <div id="sidebar-workspaces">
+    <div class="px-4 py-6 text-sm text-zinc-400 text-center">No projects</div>
+  </div>
+  <script src="/_static/workspace_accent.js" defer></script>
+  <script src="/_static/sidebar.js" defer></script>
+</body>
+</html>

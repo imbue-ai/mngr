@@ -224,3 +224,11 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# Download the Tailwind Play CDN JS bundle for the minds desktop client.
+# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
+# same script also runs automatically as a pnpm `postinstall` hook, so
+# normally you do not need to invoke this recipe. Use it when you want to
+# force-verify the file or after nuking the static/ dir.
+minds-tailwind:
+  bash apps/minds/scripts/fetch_tailwind.sh

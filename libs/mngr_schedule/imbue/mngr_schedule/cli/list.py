@@ -8,18 +8,16 @@ from tabulate import tabulate
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_schedule.cli.group import schedule
 from imbue.mngr_schedule.cli.options import ScheduleListCliOptions
+from imbue.mngr_schedule.cli.provider_utils import load_schedule_provider
 from imbue.mngr_schedule.data_types import ScheduleCreationRecord
 from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule_creation_records
 from imbue.mngr_schedule.implementations.modal.deploy import list_schedule_creation_records
@@ -59,10 +57,7 @@ def schedule_list(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     # Load the provider instance
-    try:
-        provider = get_provider_instance(ProviderInstanceName(opts.provider), mngr_ctx)
-    except MngrError as e:
-        raise click.ClickException(f"Failed to load provider '{opts.provider}': {e}") from e
+    provider = load_schedule_provider(opts.provider, mngr_ctx)
 
     if isinstance(provider, LocalProviderInstance):
         with log_span("Listing local schedule creation records"):
@@ -71,10 +66,7 @@ def schedule_list(ctx: click.Context, **kwargs: Any) -> None:
         with log_span("Listing schedule creation records"):
             records = list(list_schedule_creation_records(provider))
     else:
-        raise click.ClickException(
-            f"Provider '{opts.provider}' (type {type(provider).__name__}) is not supported for schedules. "
-            "Supported providers: local, modal."
-        )
+        assert_never(provider)
 
     # Filter out disabled schedules unless --all is specified
     if not opts.all_schedules:
