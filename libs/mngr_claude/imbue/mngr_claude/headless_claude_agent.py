@@ -280,21 +280,22 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         # transient Modal sandbox state.
         parts.extend(["--debug", "all", "--debug-file", '"$MNGR_AGENT_STATE_DIR/claude-debug.log"'])
         cmd_str = " ".join(parts)
-        # DIAGNOSTIC ablation 7: dump `type claude` + `type -a claude` +
-        # `declare -f claude` before the real invocation so we can see
-        # if bash has a function/alias named `claude` that's intercepting
-        # direct calls. `env claude` passes (ablation 6) and `timeout 60
-        # claude` passes; both bypass bash function/alias lookup.
+        # DIAGNOSTIC ablation 8: absolute path `/root/.local/bin/claude`,
+        # no env/timeout wrapper. Bypasses bash PATH lookup and any
+        # function/alias shadowing. Combined with writing `type claude`
+        # to .test_output/ so we can read it regardless of pass/fail.
+        cmd_str_absolute = cmd_str.replace(base, "/root/.local/bin/claude", 1)
         probe_diag = (
-            'echo "== DIAG claude-lookup $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            '(type claude; echo "--"; type -a claude; echo "--"; declare -f claude; echo "--"; '
-            'alias claude 2>&1 || true; echo "--"; command -v claude) '
-            '>> "$MNGR_AGENT_STATE_DIR/stderr.log" 2>&1; '
-            'echo "== DIAG claude-lookup done ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+            "mkdir -p /code/mngr/.test_output; "
+            '(echo "== DIAG claude-lookup $(date -Iseconds) =="; '
+            'type claude; echo "--"; type -a claude; echo "--"; declare -f claude; echo "--"; '
+            'alias claude 2>&1 || true; echo "--"; command -v claude; echo "--"; '
+            'which claude; echo "--"; hash -t claude 2>&1 || true) '
+            "> /code/mngr/.test_output/claude-lookup.txt 2>&1"
         )
         return CommandString(
             f"{probe_diag}; "
-            f'env {cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2>> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+            f'{cmd_str_absolute} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
         )
 
     def _get_stdout_path(self) -> Path:
