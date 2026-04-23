@@ -23,7 +23,6 @@ build_inputs = [
 
 [framework]
 type = "pytest"
-paths = ["."]
 command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
 
