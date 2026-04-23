@@ -9,7 +9,9 @@ import "./style.css";
 import { App } from "./views/App";
 
 interface MindsDesktopBridge {
-  setCloseActiveTabHandler?: (handler: () => boolean) => void;
+  // The preload awaits the handler's return value, so sync or async
+  // implementations are both fine.
+  setCloseActiveTabHandler?: (handler: () => boolean | Promise<boolean>) => void;
 }
 
 declare global {
