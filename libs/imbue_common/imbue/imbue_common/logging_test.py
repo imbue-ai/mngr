@@ -445,7 +445,7 @@ def test_make_jsonl_file_sink_writes_json_lines(tmp_path: Path) -> None:
 
 def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
     """make_jsonl_file_sink should rotate when file exceeds max_size_bytes."""
-    log_file = tmp_path / "test.jsonl"
+    log_file = tmp_path / "events.jsonl"
     sink = make_jsonl_file_sink(
         file_path=str(log_file),
         event_type="mngr",
@@ -461,9 +461,9 @@ def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
     finally:
         logger.remove(handler_id)
 
-    # Should have rotated files
-    rotated = tmp_path / "test.jsonl.1"
-    assert rotated.exists()
+    # Should have rotated files with timestamp-based names (events.jsonl.TIMESTAMP)
+    rotated_files = [f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl.") and f.name != "events.jsonl"]
+    assert len(rotated_files) >= 1
 
 
 # =============================================================================

@@ -703,22 +703,22 @@ class Host(BaseHost, OnlineHostInterface):
         Note: the underlying _run_shell_command retries on transient SSH errors,
         so commands passed here are assumed to be idempotent.
         """
-        with log_span("Executing command on host {}: {}", self.id, command):
-            logger.trace(
-                "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
-            )
-            success, output = self._run_shell_command(
-                StringCommand(command),
-                _su_user=user,
-                _chdir=str(cwd) if cwd else None,
-                _env=dict(env) if env else None,
-                _timeout=int(timeout_seconds) if timeout_seconds else None,
-            )
-            return CommandResult(
-                stdout=output.stdout,
-                stderr=output.stderr,
-                success=success,
-            )
+        logger.trace("Executing command on host {}: {}", self.id, command)
+        logger.trace(
+            "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
+        )
+        success, output = self._run_shell_command(
+            StringCommand(command),
+            _su_user=user,
+            _chdir=str(cwd) if cwd else None,
+            _env=dict(env) if env else None,
+            _timeout=int(timeout_seconds) if timeout_seconds else None,
+        )
+        return CommandResult(
+            stdout=output.stdout,
+            stderr=output.stderr,
+            success=success,
+        )
 
     def execute_stateful_command(
         self,
