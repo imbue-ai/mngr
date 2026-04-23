@@ -148,6 +148,85 @@ Report compactly:
 - Latest ToDesktop build: `ls -t /tmp/minds-build*.log | head -1` + extract id
 - Dirty tree: `git status --short`
 
+## Sub-command: iterate
+
+Trigger: "iterate", "propagate", "push changes to agent", "rsync into VM", "sync template".
+
+Fast dev-loop for minds stack work: edit source in the monorepo, have the change applied to a running agent + the workspace_server inside its Lima/Docker VM, and restart. Exists so you don't have to destroy-and-recreate an agent on every code change.
+
+**Prereqs (one-time per worktree):**
+- Template worktree at `.external_worktrees/forever-claude-template` — `git worktree add` from the canonical FCT checkout.
+- At least one running agent (see the `create lima agent` sub-command). Note the agent name, or let the script auto-detect when there's only one.
+- Electron running (the script parallels a clean Electron restart with the agent restart; if Electron isn't running, the script exits 1 on `electron_stop`). Use the `launch` sub-command first.
+
+See `.claude/skills/minds-dev-iterate/SKILL.md` for the full setup-from-zero walkthrough (env vars, SSH key discovery, template branch pinning).
+
+**Typical iterate invocation** (Lima agent, local dev):
+```bash
+# Find the lima VM's SSH port + use lima's generated key
+VM_NAME="minds-<agent-name>-host"
+PORT=$(/opt/homebrew/bin/limactl list --format '{{.SSHLocalPort}}' "$VM_NAME")
+apps/minds/scripts/propagate_changes \
+  --user weishi --host 127.0.0.1 --port "$PORT" \
+  --key ~/.lima/_config/user \
+  --agent <agent-name>
+```
+
+What it does, in order:
+1. Rsync the mngr monorepo into `.external_worktrees/forever-claude-template/vendor/mngr/` (the template's vendored-copy-of-mngr, source of truth for what runs inside the VM).
+2. Stop the Electron desktop client cleanly.
+3. `mngr stop <agent-name>` (graceful).
+4. Rsync the full template tree into the VM's `/code/` over SSH.
+5. Rebuild the workspace_server frontend (`npm run build` in `/code/vendor/mngr/apps/minds_workspace_server/frontend`).
+6. `mngr start <agent-name>` + relaunch Electron.
+
+Cycle time ~5-10s for code-only changes.
+
+**Gotchas:**
+- If Electron isn't running, the script's `electron_stop` returns 1 and kills the whole pipeline (known brittleness). Workaround: launch Electron first, or run the equivalent steps manually (`mngr stop`, bare `rsync ...`, `mngr start`).
+- On Lima 2.x, `--memory=4GiB` in `.external_worktrees/forever-claude-template/.mngr/settings.toml` fails with "invalid argument ... for --memory flag". Patched to `--memory=4` locally — if that setting re-diverges from upstream, re-apply the unit-free form.
+- vendor/mngr in the template can drift from the mngr source when the `release-minds` pipeline runs out-of-band; iterate re-syncs at every invocation so drift resets each cycle.
+
+For Docker agents, the same script works with the container's SSH port from `docker ps`. For local (non-container) agents, use `--target /path/to/agent/workdir` instead of the SSH flags.
+
+## Sub-command: integ-test
+
+Trigger: "integ-test", "e2e", "integration test", "smoke test", "verify create flow".
+
+Run the end-to-end UI integration test: launch Electron → reach workspace-list → click Create → land on chat UI. Verification is via Chrome DevTools Protocol (DOM snapshots + programmatic clicks), not screenshots.
+
+**Invocation:**
+```bash
+uv run python apps/minds/scripts/integ_test.py
+```
+
+Optional env vars:
+- `MINDS_INTEG_AGENT_NAME=<name>` — agent name to create (default `integtest`). Reused if one already exists; safe across runs.
+- `MINDS_INTEG_CHAT_TIMEOUT_SECONDS=<n>` — how long to wait for the subdomain chat UI to mount (default 240). Raise to 300-420 on a cold Mac where Lima needs longer.
+- `MINDS_INTEG_DISCOVERY_TIMEOUT_SECONDS=<n>` — how long to wait for the agent to appear in backend_resolver (default 180).
+
+**Steps the script verifies** (reports PASS/FAIL per step, exits 0 on all-green, 1 otherwise):
+1. Electron launches with `--remote-debugging-port=9222`.
+2. Backend emits the one-time login URL into the log.
+3. CDP finds the content-view page (not `/_chrome`).
+4. Navigation to the login URL succeeds (sets cookie + redirects to `/`).
+5. Landing page reached — agents listed OR "No projects yet" empty state OR "Discovering agents..." loader.
+6. Navigate to `/create`, fill + submit the create form.
+7. Browser lands on `/creating/<agent-id>/`; agent_id parsed from URL.
+8. Agent visible to backend_resolver (`/goto/<agent-id>/` returns a 3xx / opaqueredirect, not 404).
+9. Navigate to `/goto/<agent-id>/` — subdomain auth bridge fires.
+10. Chat UI mounts — `<div id="app">` on `<agent-id>.localhost:<port>` has at least one child. If the "Workspace server not yet available" static page is showing, the script periodically reloads until the service comes up.
+
+**Typical runtime:**
+- Warm caches, agent already exists (`integtest` re-used via `--reuse`): 30-90s.
+- Cold Mac, first-run Lima boot: 3-5 min.
+
+**On failure**, the FAIL line includes the last known state (e.g. `NOT_SUBDOMAIN:localhost:63218`, `NO_APP_DIV`, `APP_EMPTY`). Check `/tmp/integ-test-run*.log` (stdout/stderr of the script) and `~/.minds/logs/minds.log` (minds backend output) for details.
+
+**Teardown:** the script calls `kill_existing_minds()` in `finally`, so packaged and dev minds processes are stopped on exit. The `integtest` Lima VM is left in place (so re-running is fast); remove via `mngr destroy integtest --force --gc --remove-created-branch` when you're done with it.
+
+**Do not run this in CI without a real macOS runner** — it depends on a GUI Electron + Lima-on-QEMU. It's a developer-machine integ-test, not a unit test.
+
 ## Sub-command: interact
 
 Trigger: "interact", "drive UI", "automate", "click", "send message in chat".
