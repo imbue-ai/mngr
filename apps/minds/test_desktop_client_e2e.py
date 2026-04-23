@@ -346,13 +346,29 @@ def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: i
 # blocks unannotated docker / tmux usage. Do not remove.
 #
 # Skipped pending a separate root-cause for "TUI send enter and wait timeout"
-# seen in test-docker-release CI (ubuntu-latest with real dockerd): the tmux
-# pane reaches the `env claude --session-id ...` prompt but never responds to
-# the initial Enter keypress within 90s. Same test shape passed locally under
-# offload-modal-release after the b2036ed20 env-wrap fix, so this is a
-# docker-release-specific flavour -- likely tied to the combination of GH
-# runner + bare docker + the tmux pane attach flow, not the silent-hang
-# addressed by b2036ed20.
+# seen in test-docker-release CI (ubuntu-latest with real dockerd). The tmux
+# pane reaches the `env claude --session-id ...` prompt fine, but the initial
+# Enter keypress never registers with claude's TUI -- pane content sits
+# unchanged for 90s.
+#
+# Notes for the follow-up:
+#   - This is NOT the same silent-hang the b2036ed20 env-wrap fixed; the
+#     silent-hang was 0 bytes of both stdout and stderr. Here claude paints
+#     its prompt and stays alive; only the subsequent Enter is lost.
+#   - The test goes through minds' production `AgentCreator.run_mngr_create`
+#     which invokes `mngr create ... --message /welcome`. The `--message`
+#     flag folds the initial send into the create step and reuses the
+#     internal `_send_enter_and_wait` helper (libs/mngr/.../base_agent.py).
+#     It does NOT go through `mngr message` -- that'd be a separate CLI that
+#     the minds flow currently doesn't use. Part of the fix might be either
+#     (a) restoring the Left/Right tmux noop helper that used to sit between
+#     `send-keys -l <text>` and `send-keys Enter` in base_agent.py (last seen
+#     in commit 93f96a463, removed along the way) or (b) changing minds'
+#     creator to two-step (spawn without --message, wait-for-ready, then
+#     `mngr message`). (b) is a bigger product change but gets the message
+#     path retryable.
+#   - Ran green locally under offload-modal-release after b2036ed20
+#     (120/120), so the docker-release flavour is the only thing blocking.
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.docker_sdk
@@ -413,10 +429,11 @@ _DEV_AGENT_NAME = "forever-dev"
 # the agent inside a tmux pane. The resource-guard PATH wrapper blocks
 # unannotated docker / tmux usage. Do not remove.
 #
-# Skipped for the same reason as test_create_agent_e2e above: TUI send-enter
-# timeout in test-docker-release CI, not a silent-hang addressed by the
-# b2036ed20 env-wrap. Dev-mode exits via pytest-timeout at 120s because the
-# sentinel file never appears. Needs a separate fix.
+# Skipped for the same reason as test_create_agent_e2e above (see its
+# inline comment for the full write-up): `mngr create --message` path's
+# tmux Enter keypress doesn't register with the claude TUI in
+# test-docker-release. Dev-mode exits via pytest-timeout at 120s because
+# the initial-message send never completes.
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.docker_sdk
