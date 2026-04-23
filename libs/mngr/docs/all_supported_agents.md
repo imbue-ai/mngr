@@ -11,6 +11,7 @@ Built-in plugins provide the following agent types:
 | `claude` | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's agentic coding tool. Includes session resumption support. |
 | `code-guardian` | `claude` | Extends `claude` with a skill that identifies code-level inconsistencies and produces a structured report. |
 | `codex` | `codex` | [Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant. |
+| `command` | (user-supplied) | Runs an arbitrary shell command supplied after `--` (e.g. `mngr create my-task --type command -- sleep 3600`). |
 | `fixme-fairy` | `claude` | Extends `claude` with a skill that finds and fixes a random FIXME in the codebase. |
 
 ## External Plugin Agent Types
@@ -37,12 +38,14 @@ Or use the `--type` option:
 mngr create my-agent --type claude
 ```
 
-Any command in your PATH can also be used as an agent type:
+To run an arbitrary shell command as an agent, use the built-in `command` agent type:
 
 ```bash
-mngr create my-agent ./my-script
-mngr create my-agent python my_agent.py
+mngr create my-task --type command -- python my_agent.py
+mngr create my-task --type command -- sleep 3600
 ```
+
+For commands you run often, see [Custom Agent Types](./concepts/agent_types.md#custom-agent-types) for how to bind a fixed command to a reusable type name.
 
 ## Custom Agent Types
 

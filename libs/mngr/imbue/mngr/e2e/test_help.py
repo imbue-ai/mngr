@@ -51,4 +51,4 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("EXAMPLES")
     # Verify a few representative flags are documented
     expect(result.stdout).to_contain("--no-connect")
-    expect(result.stdout).to_contain("--command")
+    expect(result.stdout).to_contain("--type")
