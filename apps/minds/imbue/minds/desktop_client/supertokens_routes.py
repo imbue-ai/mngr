@@ -100,7 +100,6 @@ def _handle_auth_page(request: Request, message: str | None = None) -> HTMLRespo
         render_auth_page(
             default_to_signup=default_to_signup,
             message=message,
-            server_port=_get_server_port(request),
         )
     )
 

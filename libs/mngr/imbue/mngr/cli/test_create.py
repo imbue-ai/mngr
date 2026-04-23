@@ -33,53 +33,6 @@ from imbue.mngr.utils.testing import wait_for_agent_session
 
 
 @pytest.mark.tmux
-def test_cli_create_with_echo_command(
-    cli_runner: CliRunner,
-    temp_work_dir: Path,
-    temp_host_dir: Path,
-    mngr_test_prefix: str,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test creating an agent with a simple echo command."""
-    agent_name = f"test-cli-echo-{int(time.time())}"
-    session_name = f"{mngr_test_prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--command",
-                "echo 'hello from cli test' && sleep 958374",
-                "--source",
-                str(temp_work_dir),
-                "--transfer=none",
-                "--no-connect",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 0, f"CLI failed with: {result.output}"
-
-        wait_for(
-            lambda: tmux_session_exists(session_name),
-            timeout=15.0,
-            error_message=f"Expected tmux session {session_name} to exist",
-        )
-
-        # Agents live directly under the host dir
-        agents_dir = temp_host_dir / "agents"
-        wait_for(
-            lambda: agents_dir.exists(),
-            timeout=15.0,
-            error_message="agents directory should exist under host dir",
-        )
-
-
-@pytest.mark.tmux
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -106,19 +59,21 @@ def test_cli_create_via_subprocess(
                 "create",
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 651472",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
-                # Note: --command automatically implies --type generic
                 # Disable external providers to avoid connection errors in CI
                 "--disable-plugin",
                 "modal",
                 "--disable-plugin",
                 "docker",
+                "--",
+                "sleep",
+                "130001",
             ],
             capture_output=True,
             text=True,
@@ -172,8 +127,8 @@ def test_cli_create_rejects_dirty_tree_by_default(
             "create",
             "--name",
             agent_name,
-            "--command",
-            "sleep 99999",
+            "--type",
+            "command",
             "--source",
             str(temp_git_repo),
             "--no-connect",
@@ -181,6 +136,9 @@ def test_cli_create_rejects_dirty_tree_by_default(
             "modal",
             "--disable-plugin",
             "docker",
+            "--",
+            "sleep",
+            "130003",
         ],
         capture_output=True,
         text=True,
@@ -213,11 +171,12 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     address = parse_agent_address(agent_name)
 
     opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().command, "sleep 397265"),
+        to_update(default_create_cli_opts.field_ref().type, "command"),
         to_update(default_create_cli_opts.field_ref().source, str(temp_work_dir)),
         to_update(default_create_cli_opts.field_ref().transfer, "none"),
         to_update(default_create_cli_opts.field_ref().connect, True),
         to_update(default_create_cli_opts.field_ref().ensure_clean, False),
+        to_update(default_create_cli_opts.field_ref().agent_args, ("sleep", "100013")),
     )
 
     output_opts = OutputOptions()
@@ -262,13 +221,16 @@ def test_no_connect_flag_skips_tmux_attach(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 529847",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130002",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -306,8 +268,8 @@ def test_message_file_flag_reads_message_from_file(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--message-file",
                 str(message_file),
                 "--source",
@@ -315,6 +277,8 @@ def test_message_file_flag_reads_message_from_file(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -352,8 +316,8 @@ def test_message_and_message_file_both_provided_raises_error(
         [
             "--name",
             agent_name,
-            "--command",
-            "cat",
+            "--type",
+            "command",
             "--message",
             "Hello from flag",
             "--message-file",
@@ -363,6 +327,8 @@ def test_message_and_message_file_both_provided_raises_error(
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "cat",
         ],
         obj=plugin_manager,
     )
@@ -393,8 +359,8 @@ def test_multiline_message_creates_file_and_pipes(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--message-file",
                 str(message_file),
                 "--source",
@@ -402,6 +368,8 @@ def test_multiline_message_creates_file_and_pipes(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -441,8 +409,8 @@ def test_single_line_message_uses_echo(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--message",
                 single_line_message,
                 "--source",
@@ -450,6 +418,8 @@ def test_single_line_message_uses_echo(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -487,8 +457,8 @@ def test_extra_window_with_named_window(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 629481",
+                "--type",
+                "command",
                 "-w",
                 'myserver="sleep 847192"',
                 "--source",
@@ -496,6 +466,9 @@ def test_extra_window_with_named_window(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130018",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -542,8 +515,8 @@ def test_extra_window_without_name_uses_default_window_name(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 538274",
+                "--type",
+                "command",
                 "-w",
                 "sleep 719283",
                 "--source",
@@ -551,6 +524,9 @@ def test_extra_window_without_name_uses_default_window_name(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130004",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -577,79 +553,6 @@ def test_extra_window_without_name_uses_default_window_name(
             has_cmd_1_window,
             timeout=15.0,
             error_message="Expected window 'cmd-1' to exist",
-        )
-
-
-def test_command_and_type_are_mutually_exclusive(
-    cli_runner: CliRunner,
-    temp_work_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --command and --type (other than generic) are mutually exclusive."""
-    agent_name = f"test-mutex-{int(time.time())}"
-
-    # "claude" agent type should conflict with --command
-    result = cli_runner.invoke(
-        create,
-        [
-            "--name",
-            agent_name,
-            "--command",
-            "sleep 123456",
-            "--type",
-            "claude",
-            "--source",
-            str(temp_work_dir),
-            "--transfer=none",
-            "--no-connect",
-            "--no-ensure-clean",
-        ],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "--command and --type are mutually exclusive" in result.output
-
-
-@pytest.mark.tmux
-def test_command_with_generic_type_is_allowed(
-    cli_runner: CliRunner,
-    temp_work_dir: Path,
-    temp_host_dir: Path,
-    mngr_test_prefix: str,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --command with --type generic is allowed (they are compatible)."""
-    agent_name = f"test-generic-{int(time.time())}"
-    session_name = f"{mngr_test_prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        # Explicit --type generic is OK with --command
-        result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--command",
-                "sleep 654321",
-                "--type",
-                "generic",
-                "--source",
-                str(temp_work_dir),
-                "--transfer=none",
-                "--no-connect",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 0, f"CLI failed with: {result.output}"
-
-        wait_for(
-            lambda: tmux_session_exists(session_name),
-            timeout=15.0,
-            error_message=f"Expected tmux session {session_name} to exist",
         )
 
 
@@ -683,14 +586,16 @@ def test_edit_message_sends_edited_content(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -742,8 +647,8 @@ def test_edit_message_with_initial_content(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--edit-message",
                 "--message",
                 initial_content,
@@ -752,6 +657,8 @@ def test_edit_message_with_initial_content(
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -806,14 +713,16 @@ def test_edit_message_empty_content_does_not_send(
             [
                 "--name",
                 agent_name,
-                "--command",
-                f"echo '{marker_text}' && cat",
+                "--type",
+                "command",
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                f"echo '{marker_text}' && cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -840,7 +749,6 @@ def test_edit_message_empty_content_does_not_send(
 def test_template_applies_values_from_config(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
@@ -867,14 +775,17 @@ ensure_clean = false
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 847192",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--template",
                 "mytemplate",
+                "--",
+                "sleep",
+                "130005",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -894,7 +805,6 @@ ensure_clean = false
 def test_template_cli_args_take_precedence(
     cli_runner: CliRunner,
     temp_work_dir: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
     plugin_manager: pluggy.PluginManager,
@@ -922,8 +832,8 @@ ensure_clean = false
             [
                 "--name",
                 agent_name,
-                "--command",
-                "cat",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -932,6 +842,8 @@ ensure_clean = false
                 "mytemplate",
                 "--message",
                 "cli-message",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -980,14 +892,17 @@ ensure_clean = false
         [
             "--name",
             agent_name,
-            "--command",
-            "sleep 123456",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
             "--template",
             "nonexistent",
+            "--",
+            "sleep",
+            "130006",
         ],
         obj=plugin_manager,
         env={"MNGR_PROJECT_DIR": str(mngr_dir)},
@@ -1017,11 +932,14 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
         [
             "--name",
             "test-dirty",
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_git_repo),
             "--no-connect",
+            "--",
+            "sleep",
+            "130007",
         ],
         obj=plugin_manager,
     )
@@ -1034,7 +952,6 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
 def test_ensure_clean_skipped_with_explicit_base_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
@@ -1059,13 +976,16 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 847192",
+                "--type",
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--branch",
                 "other-branch:mngr/*",
                 "--no-connect",
+                "--",
+                "sleep",
+                "130008",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -1082,7 +1002,6 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
 def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
@@ -1107,8 +1026,8 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
             [
                 "--name",
                 agent_name,
-                "--command",
-                "sleep 847192",
+                "--type",
+                "command",
                 "--source",
                 str(temp_git_repo),
                 "--branch",
@@ -1116,6 +1035,9 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
                 "--transfer",
                 "git-mirror",
                 "--no-connect",
+                "--",
+                "sleep",
+                "130009",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -1144,14 +1066,17 @@ def test_transfer_rsync_rejected_for_git_repo(
         [
             "--name",
             "test-rsync-git",
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_git_repo),
             "--transfer",
             "rsync",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130010",
         ],
         obj=plugin_manager,
     )
@@ -1171,14 +1096,17 @@ def test_transfer_git_mirror_rejected_for_non_git(
         [
             "--name",
             "test-mirror-no-git",
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "git-mirror",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130011",
         ],
         obj=plugin_manager,
     )
@@ -1198,14 +1126,17 @@ def test_transfer_git_worktree_rejected_for_non_git(
         [
             "--name",
             "test-worktree-no-git",
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "git-worktree",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130012",
         ],
         obj=plugin_manager,
     )
@@ -1228,14 +1159,17 @@ def test_transfer_none_with_different_target_path_rejected(
         create,
         [
             f"test-none-diff-target:{different_dir}",
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer",
             "none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130013",
         ],
         obj=plugin_manager,
     )
@@ -1262,12 +1196,15 @@ def test_conflicting_target_path_in_address_and_flag_rejected(
             f"test-conflict:{dir_a}",
             "--target-path",
             str(dir_b),
-            "--command",
-            "sleep 1",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130014",
         ],
         obj=plugin_manager,
     )
@@ -1294,13 +1231,16 @@ def test_same_target_path_in_address_and_flag_accepted(
                 f"{agent_name}:{temp_work_dir}",
                 "--target-path",
                 str(temp_work_dir),
-                "--command",
-                "sleep 958374",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130015",
             ],
             obj=plugin_manager,
         )
@@ -1326,13 +1266,16 @@ def test_target_path_flag_works_standalone(
                 agent_name,
                 "--target-path",
                 str(temp_work_dir),
-                "--command",
-                "sleep 958374",
+                "--type",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "sleep",
+                "130016",
             ],
             obj=plugin_manager,
         )
@@ -1397,8 +1340,8 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
         [
             "--name",
             "test-idle-local",
-            "--command",
-            "sleep 99999",
+            "--type",
+            "command",
             "--idle-timeout",
             "60",
             "--source",
@@ -1406,6 +1349,9 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "sleep",
+            "130017",
         ],
         obj=plugin_manager,
         catch_exceptions=True,

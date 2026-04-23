@@ -942,7 +942,8 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     response = client.get("/_chrome/sidebar")
     assert response.status_code == 200
     assert "sidebar-workspaces" in response.text
-    assert "EventSource" in response.text
+    # Interactivity including the SSE fallback has moved to the external JS.
+    assert "/_static/sidebar.js" in response.text
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
@@ -1165,9 +1166,17 @@ def _make_workspace_stub_backend() -> FastAPI:
     return stub
 
 
-def _create_subdomain_test_client(tmp_path: Path, agent_id: AgentId) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client whose resolver routes the given agent to a stub backend."""
-    workspace_transport = httpx.ASGITransport(app=_make_workspace_stub_backend())
+def _create_subdomain_test_client(
+    tmp_path: Path,
+    agent_id: AgentId,
+    workspace_app: FastAPI | None = None,
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client whose resolver routes the given agent to a stub backend.
+
+    If *workspace_app* is supplied it is used as the workspace backend; otherwise
+    ``_make_workspace_stub_backend()`` provides a default stub.
+    """
+    workspace_transport = httpx.ASGITransport(app=workspace_app or _make_workspace_stub_backend())
 
     class _WorkspaceRoutingTransport(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -1237,3 +1246,47 @@ def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
     client.base_url = httpx.URL(f"http://{agent_id}.localhost")
     response = client.get("/")
     assert response.status_code == 404
+
+
+# -- Session cookie stripping tests --
+
+
+def _make_cookie_echo_backend() -> FastAPI:
+    """A workspace stub that echoes back the Cookie header it receives."""
+    stub = FastAPI()
+
+    @stub.get("/cookies")
+    def echo_cookies(request: FastAPIRequest) -> JSONResponse:
+        return JSONResponse({"cookie_header": request.headers.get("cookie")})
+
+    return stub
+
+
+def test_subdomain_forward_strips_session_cookie(tmp_path: Path) -> None:
+    """The proxy must strip the minds_session cookie so workspace servers
+    cannot extract and reuse it against other agents."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/cookies")
+    assert response.status_code == 200
+
+    received_cookie = response.json()["cookie_header"]
+    assert received_cookie is None or SESSION_COOKIE_NAME not in received_cookie
+
+
+def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None:
+    """The proxy must preserve cookies that are not the session cookie."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
+    _authenticate_client(client=client, auth_store=auth_store)
+    client.cookies.set("app_preference", "dark-mode-92741", path="/")
+
+    response = client.get("/cookies")
+    assert response.status_code == 200
+
+    received_cookie = response.json()["cookie_header"]
+    assert received_cookie is not None
+    assert "app_preference=dark-mode-92741" in received_cookie
+    assert SESSION_COOKIE_NAME not in received_cookie

@@ -20,11 +20,14 @@ def test_create_with_env(e2e: E2eSession) -> None:
     """)
     # Use a unique value so we can verify it appears in the tmux pane
     env_value = uuid.uuid4().hex
+    # Pass the compound command as a single argument after ``--`` so that
+    # ``&&`` reaches the agent's shell instead of being interpreted by the
+    # outer e2e runner shell. The command agent joins agent_args with spaces,
+    # so a single quoted arg is preserved verbatim.
     expect(
         e2e.run(
-            f"mngr create my-task --env MNGR_TEST_VAR={env_value}"
-            " --command 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 99999'"
-            " --no-ensure-clean",
+            f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type command --no-ensure-clean"
+            " -- 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100116'",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
@@ -56,7 +59,7 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "API_KEY=abc123 mngr create my-task --pass-env API_KEY --command 'sleep 99999' --no-ensure-clean",
+            "API_KEY=abc123 mngr create my-task --pass-env API_KEY --type command --no-ensure-clean -- sleep 100093",
             comment="pass API_KEY from current shell into the agent's environment",
         )
     ).to_succeed()
@@ -104,7 +107,7 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
     # The template sets provider=modal, but the modal plugin is disabled
     result = e2e.run(
-        "mngr create my-task --template my_modal_template --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --template my_modal_template --type command --no-ensure-clean -- sleep 100094",
         comment="templates are defined in your config",
     )
     # Expect failure because the modal provider is disabled
@@ -121,7 +124,7 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     mngr create my-task --plugin my-plugin --disable-plugin other-plugin
     """)
     result = e2e.run(
-        "mngr create my-task --plugin my-plugin --disable-plugin other-plugin --command 'sleep 99999' --no-ensure-clean",
+        "mngr create my-task --plugin my-plugin --disable-plugin other-plugin --type command --no-ensure-clean -- sleep 100095",
         comment="you can enable or disable specific plugins",
     )
     # The plugin flags should be accepted by the CLI (no "No such option" error).
@@ -145,7 +148,7 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+            "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100096",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
@@ -245,7 +248,7 @@ def test_create_with_label(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
+            "mngr create my-task --type command --no-ensure-clean --label team=backend --host-label env=staging -- sleep 100097",
             comment="you can add labels to organize your agents and tags for host metadata",
         )
     ).to_succeed()

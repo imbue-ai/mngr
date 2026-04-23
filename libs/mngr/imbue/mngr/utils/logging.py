@@ -40,7 +40,7 @@ class LoggingConfig(FrozenModel):
         description="Directory for event files (relative to data root if relative)",
     )
     max_log_size_mb: int = Field(
-        default=10,
+        default=100,
         description="Maximum size of each log file in MB",
     )
     console_level: LogLevel = Field(

@@ -36,7 +36,7 @@ def test_create_help(minimal_install_env: MinimalInstallEnv) -> None:
     assert result.returncode == 0, (
         f"mngr create --help failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert "--command" in result.stdout
+    assert "--type" in result.stdout
     assert "--no-connect" in result.stdout
 
 

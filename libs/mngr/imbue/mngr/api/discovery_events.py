@@ -19,8 +19,11 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.imbue_common.logging import generate_rotation_timestamp
+from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -226,17 +229,49 @@ def make_full_discovery_snapshot_event(
 # === File I/O ===
 
 
+_DISCOVERY_MAX_FILE_SIZE_BYTES: Final[int] = 50 * 1024 * 1024
+_DISCOVERY_MAX_ROTATED_COUNT: Final[int] = 1
+
+
 def append_discovery_event(config: MngrConfig, event: EventEnvelope) -> None:
     """Append a single discovery event to the JSONL file.
 
     Creates parent directories if they do not exist. Uses a single write() call
-    for safe concurrent appending under PIPE_BUF.
+    for safe concurrent appending under PIPE_BUF. Rotates the file when it
+    exceeds _DISCOVERY_MAX_FILE_SIZE_BYTES.
     """
     events_path = get_discovery_events_path(config)
     events_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_discovery_events_if_needed(events_path)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n"
     with open(events_path, "a") as f:
         f.write(line)
+
+
+def _rotate_discovery_events_if_needed(events_path: Path) -> None:
+    """Rotate the discovery events file if it exceeds the size limit."""
+    try:
+        file_size = events_path.stat().st_size
+    except OSError:
+        return
+    if file_size < _DISCOVERY_MAX_FILE_SIZE_BYTES:
+        return
+    with rotation_lock(events_path.parent):
+        # Re-check actual size: another process may have already rotated
+        try:
+            actual_size = events_path.stat().st_size
+        except OSError:
+            return
+        if actual_size < _DISCOVERY_MAX_FILE_SIZE_BYTES:
+            return
+        timestamp = generate_rotation_timestamp()
+        rotated = events_path.with_name(f"{events_path.name}.{timestamp}")
+        try:
+            events_path.rename(rotated)
+        except OSError as e:
+            logger.trace("Failed to rotate discovery events file: {}", e)
+            return
+        cleanup_old_rotated_files(events_path.parent, _DISCOVERY_MAX_ROTATED_COUNT)
 
 
 def emit_agent_discovered(config: MngrConfig, agent: DiscoveredAgent) -> None:
