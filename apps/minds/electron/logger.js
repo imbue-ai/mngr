@@ -1,0 +1,159 @@
+// Single-instance logger for the Electron main process.
+//
+// Owns:
+//   - a `LogWriter` writing to ~/.minds/logs/electron.jsonl (local-only records)
+//   - an `IframeLogBuffer` that POSTs MIND-destined records back to each
+//     mind's workspace server via the desktop-client subdomain proxy
+//
+// Consumers in main.js / backend.js call `logMain()` for their own
+// `console.log`-replacement messages and `attachConsoleListener()` once per
+// WebContentsView to route renderer messages through the classifier.
+
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { app, net } = require('electron');
+
+const paths = require('./paths');
+const { LogWriter } = require('./log-writer');
+const { IframeLogBuffer } = require('./iframe-log-buffer');
+const { classifyFrame } = require('./classify-frame');
+
+const FLUSH_INTERVAL_MS = 1000;
+
+let _writer = null;
+let _buffer = null;
+/** @type {NodeJS.Timeout|null} */
+let _flushTimer = null;
+/** @type {number|null} */
+let _backendPort = null;
+
+function init() {
+  if (_writer !== null) return;
+  const logDir = paths.getLogDir();
+  fs.mkdirSync(logDir, { recursive: true });
+  _writer = new LogWriter(path.join(logDir, 'electron.jsonl'));
+  _buffer = new IframeLogBuffer({
+    fetchFn: async (url, fetchInit) => {
+      const response = await net.fetch(url, fetchInit);
+      return { ok: response.ok, status: response.status };
+    },
+    onError: (err, mindId) => {
+      // Degrade gracefully: a failed POST is recorded locally so the user can
+      // see mind-side logging outages, but we don't retry the batch.
+      if (_writer === null) return;
+      _writer.write({
+        level: 'warning',
+        source: 'electron/main',
+        message: `iframe-logs POST failed for mind ${mindId}: ${err.message}`,
+      });
+    },
+  });
+  _flushTimer = setInterval(() => {
+    if (_buffer !== null) _buffer.flushAll().catch(() => {});
+  }, FLUSH_INTERVAL_MS);
+  app.on('will-quit', handleWillQuit);
+}
+
+function setBackendPort(port) {
+  _backendPort = port;
+}
+
+async function close() {
+  if (_flushTimer !== null) {
+    clearInterval(_flushTimer);
+    _flushTimer = null;
+  }
+  if (_buffer !== null) {
+    _buffer.close();
+    await _buffer.flushAll();
+    _buffer = null;
+  }
+  if (_writer !== null) {
+    _writer.close();
+    _writer = null;
+  }
+}
+
+function handleWillQuit() {
+  // Best-effort synchronous close: fire flushAll without awaiting because
+  // Electron's will-quit does not wait for async handlers.
+  close().catch(() => {});
+}
+
+/**
+ * Record a main-process event (replaces ad-hoc `console.log` calls).
+ * @param {string} level
+ * @param {string} message
+ */
+function logMain(level, message) {
+  if (_writer === null) return;
+  _writer.write({ level, source: 'electron/main', message });
+}
+
+/**
+ * Attach a `console-message` listener to a WebContentsView's webContents,
+ * routing each message through the classifier.
+ *
+ * @param {Electron.WebContents} webContents
+ * @param {string} viewName - 'chrome' | 'sidebar' | 'requests-panel' | 'content'
+ */
+function attachConsoleListener(webContents, viewName) {
+  webContents.on('console-message', (details) => {
+    handleConsoleMessage(details, viewName);
+  });
+}
+
+function handleConsoleMessage(details, viewName) {
+  const frameUrl = details && details.frame && typeof details.frame.url === 'string' ? details.frame.url : '';
+  const classification = classifyFrame(frameUrl, viewName);
+  const level = typeof details.level === 'string' ? details.level : 'info';
+  const message = typeof details.message === 'string' ? details.message : '';
+  const sourceId = typeof details.sourceId === 'string' ? details.sourceId : '';
+  const line = typeof details.lineNumber === 'number' ? details.lineNumber : 0;
+
+  if (classification.destination === 'mind' && _buffer !== null) {
+    if (_backendPort === null) {
+      // The desktop-client proxy port is not known yet; fall back to local
+      // so the record isn't dropped entirely.
+      fallbackLocal(level, message, frameUrl, sourceId, line, classification);
+      return;
+    }
+    _buffer.enqueue(classification.mindId, _backendPort, {
+      level,
+      message,
+      frame_url: frameUrl,
+      source_id: sourceId,
+      line,
+      service_name: classification.serviceName,
+      mind_id: classification.mindId,
+      client_timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  fallbackLocal(level, message, frameUrl, sourceId, line, classification);
+}
+
+function fallbackLocal(level, message, frameUrl, sourceId, line, classification) {
+  if (_writer === null) return;
+  _writer.write({
+    level,
+    source: classification.source,
+    message,
+    frame_url: frameUrl,
+    source_id: sourceId,
+    line,
+    mind_id: classification.mindId,
+    service_name: classification.serviceName,
+  });
+}
+
+module.exports = {
+  init,
+  close,
+  setBackendPort,
+  logMain,
+  attachConsoleListener,
+};
