@@ -201,6 +201,10 @@ def test_delete_virtual_key_accepts_empty_body_response() -> None:
 
     transport = httpx.MockTransport(_handle)
     client = BifrostAdminClient(base_url="http://bifrost.invalid", admin_token="test")
+    # Close the real httpx.Client created by BifrostAdminClient.__init__
+    # before reassigning ``client.client`` to the mock-transport client --
+    # otherwise the original client's connection pool leaks until GC.
+    client.client.close()
     client.client = httpx.Client(
         base_url="http://bifrost.invalid",
         headers={"Authorization": "Bearer test"},
@@ -219,6 +223,7 @@ def test_delete_virtual_key_accepts_empty_body_on_200() -> None:
 
     transport = httpx.MockTransport(_handle)
     client = BifrostAdminClient(base_url="http://bifrost.invalid", admin_token="test")
+    client.client.close()
     client.client = httpx.Client(
         base_url="http://bifrost.invalid",
         headers={"Authorization": "Bearer test"},

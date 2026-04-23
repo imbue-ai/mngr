@@ -33,9 +33,12 @@ class FakeBifrostAdminClient(BifrostAdminClient):
     delete_count: int
 
     def __init__(self) -> None:
-        # Skip the real HTTP client setup; we override every method that
-        # would have touched ``self.client``, so no outbound requests happen.
+        # The real ``BifrostAdminClient.__init__`` opens an ``httpx.Client``
+        # (socket pool). Every public method on this fake is overridden so
+        # the client is never used -- close it immediately after construction
+        # so its connection pool is released, not leaked until GC.
         super().__init__(base_url="http://fake.invalid", admin_token="fake")
+        self.client.close()
         self.virtual_key_by_id = {}
         self.create_count = 0
         self.delete_count = 0
