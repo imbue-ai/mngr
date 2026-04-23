@@ -11,13 +11,13 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 
 # How to get started on any task:
 
-Always begin your session by reading the relevant READMEs and any other related documentation in the docs/ directory of the project(s) you are working on. These represent *user-facing* documentation and are the most important to understand.
+1. Read `ARCHITECTURE.md` at the repo root.
 
-Once you've read these once during a session, there's no need to re-read them unless explicitly instructed to do so.
+2. Read the relevant user-facing documentation: READMEs and docs/ directory for the project(s) you are working on. These represent *user-facing* documentation and are the most important to understand beyond the architecture.
 
-If you will be writing code, be sure to read the style_guide.md for the project. Then read all README.md files in the relevant project directories, as well as all `.py` files at the root of the project you are working on (ex: `primitives.py`, etc.). Also read everything in data_types, interfaces, and utils to ensure you understand the core abstractions.
+3. If you will be writing code, read `style_guide.md`.
 
-Then take a look at the other code directories, and based on the task, determine which files are most relevant to read in depth. Be sure to read the full contents from those files.
+4. Based on the task, determine which source files are most relevant and read them in depth before making changes.
 
 Do NOT read files that end with "_test.py" during this first pass as they contain unit tests (unless you are explicitly instructed to read the unit tests).
 
