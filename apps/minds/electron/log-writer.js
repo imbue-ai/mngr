@@ -2,13 +2,17 @@
 //
 // Mirrors the rotation convention used by
 // libs/imbue_common/imbue/imbue_common/logging.make_jsonl_file_sink so the
-// on-disk layout is consistent with the Python-side events.jsonl files:
-// when the active file exceeds maxSizeBytes it is renamed to
-// `<name>.<YYYYMMDDHHMMSSffffff>` (UTC, zero-padded), matching the
-// `generate_rotation_timestamp` format and `ROTATED_JSONL_PATTERN` regex
-// (`^events\.jsonl\.\d+$`) so tools that already prune Python-side rotations
-// also understand ours. After each rotation the oldest siblings beyond
-// `maxRotatedCount` are deleted, matching `cleanup_old_rotated_files`.
+// on-disk layout is visually consistent with the Python-side events.jsonl
+// files: when the active file exceeds maxSizeBytes it is renamed to
+// `<name>.<YYYYMMDDHHMMSSffffff>` (UTC, zero-padded), matching the suffix
+// shape produced by `generate_rotation_timestamp`. Because the Python-side
+// `ROTATED_JSONL_PATTERN` (`^events\.jsonl\.\d+$`) is anchored to the
+// literal basename, `cleanup_old_rotated_files` cannot be pointed at this
+// writer's directory to prune its siblings -- pruning is done locally by
+// `_pruneOldRotations` against the Electron basename instead. After each
+// rotation the oldest siblings beyond `maxRotatedCount` are deleted, so the
+// retention behaviour matches the Python sink even though the identifying
+// regex is not shared.
 //
 // JS has only millisecond precision for `Date.now()`, so the microsecond
 // portion of the suffix is `ms * 1000`. That keeps the suffix 20 digits long
