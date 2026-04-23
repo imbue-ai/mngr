@@ -34,10 +34,13 @@ _DEFAULT_MAX_ROTATED_COUNT = 10
 
 
 def _now_iso() -> str:
-    """Return an ISO-8601 UTC timestamp with nanosecond precision padding.
+    """Return an ISO-8601 UTC timestamp with a 9-digit fractional-second field.
 
-    Matches the format used by ``imbue_common.logging._build_flat_log_dict``
-    so all workspace-owned JSONL files share a timestamp shape.
+    Python ``datetime`` resolves only to microseconds; the trailing ``000`` in
+    the format string pads the microsecond field (``%f``, 6 digits) to the
+    nine-digit fractional-second shape used by
+    ``imbue_common.logging.format_nanosecond_iso_timestamp`` so all
+    workspace-owned JSONL files share the same timestamp column width.
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
 
