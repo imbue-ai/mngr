@@ -43,6 +43,14 @@
         {% endif %}
       {% endif %}
 
+      <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Danger Zone</h2>
+      {% call ui.notice(variant='warn', extra='my-3') %}
+        Permanently deletes this workspace and all its data (VM, agent state,
+        and the mngr/&lt;name&gt; git branch). This cannot be undone.
+      {% endcall %}
+      {{ ui.btn_button('Delete workspace', variant='danger', id='delete-workspace-btn') }}
+      <span id="delete-workspace-spinner" class="hidden text-zinc-500 ml-2">Deleting...</span>
+
       <div class="mt-8">
         <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
       </div>

@@ -33,6 +33,41 @@
     });
   }
 
+  var deleteBtn = document.getElementById('delete-workspace-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', function () {
+      // `mngr destroy --gc` is not reversible: VM, host record, agent state,
+      // and mngr/<name> branch all go away. Confirm hard.
+      if (!confirm(
+        'Permanently delete this workspace?\n\n' +
+        'This destroys the VM, removes the agent, and deletes the ' +
+        'mngr/<name> branch. It cannot be undone.'
+      )) {
+        return;
+      }
+      var spinner = document.getElementById('delete-workspace-spinner');
+      deleteBtn.disabled = true;
+      if (spinner) spinner.classList.remove('hidden');
+      fetch('/workspace/' + encodeURIComponent(agentId) + '/delete', { method: 'POST' })
+        .then(function (resp) {
+          if (!resp.ok) {
+            return resp.json().then(function (data) {
+              throw new Error(data.error || ('HTTP ' + resp.status));
+            });
+          }
+          return resp.json();
+        })
+        .then(function (data) {
+          window.location.href = data.redirect_url || '/';
+        })
+        .catch(function (err) {
+          alert('Failed to delete workspace: ' + err.message);
+          deleteBtn.disabled = false;
+          if (spinner) spinner.classList.add('hidden');
+        });
+    });
+  }
+
   var tgBtn = document.getElementById('tg-btn');
   if (tgBtn) {
     tgBtn.addEventListener('click', async function () {
