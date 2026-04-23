@@ -628,6 +628,17 @@ function initializeDockview(parentElement: HTMLElement): void {
 
   dockview = dv;
 
+  // Register a handler so the Electron shell can forward cmd+w to close the
+  // active dockview tab. The handler returns true when a panel was closed;
+  // the shell falls back to closing the window otherwise.
+  const minds = (window as { minds?: { setCloseActiveTabHandler?: (handler: () => boolean) => void } }).minds;
+  minds?.setCloseActiveTabHandler?.(() => {
+    const active = dv.activePanel;
+    if (!active) return false;
+    active.api.close();
+    return true;
+  });
+
   // Listen for layout changes and auto-save
   _layoutChangeDisposable = dv.api.onDidLayoutChange(() => {
     scheduleSave();
