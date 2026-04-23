@@ -76,7 +76,14 @@ class LogRouter {
    */
   logMain(level, message) {
     if (this._closed) return;
-    this._writer.write({ level, source: 'electron/main', message });
+    // Swallow writer failures: this method is invoked from arbitrary
+    // main-process code paths and a thrown fs error would crash Electron.
+    // Console capture is diagnostic, never load-bearing.
+    try {
+      this._writer.write({ level, source: 'electron/main', message });
+    } catch {
+      // Intentionally empty: logging must never surface errors to callers.
+    }
   }
 
   /**
@@ -117,20 +124,34 @@ class LogRouter {
         }
         return;
       }
-      this._buffer.enqueue(classification.mindId, this._backendPort, mindRecord);
+      // `enqueue` is a sync state mutation that may trigger an async flush;
+      // wrap defensively so a synchronous throw from the buffer (e.g. bad
+      // internal state) cannot propagate out of the Electron event handler.
+      try {
+        this._buffer.enqueue(classification.mindId, this._backendPort, mindRecord);
+      } catch {
+        // Intentionally empty: logging must never surface errors to callers.
+      }
       return;
     }
 
-    this._writer.write({
-      level,
-      source: classification.source,
-      message,
-      frame_url: frameUrl,
-      source_id: sourceId,
-      line,
-      mind_id: classification.mindId,
-      service_name: classification.serviceName,
-    });
+    // Swallow writer failures here for the same reason as `logMain`: this is
+    // called from the `console-message` event listener and a thrown fs
+    // error would take down the Electron main process.
+    try {
+      this._writer.write({
+        level,
+        source: classification.source,
+        message,
+        frame_url: frameUrl,
+        source_id: sourceId,
+        line,
+        mind_id: classification.mindId,
+        service_name: classification.serviceName,
+      });
+    } catch {
+      // Intentionally empty: logging must never surface errors to callers.
+    }
   }
 
   /**

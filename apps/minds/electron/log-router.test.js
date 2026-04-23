@@ -186,3 +186,48 @@ test('malformed console details default to safe values without throwing', () => 
   assert.equal(writer.writes.length, 1);
   assert.equal(writer.writes[0].source, 'electron/renderer/unclassified');
 });
+
+test('writer throws are swallowed so console-message events cannot crash the main process', () => {
+  // LogWriter.write performs synchronous fs operations that can throw on
+  // disk full, permission errors, etc. Since handleConsoleMessage is called
+  // directly from the Electron `console-message` event listener, a throw
+  // would propagate as an uncaught exception in the main process. The
+  // router must swallow writer failures for local-destined and main
+  // records alike.
+  const writer = {
+    write: () => {
+      throw new Error('disk full');
+    },
+  };
+  const buffer = makeFakeBuffer();
+  const router = new LogRouter({ writer, buffer });
+  router.setBackendPort(8420);
+  assert.doesNotThrow(() => {
+    router.handleConsoleMessage(
+      makeConsoleDetails('http://localhost:8420/_chrome', { message: 'local' }),
+      'chrome',
+    );
+  });
+  assert.doesNotThrow(() => router.logMain('info', 'main message'));
+});
+
+test('buffer.enqueue throws are swallowed so mind-destined events cannot crash the main process', () => {
+  // Defensive: a synchronous throw from enqueue (bad internal state, etc.)
+  // must not propagate out of the console-message handler.
+  const writer = makeFakeWriter();
+  const buffer = {
+    enqueue: () => {
+      throw new Error('buffer corrupted');
+    },
+    close: () => {},
+    flushAll: async () => {},
+  };
+  const router = new LogRouter({ writer, buffer });
+  router.setBackendPort(8420);
+  assert.doesNotThrow(() => {
+    router.handleConsoleMessage(
+      makeConsoleDetails('http://agent-abc.localhost:8420/service/web/'),
+      'content',
+    );
+  });
+});
