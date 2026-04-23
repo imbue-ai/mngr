@@ -808,12 +808,26 @@ function restoreWindowBounds(bundle, entry) {
 
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
+    const oldIds = new Set(workspaceList.map((w) => w.id));
     latestChromeState.workspaces = evt.workspaces;
     workspaceList = evt.workspaces.map((w) => ({
       id: String(w.id),
       name: w.name ? String(w.name) : '',
       account: w.account ? String(w.account) : '',
     }));
+    const newIds = new Set(workspaceList.map((w) => w.id));
+
+    // Close windows for workspaces that disappeared (destroyed)
+    for (const oldId of oldIds) {
+      if (!newIds.has(oldId)) {
+        for (const b of bundles) {
+          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+            b.window.close();
+          }
+        }
+      }
+    }
+
     updateAllOsTitles();
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;

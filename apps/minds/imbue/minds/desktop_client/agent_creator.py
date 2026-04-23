@@ -604,7 +604,7 @@ class AgentCreator(MutableModel):
         include_env_file: bool = False,
         access_token: str = "",
         version: str = "",
-        account_id: str = "",
+        on_created: Callable[[AgentId], None] | None = None,
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -616,8 +616,8 @@ class AgentCreator(MutableModel):
         For ``LaunchMode.LEASED``, ``access_token`` and ``version`` are required
         to lease a pre-provisioned host from the pool.
 
-        When ``account_id`` is provided, the created agent will be associated with
-        that account after creation completes.
+        When ``on_created`` is provided, it is called with the agent ID after the
+        agent has been successfully created (but before the status is set to DONE).
 
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
@@ -643,6 +643,7 @@ class AgentCreator(MutableModel):
                 include_env_file,
                 access_token,
                 version,
+                on_created,
             ),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
@@ -787,6 +788,7 @@ class AgentCreator(MutableModel):
         include_env_file: bool,
         access_token: str = "",
         version: str = "",
+        on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
@@ -801,6 +803,7 @@ class AgentCreator(MutableModel):
                     emit_log=emit_log,
                     access_token=access_token,
                     version=version,
+                    on_created=on_created,
                 )
                 return
 
@@ -875,11 +878,12 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # After phase 6 deleted the legacy /forwarding/ routes the new
-                # workspace entry point is http://<agent-id>.localhost:<port>/,
-                # which the desktop client's subdomain middleware forwards to the
-                # per-agent minds_workspace_server. Construct the absolute URL
-                # here because the browser uses it verbatim in window.location.
+                if on_created is not None:
+                    try:
+                        on_created(agent_id)
+                    except (ValueError, OSError) as callback_exc:
+                        logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
+
                 port_suffix = ":{}".format(self.server_port) if self.server_port else ""
                 redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
 
@@ -904,6 +908,7 @@ class AgentCreator(MutableModel):
         emit_log: OutputCallback,
         access_token: str,
         version: str,
+        on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
         """Lease a pre-provisioned host and start the agent on it."""
         aid = str(agent_id)
@@ -968,6 +973,7 @@ class AgentCreator(MutableModel):
                     log_queue=log_queue,
                     emit_log=emit_log,
                     lease_result=lease_result,
+                    on_created=on_created,
                 )
             except (MngrCommandError, HostPoolError, ValueError, OSError):
                 self._cleanup_failed_lease(
@@ -988,6 +994,7 @@ class AgentCreator(MutableModel):
         log_queue: queue.Queue[str],
         emit_log: OutputCallback,
         lease_result: LeaseHostResult,
+        on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
         """Rename and start the leased agent. Raises on failure."""
         parsed_name = AgentName(agent_name)
@@ -1024,6 +1031,12 @@ class AgentCreator(MutableModel):
             )
 
         log_queue.put("[minds] Leased agent started successfully.")
+
+        if on_created is not None:
+            try:
+                on_created(agent_id)
+            except (ValueError, OSError) as callback_exc:
+                logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
 
         port_suffix = ":{}".format(self.server_port) if self.server_port else ""
         redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)

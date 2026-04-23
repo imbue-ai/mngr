@@ -129,20 +129,31 @@ def render_create_form(
     )
 
 
-@pure
-def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
-    """Render the progress page shown while an agent is being created.
+_STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
+    "CLONING": "Cloning repository...",
+    "CREATING": "Creating agent...",
+    "DONE": "Done. Redirecting...",
+}
 
-    The page streams logs from /api/create-agent/{agent_id}/logs via SSE
-    and auto-redirects to the agent when creation completes.
-    """
-    status_text_map = {
-        "CLONING": "Cloning repository...",
-        "CREATING": "Creating agent...",
-        "DONE": "Done. Redirecting...",
-        "FAILED": "Failed: {}".format(info.error or "unknown error"),
-    }
-    status_text = status_text_map.get(str(info.status), "Working...")
+_STATUS_TEXT_LEASED: Final[dict[str, str]] = {
+    "CLONING": "Connecting to host...",
+    "CREATING": "Setting up agent...",
+    "DONE": "Done. Redirecting...",
+}
+
+
+@pure
+def render_creating_page(
+    agent_id: AgentId,
+    info: AgentCreationInfo,
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
+    """Render the progress page shown while an agent is being created."""
+    text_map = _STATUS_TEXT_LEASED if launch_mode is LaunchMode.LEASED else _STATUS_TEXT_DEFAULT
+    if str(info.status) == "FAILED":
+        status_text = "Failed: {}".format(info.error or "unknown error")
+    else:
+        status_text = text_map.get(str(info.status), "Working...")
     template = JINJA_ENV.get_template("creating.html")
     return template.render(
         agent_id=agent_id,
