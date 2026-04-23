@@ -144,3 +144,14 @@ class TestCheckSafeCreateCommand:
     def test_passes_with_branch_base_and_date(self) -> None:
         result = check_safe_create_command("my-agent --branch 'main:run-{DATE}' --provider modal")
         assert result is None
+
+    def test_passes_with_foreground(self) -> None:
+        """Headless agents (--foreground) auto-destroy per run and reject both
+        --branch and --reuse on the create headless path, so the safety check
+        is inapplicable."""
+        result = check_safe_create_command("my-agent --type headless_command --foreground")
+        assert result is None
+
+    def test_foreground_after_separator_does_not_count(self) -> None:
+        result = check_safe_create_command("my-agent -- --foreground")
+        assert result is not None
