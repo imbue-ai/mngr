@@ -810,6 +810,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "is_error_reporting_enabled": False,
     "is_allowed_in_pytest": True,
     "default_destroyed_host_persisted_seconds": 12345.0,
+    "default_min_online_host_age_seconds": 600.0,
 }
 
 _SAMPLE_TOML = """\
@@ -825,6 +826,7 @@ headless = true
 is_error_reporting_enabled = false
 is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
+default_min_online_host_age_seconds = 600.0
 
 [commands.create]
 name = "test"
@@ -1425,6 +1427,27 @@ def test_load_config_raises_when_in_pytest_and_not_allowed(
 
     with pytest.raises(ConfigParseError, match="Running mngr within pytest is not allowed"):
         load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
+def test_load_config_allows_pytest_with_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch, temp_host_dir: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNGR_ALLOW_PYTEST=1 is the explicit opt-in for end-to-end test subprocesses
+    that intentionally want a real mngr with is_allowed_in_pytest=False in config.
+    The autouse setup_test_mngr_env fixture already provides HOME, MNGR_HOST_DIR
+    (pointing at tmp), PYTEST_CURRENT_TEST (pytest itself sets this), etc.; we only
+    need to add the opt-in and the settings file that triggers the guard."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("MNGR_ALLOW_PYTEST", "1")
+
+    profile_dir = get_or_create_profile_dir(temp_host_dir)
+    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = false\n")
+
+    # Should NOT raise.
+    load_config(pm=pm, concurrency_group=cg, context_dir=temp_host_dir)
 
 
 # =============================================================================

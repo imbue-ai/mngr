@@ -14,6 +14,7 @@ from imbue.mngr.agents.base_agent import _normalize_for_match
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
@@ -333,8 +334,12 @@ def test_get_resume_message_returns_message_when_set(
 
 def test_get_ready_timeout_seconds_returns_default_when_not_set(
     test_agent: BaseAgent,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that get_ready_timeout_seconds returns default when not set in data.json."""
+    # get_ready_timeout_seconds falls back to get_agent_ready_timeout(), which
+    # honors MNGR_AGENT_READY_TIMEOUT. Remove it to guarantee the default path.
+    monkeypatch.delenv("MNGR_AGENT_READY_TIMEOUT", raising=False)
     assert test_agent.get_ready_timeout_seconds() == DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
@@ -514,23 +519,23 @@ def test_assemble_command_uses_config_command_when_no_override(
     assert result == CommandString("configured-cmd")
 
 
-def test_assemble_command_falls_back_to_agent_type(
+def test_assemble_command_raises_when_no_base_and_no_args(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Test that agent_type is used as command when neither override nor config command is set."""
+    """Test that assemble_command raises when neither override, config command, nor agent_args provide a base."""
     config = AgentTypeConfig()
     agent = create_test_agent(
         local_provider, temp_host_dir, temp_work_dir, agent_config=config, agent_type=AgentTypeName("my-custom-type")
     )
 
-    result = agent.assemble_command(
-        host=agent.host,
-        agent_args=(),
-        command_override=None,
-    )
-    assert result == CommandString("my-custom-type")
+    with pytest.raises(UserInputError, match=r"has no command configured"):
+        agent.assemble_command(
+            host=agent.host,
+            agent_args=(),
+            command_override=None,
+        )
 
 
 def test_assemble_command_appends_cli_args(

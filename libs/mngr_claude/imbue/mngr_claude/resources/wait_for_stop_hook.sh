@@ -2,9 +2,21 @@
 #
 # wait_for_stop_hook.sh
 #
-# A Claude Code Stop hook that waits for all other stop hooks to finish
-# before proceeding. Exits when:
-#   1. All other stop hooks have exited.
+# A Claude Code Stop hook that waits for all other stop hooks to finish,
+# then runs post-completion actions before marking the agent inactive.
+#
+# Phases:
+#   1. Wait for all other stop hooks that were running at the start of the
+#      grace period to exit (or for MAX_WAIT seconds to elapse).
+#   2. Run post-completion actions:
+#        - If the code-guardian orchestrator wrote
+#          .reviewer/outputs/orchestrator_success, upload this commit's
+#          autofix issue file
+#          (.reviewer/outputs/autofix/issues/${HEAD_hash}.jsonl) to the
+#          code-review-json Modal volume and remove the marker.
+#        - Invoke notify_user (best-effort; silently skipped if the command
+#          is not defined).
+#   3. Mark the agent inactive and exit.
 #
 # Identification strategy:
 #   All stop hooks and bash tool tasks are direct children of the Claude
@@ -113,6 +125,49 @@ mark_inactive() {
         >> "$MNGR_HOST_DIR/events/mngr/activity/events.jsonl"
 }
 
+# --- Post-completion: upload autofix issues to Modal volume (best-effort) ---
+# Uploads only the current commit's issue file (autofix writes one file per
+# commit at .reviewer/outputs/autofix/issues/{hash}.jsonl). Files from prior
+# commits are ignored so that each commit's upload contains exactly its own
+# issues.
+upload_autofix_issues() {
+    local commit
+    commit=$(git rev-parse HEAD 2>/dev/null) || return
+    [ -n "$commit" ] || return
+
+    local issues_file=".reviewer/outputs/autofix/issues/${commit}.jsonl"
+    if [ ! -s "$issues_file" ]; then
+        return
+    fi
+
+    local nested_path="${commit:0:4}/${commit:4:4}/${commit:8:4}/${commit:12:4}/${commit:16}"
+    local volume_name="code-review-json"
+    local volume_mount="/code_reviews"
+
+    # Method 1: Copy to mounted volume + sync (Modal sandbox)
+    local mount_dir="${volume_mount}/${nested_path}"
+    if mkdir -p "${mount_dir}" 2>/dev/null && cp "$issues_file" "${mount_dir}/autofix.json" 2>/dev/null; then
+        sync "${volume_mount}" 2>/dev/null || true
+    fi
+
+    # Method 2: Upload via modal CLI (local machine with Modal credentials)
+    uv run modal volume put "${volume_name}" "$issues_file" "/${nested_path}/autofix.json" --force 2>/dev/null || true
+}
+
+# --- Post-completion actions (run after all other stop hooks finish) ---
+run_post_completion() {
+    # Only run post-completion if the orchestrator succeeded.
+    # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
+    # on success with the commit hash.
+    if [ -f ".reviewer/outputs/orchestrator_success" ]; then
+        upload_autofix_issues
+        rm -f ".reviewer/outputs/orchestrator_success"
+    fi
+
+    # Always notify the user (regardless of success/failure)
+    notify_user 2>/dev/null || true
+}
+
 # --- Signal handler: mark inactive and exit on SIGTERM/SIGINT ---
 on_signal() {
     local sig="$1"
@@ -146,6 +201,7 @@ INITIAL_HOOKS=$(get_other_stop_hooks "$CLAUDE_PID" "$OUR_WRAPPER")
 
 if [ -z "$INITIAL_HOOKS" ]; then
     echo "wait_for_stop_hook: no other stop hooks found after grace period"
+    run_post_completion
     mark_inactive
     exit 0
 fi
@@ -164,12 +220,14 @@ while true; do
 
     if [ "$ALL_DONE" = true ]; then
         echo "wait_for_stop_hook: all other stop hooks have finished"
+        run_post_completion
         mark_inactive
         exit 0
     fi
 
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
         echo "wait_for_stop_hook: timed out after ${MAX_WAIT}s waiting for hooks, marking inactive" >&2
+        run_post_completion
         mark_inactive
         exit 0
     fi

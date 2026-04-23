@@ -11,12 +11,12 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_ttyd import resources as ttyd_resources
 
 TTYD_WINDOW_NAME = "terminal"
-TTYD_SERVER_NAME = "terminal"
+TTYD_SERVICE_NAME = "terminal"
 TTYD_VERSION = "1.7.7"
 
 
 def _build_ttyd_command() -> str:
-    """Build the ttyd shell command with URL-arg dispatch and multi-server event registration.
+    """Build the ttyd shell command with URL-arg dispatch and multi-service event registration.
 
     Starts a single ttyd on a random port with --url-arg (-a) enabled.
     The inline dispatch script routes based on the first URL argument:
@@ -24,7 +24,7 @@ def _build_ttyd_command() -> str:
     - arg=<KEY>: runs $MNGR_AGENT_STATE_DIR/commands/ttyd/<KEY>.sh with remaining args
 
     The port-detection wrapper watches stderr for the assigned port and writes
-    ServerLogRecord events to events/servers/events.jsonl:
+    ServiceLogRecord events to events/services/events.jsonl:
     - One "terminal" event with the base URL
     - One event per .sh script found in commands/ttyd/ with ?arg=<KEY> appended
     """
@@ -41,10 +41,10 @@ def _build_ttyd_command() -> str:
         "_write_evt() { "
         'local _N="$1" _U="$2"; '
         '_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"); '
-        '_EID="evt-$(echo "$_N:$_U" | sha256sum | cut -c1-32)"; '
-        'printf \'{"timestamp":"%s","type":"server_registered","event_id":"%s","source":"servers",'
-        '"server":"%s","url":"%s"}\\n\' '
-        '"$_TS" "$_EID" "$_N" "$_U" >> "$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl"; '
+        '_EID="evt-$(tr -d - < /proc/sys/kernel/random/uuid)"; '
+        'printf \'{"timestamp":"%s","type":"service_registered","event_id":"%s","source":"services",'
+        '"service":"%s","url":"%s"}\\n\' '
+        '"$_TS" "$_EID" "$_N" "$_U" >> "$MNGR_AGENT_STATE_DIR/events/services/events.jsonl"; '
         "}; "
     )
     return (
@@ -55,7 +55,7 @@ def _build_ttyd_command() -> str:
         '_PORT=$(echo "$line" | awk '
         "'{print $NF}'); "
         'if [ -n "$MNGR_AGENT_STATE_DIR" ] && [ -n "$_PORT" ]; then '
-        'mkdir -p "$MNGR_AGENT_STATE_DIR/events/servers" && '
+        'mkdir -p "$MNGR_AGENT_STATE_DIR/events/services" && '
         + write_event_fn
         + '_write_evt terminal "http://127.0.0.1:$_PORT"; '
         'for _S in "$MNGR_AGENT_STATE_DIR/commands/ttyd/"*.sh; do '

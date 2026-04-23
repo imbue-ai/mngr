@@ -4,6 +4,7 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
+from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
@@ -127,6 +128,10 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
+
+
 # --- Naming conventions ---
 
 
@@ -223,7 +228,9 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(5))
+    # testing.py files are test infrastructure and excluded alongside test files
+    excluded = TEST_FILE_PATTERNS + ("testing.py",)
+    rc.check_direct_subprocess(_DIR, snapshot(5), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---

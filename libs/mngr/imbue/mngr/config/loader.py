@@ -38,6 +38,7 @@ from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -209,6 +210,7 @@ def load_config(
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
+    config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -217,11 +219,22 @@ def load_config(
     final_config = MngrConfig.model_validate(config_dict)
 
     # check whether we're in pytest
-    if not final_config.is_allowed_in_pytest:
-        if "PYTEST_CURRENT_TEST" in os.environ:
+    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
+        if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
             raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. This can happen when tests are poorly written, and load the .mngr/settings.toml file from the root of the mngr project"
+                "Running mngr within pytest is not allowed by the current configuration. "
+                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
+                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
+                "cannot mutate real mngr state."
             )
+        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
+        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
+        # test_schedule_add.py's local-dev path intentionally runs against the
+        # developer's real ~/.mngr so the subprocess can pick up their Modal
+        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
+        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
+        # which rejects env names that don't match TEST_ENV_PATTERN during
+        # pytest -- that's the actual leak-prevention gate.
 
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
@@ -362,7 +375,7 @@ def _parse_providers(
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: frozenset[str] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -533,8 +546,9 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
     for name in disabled_names:
         if is_strict:
             if not pm.has_plugin(name) and not pm.is_blocked(name):
-                raise Exception(
-                    f"Cannot disable plugin '{name}' because it is not registered. Possibly was not installed, or was disabled via a config file? Registered plugins: {pm.list_name_plugin()}"
+                registered = [n for n, _ in pm.list_name_plugin()]
+                raise UserInputError(
+                    f"Cannot disable plugin '{name}' because it is not registered. Registered plugins: {registered}"
                 )
         if not pm.is_blocked(name):
             pm.set_blocked(name)
@@ -658,6 +672,7 @@ def parse_config(
     kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
+    kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
 
     if len(raw) > 0:
         if strict:

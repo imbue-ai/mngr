@@ -2,10 +2,9 @@
 
 The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
-The simplest way would be to use sub-domains, but we don't control the DNS or URLs where user's agents are being served, so we have to do it with URL paths instead.
-In order to make that actually work, we use a combination of service workers, script injection, and rewriting.
+Each workspace already runs its own `minds_workspace_server`, which serves the dockview UI and exposes its services under `/service/<name>/...` paths (handling Service Worker bootstrap, path rewriting, cookie scoping, and WebSocket shims internally). The desktop client's job is to route browser traffic for `<agent-id>.localhost:PORT/*` to the correct workspace server -- it does not rewrite paths or inject anything itself.
 
-This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible remotely.
+This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
 
 ## Authentication
 
@@ -13,7 +12,7 @@ Authentication is global (one session grants access to all agents). The desktop 
 
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
 - **One-time codes**: a login code is generated and printed to the terminal when the server starts. Codes are stored in `{data_directory}/one_time_codes.json` and can only be used once.
-- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. This single cookie grants access to all agents and all server routes.
+- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. It is issued with `Domain=localhost` when the request host is `localhost` or an `<agent-id>.localhost` subdomain, so the browser carries it across all workspace subdomains with a single sign-in.
 
 ## Local desktop client routes
 
@@ -48,22 +47,22 @@ Authentication is global (one session grants access to all agents). The desktop 
     shows a progress page that polls /api/create-agent/{agent_id}/status
     auto-redirects to the agent when creation completes
 
-`/agents/{agent_id}/` route (requires auth):
-    redirects to the agent's default web server at /agents/{agent_id}/web/
-
-`/agents/{agent_id}/servers/` route (requires auth):
-    shows a page listing all known server names for the agent (discovered via `mngr events`)
-
-`/agents/{agent_id}/{server_name}/{path}` route (requires auth):
-    proxies any request from the user to the specific server's backend URL
-    uses Service Workers for transparent path rewriting
+`<agent-id>.localhost:PORT/*` (subdomain catch-all, requires auth):
+    a host-header middleware and a catch-all WebSocket route recognize
+    `<agent-id>.localhost(:port)` hosts and byte-forward the HTTP or
+    WebSocket request to that workspace's minds_workspace_server (resolved
+    via the backend resolver, optionally through an SSH tunnel). Unknown
+    subdomains return 404; unauthenticated HTML navigations redirect to
+    the bare-origin landing page so the user can sign in.
 
 ## Proxying design
 
-Since we can't control DNS or use subdomains, we multiplex workspaces under URL path prefixes (`/agents/{agent_id}/{server_name}/`). Each server for an agent gets its own prefix and Service Worker scope. This requires a combination of Service Workers, script injection, and rewriting:
+Because the desktop client only byte-forwards requests to the per-workspace `minds_workspace_server`, each workspace keeps its own origin (an `<agent-id>.localhost` subdomain). Within each workspace origin, the workspace server is responsible for multiplexing the workspace's individual services under `/service/<name>/...`:
 
-- On first navigation, a bootstrap page installs a Service Worker scoped to `/agents/{agent_id}/{server_name}/`
-- The SW intercepts all same-origin requests and rewrites paths to include the prefix
-- HTML responses have a WebSocket shim injected to rewrite WS URLs
-- Cookie paths in Set-Cookie headers are rewritten to scope under the server prefix
-- WebSocket connections are proxied bidirectionally
+- On first navigation to a service, the workspace server returns a bootstrap page that installs a Service Worker scoped to `/service/<name>/`.
+- The SW intercepts all same-origin requests and rewrites paths to include the prefix.
+- HTML responses have a WebSocket shim injected to rewrite WS URLs.
+- Cookie paths in `Set-Cookie` headers are rewritten to scope under the service prefix.
+- WebSocket connections are proxied bidirectionally.
+
+See `apps/minds_workspace_server/imbue/minds_workspace_server/service_dispatcher.py` for the service-side implementation.

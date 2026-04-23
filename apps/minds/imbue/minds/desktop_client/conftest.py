@@ -7,17 +7,17 @@ import pytest
 
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
-from imbue.minds.desktop_client.backend_resolver import ServerLogRecord
+from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
-from imbue.minds.desktop_client.backend_resolver import parse_server_log_records
-from imbue.minds.primitives import ServerName
+from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
-DEFAULT_SERVER_NAME: ServerName = ServerName("web")
+DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
 
 
 @pytest.fixture
@@ -38,20 +38,20 @@ def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) 
     return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 
-def make_server_log(server: str, url: str) -> str:
-    """Build a single JSONL line matching the servers/events.jsonl format."""
-    return json.dumps({"server": server, "url": url}) + "\n"
+def make_service_log(service: str, url: str) -> str:
+    """Build a single JSONL line matching the services/events.jsonl format."""
+    return json.dumps({"service": service, "url": url}) + "\n"
 
 
 def make_resolver_with_data(
     agents_json: str | None = None,
-    server_logs: dict[str, str] | None = None,
+    service_logs: dict[str, str] | None = None,
 ) -> MngrCliBackendResolver:
     """Create a MngrCliBackendResolver pre-populated with test data.
 
     agents_json is a JSON string matching `mngr list --format json` format, used to populate
-    agent IDs and SSH info. server_logs is a mapping of agent ID string to raw
-    servers/events.jsonl content, parsed to populate the server URL map for each agent.
+    agent IDs and SSH info. service_logs is a mapping of agent ID string to raw
+    services/events.jsonl content, parsed to populate the service URL map for each agent.
     """
     resolver = MngrCliBackendResolver()
 
@@ -78,13 +78,13 @@ def make_resolver_with_data(
             )
         )
 
-    if server_logs:
-        for agent_id_str, log_content in server_logs.items():
-            records = parse_server_log_records(log_content)
-            servers: dict[str, str] = {}
+    if service_logs:
+        for agent_id_str, log_content in service_logs.items():
+            records = parse_service_log_records(log_content)
+            services: dict[str, str] = {}
             for record in records:
-                if isinstance(record, ServerLogRecord):
-                    servers[str(record.server)] = record.url
-            resolver.update_servers(AgentId(agent_id_str), servers)
+                if isinstance(record, ServiceLogRecord):
+                    services[str(record.service)] = record.url
+            resolver.update_services(AgentId(agent_id_str), services)
 
     return resolver

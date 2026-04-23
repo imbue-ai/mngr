@@ -22,6 +22,8 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
+from imbue.mngr_modal.backend import truncate_modal_name
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -40,6 +42,45 @@ class E2eSession(Session):
         session = cls(env=env, cwd=cwd)
         session.output_dir = output_dir
         return session
+
+    def collect_remote_diagnostics(self, agent_name: str) -> str:
+        """Collect diagnostic info from a remote agent for debugging failures.
+
+        Captures tmux sessions, Claude Code pane content, session_started file
+        status, and running processes. Returns a formatted string suitable for
+        inclusion in assertion messages.
+        """
+        diag_parts = [f"Diagnostics from remote agent '{agent_name}':"]
+        for diag_cmd, label in [
+            (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
+            (
+                f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
+                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                "claude pane",
+            ),
+            (
+                # Agent state lives at $MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/ per
+                # libs/mngr/docs/conventions.md, and MNGR_HOST_DIR defaults to
+                # ~/.mngr (i.e. /root/.mngr on remote hosts where HOME=/root).
+                f'mngr exec {agent_name} \'ls -la "$HOME/.mngr/agents"/*/session_started 2>/dev/null'
+                " || echo session_started-not-found'",
+                "session_started",
+            ),
+            (
+                f"mngr exec {agent_name} 'ps aux | grep -E \"claude|node\" | grep -v grep || echo no-claude-process'",
+                "processes",
+            ),
+        ]:
+            # Best-effort: never let a diagnostic subprocess failure mask the
+            # primary test assertion that triggered this call. Narrowed to
+            # OSError (covers Popen spawn failures like FileNotFoundError /
+            # PermissionError) so unrelated programmer errors still propagate.
+            try:
+                diag = self.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
+                diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
+            except OSError as exc:
+                diag_parts.append(f"\n[{label}] error: {exc!r}")
+        return "\n".join(diag_parts)
 
     def write_tutorial_block(self, block: str) -> None:
         """Write the original tutorial script block to the test output directory.
@@ -232,9 +273,8 @@ def _setup_test_profile(host_dir: Path) -> str:
     return user_id
 
 
-def _delete_modal_environment(prefix: str, user_id: str, env: dict[str, str], cwd: Path) -> None:
+def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: Path) -> None:
     """Delete the Modal environment for this test."""
-    environment_name = f"{prefix}{user_id}"
     logger.info("Deleting Modal environment: {}", environment_name)
     try:
         result = run_command(
@@ -350,17 +390,24 @@ def e2e(
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
+    # e2e tests create fresh Modal environments, so they must deploy the
+    # snapshot_and_shutdown function rather than looking up an existing one.
+    env.pop("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", None)
 
     # Use a short fixed prefix so that derived names (e.g. Modal environment
     # names, which are {prefix}{user_id}) stay well under provider length
     # limits. Test isolation comes from MNGR_HOST_DIR, not the prefix.
     # The mngr_test- prefix is required by the Modal backend guard.
-    env["MNGR_PREFIX"] = "mngr_test-"
+    test_prefix = "mngr_test-"
+    env["MNGR_PREFIX"] = test_prefix
 
     # Create the mngr profile proactively so that:
     # 1. The user_id follows the timestamp convention for Modal cleanup
     # 2. The tmux onboarding screen is suppressed in test transcripts
     test_user_id = _setup_test_profile(temp_host_dir)
+    # Pre-compute the Modal environment name so create (inside the mngr
+    # subprocess) and delete (below) agree without either side re-deriving it.
+    test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
@@ -428,7 +475,7 @@ def e2e(
     )
 
     # Delete the Modal environment (if one was created)
-    _delete_modal_environment("mngr_test-", test_user_id, env=env, cwd=temp_git_repo)
+    _delete_modal_environment(test_modal_env_name, env=env, cwd=temp_git_repo)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)

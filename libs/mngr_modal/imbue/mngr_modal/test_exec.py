@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,7 @@ def _create_modal_agent(
     agent_name: str,
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
+    agent_command: str,
 ) -> None:
     """Create a long-running agent on Modal for exec testing."""
     result = subprocess.run(
@@ -21,13 +23,14 @@ def _create_modal_agent(
             "mngr",
             "create",
             f"{agent_name}@.modal",
-            "generic",
+            "--type",
+            "command",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
             "--",
-            "sleep 99123",
+            *shlex.split(agent_command),
         ],
         capture_output=True,
         text=True,
@@ -65,7 +68,7 @@ def test_exec_echo_on_modal(
 ) -> None:
     """Test executing a simple command on a Modal agent."""
     agent_name = f"test-exec-echo-{get_short_random_string()}"
-    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400001")
 
     result = _exec_on_agent(agent_name, "echo hello-from-modal", modal_subprocess_env)
 
@@ -82,7 +85,7 @@ def test_exec_cwd_override_on_modal(
 ) -> None:
     """Test that --cwd overrides the working directory on a Modal agent."""
     agent_name = f"test-exec-cwd-{get_short_random_string()}"
-    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400002")
 
     result = _exec_on_agent(agent_name, "pwd", modal_subprocess_env, extra_args=["--cwd", "/tmp"])
 
@@ -99,7 +102,7 @@ def test_exec_failure_propagates_exit_code_on_modal(
 ) -> None:
     """Test that a failing command returns exit code 1 on a Modal agent."""
     agent_name = f"test-exec-fail-{get_short_random_string()}"
-    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400003")
 
     result = _exec_on_agent(agent_name, "false", modal_subprocess_env)
 
@@ -115,7 +118,7 @@ def test_exec_json_output_on_modal(
 ) -> None:
     """Test JSON output format when executing on a Modal agent."""
     agent_name = f"test-exec-json-{get_short_random_string()}"
-    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400004")
 
     result = _exec_on_agent(
         agent_name, "echo json-test", modal_subprocess_env, extra_args=["--format", "json", "--quiet"]

@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
@@ -35,6 +36,8 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import generate_test_environment_name
+from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import _create_environment
@@ -200,39 +203,6 @@ def test_save_failed_host_record(testing_provider: ModalProviderInstance) -> Non
     assert record.certified_host_data.build_log == "Error: dependency not found"
     # Failed hosts have no SSH info
     assert record.ssh_host is None
-
-
-def test_clear_snapshots_from_host_record(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    snapshots = [
-        make_snapshot("snap-1", "s1"),
-        make_snapshot("snap-2", "s2"),
-    ]
-    record = make_host_record(host_id=host_id, snapshots=snapshots)
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_snapshots(testing_provider: ModalProviderInstance) -> None:
-    host_id = HostId.generate()
-    record = make_host_record(host_id=host_id, snapshots=[])
-    testing_provider._write_host_record(record)
-
-    testing_provider._clear_snapshots_from_host_record(host_id)
-
-    updated = testing_provider._read_host_record(host_id, use_cache=False)
-    assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
-
-
-def test_clear_snapshots_noop_when_no_record(testing_provider: ModalProviderInstance) -> None:
-    # Should not raise
-    testing_provider._clear_snapshots_from_host_record(HostId.generate())
 
 
 # ---------------------------------------------------------------------------
@@ -903,10 +873,11 @@ def test_destroy_host(
     with pytest.raises(ModalProxyError, match="terminated"):
         sandbox.exec("echo", "should fail")
 
-    # Snapshots cleared
+    # Snapshots preserved (for gc_snapshots to age-gate), but host marked DESTROYED
     updated = testing_provider._read_host_record(host_id, use_cache=False)
     assert updated is not None
-    assert len(updated.certified_host_data.snapshots) == 0
+    assert len(updated.certified_host_data.snapshots) == 1
+    assert updated.certified_host_data.stop_reason == HostState.DESTROYED.value
 
     # Agents removed
     agents = testing_provider.list_persisted_agent_data_for_host(host_id)
@@ -977,6 +948,38 @@ def test_build_provider_instance_testing_mode(
 
     # Clean up the app registry
     ModalProviderBackend.close_app("build-test")
+
+
+def test_build_provider_instance_environment_name_derived_from_prefix(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Verify that the Modal environment name is prefix + user_id.
+
+    This test is trivial but necessary for the validity of the prefix check in
+    make_modal_provider_real (conftest.py): we validate the prefix against
+    TEST_ENV_PATTERN as a proxy for the Modal environment name. That proxy is
+    only valid if environment_name == f"{prefix}{user_id}" remains the formula
+    in build_provider_instance. If this test breaks, the prefix check no longer
+    guarantees correct environment naming.
+    """
+    config = ModalProviderConfig(
+        mode=ModalMode.TESTING,
+        app_name="env-name-test",
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+    )
+    instance = ModalProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("test"),
+        config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert isinstance(instance, ModalProviderInstance)
+
+    expected_env_name = f"{temp_mngr_ctx.config.prefix}{temp_mngr_ctx.get_profile_user_id()}"
+    if len(expected_env_name) > MODAL_NAME_MAX_LENGTH:
+        expected_env_name = expected_env_name[:MODAL_NAME_MAX_LENGTH]
+    assert instance.environment_name == expected_env_name
+
+    ModalProviderBackend.close_app("env-name-test")
 
 
 def test_build_provider_instance_truncates_long_names(
@@ -1842,8 +1845,9 @@ def test_parse_build_args_unknown_arg_raises(
 
 def test_create_environment(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    _create_environment("test-env", modal)
-    assert "test-env" in modal._environments
+    name = f"{generate_test_environment_name()}-happy-path"
+    _create_environment(name, modal)
+    assert name in modal._environments
 
 
 def test_create_environment_rejects_bad_mngr_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -1854,8 +1858,26 @@ def test_create_environment_rejects_bad_mngr_prefix(tmp_path: Path, cg: Concurre
 
 def test_create_environment_allows_mngr_test_prefix(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
-    _create_environment("mngr_test-good-name", modal)
-    assert "mngr_test-good-name" in modal._environments
+    name = f"{generate_test_environment_name()}-good-name"
+    _create_environment(name, modal)
+    assert name in modal._environments
+
+
+def test_create_environment_rejects_non_test_prefix_during_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Second-line guard: under pytest, reject env names that don't match the
+    mngr_test-YYYY-MM-DD-HH-MM-SS pattern. Protects against in-process mngr
+    spawns that forget MNGR_PREFIX (the earlier guard only catches `mngr_`
+    underscore; this one also catches dash-prefixed default names like
+    `mngr-<uuid>` and any ad-hoc custom name)."""
+    modal = make_testing_modal_interface(tmp_path, cg)
+    # PYTEST_CURRENT_TEST is set by pytest itself; no monkeypatch needed.
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("mngr-abc123", modal)
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("custom-env", modal)
+    # Even a mngr_test- prefix without the timestamp shape fails.
+    with pytest.raises(MngrError, match="during pytest"):
+        _create_environment("mngr_test-not-a-timestamp", modal)
 
 
 def test_lookup_persistent_app_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:

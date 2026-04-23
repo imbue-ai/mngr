@@ -33,7 +33,8 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(6))
+    # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
+    rc.check_time_sleep(_DIR, snapshot(7))
 
 
 def test_prevent_global_keyword() -> None:
@@ -52,7 +53,13 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(3))
+    # Bumped by one for the intentional catch-all wrapping the creation
+    # thread's body in agent_manager._run_creation. The thread runs with
+    # is_checked=False, so any exception that escapes is silently swallowed;
+    # without that catch-all a bug anywhere inside leaves the client's
+    # ChatPanel stuck on "Creating agent..." because proto_agent_completed
+    # never fires. Treat this one as load-bearing rather than sloppy.
+    rc.check_broad_exception_catch(_DIR, snapshot(4))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -67,7 +74,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(8))
+    rc.check_inline_imports(_DIR, snapshot(7))
 
 
 def test_prevent_relative_imports() -> None:
@@ -94,7 +101,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(0))
+    # +1 for service_dispatcher.py's asyncio.gather running the two WS-forward
+    # tasks concurrently. Dropping asyncio here would mean rolling our own
+    # cancellation-aware gather; the spirit of the ratchet is "prefer the
+    # project's concurrency_group for threads/procs", which doesn't apply
+    # to pure asyncio tasks.
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:
@@ -264,6 +276,10 @@ def test_prevent_exit_stack() -> None:
 
 def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(1))
+
+
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 
 
 def test_prevent_bare_urwid_tty_signal_keys() -> None:

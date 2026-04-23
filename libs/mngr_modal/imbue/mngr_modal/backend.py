@@ -1,4 +1,5 @@
 import contextlib
+import os
 from contextlib import AbstractContextManager
 from io import StringIO
 from pathlib import Path
@@ -29,6 +30,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
+from imbue.mngr.utils.testing import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
@@ -50,14 +52,28 @@ STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
 
 
+def truncate_modal_name(name: str, max_length: int) -> str:
+    """Truncate a name to Modal's length limit, stripping trailing separators.
+
+    Shared by the create path (backend) and the test delete path (e2e conftest)
+    so both arrive at the same env name from the same inputs.
+    """
+    if len(name) <= max_length:
+        return name
+    return name[:max_length].rstrip("-_")
+
+
 def _create_environment(environment_name: str, modal_interface: ModalInterface) -> None:
     """Create a Modal environment.
 
     Modal environments must be created before they can be used to scope resources
     like apps, volumes, and sandboxes.
 
-    This function is only called when the environment is known to be missing (after
-    a NotFoundError), so it does not check for existence first.
+    Called from the NotFoundError retry path and does not pre-check for existence.
+    Any failure from ``modal environment create`` -- including a concurrent
+    creation that races and causes an "already exists" response -- is surfaced
+    as a MngrError. Callers should not call this unless they have evidence the
+    environment is missing.
     """
 
     # first a quick check to make sure we're not naming things incorrectly (and making it hard to clean up these environments)
@@ -66,12 +82,29 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
             f"Refusing to create Modal environment with name {environment_name}: test environments should start with 'mngr_test-' and should be explicitly configured using generate_test_environment_name() so that they can be easily identified and cleaned up."
         )
 
+    # Second line of defense: when running under pytest, require the env name to
+    # match the timestamped `mngr_test-YYYY-MM-DD-HH-MM-SS` pattern (same
+    # TEST_ENV_PATTERN used by cleanup_old_modal_test_environments.py and
+    # modal_mngr_ctx). Without this, a test that spawns `mngr` via a non-obvious
+    # code path (e.g. an in-process ConcurrencyGroup.run_process that inherits
+    # os.environ) and forgets to override MNGR_PREFIX would silently create a
+    # default-prefixed env that no CI cleanup script recognizes. The earlier
+    # guard only catches `mngr_` underscore -- this one also catches dash-
+    # prefixed default names like `mngr-<uuid>`.
+    if "PYTEST_CURRENT_TEST" in os.environ and not TEST_ENV_PATTERN.match(environment_name):
+        raise MngrError(
+            f"Refusing to create Modal environment {environment_name!r} during pytest: "
+            "test Modal envs must match the mngr_test-YYYY-MM-DD-HH-MM-SS pattern so the "
+            "CI cleanup script can find them. Set MNGR_PREFIX via "
+            "generate_test_environment_name()."
+        )
+
     with log_span("Creating Modal environment: {}", environment_name):
         try:
             modal_interface.environment_create(environment_name)
             logger.info("Created Modal environment: {}", environment_name)
         except ModalProxyError as e:
-            logger.warning("Failed to create Modal environment: {}", e)
+            raise MngrError(f"Failed to create Modal environment '{environment_name}': {e}") from e
 
 
 def _lookup_persistent_app_with_env_retry(
@@ -443,21 +476,19 @@ Supported build arguments for the modal provider:
         environment_name = f"{prefix}{user_id}"
         default_app_name = f"{prefix}{name}"
 
-        # Truncate environment_name if needed to fit Modal's 64 char limit
         if len(environment_name) > MODAL_NAME_MAX_LENGTH:
             logger.warning(
                 "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
             )
-            environment_name = environment_name[:MODAL_NAME_MAX_LENGTH]
+        environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
 
         app_name = config.app_name if config.app_name is not None else default_app_name
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
 
-        # Truncate app_name if needed to fit Modal's 64 char limit (accounting for volume suffix)
         max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
         if len(app_name) > max_app_name_length:
             logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-            app_name = app_name[:max_app_name_length]
+        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
@@ -484,6 +515,8 @@ Supported build arguments for the modal provider:
                 "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
                 f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
             ) from e
+        except ModalProxyError as e:
+            raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
         return ModalProviderInstance(
             name=name,

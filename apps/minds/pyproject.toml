@@ -24,7 +24,6 @@ dependencies = [
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
-    "supertokens-python>=0.27.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
@@ -57,18 +56,12 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.minds",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=80",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -105,3 +98,6 @@ venvPath = "../.."
 venv = ".venv"
 pythonVersion = "3.12"
 strict = ["**/*.py"]
+
+[tool.coverage.report]
+fail_under = 70

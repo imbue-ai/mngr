@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, dialog, ipcMain, net, shell, app } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, dialog, ipcMain, net, shell, app, session } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -12,6 +12,7 @@ const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
 const SIDEBAR_WIDTH = 260;
 const REQUESTS_PANEL_WIDTH = 320;
+const CONTENT_PARTITION = 'persist:workspace-content';
 
 // -- Per-window bundle registry --
 const bundles = new Set();
@@ -19,7 +20,6 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
-let backendPort = null;
 let workspaceList = []; // [{id, name, account}]
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
@@ -34,7 +34,7 @@ const latestChromeState = {
   requestCount: 0,  // most recent request_count value
 };
 
-let chromeSseAbortRef = { current: null };
+const chromeSseAbortRef = { current: null };
 let chromeSseReconnectTick = 0; // bumped to interrupt the current wait
 
 function getSessionStatePath() {
@@ -47,8 +47,14 @@ function parseWorkspaceId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    const m = parsed.pathname.match(/^\/forwarding\/([^\/]+)(?:\/|$)/);
-    return m ? m[1] : null;
+    // Final workspace URL: `<agent-id>.localhost:PORT/...`
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
+    // state before the subdomain cookie is installed. Recognising it lets
+    // findBundleForWorkspace de-dupe clicks during the redirect window.
+    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
   }
@@ -58,6 +64,14 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
+}
+
+// Build the auth-bridge URL that, when loaded, installs a session cookie on
+// the agent's subdomain and redirects into the workspace's dockview UI.
+// Returns null if the backend hasn't come up yet.
+function workspaceUrlForAgent(agentId) {
+  if (!agentId || !backendBaseUrl) return null;
+  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -174,7 +188,7 @@ function updateBundleBounds(bundle) {
 
 // -- Bundle lifecycle --
 
-function createBundle() {
+function buildBundleWindowOptions() {
   const windowOptions = {
     width: 1200,
     height: 800,
@@ -190,9 +204,10 @@ function createBundle() {
   } else {
     windowOptions.frame = false;
   }
+  return windowOptions;
+}
 
-  const win = new BaseWindow(windowOptions);
-
+function createBundleWebContentsViews(win) {
   const chromeView = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -200,38 +215,20 @@ function createBundle() {
       nodeIntegration: false,
     },
   });
-
   const contentView = new WebContentsView({
     webPreferences: {
+      partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+  return { chromeView, contentView };
+}
 
-  const bundle = {
-    window: win,
-    chromeView,
-    contentView,
-    sidebarView: null,
-    sidebarVisible: false,
-    requestsPanelView: null,
-    requestsPanelVisible: false,
-    requestsPanelReloadTimer: null,
-    currentContentUrl: null,
-    currentWorkspaceId: null,
-    preErrorUrl: null,
-    isErrorState: false,
-    isLoadingState: true,
-    _maximizedByUs: false,
-    _boundsBeforeMaximize: null,
-  };
-  bundles.add(bundle);
-  mruWindows.unshift(bundle);
-
-  updateBundleBounds(bundle);
+function wireBundleWindowEvents(bundle) {
+  const { window: win } = bundle;
 
   win.on('focus', () => {
     const idx = mruWindows.indexOf(bundle);
@@ -276,18 +273,10 @@ function createBundle() {
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
   });
+}
 
-  // Re-push the computed title when chrome finishes (re)loading; the in-window
-  // title bar otherwise has no way to learn its own window's title.
-  chromeView.webContents.on('did-finish-load', () => {
-    updateOsTitle(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
-  });
-
-  wireContentViewEvents(bundle, contentView);
-  registerShortcutsFor(bundle, chromeView.webContents);
-  registerShortcutsFor(bundle, contentView.webContents);
-
+function wireBundleShowLogic(bundle) {
+  const { window: win, chromeView } = bundle;
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
@@ -300,6 +289,46 @@ function createBundle() {
   setTimeout(() => {
     if (!win.isDestroyed() && !win.isVisible()) win.show();
   }, 3000);
+}
+
+function createBundle() {
+  const win = new BaseWindow(buildBundleWindowOptions());
+  const { chromeView, contentView } = createBundleWebContentsViews(win);
+
+  const bundle = {
+    window: win,
+    chromeView,
+    contentView,
+    sidebarView: null,
+    sidebarVisible: false,
+    requestsPanelView: null,
+    requestsPanelVisible: false,
+    requestsPanelReloadTimer: null,
+    currentContentUrl: null,
+    currentWorkspaceId: null,
+    preErrorUrl: null,
+    isErrorState: false,
+    isLoadingState: true,
+    _maximizedByUs: false,
+    _boundsBeforeMaximize: null,
+  };
+  bundles.add(bundle);
+  mruWindows.unshift(bundle);
+
+  updateBundleBounds(bundle);
+  wireBundleWindowEvents(bundle);
+
+  // Re-push the computed title when chrome finishes (re)loading; the in-window
+  // title bar otherwise has no way to learn its own window's title.
+  chromeView.webContents.on('did-finish-load', () => {
+    updateOsTitle(bundle);
+    primeViewWithCachedChromeState(chromeView.webContents);
+  });
+
+  wireContentViewEvents(bundle, contentView);
+  registerShortcutsFor(bundle, chromeView.webContents);
+  registerShortcutsFor(bundle, contentView.webContents);
+  wireBundleShowLogic(bundle);
 
   return bundle;
 }
@@ -368,9 +397,12 @@ function registerShortcutsFor(bundle, wc) {
     if (input.type !== 'keyDown') return;
     const key = input.key ? input.key.toLowerCase() : '';
     const modifier = isMac ? input.meta : input.control;
+    // Match on `input.code` (physical key) rather than `input.key`: on macOS,
+    // holding Option transforms `key` into the Option-composed character
+    // (e.g. 'ˆ' or 'Dead' for Option+I), so `key === 'i'` never matches.
     const devTools =
-      (isMac && input.meta && input.alt && key === 'i') ||
-      (!isMac && input.control && input.shift && key === 'c');
+      (isMac && input.meta && input.alt && input.code === 'KeyI') ||
+      (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
       if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
@@ -556,7 +588,7 @@ function openOrFocusWorkspace(agentId, url) {
     focusBundle(existing);
     return existing;
   }
-  const absolute = toAbsoluteUrl(url || ('/forwarding/' + agentId + '/'));
+  const absolute = toAbsoluteUrl(url || workspaceUrlForAgent(agentId));
   return openNewWindow(absolute);
 }
 
@@ -621,6 +653,7 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
         },
@@ -961,9 +994,65 @@ if (!gotLock) {
   app.whenReady().then(onReady);
 }
 
+// -- Content partition cookie sync --
+// Auth happens in the contentView (which uses CONTENT_PARTITION). The main
+// process SSE and chrome/sidebar views use the default session. We sync
+// minds_session cookies from the content partition to the default session
+// so that chrome-level auth checks work.
+
+function setupContentPartitionCookieSync() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  contentSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    if (cookie.name !== 'minds_session' || removed) return;
+    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
+    const url = `http://${domain}`;
+    session.defaultSession.cookies.set({
+      url,
+      name: cookie.name,
+      value: cookie.value,
+      httpOnly: cookie.httpOnly,
+      path: cookie.path || '/',
+      sameSite: cookie.sameSite || 'lax',
+    }).then(() => {
+      kickChromeSSEReconnect();
+    }).catch((err) => {
+      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
+    });
+  });
+}
+
+async function syncContentCookiesToDefaultSession() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  let cookies;
+  try {
+    cookies = await contentSession.cookies.get({ name: 'minds_session' });
+  } catch (err) {
+    console.warn('[cookie-sync] Failed to read cookies from content partition:', err);
+    return;
+  }
+  for (const cookie of cookies) {
+    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
+    const url = `http://${domain}`;
+    try {
+      await session.defaultSession.cookies.set({
+        url,
+        name: cookie.name,
+        value: cookie.value,
+        httpOnly: cookie.httpOnly,
+        path: cookie.path || '/',
+        sameSite: cookie.sameSite || 'lax',
+      });
+    } catch (err) {
+      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
+    }
+  }
+}
+
 async function onReady() {
   installApplicationMenu();
   installDockMenu();
+  setupContentPartitionCookieSync();
+  await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
   await runStartupSequence(initialBundle);
@@ -1073,8 +1162,10 @@ async function startBackendWithRetry() {
       (event) => handleAuthEvent(event),
     );
 
-    backendBaseUrl = `http://127.0.0.1:${port}`;
-    backendPort = port;
+    // Use `localhost` (not `127.0.0.1`) so the auth cookie, which is issued with
+    // `Domain=localhost`, is valid both here and on every `<agent-id>.localhost`
+    // subdomain the desktop client forwards to.
+    backendBaseUrl = `http://localhost:${port}`;
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
@@ -1199,8 +1290,8 @@ function handleAuthEvent(event) {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
-    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendPort) {
-      const authUrl = `http://127.0.0.1:${backendPort}/auth/login?message=` +
+    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendBaseUrl) {
+      const authUrl = `${backendBaseUrl}/auth/login?message=` +
         encodeURIComponent('You need to sign in to Imbue in order to share');
       mru.contentView.webContents.loadURL(authUrl);
     }
@@ -1268,7 +1359,7 @@ ipcMain.on('open-requests-panel', (event) => {
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
-  openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+  openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
   // The sidebar is the sender for both the hover-icon click and the native
   // context-menu "Open in new window" item; close it now that the action is done.
   const bundle = getBundleFromEvent(event);
@@ -1329,7 +1420,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     items.push({
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, '/forwarding/' + agentId + '/');
+        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
         closeSidebar(bundle);
       },
     });

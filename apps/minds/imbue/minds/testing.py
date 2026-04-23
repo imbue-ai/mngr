@@ -7,6 +7,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
+from imbue.mngr.utils.testing import TEST_ENV_PREFIX
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -87,15 +88,39 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 
 
 def clean_env() -> dict[str, str]:
-    """Build an environment dict for subprocesses that strips pytest markers.
+    """Build an environment dict for subprocesses.
 
-    mngr refuses to run when PYTEST_CURRENT_TEST is set (safety check to
-    prevent tests from accidentally using real mngr state). We strip it
-    so that our end-to-end subprocess calls work against the real system.
+    Returns a copy of os.environ. Relies on the shared plugin test fixtures
+    (registered in apps/minds/conftest.py via register_plugin_test_fixtures)
+    having set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
+    tmp values, so the subprocess inherits proper isolation. With
+    MNGR_ROOT_NAME set to `mngr-test-<id>`, the subprocess does not load
+    the repo's .mngr/settings.toml, so the is_allowed_in_pytest=false
+    guard there does not fire and no explicit opt-in is needed.
+
+    Asserts that the expected isolation is in place so a future test that
+    forgets to register the shared fixtures gets a loud failure instead of
+    a silent orphan-env leak.
     """
-    env = dict(os.environ)
-    env.pop("PYTEST_CURRENT_TEST", None)
-    return env
+    host_dir = os.environ.get("MNGR_HOST_DIR")
+    prefix = os.environ.get("MNGR_PREFIX", "")
+    root_name = os.environ.get("MNGR_ROOT_NAME", "")
+    assert host_dir is not None, (
+        "clean_env() requires MNGR_HOST_DIR to be set -- expected the shared plugin "
+        "test fixtures (register_plugin_test_fixtures in apps/minds/conftest.py) to "
+        "have populated it via the autouse setup_test_mngr_env fixture."
+    )
+    assert prefix.startswith(TEST_ENV_PREFIX), (
+        f"clean_env() requires MNGR_PREFIX to start with {TEST_ENV_PREFIX!r} so any "
+        f"leaked Modal env is visible to the CI cleanup script; got {prefix!r}. The "
+        f"apps/minds/conftest.py override points this at generate_test_environment_name()."
+    )
+    assert root_name.startswith("mngr-test-"), (
+        f"clean_env() requires MNGR_ROOT_NAME to start with 'mngr-test-' so the "
+        f"subprocess mngr does not load the repo's .mngr/settings.toml; got "
+        f"{root_name!r}. The autouse setup_test_mngr_env fixture sets this."
+    )
+    return dict(os.environ)
 
 
 def run_mngr(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

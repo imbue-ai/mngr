@@ -16,7 +16,14 @@ class AgentEventQueues:
     def __init__(self) -> None:
         self._queues: dict[str, list[queue.Queue[dict[str, Any] | None]]] = defaultdict(list)
         self._event_buffers: dict[str, list[dict[str, Any]]] = {}
-        self._lock: threading.Lock = threading.Lock()
+        # Reentrant because a CPython GC cycle during a put_nowait call inside
+        # the locked register() section can finalize an abandoned SSE
+        # event_generator (from an unrelated prior stream), whose `finally`
+        # block calls unregister() on the same thread. The class never calls
+        # its own API directly -- the runtime effectively inserts the
+        # unregister() call mid-register() via a GC finalizer. With a
+        # non-reentrant Lock that indirect re-entrance self-deadlocks.
+        self._lock: threading.RLock = threading.RLock()
         self._shutdown: bool = False
 
     @property

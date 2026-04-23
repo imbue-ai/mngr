@@ -1,7 +1,7 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.templates import render_agent_servers_page
+from imbue.minds.desktop_client.templates import TEMPLATE_DIR
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -11,7 +11,6 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -21,8 +20,8 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/forwarding/{_AGENT_A}/" in html
-    assert f"/forwarding/{_AGENT_B}/" in html
+    assert f"/goto/{_AGENT_A}/" in html
+    assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -37,7 +36,7 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "Discovering agents" in html
     assert "reload" in html
     assert "No projects yet" not in html
-    assert "/forwarding/" not in html
+    assert "/goto/" not in html
 
 
 def test_render_landing_page_includes_restart_workspace_server_button() -> None:
@@ -50,17 +49,22 @@ def test_render_landing_page_includes_restart_workspace_server_button() -> None:
 
 
 def test_render_sidebar_page_includes_stuck_toast_plumbing() -> None:
-    """The sidebar renders a toast stack and listens for workspace_server_status events.
+    """The sidebar renders a toast stack; the JS plumbing that drives it lives
+    in /_static/sidebar.js. Verify the HTML provides the container + script
+    reference, and that sidebar.js carries the event handler + restart POST.
 
     The toast subscribes to the same /_chrome/events stream the sidebar already
     uses, so the detection-to-surface loop is end-to-end via existing SSE.
     """
     html = render_sidebar_page()
     assert 'id="stuck-toast-stack"' in html
-    assert "workspace_server_status" in html
-    assert "renderStuckToasts" in html
-    assert "/api/agents/" in html
-    assert "/restart-workspace-server" in html
+    assert "/_static/sidebar.js" in html
+
+    sidebar_js = (TEMPLATE_DIR.parent / "static" / "sidebar.js").read_text()
+    assert "workspace_server_status" in sidebar_js
+    assert "renderStuckToasts" in sidebar_js
+    assert "/api/agents/" in sidebar_js
+    assert "/restart-workspace-server" in sidebar_js
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
@@ -68,7 +72,12 @@ def test_render_login_redirect_page_contains_redirect_script() -> None:
         one_time_code=OneTimeCode("abc123-secret-82341"),
     )
     assert "window.location.href" in html
-    assert "one_time_code=abc123-secret-82341" in html
+    # The URL is built at runtime with encodeURIComponent, so the code appears
+    # as a JS string literal (via Jinja's `tojson` filter) rather than inlined
+    # into the URL directly.
+    assert "abc123-secret-82341" in html
+    assert "/authenticate?one_time_code=" in html
+    assert "encodeURIComponent" in html
 
 
 def test_render_auth_error_page_shows_error_message() -> None:
@@ -86,48 +95,6 @@ def test_agent_id_rejects_invalid_format() -> None:
 def test_agent_id_accepts_valid_format() -> None:
     agent_id = AgentId("agent-00000000000000000000000000000001")
     assert agent_id == "agent-00000000000000000000000000000001"
-
-
-# -- Agent servers page tests --
-
-
-def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
-    server_names = (ServerName("api"), ServerName("web"))
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert f"/forwarding/{_AGENT_A}/api/" in html
-    assert f"/forwarding/{_AGENT_A}/web/" in html
-    assert "api" in html
-    assert "web" in html
-    assert str(_AGENT_A) in html
-
-
-def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    assert "No servers are currently running" in html
-    assert str(_AGENT_A) in html
-
-
-def test_render_agent_servers_page_has_back_link() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    assert 'href="/"' in html
-    assert "Back to all projects" in html
-
-
-def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
-    server_names = (ServerName("web"), ServerName("terminal"))
-    cf_services = {"web": "web--agent-123--josh.forward.example.com"}
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services)
-    assert "Global" in html
-    assert "web--agent-123--josh.forward.example.com" in html
-    assert "Disable global" in html
-    assert "Enable global" in html
-
-
-def test_render_agent_servers_page_without_cf_services_shows_enable_buttons() -> None:
-    server_names = (ServerName("web"),)
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert "Enable global" in html
-    assert "Global" not in html or "Enable global" in html
 
 
 def test_render_create_form_has_default_values() -> None:
@@ -178,9 +145,14 @@ def test_render_chrome_page_contains_titlebar() -> None:
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
-    """On macOS, the .minds-wc section is hidden (native traffic lights used instead)."""
-    html = render_chrome_page(is_mac=True)
-    assert "display: none" in html
+    """On macOS, the window-controls row carries the 'hidden' Tailwind class
+    so the native traffic lights are used instead."""
+    html_mac = render_chrome_page(is_mac=True)
+    html_other = render_chrome_page(is_mac=False)
+    # The 'hidden' class only appears on the window-controls wrapper in
+    # mac mode; on other platforms the same element is visible.
+    assert 'class="flex hidden"' in html_mac or 'class="flex  hidden"' in html_mac
+    assert 'class="flex hidden"' not in html_other and 'class="flex  hidden"' not in html_other
 
 
 def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
@@ -193,4 +165,6 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
 def test_render_sidebar_page_contains_workspace_list() -> None:
     html = render_sidebar_page()
     assert "sidebar-workspaces" in html
-    assert "EventSource" in html
+    # The interactivity (including the SSE EventSource fallback) now lives
+    # in the external /_static/sidebar.js file; the template should pull it in.
+    assert "/_static/sidebar.js" in html

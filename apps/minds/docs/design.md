@@ -21,11 +21,11 @@ Each workspace is created from a template repository (or local directory). The r
 
 All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template dev` for DEV mode, `--template docker` for LOCAL mode) when running `mngr create`. The template's settings file defines everything the agent needs.
 
-## Data and servers
+## Data and services
 
 Workspaces use space in the host volume (via the agent dir) for persistent data. The structure and format of this data is up to each individual workspace. You can optionally configure them to store their memories in git (but that is less secure, as data would leak out if synced).
 
-Workspaces *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl` -- one line per server -- containing the server name and URL, e.g. `{"server": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different servers (e.g. a "web" UI server and an "api" backend server). Later entries for the same server name override earlier ones. The desktop client reads this via `mngr events <agent-id> servers/events.jsonl` to discover all backends.
+Workspaces *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/services/events.jsonl` -- one line per service -- containing the service name and URL, e.g. `{"service": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different services (e.g. a "web" UI service and an "api" backend service). Later entries for the same service name override earlier ones. The desktop client reads this via `mngr events <agent-id> services/events.jsonl` to discover all backends.
 
 # Desktop client
 
@@ -46,9 +46,9 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-The forwarding URL comes from `MindsConfig.cloudflare_forwarding_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `CLOUDFLARE_FORWARDING_URL` environment variable (env overrides file), with a dev-deployed default baked in. Auth credentials (`CLOUDFLARE_FORWARDING_USERNAME`, `CLOUDFLARE_FORWARDING_SECRET`, `OWNER_EMAIL`) stay environment-variable-only since they are secrets. With any of these set, the desktop client creates a Cloudflare tunnel for each new agent that provides global access to the agent's services with a Google OAuth access policy gated on the owner's email.
+The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
 
-The per-agent servers page shows both local forwarding links and global Cloudflare links, with toggle controls for enabling/disabling global forwarding per service.
+Within each workspace's dockview UI, a Share action per service opens a modal that surfaces the global Cloudflare link and provides toggle controls for enabling/disabling global forwarding per service.
 
 # Command line interface
 

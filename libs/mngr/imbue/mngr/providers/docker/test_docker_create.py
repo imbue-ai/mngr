@@ -8,7 +8,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 pytestmark = [pytest.mark.docker, pytest.mark.acceptance, pytest.mark.rsync]
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(600)
 def test_mngr_create_echo_command_on_docker(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
@@ -24,7 +24,8 @@ def test_mngr_create_echo_command_on_docker(
             "mngr",
             "create",
             agent_name,
-            "echo",
+            "--type",
+            "command",
             "--provider",
             "docker",
             "--no-connect",
@@ -32,11 +33,12 @@ def test_mngr_create_echo_command_on_docker(
             "--from",
             str(temp_source_dir),
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=540,
         env=docker_subprocess_env,
     )
 
@@ -44,7 +46,7 @@ def test_mngr_create_echo_command_on_docker(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(600)
 def test_mngr_create_with_start_args_on_docker(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
@@ -60,7 +62,8 @@ def test_mngr_create_with_start_args_on_docker(
             "mngr",
             "create",
             agent_name,
-            "echo",
+            "--type",
+            "command",
             "--provider",
             "docker",
             "--no-connect",
@@ -72,11 +75,12 @@ def test_mngr_create_with_start_args_on_docker(
             "-s",
             "--memory=2g",
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=540,
         env=docker_subprocess_env,
     )
 
@@ -84,7 +88,7 @@ def test_mngr_create_with_start_args_on_docker(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(600)
 def test_mngr_create_with_tags_on_docker(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
@@ -100,7 +104,8 @@ def test_mngr_create_with_tags_on_docker(
             "mngr",
             "create",
             agent_name,
-            "echo",
+            "--type",
+            "command",
             "--provider",
             "docker",
             "--no-connect",
@@ -110,11 +115,12 @@ def test_mngr_create_with_tags_on_docker(
             "--host-label",
             "env=test",
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=540,
         env=docker_subprocess_env,
     )
 
@@ -122,7 +128,7 @@ def test_mngr_create_with_tags_on_docker(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(600)
 def test_mngr_create_with_dockerfile_on_docker(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
@@ -153,7 +159,8 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "mngr",
             "create",
             agent_name,
-            "echo",
+            "--type",
+            "command",
             "--provider",
             "docker",
             "--no-connect",
@@ -165,11 +172,12 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "-b",
             str(temp_source_dir),
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=540,
         env=docker_subprocess_env,
     )
 
@@ -178,7 +186,7 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
 
 
 @pytest.mark.release
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(900)
 def test_mngr_create_stop_start_destroy_lifecycle(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
@@ -194,7 +202,8 @@ def test_mngr_create_stop_start_destroy_lifecycle(
             "mngr",
             "create",
             agent_name,
-            "generic",
+            "--type",
+            "command",
             "--provider",
             "docker",
             "--no-connect",
@@ -206,7 +215,7 @@ def test_mngr_create_stop_start_destroy_lifecycle(
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=840,
         env=docker_subprocess_env,
     )
     assert create_result.returncode == 0, (
@@ -241,7 +250,7 @@ def test_mngr_create_stop_start_destroy_lifecycle(
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=540,
         env=docker_subprocess_env,
     )
     assert start_result.returncode == 0, (

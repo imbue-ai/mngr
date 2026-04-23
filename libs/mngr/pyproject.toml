@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.4"
+version = "0.2.5"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.12"
 license = "MIT"
@@ -17,12 +17,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "imbue-common==0.1.13",
-    "resource-guards==0.1.3",
+    "imbue-common==0.1.14",
+    "resource-guards==0.1.4",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.13",
+    "concurrency-group==0.1.14",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker because the guard registration module
@@ -64,6 +64,7 @@ imbue-common = { workspace = true }
 concurrency-group = { workspace = true }
 resource-guards = { workspace = true }
 # skitwright is used by e2e tests (not a runtime dependency); resolved via workspace
+# mngr_modal is used by e2e conftest (shared truncate_modal_name); resolved via workspace
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:
@@ -76,18 +77,12 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "-n 4",
-  "--dist=worksteal",
   "--cov=imbue.mngr",
   "--cov-report=term-missing",
-  "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=80",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
-  "--max-worker-restart=0",
-  "-m not acceptance and not release",
   "--slow-tests-to-file",
   "--coverage-to-file",
 ]
@@ -110,6 +105,7 @@ omit = [
 ]
 
 [tool.coverage.report]
+fail_under = 80
 omit = [
   "*_test.py",
   "test_*.py",
@@ -124,6 +120,12 @@ omit = [
   "*/providers/docker/testing.py",
   # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
   "*/minds/*",
+  # These packages are gated individually by their own (lower) fail_under
+  # thresholds; excluding them from the combined report keeps the
+  # combined 80% gate focused on the "main" set of packages and
+  # prevents their lower coverage from dragging the combined mean down.
+  "*/mngr_vps_docker/*",
+  "*/mngr_vultr/*",
 ]
 
 [tool.inline-snapshot]

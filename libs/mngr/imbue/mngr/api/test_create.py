@@ -100,7 +100,7 @@ def test_create_simple_echo_agent(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("echo 'Hello from mngr test' && sleep 365817"),
         )
@@ -134,7 +134,7 @@ def test_create_agent_with_new_host(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("echo 'Created with new host' && sleep 816394"),
         )
@@ -235,40 +235,32 @@ def test_agent_state_is_persisted(
 # =============================================================================
 
 
-@pytest.mark.tmux
-def test_create_agent_with_unknown_type_uses_type_as_command(
+def test_create_agent_with_unknown_type_and_no_command_raises(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that creating an agent with an unknown type uses the type name as the command.
+    """Test that creating an agent with an unknown type and no command raises UserInputError.
 
-    This verifies the documented "Direct command" fallback behavior where an unrecognized
-    agent type (e.g., 'echo') is treated as a command to run.
+    With no registered type and no command_override / config command / agent_args,
+    BaseAgent.assemble_command has nothing to build into a shell command, so it
+    raises UserInputError with a message pointing the user at `--type command`.
     """
-    agent_name = AgentName(f"test-direct-cmd-{int(time.time())}")
-    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+    agent_name = AgentName(f"test-unknown-type-no-cmd-{int(time.time())}")
 
-    with tmux_session_cleanup(session_name):
-        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
+    local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        # Use a custom agent type name that will be treated as a command
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("my-custom-command"),
-            name=agent_name,
-        )
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("my-custom-command"),
+        name=agent_name,
+    )
 
-        result = create(
+    with pytest.raises(UserInputError, match=r"has no command configured"):
+        create(
             source_location=source_location,
             target_host=local_host,
             agent_options=agent_options,
             mngr_ctx=temp_mngr_ctx,
         )
-
-        # The agent should be created successfully
-        assert result.agent.id is not None
-        assert result.host.id is not None
-        # The command should be the agent type name since no explicit command was provided
-        assert result.agent.get_command() == "my-custom-command"
 
 
 # =============================================================================
@@ -872,7 +864,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847291"),
         )
@@ -892,7 +884,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
                 source_location=source_location,
                 target_host=local_host,
                 agent_options=CreateAgentOptions(
-                    agent_type=AgentTypeName("echo"),
+                    agent_type=AgentTypeName("command"),
                     name=agent_name,
                     command=CommandString("sleep 847292"),
                 ),
@@ -924,7 +916,7 @@ def test_create_with_update_flag_updates_existing_agent(
 
         # Step 1: Create the agent normally
         original_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847291"),
             label_options=AgentLabelOptions(labels={"project": "old-project"}),
@@ -945,7 +937,7 @@ def test_create_with_update_flag_updates_existing_agent(
         # Step 3: Call create() with is_update=True and the same agent_id + work_dir
         update_options = CreateAgentOptions(
             agent_id=original_agent_id,
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847292"),
             target_path=original_work_dir,
