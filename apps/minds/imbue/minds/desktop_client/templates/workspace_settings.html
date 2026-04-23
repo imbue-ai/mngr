@@ -85,6 +85,23 @@
       destroyDialog.addEventListener('click', function(e) {
         if (e.target === destroyDialog) destroyDialog.classList.add('hidden');
       });
+      function pollDestroyStatus() {
+        fetch('/api/destroy-agent/' + agentId + '/status')
+          .then(function(resp) { return resp.json(); })
+          .then(function(data) {
+            if (data.status === 'done') {
+              window.location.href = '/';
+            } else if (data.status === 'failed') {
+              destroySpinner.classList.add('hidden');
+              destroyBtn.disabled = false;
+              alert('Failed to destroy: ' + (data.error || 'unknown error'));
+            } else {
+              setTimeout(pollDestroyStatus, 1000);
+            }
+          })
+          .catch(function() { setTimeout(pollDestroyStatus, 1000); });
+      }
+
       destroyConfirmBtn.addEventListener('click', function() {
         destroyDialog.classList.add('hidden');
         destroyBtn.disabled = true;
@@ -92,7 +109,9 @@
         fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
           .then(function(resp) { return resp.json(); })
           .then(function(data) {
-            if (data.status === 'destroying' || data.status === 'done') {
+            if (data.status === 'destroying') {
+              pollDestroyStatus();
+            } else if (data.status === 'done') {
               window.location.href = '/';
             } else {
               destroySpinner.classList.add('hidden');

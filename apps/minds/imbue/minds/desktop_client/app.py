@@ -1106,6 +1106,32 @@ async def _handle_destroy_agent_api(
     )
 
 
+def _handle_destroy_agent_status_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Check destruction status for an agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(
+            status_code=501, content='{"error": "Agent management not configured"}', media_type="application/json"
+        )
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_destruction_info(parsed_id)
+    if info is None:
+        return Response(status_code=404, content='{"error": "Unknown destruction"}', media_type="application/json")
+
+    result: dict[str, object] = {"agent_id": agent_id, "status": str(info.status).lower()}
+    if info.error:
+        result["error"] = info.error
+    return Response(content=json.dumps(result), media_type="application/json")
+
+
 # -- Telegram setup route handlers --
 
 
@@ -1997,6 +2023,7 @@ def create_desktop_client(
 
     # Agent destruction routes
     app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
+    app.get("/api/destroy-agent/{agent_id}/status")(_handle_destroy_agent_status_api)
 
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
