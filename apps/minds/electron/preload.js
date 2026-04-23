@@ -1,23 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Handler registered by the renderer (e.g. the Dockview workspace) to close
-// its "active tab". The main process sends 'close-active-tab-request' with a
-// correlation id and awaits 'close-active-tab-response' on that same id.
-// Responses carry a boolean: true if a tab was closed, false otherwise --
-// main uses that to decide whether to fall back to closing the window.
-let closeActiveTabHandler = null;
-ipcRenderer.on('close-active-tab-request', async (_event, requestId) => {
-  let closed = false;
-  try {
-    if (typeof closeActiveTabHandler === 'function') {
-      closed = !!(await closeActiveTabHandler());
-    }
-  } catch (err) {
-    console.error('close-active-tab handler threw:', err);
-    closed = false;
-  }
-  ipcRenderer.send('close-active-tab-response', requestId, closed);
-});
+// This preload is attached to the chrome-origin views (chromeView,
+// sidebarView, requestsPanelView). The content view uses a narrower
+// preload at content-preload.js -- see that file for rationale.
 
 contextBridge.exposeInMainWorld('minds', {
   // Platform info
@@ -77,11 +62,4 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
-
-  // Close-active-tab hook: the renderer (e.g. DockviewWorkspace) registers
-  // a handler invoked when the user presses cmd+w. The handler should close
-  // the currently focused tab if one exists and return true, else false.
-  setCloseActiveTabHandler: (handler) => {
-    closeActiveTabHandler = typeof handler === 'function' ? handler : null;
-  },
 });

@@ -216,7 +216,10 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      // Narrow preload: only exposes setCloseActiveTabHandler, not the full
+      // window.minds surface that chrome-origin views get. See
+      // content-preload.js for why.
+      preload: path.join(__dirname, 'content-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -693,7 +696,8 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
-          preload: path.join(__dirname, 'preload.js'),
+          // See createBundleWebContentsViews for why content-preload.js.
+          preload: path.join(__dirname, 'content-preload.js'),
           contextIsolation: true,
           nodeIntegration: false,
         },
