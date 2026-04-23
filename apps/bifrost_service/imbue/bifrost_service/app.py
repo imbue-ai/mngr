@@ -247,6 +247,12 @@ class BifrostAdminClient:
                     raise VirtualKeyNotFoundError(key_id)
         if response.status_code >= 400:
             raise BifrostAdminApiError(response.status_code, response.text)
+        # Successful responses may have an empty body (e.g. 204 No Content on
+        # DELETE). Callers that expect a dict re-validate the return value, so
+        # returning None here surfaces unexpected empty bodies as a clear
+        # type-mismatch error instead of a confusing JSONDecodeError.
+        if not response.content:
+            return None
         return response.json()
 
     def create_virtual_key(

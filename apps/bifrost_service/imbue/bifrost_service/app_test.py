@@ -3,9 +3,11 @@
 End-to-end handler behavior is covered in ``test_bifrost_service.py``.
 """
 
+import httpx
 import pytest
 from inline_snapshot import snapshot
 
+from imbue.bifrost_service.app import BifrostAdminClient
 from imbue.bifrost_service.app import BudgetInfo
 from imbue.bifrost_service.app import InvalidKeyNameError
 from imbue.bifrost_service.app import VirtualKeyOwnershipError
@@ -181,3 +183,46 @@ def test_build_bifrost_config_requires_ssl() -> None:
 
     assert config["config_store"]["config"]["ssl_mode"] == {"value": "require"}
     assert config["logs_store"]["config"]["ssl_mode"] == {"value": "require"}
+
+
+# --- BifrostAdminClient.delete_virtual_key / empty-body handling ---
+
+
+def test_delete_virtual_key_accepts_empty_body_response() -> None:
+    """Bifrost's DELETE may return 204 No Content (empty body).
+
+    Regression test: the admin client previously called ``response.json()``
+    unconditionally on non-error responses, which raised ``JSONDecodeError``
+    for a successful 204 and masked the delete as a 500.
+    """
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=204)
+
+    transport = httpx.MockTransport(_handle)
+    client = BifrostAdminClient(base_url="http://bifrost.invalid", admin_token="test")
+    client.client = httpx.Client(
+        base_url="http://bifrost.invalid",
+        headers={"Authorization": "Bearer test"},
+        transport=transport,
+    )
+
+    # Should not raise. A JSONDecodeError here would indicate the regression.
+    client.delete_virtual_key("vk-empty")
+
+
+def test_delete_virtual_key_accepts_empty_body_on_200() -> None:
+    """Some deployments return 200 with an empty body instead of 204."""
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, content=b"")
+
+    transport = httpx.MockTransport(_handle)
+    client = BifrostAdminClient(base_url="http://bifrost.invalid", admin_token="test")
+    client.client = httpx.Client(
+        base_url="http://bifrost.invalid",
+        headers={"Authorization": "Bearer test"},
+        transport=transport,
+    )
+
+    client.delete_virtual_key("vk-empty-200")
