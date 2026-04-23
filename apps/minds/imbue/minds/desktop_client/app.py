@@ -569,6 +569,10 @@ async def _forward_workspace_http(
                 async for chunk in backend_response.aiter_bytes():
                     yield chunk
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+                # Also count mid-stream drops toward the wedge detector so
+                # a server that 200s the initial SSE open and then dies is
+                # still observable.
+                tracker.record_failure(str(agent_id), server_name, type(e).__name__)
                 logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
             finally:
                 await backend_response.aclose()
