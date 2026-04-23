@@ -302,13 +302,7 @@ def _gc_single_host(
                     HostState.CRASHED,
                     HostState.DESTROYED,
                 ):
-                    # Reclaim the underlying VM (destroy_host) rather than just
-                    # wiping mngr's record (delete_host). For STOPPED/CRASHED/
-                    # FAILED hosts the VM is still live on the provider, so
-                    # delete_host on its own leaves it orphaned on disk. For
-                    # already-DESTROYED hosts destroy_host is idempotent --
-                    # the provider's destroy_host invokes limactl_delete /
-                    # equivalent which no-ops on already-gone VMs.
+                    # permanently delete the host's data
                     if not dry_run:
                         # FOLLOWUP: when there are multiple instance of gc running concurrently on different hosts
                         #  there's a risk of getting into a screwy situation here--if we delete this right as
