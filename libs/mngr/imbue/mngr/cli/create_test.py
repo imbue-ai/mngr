@@ -1122,26 +1122,21 @@ def test_apply_host_labels_strips_whitespace(
     assert local_provider.get_host_tags(local_host).get("env") == "prod"
 
 
-def test_apply_host_labels_ignores_entries_without_equals(
+def test_apply_host_labels_raises_on_entries_without_equals(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Labels without '=' are silently dropped (documented current behavior).
+    """Labels without '=' must raise UserInputError.
 
     _parse_target_host raises UserInputError for missing '=' on the new-host
-    branch; _apply_host_labels does not. The CLI layer catches invalid input
-    upstream, so here we only document that the helper tolerates malformed
-    entries rather than crashing.
+    branch. _apply_host_labels mirrors that validation so malformed entries
+    cannot slip through on the existing-host or local-host paths, where
+    _parse_target_host returns early before its own label validator runs.
+    Silently dropping them would hide user mistakes.
     """
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    before_keys = set(local_provider.get_host_tags(local_host).keys())
 
-    _apply_host_labels(local_host, ("no-equals-here", "env=prod"))
-
-    tags = local_provider.get_host_tags(local_host)
-    assert tags.get("env") == "prod"
-    # The malformed entry should not have produced a new key.
-    new_keys = set(tags.keys()) - before_keys
-    assert new_keys == {"env"}
+    with pytest.raises(UserInputError, match="KEY=VALUE"):
+        _apply_host_labels(local_host, ("no-equals-here", "env=prod"))
 
 
 # =============================================================================
