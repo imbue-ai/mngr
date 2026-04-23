@@ -11,9 +11,12 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
+from imbue.minds.desktop_client.agent_creator import _load_lease_info
 from imbue.minds.desktop_client.agent_creator import _load_or_create_leased_host_keypair
 from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _remove_dynamic_host_entry
+from imbue.minds.desktop_client.agent_creator import _remove_lease_info
+from imbue.minds.desktop_client.agent_creator import _save_lease_info
 from imbue.minds.desktop_client.agent_creator import _write_dynamic_host_entry
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
@@ -570,3 +573,29 @@ def test_remove_dynamic_host_entry_noop_for_missing_section(tmp_path: Path) -> N
 
     content = tomllib.loads(hosts_file.read_text())
     assert "host-a" in content
+
+
+# -- _save_lease_info / _load_lease_info / _remove_lease_info tests --
+
+
+def test_save_and_load_lease_info(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    _save_lease_info(tmp_path, agent_id, 42)
+    loaded = _load_lease_info(tmp_path, agent_id)
+    assert loaded == 42
+
+
+def test_load_lease_info_returns_none_for_missing(tmp_path: Path) -> None:
+    result = _load_lease_info(tmp_path, AgentId())
+    assert result is None
+
+
+def test_remove_lease_info_deletes_file(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    _save_lease_info(tmp_path, agent_id, 99)
+    _remove_lease_info(tmp_path, agent_id)
+    assert _load_lease_info(tmp_path, agent_id) is None
+
+
+def test_remove_lease_info_noop_for_missing(tmp_path: Path) -> None:
+    _remove_lease_info(tmp_path, AgentId())
