@@ -33,10 +33,8 @@ command, use the built-in 'command' agent type:
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.
-Source resolution, transfer, git, environment, and provisioning all work
-the same as non-headless create; the agent streams its output to stdout
-and is destroyed when done instead of being connected to. Pass
---transfer=none to run the agent in-place at the source directory.
+The agent streams its output to stdout and is destroyed when done instead
+of being connected to.
 
 For local agents in git repos, mngr creates a git worktree that shares objects
 with your original repository. For remote agents, the repo is transferred
