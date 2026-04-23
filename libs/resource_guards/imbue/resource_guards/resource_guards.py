@@ -456,11 +456,16 @@ def stop_resource_guards() -> None:
     """
     global _owns_guard_plugin, _guard_plugin, _guard_plugin_manager
 
+    # Only the caller that registered the plugin clears its own bookkeeping.
+    # A non-owner stop must leave _owns_guard_plugin / _guard_plugin /
+    # _guard_plugin_manager untouched so the real owner's later stop still
+    # finds the state it needs to unregister the plugin. Mirrors the
+    # _owns_guard_wrapper_dir handling in cleanup_resource_guard_wrappers().
     if _owns_guard_plugin and _guard_plugin is not None and _guard_plugin_manager is not None:
         _guard_plugin_manager.unregister(_guard_plugin)
-    _owns_guard_plugin = False
-    _guard_plugin = None
-    _guard_plugin_manager = None
+        _owns_guard_plugin = False
+        _guard_plugin = None
+        _guard_plugin_manager = None
 
     cleanup_sdk_resource_guards()
     cleanup_resource_guard_wrappers()
