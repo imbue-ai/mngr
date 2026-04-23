@@ -1,10 +1,3 @@
-import json
-import threading
-from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler
-from http.server import HTTPServer
-from typing import Final
-
 import pytest
 
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
@@ -13,58 +6,6 @@ from imbue.minds.desktop_client.host_pool_client import HostPoolEmptyError
 from imbue.minds.desktop_client.host_pool_client import HostPoolError
 from imbue.minds.desktop_client.host_pool_client import LeaseHostResult
 from imbue.minds.errors import MindError
-
-_FAKE_LEASE_RESPONSE: Final[dict[str, object]] = {
-    "host_db_id": 7,
-    "vps_ip": "203.0.113.10",
-    "ssh_port": 22,
-    "ssh_user": "root",
-    "container_ssh_port": 2222,
-    "agent_id": "agent-abc123",
-    "host_id": "host-def456",
-    "version": "v0.1.0",
-}
-
-
-class _FakePoolHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler that returns canned responses for pool endpoints."""
-
-    def do_POST(self) -> None:
-        if self.path == "/hosts/lease":
-            self._respond(200, _FAKE_LEASE_RESPONSE)
-        elif self.path.endswith("/release"):
-            self._respond(200, {"status": "released"})
-        else:
-            self._respond(404, {"error": "not found"})
-
-    def do_GET(self) -> None:
-        if self.path == "/hosts":
-            self._respond(200, [dict(_FAKE_LEASE_RESPONSE, leased_at="2026-01-01T00:00:00Z")])
-        else:
-            self._respond(404, {"error": "not found"})
-
-    def _respond(self, status: int, body: object) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(body).encode())
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
-
-
-@pytest.fixture()
-def fake_pool_server() -> Iterator[HostPoolClient]:
-    """Start a local HTTP server and return a HostPoolClient pointing to it."""
-    server = HTTPServer(("127.0.0.1", 0), _FakePoolHandler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    client = HostPoolClient(
-        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:{}".format(port)),
-    )
-    yield client
-    server.shutdown()
 
 
 def _make_client(url: str = "http://127.0.0.1:1") -> HostPoolClient:
