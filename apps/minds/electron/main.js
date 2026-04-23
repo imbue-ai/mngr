@@ -426,9 +426,15 @@ async function requestCloseActiveTab(cv) {
 
 async function closeActiveTabOrWindow(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const closed = await requestCloseActiveTab(bundle.contentView);
-  if (!closed && !bundle.window.isDestroyed()) {
-    bundle.window.close();
+  // Log-and-swallow so fire-and-forget call sites (keyboard shortcut and
+  // app-menu click handlers) don't surface unhandled promise rejections.
+  try {
+    const closed = await requestCloseActiveTab(bundle.contentView);
+    if (!closed && !bundle.window.isDestroyed()) {
+      bundle.window.close();
+    }
+  } catch (err) {
+    console.error('[close-tab] closeActiveTabOrWindow failed:', err);
   }
 }
 
