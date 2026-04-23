@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Settings: {{ ws_name }}{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
+    <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
+
+    <h2 class="text-sm font-medium text-zinc-600 mb-3">Account</h2>
+    <div id="account-section">
+    {% if current_account %}
+      <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+      {% call ui.notice(variant='warn', extra='my-3') %}
+        Disassociating will remove all sharing (tunnels) for this workspace.
+        You will need to set up sharing again after re-associating.
+      {% endcall %}
+      {{ ui.btn_button('Disassociate', variant='danger', id='disassociate-btn', onclick='submitDisassociate()') }}
+      <span id="disassociate-spinner" class="hidden text-zinc-500 ml-2">Disassociating...</span>
+    {% else %}
+      {% include '_associate.html' %}
+    {% endif %}
+    </div>
+
+    <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Sharing</h2>
+    {% for server in servers %}
+      {% call ui.card_row() %}
+        <span class="font-medium">{{ server }}</span>
+        {{ ui.btn_link('Manage sharing', '/sharing/' ~ agent_id ~ '/' ~ server, variant='secondary') }}
+      {% endcall %}
+    {% else %}
+      <p class="text-zinc-500">No servers discovered for this workspace.</p>
+    {% endfor %}
+
+    {% if telegram_section %}
+      <h2 class="text-sm font-medium text-zinc-600 mt-8 mb-3 pt-5 border-t border-zinc-200">Telegram</h2>
+      {{ telegram_section | safe }}
+    {% endif %}
+
+    <div class="mt-8">
+      <a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a>
+    </div>
+  {% endcall %}
+{% endblock %}
+{% block scripts %}
+  <script>
+    function submitDisassociate() {
+      var btn = document.getElementById('disassociate-btn');
+      var spinner = document.getElementById('disassociate-spinner');
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      var section = document.getElementById('account-section');
+      section.style.opacity = '0.5';
+      section.style.pointerEvents = 'none';
+      fetch('/workspace/{{ agent_id }}/disassociate', { method: 'POST' })
+        .then(function () { window.location.reload(); })
+        .catch(function (err) {
+          alert('Failed: ' + err.message);
+          btn.disabled = false;
+          spinner.classList.add('hidden');
+          section.style.opacity = '1';
+          section.style.pointerEvents = 'auto';
+        });
+    }
+    {% if telegram_js %}
+      {{ telegram_js | safe }}
+    {% endif %}
+  </script>
+{% endblock %}

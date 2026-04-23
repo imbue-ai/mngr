@@ -111,9 +111,14 @@ def test_render_chrome_page_contains_titlebar() -> None:
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
-    """On macOS, the .minds-wc section is hidden (native traffic lights used instead)."""
-    html = render_chrome_page(is_mac=True)
-    assert "display: none" in html
+    """On macOS, the window-controls row carries the 'hidden' Tailwind class
+    so the native traffic lights are used instead."""
+    html_mac = render_chrome_page(is_mac=True)
+    html_other = render_chrome_page(is_mac=False)
+    # The 'hidden' class only appears on the window-controls wrapper in
+    # mac mode; on other platforms the same element is visible.
+    assert 'class="flex hidden"' in html_mac or 'class="flex  hidden"' in html_mac
+    assert 'class="flex hidden"' not in html_other and 'class="flex  hidden"' not in html_other
 
 
 def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
@@ -126,4 +131,6 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
 def test_render_sidebar_page_contains_workspace_list() -> None:
     html = render_sidebar_page()
     assert "sidebar-workspaces" in html
-    assert "EventSource" in html
+    # The interactivity (including the SSE EventSource fallback) now lives
+    # in the external /_static/sidebar.js file; the template should pull it in.
+    assert "/_static/sidebar.js" in html

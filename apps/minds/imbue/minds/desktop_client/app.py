@@ -26,6 +26,7 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from websockets import ClientConnection
 
@@ -1786,6 +1787,15 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Static assets: Tailwind CSS + page-specific JS files. The Tailwind
+    # bundle is built by `just minds-tailwind` and is gitignored; if it is
+    # missing, the mount still works (paths 404) and the server logs a
+    # warning at startup.
+    _static_dir = Path(__file__).resolve().parent / "static"
+    if not (_static_dir / "tailwind.css").exists():
+        logger.warning("Missing static/tailwind.css. Run `just minds-tailwind` from the repo root to generate it.")
+    app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
 
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)

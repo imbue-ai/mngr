@@ -1,0 +1,93 @@
+{#
+  Persistent chrome page: titlebar, browser-mode sidebar/iframe. In Electron
+  the iframe and embedded sidebar are hidden; the content and sidebar are
+  separate native WebContentsViews. All interactivity is in
+  /_static/chrome.js.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Minds</title>
+<link rel="stylesheet" href="/_static/tailwind.css">
+<style>
+  /* Things that can't easily be expressed as Tailwind utilities. */
+  html, body { height: 100%; overflow: hidden; }
+  #minds-titlebar { -webkit-app-region: drag; box-shadow: var(--shadow-seam); }
+  #minds-titlebar button { -webkit-app-region: no-drag; }
+  .minds-user-area { -webkit-app-region: no-drag; }
+</style>
+</head>
+<body class="font-sans antialiased bg-zinc-900"
+      data-is-mac="{{ 'true' if is_mac else 'false' }}"
+      data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}">
+
+<div id="minds-titlebar"
+     class="fixed top-0 left-0 right-0 h-[38px] bg-zinc-900 flex items-center select-none z-[100] border-b border-white/10 px-1 {% if is_mac %}pl-[72px]{% endif %}">
+  <div class="flex gap-0.5">
+    <button id="sidebar-toggle" title="Projects"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+    </button>
+    <button id="home-btn" title="Home"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
+    </button>
+    <button id="back-btn" title="Back"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <button id="forward-btn" title="Forward"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5 active:bg-white/10">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+    </button>
+  </div>
+  <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
+    <span id="title-swatch" class="accent-swatch hidden w-2.5 h-2.5 rounded-sm shrink-0"></span>
+    <span id="page-title" class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+  </div>
+  <div class="relative minds-user-area shrink-0">
+    <button id="user-btn"
+            class="!w-auto !h-auto !inline-block text-zinc-400 cursor-pointer px-2.5 py-1 rounded text-xs font-sans whitespace-nowrap hover:bg-white/5 hover:text-zinc-200"
+            title="Account">Log in</button>
+  </div>
+  <button id="requests-toggle" title="Requests" class="relative bg-transparent border-none text-zinc-400 cursor-pointer w-8 h-7 flex items-center justify-center rounded hover:text-zinc-200 hover:bg-white/5">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <span id="requests-badge" class="hidden absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
+  </button>
+  <div class="flex {% if is_mac %}hidden{% endif %}">
+    <button id="min-btn" title="Minimize"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
+      <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+    </button>
+    <button id="max-btn" title="Maximize"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-white/5 hover:text-zinc-200" style="border-radius: 0;">
+      <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="0.5"/></svg>
+    </button>
+    <button id="close-btn" title="Close"
+            class="bg-transparent border-none text-zinc-400 cursor-pointer w-9 h-[38px] flex items-center justify-center hover:bg-red-600 hover:text-white" style="border-radius: 0;">
+      <svg viewBox="0 0 12 12" class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+    </button>
+  </div>
+</div>
+
+{#
+  Browser-mode sidebar: sits under the titlebar and slides in from the left
+  when toggled. In Electron this is a separate WebContentsView and the JS
+  below hides this element.
+#}
+<div id="sidebar-panel"
+     class="fixed left-0 top-[38px] w-[260px] h-[calc(100%-38px)] bg-zinc-900 z-50 shadow-[4px_0_12px_rgba(0,0,0,0.3)] -translate-x-full transition-transform duration-200 ease-in-out overflow-y-auto border-r border-white/10">
+  <div id="sidebar-workspaces">
+    <div class="px-4 py-6 text-sm text-zinc-400 text-center">No projects</div>
+  </div>
+</div>
+
+<iframe id="content-frame"
+        src="/"
+        class="fixed left-[6px] top-[38px] border-0 rounded-xl bg-zinc-50"
+        style="width: calc(100% - 12px); height: calc(100% - 44px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
+
+<script src="/_static/chrome.js" defer></script>
+</body>
+</html>

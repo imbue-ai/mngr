@@ -1,0 +1,29 @@
+{#
+  Base layout: every page extends this. Provides the <head> (with the Tailwind
+  bundle + design-token overlay from static/_tailwind_input.css), a sensible
+  body scaffold, and two optional blocks:
+
+    title           -- <title> contents. Defaults to "Minds".
+    head            -- extra <head> content (page-specific <link>/<meta>).
+    body_class      -- classes on <body>. Default is the light page surface.
+    body_style      -- inline style on <body>. Used to set --workspace-accent
+                       on in-workspace pages so the top stripe picks up the
+                       deterministic per-project color.
+    content         -- the page body.
+    scripts         -- <script> tags emitted just before </body>. Prefer
+                       <script src="/_static/foo.js"> over inline JS.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{% block title %}Minds{% endblock %}</title>
+  <link rel="stylesheet" href="/_static/tailwind.css">
+  {% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased{% endblock %}"
+      style="{% block body_style %}{% endblock %}">
+  {% block content %}{% endblock %}
+  {% block scripts %}{% endblock %}
+</body>
+</html>

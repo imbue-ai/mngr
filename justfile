@@ -224,3 +224,12 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# Build the Tailwind CSS bundle for the minds desktop client. Installs
+# node deps (including tailwindcss) via pnpm if they're missing, then runs
+# the Tailwind CLI with the minds config. The output file lives in
+# apps/minds/imbue/minds/desktop_client/static/tailwind.css and is gitignored;
+# this recipe exists so the desktop client and its tests have that file
+# available without checking a ~3MB CSS blob into the repo.
+minds-tailwind:
+  cd apps/minds && pnpm install --silent && pnpm run tailwind

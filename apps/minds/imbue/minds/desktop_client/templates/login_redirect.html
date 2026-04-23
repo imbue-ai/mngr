@@ -1,0 +1,14 @@
+{#
+  JS-only redirect to /authenticate. Kept minimal so Chromium's pre-render
+  doesn't consume the one-time code before the user clicks the link.
+#}
+<!DOCTYPE html>
+<html>
+<head><title>Authenticating...</title></head>
+<body>
+<p>Authenticating...</p>
+<script>
+window.location.href = '/authenticate?one_time_code={{ one_time_code }}';
+</script>
+</body>
+</html>

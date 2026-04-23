@@ -1,0 +1,11 @@
+{#
+  Auth-card layout variant of base.html. Center-aligned card on a light page,
+  fixed max width. Children override {% block card_content %}.
+#}
+{% extends 'base.html' %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased flex items-center justify-center min-h-screen p-5{% endblock %}
+{% block content %}
+  <div class="bg-white border border-zinc-200 rounded-xl shadow-sm p-10 {% block card_extra %}max-w-[420px]{% endblock %} w-full">
+    {% block card_content %}{% endblock %}
+  </div>
+{% endblock %}

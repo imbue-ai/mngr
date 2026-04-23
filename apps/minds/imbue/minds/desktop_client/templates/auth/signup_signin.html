@@ -1,0 +1,84 @@
+{% extends 'auth/_auth_base.html' %}
+{% import 'auth/_oauth_icons.html' as icons %}
+{% block title %}{{ title }}{% endblock %}
+{% block card_content %}
+  {% if message %}
+    <div class="text-blue-900 text-sm mb-3 px-3 py-2 bg-blue-50 rounded-md border border-blue-100">{{ message }}</div>
+  {% endif %}
+
+  <div id="signup-tab" class="{% if not default_to_signup %}hidden{% endif %}">
+    <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Create account</h1>
+    <p class="text-zinc-500 mb-6">Sign up to enable sharing</p>
+    <div id="signup-error" class="hidden text-red-600 text-sm mb-3 px-3 py-2 bg-red-50 rounded-md"></div>
+    <form id="signup-form">
+      <div class="mb-4">
+        <label for="signup-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
+        <input type="email" id="signup-email" name="email" required autocomplete="email"
+               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+      </div>
+      <div class="mb-4">
+        <label for="signup-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
+        <input type="password" id="signup-password" name="password" required minlength="8" autocomplete="new-password"
+               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+      </div>
+      <button type="submit" id="signup-btn"
+              class="w-full py-3 rounded-lg bg-zinc-900 text-zinc-50 font-semibold cursor-pointer transition-colors hover:bg-zinc-800 disabled:bg-zinc-400 disabled:cursor-not-allowed">Create account</button>
+    </form>
+    <div class="flex items-center my-5 text-zinc-400 text-xs">
+      <span class="flex-1 border-b border-zinc-200"></span>
+      <span class="px-3">or</span>
+      <span class="flex-1 border-b border-zinc-200"></span>
+    </div>
+    <button data-oauth="google"
+            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50 mb-2">
+      {{ icons.google_svg() }} Continue with Google
+    </button>
+    <button data-oauth="github"
+            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50">
+      {{ icons.github_svg() }} Continue with GitHub
+    </button>
+    <div class="text-center mt-5 text-sm text-zinc-500">
+      Already have an account? <a href="#" data-show-tab="signin" class="text-blue-600 font-medium hover:underline">Sign in</a>
+    </div>
+  </div>
+
+  <div id="signin-tab" class="{% if default_to_signup %}hidden{% endif %}">
+    <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Sign in</h1>
+    <p class="text-zinc-500 mb-6">Sign in to your Imbue account</p>
+    <div id="signin-error" class="hidden text-red-600 text-sm mb-3 px-3 py-2 bg-red-50 rounded-md"></div>
+    <form id="signin-form">
+      <div class="mb-4">
+        <label for="signin-email" class="block text-sm font-medium text-zinc-900 mb-1.5">Email</label>
+        <input type="email" id="signin-email" name="email" required autocomplete="email"
+               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+      </div>
+      <div class="mb-4">
+        <label for="signin-password" class="block text-sm font-medium text-zinc-900 mb-1.5">Password</label>
+        <input type="password" id="signin-password" name="password" required autocomplete="current-password"
+               class="w-full px-3 py-2.5 text-sm rounded-lg border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+      </div>
+      <div class="text-right -mt-2 mb-4"><a href="/auth/forgot-password" class="text-xs text-blue-600 hover:underline">Forgot password?</a></div>
+      <button type="submit" id="signin-btn"
+              class="w-full py-3 rounded-lg bg-zinc-900 text-zinc-50 font-semibold cursor-pointer transition-colors hover:bg-zinc-800 disabled:bg-zinc-400 disabled:cursor-not-allowed">Sign in</button>
+    </form>
+    <div class="flex items-center my-5 text-zinc-400 text-xs">
+      <span class="flex-1 border-b border-zinc-200"></span>
+      <span class="px-3">or</span>
+      <span class="flex-1 border-b border-zinc-200"></span>
+    </div>
+    <button data-oauth="google"
+            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50 mb-2">
+      {{ icons.google_svg() }} Continue with Google
+    </button>
+    <button data-oauth="github"
+            class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-zinc-900 hover:bg-zinc-50">
+      {{ icons.github_svg() }} Continue with GitHub
+    </button>
+    <div class="text-center mt-5 text-sm text-zinc-500">
+      Don't have an account? <a href="#" data-show-tab="signup" class="text-blue-600 font-medium hover:underline">Create one</a>
+    </div>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script src="/_static/auth.js" defer></script>
+{% endblock %}

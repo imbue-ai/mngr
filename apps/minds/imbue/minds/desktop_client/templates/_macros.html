@@ -1,0 +1,94 @@
+{#
+  UI macros. Import with:  {% import '_macros.html' as ui %}
+  Usage:
+    {{ ui.btn_link('Create', '/create', variant='primary') }}
+    {{ ui.btn_submit('Save', form='create-form') }}
+    {% call ui.card() %}...body...{% endcall %}
+#}
+
+{# ---- Button base classes ------------------------------------------------ #}
+
+{% set _BTN_BASE = 'inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap' %}
+
+{% set _BTN_VARIANTS = {
+  'primary':   'bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800',
+  'secondary': 'bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200',
+  'danger':    'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100',
+  'success':   'bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900',
+  'ghost':     'bg-transparent text-zinc-600 border border-transparent hover:bg-zinc-100 hover:text-zinc-900',
+} %}
+
+{% macro _btn_cls(variant, extra='', block=false) -%}
+  {{ _BTN_BASE }} {{ _BTN_VARIANTS[variant] }} {% if block %}w-full{% endif %} {{ extra }}
+{%- endmacro %}
+
+{% macro btn_link(label, href, variant='secondary', extra='', id='', block=false) -%}
+  <a href="{{ href }}" class="{{ _btn_cls(variant, extra, block) }}"
+     {% if id %}id="{{ id }}"{% endif %}>{{ label }}</a>
+{%- endmacro %}
+
+{% macro btn_submit(label, variant='primary', extra='', id='', form='', block=false) -%}
+  <button type="submit" class="{{ _btn_cls(variant, extra, block) }}"
+          {% if id %}id="{{ id }}"{% endif %}
+          {% if form %}form="{{ form }}"{% endif %}>{{ label }}</button>
+{%- endmacro %}
+
+{% macro btn_button(label, variant='secondary', extra='', id='', onclick='', block=false) -%}
+  <button type="button" class="{{ _btn_cls(variant, extra, block) }}"
+          {% if id %}id="{{ id }}"{% endif %}
+          {% if onclick %}onclick="{{ onclick }}"{% endif %}>{{ label }}</button>
+{%- endmacro %}
+
+{# ---- Card -------------------------------------------------------------- #}
+
+{% macro card(extra='') -%}
+  <div class="bg-white border border-zinc-200 rounded-xl shadow-sm p-4 {{ extra }}">
+    {{ caller() }}
+  </div>
+{%- endmacro %}
+
+{# Card with left/right flex row (name + action). #}
+{% macro card_row(extra='') -%}
+  <div class="bg-white border border-zinc-200 rounded-xl shadow-sm p-4 flex items-center justify-between gap-3 {{ extra }}">
+    {{ caller() }}
+  </div>
+{%- endmacro %}
+
+{# ---- Input ------------------------------------------------------------- #}
+
+{% macro text_input(name, value='', placeholder='', type='text', id='', required=false, extra='') -%}
+  <input type="{{ type }}" name="{{ name }}"
+         {% if id %}id="{{ id }}"{% endif %}
+         class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15 {{ extra }}"
+         value="{{ value }}"
+         placeholder="{{ placeholder }}"
+         {% if required %}required{% endif %}>
+{%- endmacro %}
+
+{# ---- Notice boxes ------------------------------------------------------ #}
+
+{% set _NOTICE_VARIANTS = {
+  'info':    'bg-blue-50 text-blue-900 border border-blue-100',
+  'warn':    'bg-amber-50 text-amber-900 border border-amber-200',
+  'success': 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+  'error':   'bg-red-50 text-red-600 border border-red-200',
+} %}
+
+{% macro notice(variant='info', extra='') -%}
+  <div class="px-3 py-2.5 rounded-md text-sm my-2 {{ _NOTICE_VARIANTS[variant] }} {{ extra }}">
+    {{ caller() }}
+  </div>
+{%- endmacro %}
+
+{# ---- Spinner ----------------------------------------------------------- #}
+
+{% macro spinner(size='md', extra='') -%}
+  {% set dim = {'sm': 'w-3.5 h-3.5 border', 'md': 'w-[18px] h-[18px] border-2', 'lg': 'w-8 h-8 border-[3px]'} %}
+  <span class="spinner inline-block align-middle {{ dim[size] }} {{ extra }}" aria-hidden="true"></span>
+{%- endmacro %}
+
+{# ---- Page shell -------------------------------------------------------- #}
+
+{% macro page_container(extra='') -%}
+  <div class="max-w-[720px] mx-auto px-6 py-12 {{ extra }}">{{ caller() }}</div>
+{%- endmacro %}
