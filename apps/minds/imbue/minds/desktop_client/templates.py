@@ -16,50 +16,36 @@ _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(defaul
 
 
 # -- Per-workspace identity color --
-# Each workspace gets a deterministic color from a curated palette. A continuous
-# hue-wheel hash looks fine in isolation but fails for small workspace counts:
-# two random hues often land in the same perceptual bucket (e.g. 326 and 13 are
-# both "warm red" at a glance). The palette below is hand-picked so any two
-# slots are distinguishable by hue AND by lightness/saturation, so adjacent
-# picks still read clearly apart.
+# Each workspace gets a deterministic color derived from a SHA-256 hash of
+# its agent id, mapped into OKLCH with fixed lightness and chroma. OKLCH is
+# perceptually uniform: a 15 degree hue shift looks like the same amount of
+# change at any point on the wheel, which HSL doesn't give (HSL yellows all
+# bunch up, HSL greens sprawl). Fixed L/C keeps every workspace at the same
+# readable mid-tone and the same saturation, so the only axis of variation
+# is the hue itself.
 #
-# Shared with the JS side via the WORKSPACE_PALETTE export, which the chrome
-# and sidebar templates inline so the client never recomputes.
+# The hue is a 32-bit hash mod 360, so collisions only happen if two ids
+# hash to the exact same degree -- effectively never. Callers on the JS
+# side (chrome, sidebar) mirror this function so the client picks the same
+# color the server would have picked.
 
-_WORKSPACE_PALETTE: Final[tuple[str, ...]] = (
-    "hsl(212, 72%, 52%)",  # blue
-    "hsl(8, 75%, 55%)",  # red
-    "hsl(142, 55%, 42%)",  # forest green
-    "hsl(35, 85%, 52%)",  # amber
-    "hsl(280, 55%, 58%)",  # purple
-    "hsl(188, 72%, 42%)",  # teal
-    "hsl(330, 65%, 58%)",  # rose
-    "hsl(95, 50%, 42%)",  # olive
-    "hsl(248, 62%, 62%)",  # indigo
-    "hsl(22, 85%, 50%)",  # orange
-    "hsl(168, 58%, 38%)",  # deep teal
-    "hsl(312, 58%, 52%)",  # magenta
-)
+_WORKSPACE_L: Final[int] = 65  # percent
+_WORKSPACE_C: Final[float] = 0.15
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
-    """Deterministically map an agent id to a CSS color from the workspace palette."""
+    """Deterministically map an agent id to a CSS OKLCH color.
+
+    Uses a fixed lightness and chroma so every workspace accent sits at the
+    same readable mid-tone, and only the hue varies. Full 360 degree hue
+    range means collisions are effectively impossible, and OKLCH's
+    perceptual uniformity means close hashes still read as visibly
+    different colors.
+    """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    idx = int.from_bytes(digest[:4], "big") % len(_WORKSPACE_PALETTE)
-    return _WORKSPACE_PALETTE[idx]
-
-
-@pure
-def workspace_palette_size() -> int:
-    """Size of the workspace color palette (for the JS-side mapping)."""
-    return len(_WORKSPACE_PALETTE)
-
-
-# JS literal for the palette -- emitted into the chrome and sidebar templates
-# so the client picks the same color for a given workspace id that the server
-# would pick. Rendered as a simple array of color strings.
-_WORKSPACE_PALETTE_JS: Final[str] = "[" + ",".join(f'"{c}"' for c in _WORKSPACE_PALETTE) + "]"
+    hue = int.from_bytes(digest[:4], "big") % 360
+    return f"oklch({_WORKSPACE_L}% {_WORKSPACE_C} {hue})"
 
 
 # -- Shared design tokens --
@@ -155,7 +141,7 @@ a:hover { text-decoration: underline; }
 .page-workspace::before {
   content: "";
   position: fixed; top: 0; left: 0; right: 0; height: 3px;
-  background: var(--workspace-accent, hsl(235 60% 55%));
+  background: var(--workspace-accent, oklch(65% 0.15 230));
   z-index: 1000;
 }
 
@@ -273,7 +259,7 @@ code {
   display: inline-block;
   width: 10px; height: 10px;
   border-radius: 2px;
-  background: var(--workspace-accent, hsl(235 60% 55%));
+  background: var(--workspace-accent, oklch(65% 0.15 230));
   vertical-align: middle;
   flex-shrink: 0;
 }
@@ -300,7 +286,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .project-row:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
     .project-row::before {
       content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-      background: var(--workspace-accent, hsl(235 60% 55%));
+      background: var(--workspace-accent, oklch(65% 0.15 230));
     }
     .project-row__name { flex: 1; font-weight: 500; color: var(--text); padding-left: 4px; }
     .project-row__cog {
@@ -323,7 +309,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     <div class="project-list">
       {% for agent_id in agent_ids %}
       <div class="project-row"
-           style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'hsl(235 60% 55%)') }};"
+           style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
            data-agent-id="{{ agent_id }}"
            onclick="window.location='/goto/{{ agent_id }}/'">
         <span class="project-row__name">{{ agent_names.get(agent_id | string, agent_id) }}</span>
@@ -735,7 +721,7 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 }
 .minds-title-swatch {
   display: none; width: 10px; height: 10px; border-radius: 2px;
-  background: var(--workspace-accent, hsl(235 60% 55%));
+  background: var(--workspace-accent, oklch(65% 0.15 230));
   flex-shrink: 0;
 }
 .minds-title-swatch.visible { display: inline-block; }
@@ -787,7 +773,7 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 }
 .sidebar-item::before {
   content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
-  border-radius: 2px; background: var(--workspace-accent, hsl(235 60% 55%));
+  border-radius: 2px; background: var(--workspace-accent, oklch(65% 0.15 230));
   opacity: 0.55;
 }
 .sidebar-item:hover { background: var(--bg-chrome-hover); }
@@ -863,20 +849,15 @@ html, body { overflow: hidden; background: var(--bg-chrome); }
 <script>
 var isElectron = !!window.minds;
 
-// Curated workspace color palette. Must stay in sync with _WORKSPACE_PALETTE
-// in templates.py -- both sides hash the agent id the same way and index into
-// the same array, so the server and client pick identical colors.
-var WORKSPACE_PALETTE = """
-    + _WORKSPACE_PALETTE_JS
-    + """;
-
-// SHA-256 first-4-bytes mod palette-length, matching workspace_accent() in templates.py.
+// Stable agent id -> OKLCH accent. Mirrors workspace_accent() in templates.py:
+// SHA-256 first 4 bytes mod 360 gives the hue; fixed L and C match the
+// Python side so the client and server pick the exact same color.
 async function accentForAgentId(agentId) {
   var enc = new TextEncoder().encode(agentId);
   var digest = await crypto.subtle.digest('SHA-256', enc);
   var view = new DataView(digest);
-  var idx = view.getUint32(0, false) % WORKSPACE_PALETTE.length;
-  return WORKSPACE_PALETTE[idx];
+  var hue = view.getUint32(0, false) % 360;
+  return 'oklch(65% 0.15 ' + hue + ')';
 }
 
 var accentCache = {};
@@ -1132,7 +1113,7 @@ h2.sidebar-heading {
 }
 .sidebar-item::before {
   content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
-  border-radius: 2px; background: var(--workspace-accent, hsl(235 60% 55%));
+  border-radius: 2px; background: var(--workspace-accent, oklch(65% 0.15 230));
   opacity: 0.55;
 }
 .sidebar-item.is-current::before { opacity: 1; }
@@ -1172,18 +1153,14 @@ var currentWorkspaceId = null;
 var lastWorkspaces = [];
 var accentCache = {};
 
-// Curated workspace color palette. Must stay in sync with _WORKSPACE_PALETTE
-// in templates.py.
-var WORKSPACE_PALETTE = """
-    + _WORKSPACE_PALETTE_JS
-    + """;
-
+// Mirrors workspace_accent() in templates.py. See comment there for why
+// OKLCH + fixed L/C + SHA-256-derived hue.
 async function accentForAgentId(agentId) {
   var enc = new TextEncoder().encode(agentId);
   var digest = await crypto.subtle.digest('SHA-256', enc);
   var view = new DataView(digest);
-  var idx = view.getUint32(0, false) % WORKSPACE_PALETTE.length;
-  return WORKSPACE_PALETTE[idx];
+  var hue = view.getUint32(0, false) % 360;
+  return 'oklch(65% 0.15 ' + hue + ')';
 }
 function getAccent(agentId, cb) {
   if (accentCache[agentId] !== undefined) { cb(accentCache[agentId]); return; }
