@@ -363,17 +363,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2.1.116
 
       - name: Run Docker release tests
-        # Retry failed tests once. Some tests in this suite (e.g.
-        # test_gc_machines_destroys_running_docker_host_with_no_agents)
-        # intermittently fail with "SSH protocol banner: Connection reset
-        # by peer" when the dockerd-managed SSH server drops mid-GC -- a
-        # race between the GC worker opening SSH and the container
-        # shutting down. Running `pytest --lf` after the first failure
-        # re-runs only the failed tests and papers over the flake without
-        # pulling in pytest-rerunfailures as a new dep.
-        run: |
-          PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release' \
-            || PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short --last-failed
+        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
 
   # Release tests - runs only on release branch pushes
   test-release:
