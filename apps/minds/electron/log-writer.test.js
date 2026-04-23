@@ -59,7 +59,7 @@ test('successive writes append to the same file', () => {
   const file = path.join(dir, 'electron.jsonl');
   const writer = new LogWriter(file);
   writer.write({ level: 'info', message: 'first', source: 'electron/main' });
-  writer.write({ level: 'warn', message: 'second', source: 'electron/main' });
+  writer.write({ level: 'warning', message: 'second', source: 'electron/main' });
   writer.close();
 
   const lines = readLines(file);
