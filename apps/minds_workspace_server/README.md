@@ -2,8 +2,7 @@
 
 Web chat interface for viewing and interacting with mngr-managed Claude agents.
 
-Shows live conversations from Claude session files in a web UI, with real-time
-updates via Server-Sent Events.
+Shows live conversations from Claude session files in a web UI, with real-time updates via Server-Sent Events.
 
 ## Usage
 
