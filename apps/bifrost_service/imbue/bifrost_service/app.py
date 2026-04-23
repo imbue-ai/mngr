@@ -70,6 +70,11 @@ _BIFROST_ADMIN_BASE = f"http://{_BIFROST_HOST}:{_BIFROST_PORT}"
 _BIFROST_STARTUP_TIMEOUT_SECONDS = 60.0
 _BIFROST_STARTUP_POLL_INTERVAL_SECONDS = 0.25
 
+# Max virtual keys returned per list-keys call. The handler further filters
+# this list by the caller's user prefix, so the effective per-user cap is also
+# 500; revisit if any user ever realistically owns more keys than this.
+_VIRTUAL_KEY_LIST_LIMIT = 500
+
 # Key-name separator. Mirrors ``TUNNEL_NAME_SEP`` in the
 # remote_service_connector: picked so parsing a name into
 # ``(user_prefix, user_choice)`` is unambiguous. Users' names cannot contain
@@ -288,7 +293,7 @@ class BifrostAdminClient:
 
     def list_virtual_keys(self, search: str | None = None) -> list[dict[str, Any]]:
         """List virtual keys, optionally filtered by name search."""
-        params: dict[str, str] = {"limit": "500"}
+        params: dict[str, str] = {"limit": str(_VIRTUAL_KEY_LIST_LIMIT)}
         if search is not None:
             params["search"] = search
         response = self.client.get("/api/governance/virtual-keys", params=params)
