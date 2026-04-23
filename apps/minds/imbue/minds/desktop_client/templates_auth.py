@@ -8,7 +8,7 @@ Shares the Jinja2 ``Environment`` from :mod:`templates` so both modules
 see the same template cache, loader, and autoescape configuration.
 """
 
-from imbue.minds.desktop_client.templates import _JINJA_ENV
+from imbue.minds.desktop_client.templates import JINJA_ENV
 
 
 def render_auth_page(
@@ -17,7 +17,7 @@ def render_auth_page(
 ) -> str:
     """Render the sign-up / sign-in page."""
     title = "Create account" if default_to_signup else "Sign in"
-    return _JINJA_ENV.get_template("auth/signup_signin.html").render(
+    return JINJA_ENV.get_template("auth/signup_signin.html").render(
         title=title,
         default_to_signup=default_to_signup,
         message=message,
@@ -26,17 +26,17 @@ def render_auth_page(
 
 def render_check_email_page(email: str) -> str:
     """Render the 'check your email for verification' page."""
-    return _JINJA_ENV.get_template("auth/check_email.html").render(email=email)
+    return JINJA_ENV.get_template("auth/check_email.html").render(email=email)
 
 
 def render_oauth_close_page(email: str, display_name: str | None = None) -> str:
     """Render the 'you can close this tab' page after OAuth."""
-    return _JINJA_ENV.get_template("auth/oauth_close.html").render(email=email, display_name=display_name)
+    return JINJA_ENV.get_template("auth/oauth_close.html").render(email=email, display_name=display_name)
 
 
 def render_forgot_password_page() -> str:
     """Render the forgot password page."""
-    return _JINJA_ENV.get_template("auth/forgot_password.html").render()
+    return JINJA_ENV.get_template("auth/forgot_password.html").render()
 
 
 def render_settings_page(
@@ -47,7 +47,7 @@ def render_settings_page(
     user_id_prefix: str,
 ) -> str:
     """Render the account settings page."""
-    return _JINJA_ENV.get_template("auth/settings.html").render(
+    return JINJA_ENV.get_template("auth/settings.html").render(
         email=email,
         display_name=display_name,
         user_id=user_id,

@@ -25,7 +25,7 @@ from imbue.mngr.primitives import AgentId
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
-_JINJA_ENV: Final[Environment] = Environment(
+JINJA_ENV: Final[Environment] = Environment(
     loader=FileSystemLoader(str(TEMPLATE_DIR)),
     autoescape=select_autoescape(default_for_string=True, default=True),
 )
@@ -78,7 +78,7 @@ def render_landing_page(
     manager hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
-    template = _JINJA_ENV.get_template("landing.html")
+    template = JINJA_ENV.get_template("landing.html")
     return template.render(
         agent_ids=accessible_agent_ids,
         agent_accents=agent_accents,
@@ -111,7 +111,7 @@ def render_create_form(
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
     effective_branch = branch if branch else _DEFAULT_BRANCH
-    template = _JINJA_ENV.get_template("create.html")
+    template = JINJA_ENV.get_template("create.html")
     return template.render(
         git_url=effective_url,
         agent_name=effective_name,
@@ -135,7 +135,7 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
         "FAILED": "Failed: {}".format(info.error or "unknown error"),
     }
     status_text = status_text_map.get(str(info.status), "Working...")
-    template = _JINJA_ENV.get_template("creating.html")
+    template = JINJA_ENV.get_template("creating.html")
     return template.render(
         agent_id=agent_id,
         status_text=status_text,
@@ -146,19 +146,19 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
 @pure
 def render_login_page() -> str:
     """Render the login prompt page for unauthenticated users."""
-    return _JINJA_ENV.get_template("login.html").render()
+    return JINJA_ENV.get_template("login.html").render()
 
 
 @pure
 def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
-    return _JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
+    return JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
 
 
 @pure
 def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
-    return _JINJA_ENV.get_template("auth_error.html").render(message=message)
+    return JINJA_ENV.get_template("auth_error.html").render(message=message)
 
 
 # -- Chrome (persistent shell) templates --
@@ -178,7 +178,7 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
     """
-    return _JINJA_ENV.get_template("chrome.html").render(
+    return JINJA_ENV.get_template("chrome.html").render(
         is_mac=is_mac,
         is_authenticated=is_authenticated,
         initial_workspaces=initial_workspaces or [],
@@ -193,7 +193,7 @@ def render_sidebar_page() -> str:
     clicking a workspace sends an IPC message via the preload bridge to navigate
     the content WebContentsView.
     """
-    return _JINJA_ENV.get_template("sidebar.html").render()
+    return JINJA_ENV.get_template("sidebar.html").render()
 
 
 # -- Workspace/settings/sharing/accounts --
@@ -214,7 +214,7 @@ def render_sharing_editor(
     account_email: str = "",
 ) -> str:
     """Render the sharing editor page used for both request approval and direct editing."""
-    return _JINJA_ENV.get_template("sharing.html").render(
+    return JINJA_ENV.get_template("sharing.html").render(
         title=title,
         agent_id=agent_id,
         service_name=service_name,
@@ -250,7 +250,7 @@ def render_workspace_settings(
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
-    return _JINJA_ENV.get_template("workspace_settings.html").render(
+    return JINJA_ENV.get_template("workspace_settings.html").render(
         agent_id=agent_id,
         ws_name=ws_name,
         current_account=current_account,
@@ -267,7 +267,7 @@ def render_accounts_page(
     default_account_id: str | None = None,
 ) -> str:
     """Render the manage accounts page."""
-    return _JINJA_ENV.get_template("accounts.html").render(
+    return JINJA_ENV.get_template("accounts.html").render(
         accounts=accounts,
         default_account_id=default_account_id or "",
     )
