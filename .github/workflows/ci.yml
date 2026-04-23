@@ -78,6 +78,19 @@ jobs:
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
           restore-keys: offload-durations-${{ github.ref }}-
 
+      - name: Debug offload checkpoint state
+        run: |
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "Checkpoint commit (git log -m -n1 -- Dockerfile):"
+          git log --format=%H -n 1 --full-history -m -- libs/mngr/imbue/mngr/resources/Dockerfile || echo "none found"
+          echo "Fetching notes..."
+          git fetch origin refs/notes/offload-images:refs/notes/offload-images 2>&1 || echo "fetch failed"
+          echo "Notes list:"
+          git notes --ref=refs/notes/offload-images list 2>&1 || echo "no notes"
+          CKPT=$(git log --format=%H -n 1 --full-history -m -- libs/mngr/imbue/mngr/resources/Dockerfile)
+          echo "Note on checkpoint $CKPT:"
+          git notes --ref=refs/notes/offload-images show "$CKPT" 2>&1 || echo "no note on checkpoint"
+
       - name: Run tests via offload
         id: tests
         run: just test-offload
