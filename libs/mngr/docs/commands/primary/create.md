@@ -26,10 +26,9 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Any command in your
-PATH can also be used as an agent type. Arguments after -- are passed
-directly to the agent command. To run a shell command with spaces or
-metacharacters, use the built-in 'command' agent type:
+The agent type defaults to 'claude' if not specified. Arguments after --
+are passed directly to the agent command. To run an arbitrary shell
+command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,

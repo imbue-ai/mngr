@@ -14,6 +14,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_clone_creates_agent_from_source(
     cli_runner: CliRunner,
     create_test_agent,

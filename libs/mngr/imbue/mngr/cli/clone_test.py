@@ -90,7 +90,8 @@ def test_clone_rejects_from_equals_form(
 def test_reject_source_agent_options_allows_from_after_dd() -> None:
     """--from after -- should not be rejected."""
     ctx = click.Context(clone, info_name="clone")
-    # before_dd=0 means nothing is before --, so --from is after --
+    # before_dd=0 makes the function check args[:0] (empty), so --from is
+    # treated as past the separator and must not raise.
     _reject_source_agent_options(["--from", "x"], ctx, before_dd=0)
 
 

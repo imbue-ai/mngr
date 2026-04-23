@@ -1582,7 +1582,7 @@ def test_create_rejects_update_without_reuse(
     """--update without --reuse should fail with a clear error."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--update", "--type", "true", "--no-connect"],
+        ["my-agent", "--update", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1602,7 +1602,7 @@ def test_create_rejects_positional_and_name_together(
     """Providing both a positional address and --name should fail."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1622,7 +1622,7 @@ def test_create_edit_message_error_not_swallowed(
     """
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect", "--edit-message"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect", "--edit-message"],
         obj=plugin_manager,
     )
 
@@ -1644,11 +1644,13 @@ def test_create_accepts_name_flag_alone(
             "--name",
             "@.local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1675,11 +1677,13 @@ def test_create_provider_flag_sets_provider(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1694,7 +1698,7 @@ def test_create_provider_flag_conflicts_with_address_provider(
     """--provider that conflicts with the address provider should abort."""
     result = cli_runner.invoke(
         create,
-        ["my-agent@.modal", "--provider", "docker", "--type", "true", "--no-connect"],
+        ["my-agent@.modal", "--provider", "docker", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1716,11 +1720,13 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )

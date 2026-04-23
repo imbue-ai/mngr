@@ -1,13 +1,19 @@
 /**
  * SSE connection management for real-time agent events.
  * Connects to the backend's SSE stream and appends new events.
+ *
+ * Streams are keyed by agentId so multiple chat panels can subscribe
+ * independently; each agent gets its own EventSource.
  */
 
 import { apiUrl } from "../base-path";
 import { appendEvents, type TranscriptEvent } from "./Response";
 
-let activeEventSource: EventSource | null = null;
-let activeAgentId: string | null = null;
+const activeStreams = new Map<string, EventSource>();
+// Tombstones for agents whose streams were explicitly closed via
+// disconnectFromStream. Used by pending error-triggered reconnect timeouts
+// to distinguish an intentional shutdown from a transient error.
+const explicitlyDisconnectedAgents = new Set<string>();
 
 export interface StreamingMessage {
   conversationId: string;
@@ -19,14 +25,15 @@ export interface StreamingMessage {
 }
 
 export function connectToStream(agentId: string): void {
-  if (agentId === activeAgentId && activeEventSource !== null) {
+  if (activeStreams.has(agentId)) {
     return;
   }
-  disconnectFromStream();
 
-  activeAgentId = agentId;
+  // A fresh connect supersedes any prior explicit-disconnect tombstone.
+  explicitlyDisconnectedAgents.delete(agentId);
+
   const eventSource = new EventSource(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/stream`));
-  activeEventSource = eventSource;
+  activeStreams.set(agentId, eventSource);
 
   eventSource.onmessage = (messageEvent: MessageEvent) => {
     const event = JSON.parse(messageEvent.data) as TranscriptEvent;
@@ -34,10 +41,16 @@ export function connectToStream(agentId: string): void {
   };
 
   eventSource.onerror = () => {
-    if (eventSource === activeEventSource) {
-      disconnectFromStream();
+    // Close this specific stream and schedule a reconnect. Reconnect is
+    // skipped if another caller already reconnected this agent, or if the
+    // agent was explicitly disconnected (e.g. its panel was unmounted) while
+    // this timeout was pending.
+    if (activeStreams.get(agentId) === eventSource) {
+      eventSource.close();
+      activeStreams.delete(agentId);
       setTimeout(() => {
-        if (activeAgentId === null && agentId) {
+        const wasExplicitlyDisconnected = explicitlyDisconnectedAgents.delete(agentId);
+        if (!wasExplicitlyDisconnected && !activeStreams.has(agentId)) {
           connectToStream(agentId);
         }
       }, 3000);
@@ -45,11 +58,15 @@ export function connectToStream(agentId: string): void {
   };
 }
 
-export function disconnectFromStream(): void {
-  if (activeEventSource !== null) {
-    activeEventSource.close();
-    activeEventSource = null;
-    activeAgentId = null;
+export function disconnectFromStream(agentId: string): void {
+  // Always record the intent, even if no stream is currently active. A
+  // pending error-triggered reconnect timeout for this agent must see the
+  // tombstone so it does not revive the stream.
+  explicitlyDisconnectedAgents.add(agentId);
+  const eventSource = activeStreams.get(agentId);
+  if (eventSource !== undefined) {
+    eventSource.close();
+    activeStreams.delete(agentId);
   }
 }
 
