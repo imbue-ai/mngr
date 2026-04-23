@@ -9,6 +9,7 @@ Callers can poll creation status via get_creation_info() or stream logs
 via get_log_queue().
 """
 
+import json
 import os
 import queue
 import re
@@ -745,28 +746,24 @@ class AgentCreator(MutableModel):
         agent_id: AgentId,
         access_token: str,
     ) -> None:
-        """Background thread that destroys an agent and releases leased resources."""
+        """Background thread that destroys all agents on the same host and releases leased resources."""
         aid = str(agent_id)
         try:
-            with log_span("Destroying agent {}", agent_id):
+            with log_span("Destroying workspace {}", agent_id):
                 # Release leased host first (no-op if not a leased agent)
                 if access_token:
                     self.release_leased_host(agent_id, access_token)
 
-                # Run mngr destroy
-                cg = ConcurrencyGroup(name="mngr-destroy")
-                with cg:
-                    result = cg.run_process_to_completion(
-                        command=[MNGR_BINARY, "destroy", aid, "--yes"],
-                        is_checked_after=False,
-                    )
-                if result.returncode != 0:
-                    logger.warning(
-                        "mngr destroy exited with code {} for {}: {}",
-                        result.returncode,
-                        agent_id,
-                        result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-                    )
+                # Find the host ID for this agent
+                host_id = self._get_host_id_for_agent(agent_id)
+
+                if host_id is not None:
+                    # Destroy all agents on the same host
+                    self._destroy_all_agents_on_host(host_id)
+                else:
+                    # Fallback: destroy just this agent
+                    logger.warning("Could not determine host for agent {}, destroying single agent", agent_id)
+                    self._destroy_single_agent(agent_id)
 
                 with self._lock:
                     self._destroy_statuses[aid] = AgentDestructionStatus.DONE
@@ -776,6 +773,72 @@ class AgentCreator(MutableModel):
             with self._lock:
                 self._destroy_statuses[aid] = AgentDestructionStatus.FAILED
                 self._destroy_errors[aid] = str(e)
+
+    def _get_host_id_for_agent(self, agent_id: AgentId) -> str | None:
+        """Look up the host ID for an agent via ``mngr list``."""
+        cg = ConcurrencyGroup(name="mngr-list-host")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    MNGR_BINARY,
+                    "list",
+                    "--include",
+                    'id == "{}"'.format(agent_id),
+                    "--format",
+                    "json",
+                ],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout)
+            agents = data.get("agents", [])
+            if agents:
+                host = agents[0].get("host", {})
+                return host.get("id")
+        except (json.JSONDecodeError, KeyError, IndexError):
+            pass
+        return None
+
+    def _destroy_all_agents_on_host(self, host_id: str) -> None:
+        """Destroy all agents on the given host via ``mngr destroy -f``."""
+        cg = ConcurrencyGroup(name="mngr-destroy-host")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "bash",
+                    "-c",
+                    "{mngr} list --include 'host.id == \"{host_id}\"' --ids | {mngr} destroy -f -".format(
+                        mngr=MNGR_BINARY,
+                        host_id=host_id,
+                    ),
+                ],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "mngr destroy for host {} exited with code {}: {}",
+                host_id,
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+
+    def _destroy_single_agent(self, agent_id: AgentId) -> None:
+        """Destroy a single agent via ``mngr destroy``."""
+        cg = ConcurrencyGroup(name="mngr-destroy")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[MNGR_BINARY, "destroy", str(agent_id), "--yes"],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "mngr destroy exited with code {} for {}: {}",
+                result.returncode,
+                agent_id,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
 
     def _create_agent_background(
         self,
