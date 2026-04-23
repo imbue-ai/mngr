@@ -825,7 +825,7 @@ class AgentCreator(MutableModel):
                     emit_log=emit_log,
                     lease_result=lease_result,
                 )
-            except Exception:
+            except (MngrCommandError, HostPoolError, ValueError, OSError):
                 self._cleanup_failed_lease(
                     agent_id=agent_id,
                     access_token=access_token,
@@ -917,7 +917,7 @@ class AgentCreator(MutableModel):
                     logger.debug("Released leased host {} during cleanup", host_db_id)
                 else:
                     logger.warning("Failed to release leased host {} during cleanup", host_db_id)
-            except Exception as cleanup_exc:
+            except (HostPoolError, OSError) as cleanup_exc:
                 logger.warning("Error releasing leased host {} during cleanup: {}", host_db_id, cleanup_exc)
 
         try:
