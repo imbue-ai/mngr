@@ -24,7 +24,7 @@ retry_count = 10
 filters = "-m 'flaky and not acceptance and not release'"
 
 [checkpoint]
-build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile", "uv.lock"]
+build_inputs = ["libs/mngr/imbue/mngr/resources/Dockerfile"]
 
 [report]
 output_dir = "test-results"
