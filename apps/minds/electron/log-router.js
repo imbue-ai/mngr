@@ -60,11 +60,19 @@ class LogRouter {
     this._backendPort = port;
     if (this._closed || this._pendingMindRecords.length === 0) return;
     // Drain pending records through the buffer so back-pressure and
-    // flushing behave identically to the steady-state path.
+    // flushing behave identically to the steady-state path. Each enqueue
+    // is guarded for the same reason as in handleConsoleMessage: a
+    // synchronous throw from the buffer must not propagate out of the
+    // logger (this would surface as an unhandled rejection during Electron
+    // startup, where setBackendPort is invoked).
     const pending = this._pendingMindRecords;
     this._pendingMindRecords = [];
     for (const entry of pending) {
-      this._buffer.enqueue(entry.mindId, port, entry.record);
+      try {
+        this._buffer.enqueue(entry.mindId, port, entry.record);
+      } catch {
+        // Intentionally empty: logging must never surface errors to callers.
+      }
     }
   }
 
