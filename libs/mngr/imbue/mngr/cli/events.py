@@ -15,6 +15,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
 
 class EventsCliOptions(CommonCliOptions):
@@ -31,6 +32,7 @@ class EventsCliOptions(CommonCliOptions):
     follow: bool
     tail: int | None
     head: int | None
+    daemonize: bool = False
 
 
 def _write_and_flush_stdout(content: str) -> None:
@@ -77,6 +79,13 @@ def _write_and_flush_stdout(content: str) -> None:
     multiple=True,
     help="CEL expression; events matching any exclude filter are dropped (repeatable).",
 )
+@click.option(
+    "--daemonize/--no-daemonize",
+    default=False,
+    show_default=True,
+    help="When not daemonized (default), exit if the parent process dies. "
+    "Use --daemonize to keep running independently.",
+)
 @add_common_options
 @click.pass_context
 def events(ctx: click.Context, **kwargs: Any) -> None:
@@ -86,6 +95,10 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
         command_class=EventsCliOptions,
         is_format_template_supported=False,
     )
+
+    # Start parent death watcher unless running as a daemon
+    if not opts.daemonize:
+        start_parent_death_watcher(mngr_ctx.concurrency_group)
 
     # Validate mutually exclusive options
     if opts.head is not None and opts.tail is not None:

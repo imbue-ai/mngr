@@ -206,12 +206,19 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_send_message_to_agents_with_include_filter(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that send_message respects include filters."""
+    """Test that send_message respects include filters.
+
+    Locally runs in ~5s. On offload it occasionally exceeds the default 10s
+    pytest-timeout during tmux kill-session cleanup under CI load (the hang
+    is inside loguru's sink during log_span, not in the actual kill). Marked
+    flaky so offload retries rather than the whole sandbox failing.
+    """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 

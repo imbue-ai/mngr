@@ -1,7 +1,6 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -11,7 +10,6 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -21,8 +19,8 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/forwarding/{_AGENT_A}/" in html
-    assert f"/forwarding/{_AGENT_B}/" in html
+    assert f"/goto/{_AGENT_A}/" in html
+    assert f"/goto/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -37,7 +35,7 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "Discovering agents" in html
     assert "reload" in html
     assert "No projects yet" not in html
-    assert "/forwarding/" not in html
+    assert "/goto/" not in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
@@ -63,65 +61,6 @@ def test_agent_id_rejects_invalid_format() -> None:
 def test_agent_id_accepts_valid_format() -> None:
     agent_id = AgentId("agent-00000000000000000000000000000001")
     assert agent_id == "agent-00000000000000000000000000000001"
-
-
-# -- Agent servers page tests --
-
-
-def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
-    server_names = (ServerName("api"), ServerName("web"))
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert f"/forwarding/{_AGENT_A}/api/" in html
-    assert f"/forwarding/{_AGENT_A}/web/" in html
-    assert "api" in html
-    assert "web" in html
-    assert str(_AGENT_A) in html
-
-
-def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    assert "No servers are currently running" in html
-    assert str(_AGENT_A) in html
-
-
-def test_render_agent_servers_page_with_no_servers_does_not_auto_reload() -> None:
-    """The servers-listing page is only reached by explicit user navigation;
-    it should render an honest empty-state snapshot, not a self-healing
-    loader. The loading-until-servers-arrive UX lives in
-    `_handle_agent_default_redirect` (which returns `generate_backend_loading_html`
-    instead of redirecting here on empty).
-    """
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    assert "No servers are currently running" in html
-    # No auto-reload / retry loop on this page. The `toggleGlobal` handler
-    # reloads after a successful enable/disable click but that's not a
-    # timer-driven retry -- no setTimeout/setInterval anywhere.
-    assert "setTimeout" not in html
-    assert "setInterval" not in html
-    assert "sessionStorage" not in html
-
-
-def test_render_agent_servers_page_has_back_link() -> None:
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
-    assert 'href="/"' in html
-    assert "Back to all projects" in html
-
-
-def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
-    server_names = (ServerName("web"), ServerName("terminal"))
-    cf_services = {"web": "web--agent-123--josh.forward.example.com"}
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names, cf_services=cf_services)
-    assert "Global" in html
-    assert "web--agent-123--josh.forward.example.com" in html
-    assert "Disable global" in html
-    assert "Enable global" in html
-
-
-def test_render_agent_servers_page_without_cf_services_shows_enable_buttons() -> None:
-    server_names = (ServerName("web"),)
-    html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert "Enable global" in html
-    assert "Global" not in html or "Enable global" in html
 
 
 def test_render_create_form_has_default_values() -> None:

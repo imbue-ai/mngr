@@ -3,6 +3,7 @@ import html
 import json
 import os
 import queue
+import re
 import shutil
 import socket as socket_module
 from collections.abc import AsyncGenerator
@@ -10,7 +11,9 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import Final
+from urllib.parse import quote
 
 import httpx
 import paramiko
@@ -45,15 +48,12 @@ from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_token
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.proxy import generate_backend_loading_html
-from imbue.minds.desktop_client.proxy import generate_bootstrap_html
-from imbue.minds.desktop_client.proxy import generate_service_worker_js
-from imbue.minds.desktop_client.proxy import rewrite_cookie_path
-from imbue.minds.desktop_client.proxy import rewrite_proxied_html
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
@@ -66,7 +66,6 @@ from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.templates import render_accounts_page
-from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -82,39 +81,12 @@ from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.primitives import ServerName
+from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
-
-
-def _split_backend_url(backend_url: str) -> tuple[str, str]:
-    """Split a backend URL into base URL and stored query string.
-
-    Backend URLs may contain query parameters from URL-arg dispatch
-    (e.g. ``http://127.0.0.1:PORT?arg=chat``). This function separates
-    the base URL from the stored query so the proxy can correctly
-    construct the final URL by combining stored and request query parts.
-    """
-    if "?" in backend_url:
-        base, query = backend_url.split("?", 1)
-        return base, query
-    return backend_url, ""
-
-
-def _build_proxy_url(base_url: str, path: str, *query_parts: str) -> str:
-    """Build a proxy URL from base URL, path, and optional query string parts.
-
-    Combines the base URL with the path, then appends any non-empty
-    query parts joined by ``&``.
-    """
-    url = f"{base_url}/{path}"
-    non_empty = [p for p in query_parts if p]
-    if non_empty:
-        url += f"?{'&'.join(non_empty)}"
-    return url
 
 
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
@@ -272,6 +244,7 @@ def _handle_login(
 
 def _handle_authenticate(
     one_time_code: str,
+    request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
     code = OneTimeCode(one_time_code)
@@ -282,7 +255,12 @@ def _handle_authenticate(
         html = render_auth_error_page(message="This login code is invalid or has already been used.")
         return HTMLResponse(content=html, status_code=403)
 
-    # Set global session cookie
+    # Set a host-only session cookie on the bare origin. We do NOT try to
+    # share the cookie across `<agent-id>.localhost` subdomains via
+    # ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
+    # a public suffix and refuse to send such cookies to subdomains. Each
+    # subdomain gets its own cookie set on first visit, minted via the
+    # ``/goto/{agent_id}/`` auth-bridge redirect below.
     signing_key = auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)
 
@@ -340,505 +318,6 @@ def _handle_landing_page(
     branch = request.query_params.get("branch", "")
     html = render_create_form(git_url=git_url, branch=branch)
     return HTMLResponse(content=html)
-
-
-# Order matters. Each template picks its own server name(s); the names
-# below are the well-known conventions minds knows about. We try them
-# in order and pick the first one the agent actually registered.
-#
-# - "system_interface": minds_workspace_server dashboard -- polished
-#   web UI with chat view, ticket tracker, agent controls. Best
-#   landing for a fresh agent create since it looks like an app.
-# - "agent": ttyd-attached to the agent's tmux session where claude
-#   is running. Raw CLI view; great for power users and debugging,
-#   but overwhelming as the default first-create experience.
-# - "web": per-template free slot for whatever web UI the template
-#   author wants (placeholder in forever-claude-template). Last
-#   resort -- routing here is better than dropping users on the
-#   servers-listing page, but content depends entirely on the
-#   template.
-_DEFAULT_SERVER_PREFERENCE: tuple[str, ...] = ("system_interface", "agent", "web")
-
-
-def _handle_agent_default_redirect(
-    agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    """Redirect to the agent's canonical primary server.
-
-    Picks the first registered server name that matches
-    ``_DEFAULT_SERVER_PREFERENCE`` (currently "system_interface"
-    first -- the workspace-server dashboard; then "agent" --
-    ttyd-attached chat; then "web" -- template's free slot). Falls
-    back to any registered server if none match, and to the
-    servers-listing page if the agent has no servers yet.
-    """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-
-    parsed_id = AgentId(agent_id)
-    known_servers = backend_resolver.list_servers_for_agent(parsed_id)
-    known_server_names = {str(s) for s in known_servers}
-
-    preferred: str | None = None
-    for candidate in _DEFAULT_SERVER_PREFERENCE:
-        if candidate in known_server_names:
-            preferred = candidate
-            break
-
-    if preferred is None:
-        # No preferred server is registered yet. Don't fall back to
-        # `known_servers[0]` -- that would silently land users on whichever
-        # server happened to register first, which is almost always
-        # `terminal` (ttyd registers nearly instantly; `system_interface`
-        # takes longer because it has to boot minds-workspace-server).
-        # Users who just created an agent expect to land on the chat UI,
-        # not a shell.
-        #
-        # Render the shared Loading page instead. It auto-reloads this
-        # same URL, so once the in-VM `app-watcher` propagates the first
-        # preferred-server registration, the next reload promotes to it.
-        # Pass the already-registered non-preferred servers as
-        # `other_servers` so users who DO want a shell (or any other
-        # non-preferred server that's already up) have a clickable
-        # escape hatch at the bottom of the Loading page.
-        return HTMLResponse(
-            content=generate_backend_loading_html(
-                agent_id=parsed_id,
-                other_servers=known_servers,
-            )
-        )
-
-    return Response(status_code=307, headers={"Location": f"/forwarding/{agent_id}/{preferred}/"})
-
-
-async def _handle_agent_servers_page(
-    agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    """Show a listing of all available servers for a given agent."""
-    parsed_id = AgentId(agent_id)
-
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-
-    server_names = backend_resolver.list_servers_for_agent(parsed_id)
-
-    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
-    cf_services: dict[str, str] | None = None
-    if cf_client is not None:
-        cf_services = await asyncio.get_running_loop().run_in_executor(None, cf_client.list_services, parsed_id)
-
-    html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names, cf_services=cf_services)
-    return HTMLResponse(content=html)
-
-
-async def _handle_toggle_global(
-    agent_id: str,
-    server_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    """Toggle global cloudflare forwarding for a specific server on an agent."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    cf_client, error_response = get_cf_client_with_auth(request)
-    if error_response is not None:
-        return error_response
-    assert cf_client is not None
-
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return Response(status_code=400, content='{"error": "Invalid JSON"}', media_type="application/json")
-
-    enabled = body.get("enabled", True)
-    parsed_id = AgentId(agent_id)
-
-    loop = asyncio.get_running_loop()
-    if enabled:
-        parsed_server = ServerName(server_name)
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-        if backend_url is None:
-            return Response(
-                status_code=404,
-                content='{"error": "Server not found locally"}',
-                media_type="application/json",
-            )
-        success = await loop.run_in_executor(None, cf_client.add_service, parsed_id, server_name, backend_url)
-    else:
-        success = await loop.run_in_executor(None, cf_client.remove_service, parsed_id, server_name)
-
-    if success:
-        return Response(content='{"ok": true}', media_type="application/json")
-    return Response(
-        status_code=502,
-        content='{"error": "Cloudflare API call failed"}',
-        media_type="application/json",
-    )
-
-
-async def _forward_http_request(
-    request: Request,
-    backend_url: str,
-    path: str,
-    agent_id: str,
-    server_name: str,
-    http_client: httpx.AsyncClient | None,
-) -> httpx.Response | Response:
-    """Forward an HTTP request to the backend, returning the backend response or an error Response.
-
-    When http_client is not None, uses it instead of the app's default client. This is
-    used for SSH-tunneled connections where the client is configured with UDS transport.
-    """
-    base_url, stored_query = _split_backend_url(backend_url)
-    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    body = await request.body()
-
-    active_http_client = http_client or request.app.state.http_client
-    try:
-        return await active_http_client.request(
-            method=request.method,
-            url=proxy_url,
-            headers=headers,
-            content=body,
-        )
-    except httpx.ConnectError:
-        logger.warning("Backend connection refused for {} server {}", agent_id, server_name)
-        return Response(status_code=502, content="Backend connection refused")
-    except httpx.ReadError:
-        logger.warning("Backend connection lost for {} server {}", agent_id, server_name)
-        return Response(status_code=502, content="Backend connection lost")
-    except httpx.RemoteProtocolError:
-        # Raised when the SSH tunnel accepts the connection but closes it without
-        # sending a response, which happens when the SSH channel-open to the
-        # backend port fails (e.g. uvicorn inside the agent container hasn't
-        # finished binding to its port yet). Returning 502 lets the caller show
-        # the auto-retrying loading page for HTML requests.
-        logger.warning(
-            "Backend disconnected without response for {} server {} (likely still starting up)", agent_id, server_name
-        )
-        return Response(status_code=502, content="Backend disconnected without response")
-    except httpx.TimeoutException:
-        logger.warning("Backend request timed out for {} server {}", agent_id, server_name)
-        return Response(status_code=504, content="Backend request timed out")
-
-
-async def _forward_http_request_streaming(
-    request: Request,
-    backend_url: str,
-    path: str,
-    agent_id: str,
-    server_name: str,
-    http_client: httpx.AsyncClient | None,
-) -> Response:
-    """Forward an HTTP request and stream the response back without buffering.
-
-    Used for SSE (Server-Sent Events) endpoints where the backend sends data
-    incrementally and the client needs to receive it as it arrives.
-    """
-    base_url, stored_query = _split_backend_url(backend_url)
-    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    body = await request.body()
-
-    active_http_client = http_client or request.app.state.http_client
-
-    try:
-        backend_stream = active_http_client.stream(
-            method=request.method,
-            url=proxy_url,
-            headers=headers,
-            content=body,
-        )
-    except httpx.ConnectError:
-        logger.debug("Backend connection refused for {} server {} (streaming)", agent_id, server_name)
-        return Response(status_code=502, content="Backend connection refused")
-
-    async def _stream_generator() -> AsyncGenerator[bytes, None]:
-        try:
-            async with backend_stream as response:
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-        except httpx.ConnectError:
-            logger.debug("Backend connection lost during streaming for {} server {}", agent_id, server_name)
-        except httpx.ReadError:
-            logger.debug("Backend read error during streaming for {} server {}", agent_id, server_name)
-        except httpx.RemoteProtocolError:
-            logger.debug(
-                "Backend disconnected without response during streaming for {} server {}", agent_id, server_name
-            )
-        except httpx.TimeoutException:
-            logger.debug("Backend stream timed out for {} server {}", agent_id, server_name)
-
-    return StreamingResponse(
-        _stream_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-def _build_proxy_response(
-    backend_response: httpx.Response,
-    agent_id: AgentId,
-    server_name: ServerName,
-) -> Response:
-    """Transform a backend httpx response into a FastAPI Response with header/content rewriting."""
-    # Build response headers, dropping hop-by-hop headers
-    resp_headers: dict[str, list[str]] = {}
-    for header_key, header_value in backend_response.headers.multi_items():
-        if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
-            continue
-        if header_key.lower() == "set-cookie":
-            header_value = rewrite_cookie_path(
-                set_cookie_header=header_value,
-                agent_id=agent_id,
-                server_name=server_name,
-            )
-        resp_headers.setdefault(header_key, [])
-        resp_headers[header_key].append(header_value)
-
-    content: str | bytes = backend_response.content
-
-    # Rewrite HTML responses (absolute paths, base tag, WS shim)
-    content_type = backend_response.headers.get("content-type", "")
-    if "text/html" in content_type:
-        html_text = backend_response.text
-        rewritten_html = rewrite_proxied_html(
-            html_content=html_text,
-            agent_id=agent_id,
-            server_name=server_name,
-        )
-        content = rewritten_html.encode()
-
-    response = Response(content=content, status_code=backend_response.status_code)
-    for header_key, header_values in resp_headers.items():
-        for header_value in header_values:
-            response.headers.append(header_key, header_value)
-    return response
-
-
-def _make_loading_html(
-    agent_id: AgentId,
-    server_name: ServerName,
-    backend_resolver: BackendResolverInterface,
-) -> str:
-    """Build loading-page HTML with fallback links to other available servers."""
-    other_servers = tuple(s for s in backend_resolver.list_servers_for_agent(agent_id) if s != server_name)
-    return generate_backend_loading_html(
-        agent_id=agent_id,
-        current_server=server_name,
-        other_servers=other_servers,
-    )
-
-
-async def _handle_proxy_http(
-    agent_id: str,
-    server_name: str,
-    path: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    parsed_id = AgentId(agent_id)
-    parsed_server = ServerName(server_name)
-
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-
-    # Serve the service worker script
-    if path == "__sw.js":
-        return Response(
-            content=generate_service_worker_js(parsed_id, parsed_server),
-            media_type="application/javascript",
-        )
-
-    is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
-
-    backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-    if backend_url is None:
-        # Diagnostics: nothing in the logs today tells us *why* we fell into
-        # the loading page. Surface which agent/server missed and what the
-        # resolver actually knows about.
-        known_servers = backend_resolver.list_servers_for_agent(parsed_id)
-        logger.warning(
-            "Proxy loading-page fallback: agent_id={} server={} not resolvable. known_servers={} path={}",
-            agent_id,
-            server_name,
-            known_servers,
-            path,
-        )
-        # Return immediately instead of holding the connection open.
-        # For HTML-accepting requests, return a loading page that retries
-        # client-side after a short delay. This avoids saturating the
-        # browser's per-origin connection pool (typically 6 for HTTP/1.1)
-        # when a stale tab is pointed at an unavailable backend.
-        request_accept = request.headers.get("accept", "")
-        if "text/html" in request_accept:
-            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
-        return Response(
-            status_code=502,
-            content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
-        )
-
-    assert backend_url is not None
-    resolved_backend_url = backend_url
-
-    # Check if SW is installed via cookie (scoped per server)
-    sw_cookie = request.cookies.get(f"sw_installed_{agent_id}_{server_name}")
-
-    # First HTML navigation without SW -> serve bootstrap
-    if is_navigation and not sw_cookie:
-        return HTMLResponse(generate_bootstrap_html(parsed_id, parsed_server))
-
-    # Determine if this backend needs SSH tunneling (run in executor to avoid blocking event loop
-    # during SSH handshake which can take several seconds)
-    try:
-        tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, request.app, parsed_id, resolved_backend_url, backend_resolver
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.warning("SSH tunnel setup failed for {} server {}: {}", agent_id, server_name, e)
-        if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
-        return Response(status_code=502, content=f"SSH tunnel to remote backend failed: {e}")
-
-    # Check if this request expects a streaming response (SSE).
-    # If Accept includes text/event-stream, use streaming proxy to avoid
-    # buffering the entire response before forwarding.
-    accept_header = request.headers.get("accept", "")
-    is_likely_sse = "text/event-stream" in accept_header or (request.method == "POST" and "api/chat/send" in path)
-
-    if is_likely_sse:
-        return await _forward_http_request_streaming(
-            request=request,
-            backend_url=resolved_backend_url,
-            path=path,
-            agent_id=agent_id,
-            server_name=server_name,
-            http_client=tunnel_client,
-        )
-
-    # Forward request to backend
-    result = await _forward_http_request(
-        request=request,
-        backend_url=resolved_backend_url,
-        path=path,
-        agent_id=agent_id,
-        server_name=server_name,
-        http_client=tunnel_client,
-    )
-
-    # If forwarding returned an error Response (e.g. backend not ready yet),
-    # show the auto-retrying loading page for HTML requests instead of a
-    # dead-end 502 that requires manual reload.
-    if isinstance(result, Response):
-        if result.status_code >= 500 and "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
-        return result
-
-    return _build_proxy_response(
-        backend_response=result,
-        agent_id=parsed_id,
-        server_name=parsed_server,
-    )
-
-
-async def _handle_proxy_websocket(
-    websocket: WebSocket,
-    agent_id: str,
-    server_name: str,
-    path: str,
-    auth_store: AuthStoreInterface,
-    backend_resolver: BackendResolverInterface,
-    tunnel_manager: SSHTunnelManager | None,
-) -> None:
-    parsed_id = AgentId(agent_id)
-    parsed_server = ServerName(server_name)
-
-    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
-        await websocket.close(code=4003, reason="Not authenticated")
-        return
-
-    backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-    if backend_url is None:
-        await websocket.close(code=4004, reason=f"Unknown server: {agent_id}/{server_name}")
-        return
-
-    base_url, stored_query = _split_backend_url(backend_url)
-    ws_backend = base_url.replace("http://", "ws://").replace("https://", "wss://")
-    ws_url = _build_proxy_url(ws_backend, path, stored_query, websocket.url.query)
-
-    # Forward subprotocols from the client to the backend so that
-    # protocol-specific servers (e.g. ttyd which requires "tty") work correctly.
-    client_subprotocol_header = websocket.headers.get("sec-websocket-protocol")
-    subprotocols: list[str] = []
-    if client_subprotocol_header:
-        subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
-
-    # Check if this backend needs SSH tunneling (run in executor to avoid blocking event loop)
-    try:
-        tunnel_socket_path = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_socket_path, tunnel_manager, parsed_id, backend_url, backend_resolver
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.debug("SSH tunnel setup failed for WS {}/{}: {}", agent_id, server_name, e)
-        try:
-            await websocket.close(code=1011, reason="SSH tunnel to remote backend failed")
-        except RuntimeError:
-            logger.trace("WebSocket already closed when trying to send tunnel error for {}", agent_id)
-        return
-
-    try:
-        backend_ws_conn = _connect_backend_websocket(
-            ws_url=ws_url,
-            subprotocols=subprotocols,
-            tunnel_socket_path=tunnel_socket_path,
-        )
-        async with backend_ws_conn as backend_ws:
-            # Accept the client connection with the subprotocol the backend agreed on
-            await websocket.accept(subprotocol=backend_ws.subprotocol)
-
-            await asyncio.gather(
-                _forward_client_to_backend(
-                    client_websocket=websocket,
-                    backend_ws=backend_ws,
-                ),
-                _forward_backend_to_client(
-                    client_websocket=websocket,
-                    backend_ws=backend_ws,
-                    agent_id=parsed_id,
-                ),
-            )
-
-    except (ConnectionRefusedError, OSError, TimeoutError, SSHTunnelError, paramiko.SSHException) as connection_error:
-        logger.debug(
-            "Backend WebSocket connection failed for {}/{}: {}",
-            agent_id,
-            server_name,
-            connection_error,
-        )
-        try:
-            await websocket.close(code=1011, reason="Backend connection failed")
-        except RuntimeError:
-            logger.trace("WebSocket already closed when trying to send error for {}", agent_id)
 
 
 def _connect_backend_websocket(
@@ -913,6 +392,319 @@ def _get_tunnel_http_client(
         follow_redirects=False,
         timeout=_PROXY_TIMEOUT_SECONDS,
     )
+
+
+# -- Auth bridge: bare origin -> per-subdomain session cookie --
+
+
+def _handle_goto_workspace(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Redirect an authenticated user from the bare origin to a workspace subdomain,
+    carrying a short-lived signed token that sets the subdomain's session cookie
+    on first landing.
+
+    Flow:
+      1. Landing page click fetches ``/goto/<agent-id>/``.
+      2. This handler verifies the bare-origin session cookie (fails back to
+         ``/`` for unauth users).
+      3. Mints a short-lived token and 302s to
+         ``http://<agent-id>.localhost:PORT/_subdomain_auth?token=...&next=/``.
+      4. The subdomain's ``/_subdomain_auth`` handler sets the subdomain cookie.
+
+    We route through this bridge because ``Domain=localhost`` cookies don't
+    cross from ``localhost`` into ``<agent>.localhost`` (public-suffix rule).
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=302, headers={"Location": "/"})
+
+    try:
+        parsed_id = AgentId(agent_id)
+    except ValueError:
+        return Response(status_code=404)
+
+    signing_key = auth_store.get_signing_key()
+    token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
+
+    # Preserve the user's desired landing path on the subdomain.
+    next_url = request.query_params.get("next", "/")
+    if not next_url.startswith("/"):
+        next_url = "/"
+
+    host_header = request.headers.get("host", "")
+    port = host_header.split(":")[-1] if ":" in host_header else str(request.app.state.auth_server_port or 8420)
+
+    encoded_next = quote(next_url, safe="")
+    location = f"http://{parsed_id}.localhost:{port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+    return Response(status_code=302, headers={"Location": location})
+
+
+# -- Subdomain forwarding to per-workspace minds_workspace_server --
+
+_WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(agent-[a-f0-9]+)\.(?:localhost|127\.0\.0\.1)(?::\d+)?$",
+    re.IGNORECASE,
+)
+_WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
+
+
+def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
+    """Return the agent ID if ``host_header`` is ``<agent-id>.localhost(:port)``.
+
+    Returns None for bare ``localhost``, ``127.0.0.1``, or unparseable values;
+    those requests are served by the desktop client's own routes.
+    """
+    if not host_header:
+        return None
+    match = _WORKSPACE_SUBDOMAIN_PATTERN.match(host_header)
+    if match is None:
+        return None
+    try:
+        return AgentId(match.group(1))
+    except ValueError:
+        return None
+
+
+def _unauthenticated_subdomain_response(request: Request) -> Response:
+    """Redirect to the bare-origin landing page for HTML navigations; 403 otherwise.
+
+    The landing page (``/``) renders the login prompt for unauthenticated
+    users. We deliberately do not redirect to ``/login`` because that route
+    requires a ``one_time_code`` query parameter -- sending a browser there
+    without one yields a 422 validation error. Users get their OTP from the
+    terminal output of the desktop client, not from this redirect.
+    """
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        auth_port = request.app.state.auth_server_port or 8420
+        location = f"http://localhost:{auth_port}/"
+        return Response(status_code=302, headers={"Location": location})
+    return Response(status_code=403, content="Not authenticated")
+
+
+async def _forward_workspace_http(
+    request: Request,
+    workspace_backend_url: str,
+    http_client: httpx.AsyncClient,
+) -> Response:
+    """Byte-forward an HTTP request to a workspace_server URL.
+
+    Streams SSE responses (detected by the client's ``accept: text/event-stream``),
+    buffers everything else. Does NOT rewrite body or headers: the workspace_server
+    already emits /service/<name>/ prefixed URLs, scoped cookies, and the SW shim.
+    """
+    base = workspace_backend_url.rstrip("/")
+    path = request.url.path.lstrip("/")
+    url = f"{base}/{path}" if path else base + "/"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    body = await request.body()
+
+    accept = request.headers.get("accept", "")
+    is_likely_sse = "text/event-stream" in accept
+
+    if is_likely_sse:
+        backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
+        try:
+            backend_response = await http_client.send(backend_request, stream=True)
+        except httpx.ConnectError:
+            return Response(status_code=502, content="Workspace server connection refused")
+        except httpx.TimeoutException:
+            return Response(status_code=504, content="Workspace server stream timed out")
+
+        async def _stream() -> AsyncGenerator[bytes, None]:
+            try:
+                async for chunk in backend_response.aiter_bytes():
+                    yield chunk
+            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+                logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
+            finally:
+                await backend_response.aclose()
+
+        media_type = backend_response.headers.get("content-type", "text/event-stream")
+        return StreamingResponse(
+            _stream(),
+            status_code=backend_response.status_code,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    try:
+        backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
+    except httpx.ConnectError:
+        return Response(status_code=502, content="Workspace server connection refused")
+    except httpx.ReadError:
+        return Response(status_code=502, content="Workspace server connection lost")
+    except httpx.RemoteProtocolError:
+        return Response(status_code=502, content="Workspace server disconnected without response")
+    except httpx.TimeoutException:
+        return Response(status_code=504, content="Workspace server timed out")
+
+    response = Response(content=backend_response.content, status_code=backend_response.status_code)
+    for header_key, header_value in backend_response.headers.multi_items():
+        if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
+            continue
+        response.headers.append(header_key, header_value)
+    return response
+
+
+_SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
+
+
+def _handle_subdomain_auth_bridge(request: Request, agent_id: AgentId) -> Response:
+    """Validate an inbound ``/_subdomain_auth`` token and set a subdomain cookie.
+
+    The bare-origin ``/goto/{agent_id}/`` handler mints a short-lived signed
+    token and redirects the browser to ``http://<agent_id>.localhost:PORT/
+    _subdomain_auth?token=...&next=/...``. That's this handler. We verify the
+    token was issued for this specific agent, then set a host-only session
+    cookie on the subdomain and redirect to ``next``. Subsequent requests on
+    this subdomain carry the cookie and pass the normal auth check.
+
+    We do this dance because ``Domain=localhost`` cookies don't propagate to
+    subdomains in Chromium / curl (localhost is treated as a public suffix).
+    """
+    auth_store: AuthStoreInterface = request.app.state.auth_store
+    token = request.query_params.get("token", "")
+    next_url = request.query_params.get("next", "/")
+    if not next_url.startswith("/"):
+        next_url = "/"
+    signing_key = auth_store.get_signing_key()
+    if not verify_subdomain_auth_token(token=token, signing_key=signing_key, agent_id=str(agent_id)):
+        return Response(status_code=403, content="Invalid or expired subdomain auth token")
+
+    cookie_value = create_session_cookie(signing_key=signing_key)
+    response = Response(status_code=302, headers={"Location": next_url})
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=cookie_value,
+        path="/",
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+async def _handle_workspace_forward_http(request: Request) -> Response:
+    """Forward an HTTP request arriving at ``<agent-id>.localhost:8420`` to that
+    workspace's minds_workspace_server. Called from subdomain-routing middleware.
+    """
+    host_header = request.headers.get("host", "")
+    agent_id = _parse_workspace_subdomain(host_header)
+    if agent_id is None:
+        return Response(status_code=404)
+
+    # Auth-bridge: /_subdomain_auth?token=... sets the subdomain cookie. It
+    # must be handled BEFORE the auth check because there's no cookie yet.
+    if request.url.path == _SUBDOMAIN_AUTH_PATH:
+        return _handle_subdomain_auth_bridge(request, agent_id)
+
+    auth_store: AuthStoreInterface = request.app.state.auth_store
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _unauthenticated_subdomain_response(request)
+
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if agent_id not in backend_resolver.list_known_workspace_ids():
+        return Response(status_code=404, content=f"Unknown workspace: {agent_id}")
+
+    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    if workspace_url is None:
+        if "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(content="<p>Workspace server not yet available. Retrying...</p>")
+        return Response(status_code=503, content="Workspace server not yet available")
+
+    try:
+        tunnel_client = await asyncio.get_running_loop().run_in_executor(
+            None, _get_tunnel_http_client, request.app, agent_id, workspace_url, backend_resolver
+        )
+    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
+        return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
+
+    active_client = tunnel_client or request.app.state.http_client
+    return await _forward_workspace_http(
+        request=request, workspace_backend_url=workspace_url, http_client=active_client
+    )
+
+
+async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
+    """Forward a WebSocket upgrade arriving at ``<agent-id>.localhost:8420`` to the
+    workspace's minds_workspace_server. Auth still honored via the session cookie.
+    """
+    host_header = websocket.headers.get("host", "")
+    agent_id = _parse_workspace_subdomain(host_header)
+    if agent_id is None:
+        await websocket.close(code=4004, reason="Unknown host")
+        return
+
+    auth_store: AuthStoreInterface = websocket.app.state.auth_store
+    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
+        await websocket.close(code=4003, reason="Not authenticated")
+        return
+
+    backend_resolver: BackendResolverInterface = websocket.app.state.backend_resolver
+    if agent_id not in backend_resolver.list_known_workspace_ids():
+        await websocket.close(code=4004, reason=f"Unknown workspace: {agent_id}")
+        return
+
+    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    if workspace_url is None:
+        await websocket.close(code=1013, reason="Workspace server not yet available")
+        return
+
+    try:
+        tunnel_socket_path = await asyncio.get_running_loop().run_in_executor(
+            None,
+            _get_tunnel_socket_path,
+            websocket.app.state.tunnel_manager,
+            agent_id,
+            workspace_url,
+            backend_resolver,
+        )
+    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
+        try:
+            await websocket.close(code=1011, reason="SSH tunnel failed")
+        except RuntimeError:
+            pass
+        return
+
+    ws_backend = workspace_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
+    path = websocket.url.path.lstrip("/")
+    ws_url = f"{ws_backend}/{path}" if path else ws_backend + "/"
+    if websocket.url.query:
+        ws_url = f"{ws_url}?{websocket.url.query}"
+
+    client_subprotocol_header = websocket.headers.get("sec-websocket-protocol")
+    subprotocols: list[str] = []
+    if client_subprotocol_header:
+        subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
+
+    try:
+        backend_ws_conn = _connect_backend_websocket(
+            ws_url=ws_url, subprotocols=subprotocols, tunnel_socket_path=tunnel_socket_path
+        )
+        async with backend_ws_conn as backend_ws:
+            await websocket.accept(subprotocol=backend_ws.subprotocol)
+            await asyncio.gather(
+                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
+                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id),
+            )
+    except (ConnectionRefusedError, OSError, TimeoutError, SSHTunnelError, paramiko.SSHException) as connection_error:
+        logger.debug("Backend WebSocket connection failed for workspace {}: {}", agent_id, connection_error)
+        try:
+            await websocket.close(code=1011, reason="Backend connection failed")
+        except RuntimeError:
+            pass
 
 
 # -- Agent creation route handlers --
@@ -1447,7 +1239,7 @@ def _handle_workspace_settings(
         info = backend_resolver.get_agent_display_info(AgentId(agent_id))
         ws_name = info.agent_name if info else agent_id
 
-    servers = [str(s) for s in backend_resolver.list_servers_for_agent(AgentId(agent_id))]
+    servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
 
     # Telegram section
     telegram_section = ""
@@ -1581,7 +1373,7 @@ async def _handle_workspace_delete(
     #    was working on so the source template's git repo doesn't
     #    accumulate branches.
     destroy_cmd = [
-        MNGR_BINARY,
+        request.app.state.mngr_binary,
         "destroy",
         agent_id,
         "--force",
@@ -1640,7 +1432,7 @@ def _handle_requests_panel(
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     for req in pending:
-        server_name = req.server_name if isinstance(req, SharingRequestEvent) else ""
+        service_name = req.service_name if isinstance(req, SharingRequestEvent) else ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
@@ -1658,7 +1450,7 @@ def _handle_requests_panel(
         cards.append(
             f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{server_name}</div></div>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{service_name}</div></div>'
         )
 
     html_content = (
@@ -1749,7 +1541,7 @@ def _handle_request_page(
         return HTMLResponse(content="<p>Request not found</p>", status_code=404)
 
     is_sharing = isinstance(req_event, SharingRequestEvent)
-    server_name = req_event.server_name if is_sharing else ""
+    service_name = req_event.service_name if is_sharing else ""
     emails: list[str] = []
     if is_sharing:
         emails.extend(req_event.suggested_emails)
@@ -1763,8 +1555,8 @@ def _handle_request_page(
 
     html = render_sharing_editor(
         agent_id=req_event.agent_id,
-        server_name=server_name,
-        title=f"Sharing Request: {server_name}",
+        service_name=service_name,
+        title=f"Sharing Request: {service_name}",
         initial_emails=emails,
         is_request=True,
         request_id=request_id,
@@ -1779,7 +1571,7 @@ def _handle_request_page(
 
 def _handle_sharing_page(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
@@ -1796,12 +1588,12 @@ def _handle_sharing_page(
 
     html = render_sharing_editor(
         agent_id=agent_id,
-        server_name=server_name,
-        title=f"Sharing: {server_name}",
+        service_name=service_name,
+        title=f"Sharing: {service_name}",
         is_request=False,
         has_account=has_account,
         accounts=accounts,
-        redirect_url=f"/sharing/{agent_id}/{server_name}",
+        redirect_url=f"/sharing/{agent_id}/{service_name}",
         ws_name=ws_name,
         account_email=account_email,
     )
@@ -1810,7 +1602,7 @@ def _handle_sharing_page(
 
 async def _handle_sharing_enable(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
@@ -1830,8 +1622,8 @@ async def _handle_sharing_enable(
     cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if cf_client is not None:
         parsed_id = AgentId(agent_id)
-        parsed_server = ServerName(server_name)
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        parsed_service = ServiceName(service_name)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
         if backend_url:
             paths: WorkspacePaths = request.app.state.api_v1_paths
             stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
@@ -1840,38 +1632,38 @@ async def _handle_sharing_enable(
                 if token:
                     _save_tunnel_token(paths.data_dir, parsed_id, token)
                     inject_tunnel_token_into_agent(parsed_id, token)
-            cf_client.add_service(parsed_id, parsed_server, backend_url)
+            cf_client.add_service(parsed_id, parsed_service, backend_url)
             sharing_succeeded = True
             # Apply auth rules if emails were provided
             if emails:
                 rules: list[dict[str, object]] = [
                     {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
                 ]
-                cf_client.set_service_auth(parsed_id, str(parsed_server), rules)
+                cf_client.set_service_auth(parsed_id, str(parsed_service), rules)
 
     # If there's a pending request for this agent/server, mark it as granted only if sharing succeeded
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is not None and sharing_succeeded:
         for req in inbox.get_pending_requests():
-            if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.server_name == server_name:
+            if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.service_name == service_name:
                 paths = request.app.state.api_v1_paths
                 response_event = create_request_response_event(
                     request_event_id=str(req.event_id),
                     status=RequestStatus.GRANTED,
                     agent_id=agent_id,
                     request_type=req.request_type,
-                    server_name=server_name,
+                    service_name=service_name,
                 )
                 append_response_event(paths.data_dir, response_event)
                 request.app.state.request_inbox = inbox.add_response(response_event)
                 break
 
-    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{server_name}"})
+    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
 async def _handle_sharing_disable(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
@@ -1881,14 +1673,14 @@ async def _handle_sharing_disable(
 
     cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
     if cf_client is not None:
-        cf_client.remove_service(AgentId(agent_id), server_name)
+        cf_client.remove_service(AgentId(agent_id), service_name)
 
-    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{server_name}"})
+    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
 def _handle_sharing_status_api(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
@@ -1917,9 +1709,9 @@ def _handle_sharing_status_api(
             media_type="application/json",
         )
 
-    hostname = services.get(server_name)
+    hostname = services.get(service_name)
     if hostname:
-        auth_rules = cf_client.get_service_auth(parsed_id, server_name)
+        auth_rules = cf_client.get_service_auth(parsed_id, service_name)
         if auth_rules is None:
             auth_rules = cf_client.get_tunnel_auth(parsed_id) or []
         return Response(
@@ -1952,7 +1744,7 @@ async def _handle_request_grant(
 
     if isinstance(req_event, SharingRequestEvent):
         return await _handle_sharing_enable(
-            req_event.agent_id, req_event.server_name, request, auth_store, backend_resolver
+            req_event.agent_id, req_event.service_name, request, auth_store, backend_resolver
         )
 
     return Response(status_code=303, headers={"Location": "/"})
@@ -1979,7 +1771,7 @@ async def _handle_request_deny(
         status=RequestStatus.DENIED,
         agent_id=req_event.agent_id,
         request_type=req_event.request_type,
-        server_name=req_event.server_name if isinstance(req_event, SharingRequestEvent) else None,
+        service_name=req_event.service_name if isinstance(req_event, SharingRequestEvent) else None,
     )
     append_response_event(paths.data_dir, response_event)
     request.app.state.request_inbox = inbox.add_response(response_event)
@@ -2061,8 +1853,22 @@ def create_desktop_client(
             content={"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"},
         )
 
+    @app.middleware("http")
+    async def _subdomain_forwarding_middleware(request: Request, call_next: Any) -> Response:
+        """Dispatch ``<agent-id>.localhost:PORT/*`` to the workspace_server byte-forward.
+
+        Bare ``localhost`` / ``127.0.0.1`` traffic falls through to the normal
+        desktop-client routes via ``call_next``. Unknown subdomains return 404.
+        """
+        host_header = request.headers.get("host", "")
+        agent_id = _parse_workspace_subdomain(host_header)
+        if agent_id is None:
+            return await call_next(request)
+        return await _handle_workspace_forward_http(request)
+
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
+    app.state.mngr_binary = MNGR_BINARY
     app.state.tunnel_manager = tunnel_manager
     app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
@@ -2110,6 +1916,10 @@ def create_desktop_client(
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
 
+    # Auth bridge: same-origin redirect to a workspace subdomain that
+    # installs a subdomain-scoped session cookie on first visit.
+    app.get("/goto/{agent_id}/")(_handle_goto_workspace)
+
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)
     app.post("/accounts/set-default")(_handle_set_default_account)
@@ -2129,10 +1939,10 @@ def create_desktop_client(
     app.post("/requests/{request_id}/deny")(_handle_request_deny)
 
     # Sharing editor routes (used by both request approval and direct editing)
-    app.get("/sharing/{agent_id}/{server_name}")(_handle_sharing_page)
-    app.post("/sharing/{agent_id}/{server_name}/enable")(_handle_sharing_enable)
-    app.post("/sharing/{agent_id}/{server_name}/disable")(_handle_sharing_disable)
-    app.get("/api/sharing-status/{agent_id}/{server_name}")(_handle_sharing_status_api)
+    app.get("/sharing/{agent_id}/{service_name}")(_handle_sharing_page)
+    app.post("/sharing/{agent_id}/{service_name}/enable")(_handle_sharing_enable)
+    app.post("/sharing/{agent_id}/{service_name}/disable")(_handle_sharing_disable)
+    app.get("/api/sharing-status/{agent_id}/{service_name}")(_handle_sharing_status_api)
 
     # Agent creation routes
     app.get("/create")(_handle_create_page)
@@ -2142,36 +1952,19 @@ def create_desktop_client(
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
 
-    # Agent default page: redirect to web server
-    app.get("/forwarding/{agent_id}/")(_handle_agent_default_redirect)
-
-    # Agent server listing page: /forwarding/{agent_id}/servers/
-    app.get("/forwarding/{agent_id}/servers/")(_handle_agent_servers_page)
-
-    # Toggle global forwarding for a server
-    app.post("/forwarding/{agent_id}/servers/{server_name}/global")(_handle_toggle_global)
-
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
 
-    # Proxy routes: /forwarding/{agent_id}/{server_name}/{path:path}
-    app.api_route(
-        "/forwarding/{agent_id}/{server_name}/{path:path}",
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
-    )(_handle_proxy_http)
-
-    # WebSocket route needs manual dependency wiring since Depends doesn't work on WS
-    @app.websocket("/forwarding/{agent_id}/{server_name}/{path:path}")
-    async def proxy_websocket(websocket: WebSocket, agent_id: str, server_name: str, path: str) -> None:
-        await _handle_proxy_websocket(
-            websocket=websocket,
-            agent_id=agent_id,
-            server_name=server_name,
-            path=path,
-            auth_store=auth_store,
-            backend_resolver=backend_resolver,
-            tunnel_manager=tunnel_manager,
-        )
+    # Catch-all WebSocket route for ``<agent-id>.localhost:PORT/*``. For
+    # requests arriving on the bare-origin host, the handler closes the WS
+    # with a 4004 since those paths aren't routed by any other handler.
+    @app.websocket("/{path:path}")
+    async def subdomain_forwarding_websocket(websocket: WebSocket, path: str) -> None:
+        host_header = websocket.headers.get("host", "")
+        if _parse_workspace_subdomain(host_header) is None:
+            await websocket.close(code=4004, reason="Not found")
+            return
+        await _handle_workspace_forward_websocket(websocket)
 
     return app

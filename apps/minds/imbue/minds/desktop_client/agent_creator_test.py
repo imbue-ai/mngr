@@ -431,3 +431,30 @@ def test_make_log_callback_puts_lines_into_queue() -> None:
     callback("world\n", False)
     assert log_queue.get_nowait() == "hello"
     assert log_queue.get_nowait() == "world"
+
+
+def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
+    """AgentCreator exposes its configured server_port for redirect-URL construction.
+
+    Regression guard: the happy-path redirect URL for a newly-created agent is
+    built as ``http://<agent-id>.localhost:<server_port>/`` inside the creation
+    thread. Earlier iterations of this branch emitted ``/forwarding/<id>/`` which
+    404'd after the legacy forwarding routes were deleted.
+    """
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        server_port=12345,
+    )
+    assert creator.server_port == 12345
+
+
+def test_agent_creator_server_port_defaults_to_zero() -> None:
+    """AgentCreator.server_port defaults to 0 for legacy test callers.
+
+    Tests that don't exercise the happy-path redirect can construct an
+    AgentCreator without explicitly passing a port.
+    """
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+    )
+    assert creator.server_port == 0
