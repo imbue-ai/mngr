@@ -597,12 +597,7 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
             environment_name=record.environment,
         )
         result = fn.remote()
-        if not isinstance(result, str):
-            raise MngrError(
-                f"run_scheduled_trigger returned {type(result).__name__}, expected str "
-                f"(app: {record.app_name}, env: {record.environment})."
-            )
-        return result
+        return result if isinstance(result, str) else ""
     except modal.exception.NotFoundError:
         raise MngrError(
             f"Modal function not found (app: {record.app_name}, env: {record.environment}). "
