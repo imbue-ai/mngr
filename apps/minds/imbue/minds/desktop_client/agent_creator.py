@@ -331,6 +331,21 @@ def _remote_host_env_flags() -> list[str]:
     ]
 
 
+def build_post_creation_redirect_url(agent_id: AgentId) -> str:
+    """Return the URL the creating-progress page should navigate to on success.
+
+    The browser is already on the bare origin (``localhost:PORT``), where the
+    signed session cookie lives. We send it through the same-origin
+    ``/goto/<id>/`` auth bridge, which mints a subdomain-auth token and 302s
+    to ``<id>.localhost:PORT`` -- installing the host-only subdomain cookie
+    before the workspace loads. A direct absolute URL to the subdomain would
+    fail auth (Chromium treats ``localhost`` as a public suffix, so the
+    ``Domain=localhost`` cookie does not carry across) and the user would be
+    bounced back to the homepage.
+    """
+    return "/goto/{}/".format(agent_id)
+
+
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path,
@@ -381,16 +396,6 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
-    server_port: int = Field(
-        default=0,
-        frozen=True,
-        description=(
-            "Port the desktop client is listening on. Used to build the absolute "
-            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
-            "The default of 0 is only appropriate for tests that never exercise the "
-            "happy-path redirect."
-        ),
-    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -546,13 +551,7 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # After phase 6 deleted the legacy /forwarding/ routes the new
-                # workspace entry point is http://<agent-id>.localhost:<port>/,
-                # which the desktop client's subdomain middleware forwards to the
-                # per-agent minds_workspace_server. Construct the absolute URL
-                # here because the browser uses it verbatim in window.location.
-                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+                redirect_url = build_post_creation_redirect_url(agent_id)
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE

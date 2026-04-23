@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _make_host_name
+from imbue.minds.desktop_client.agent_creator import build_post_creation_redirect_url
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -386,28 +387,16 @@ def test_make_log_callback_puts_lines_into_queue() -> None:
     assert log_queue.get_nowait() == "world"
 
 
-def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
-    """AgentCreator exposes its configured server_port for redirect-URL construction.
+def test_build_post_creation_redirect_url_uses_goto_bridge() -> None:
+    """The happy-path redirect URL routes through the ``/goto/<id>/`` auth bridge.
 
-    Regression guard: the happy-path redirect URL for a newly-created agent is
-    built as ``http://<agent-id>.localhost:<server_port>/`` inside the creation
-    thread. Earlier iterations of this branch emitted ``/forwarding/<id>/`` which
-    404'd after the legacy forwarding routes were deleted.
+    Regression guard: earlier iterations emitted ``http://<id>.localhost:<port>/``
+    directly, which fails auth because Chromium treats ``localhost`` as a public
+    suffix (so the ``Domain=localhost`` session cookie does not carry into
+    ``<id>.localhost``) and bounces the user back to the bare-origin landing
+    page -- which lists all minds. The redirect must stay on the bare origin so
+    that the ``/goto/`` handler can mint a subdomain-auth token before the
+    browser navigates to the workspace subdomain.
     """
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        server_port=12345,
-    )
-    assert creator.server_port == 12345
-
-
-def test_agent_creator_server_port_defaults_to_zero() -> None:
-    """AgentCreator.server_port defaults to 0 for legacy test callers.
-
-    Tests that don't exercise the happy-path redirect can construct an
-    AgentCreator without explicitly passing a port.
-    """
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=Path("/tmp/test")),
-    )
-    assert creator.server_port == 0
+    agent_id = AgentId()
+    assert build_post_creation_redirect_url(agent_id) == f"/goto/{agent_id}/"
