@@ -21,9 +21,12 @@ from typing import TypeVar
 # gevent._hub_local is private but quasi-stable: gevent's own internals
 # (thread.py, threadpool.py, _abstract_linkable.py, etc.) all import from it.
 from gevent._hub_local import get_hub_if_exists
+from pydantic import ConfigDict
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.imbue_common.frozen_model import FrozenModel
 
 T = TypeVar("T")
 
@@ -40,13 +43,14 @@ def cleanup_thread_local_resources() -> None:
     hub.destroy(destroy_loop=True)
 
 
-class _MngrExecutor:
+class _MngrExecutor(FrozenModel):
     """Thin wrapper around ConcurrencyGroupExecutor that runs gevent Hub
     cleanup after each submitted callable completes.
     """
 
-    def __init__(self, executor: ConcurrencyGroupExecutor) -> None:
-        self._executor = executor
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    executor: ConcurrencyGroupExecutor = Field(description="The underlying executor")
 
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> "Future[T]":
         @functools.wraps(fn)
@@ -56,7 +60,7 @@ class _MngrExecutor:
             finally:
                 cleanup_thread_local_resources()
 
-        return self._executor.submit(wrapped)
+        return self.executor.submit(wrapped)
 
 
 @contextmanager
@@ -72,4 +76,4 @@ def mngr_executor(
     destroyed when each task finishes.
     """
     with ConcurrencyGroupExecutor(parent_cg=parent_cg, name=name, max_workers=max_workers) as executor:
-        yield _MngrExecutor(executor)
+        yield _MngrExecutor(executor=executor)
