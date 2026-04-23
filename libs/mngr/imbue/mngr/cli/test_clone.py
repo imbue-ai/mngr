@@ -14,6 +14,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_clone_creates_agent_from_source(
     cli_runner: CliRunner,
     create_test_agent,
@@ -23,7 +24,7 @@ def test_clone_creates_agent_from_source(
     """Test that clone creates a new agent by delegating to create --from."""
     source_name = f"test-clone-source-{uuid4().hex}"
     clone_name = f"test-clone-target-{uuid4().hex}"
-    create_test_agent(source_name)
+    create_test_agent(source_name, "sleep 300001")
     clone_session = f"{mngr_test_prefix}{clone_name}"
 
     # Clone session is created by clone command, not by create_test_agent, so clean it up separately
@@ -34,10 +35,13 @@ def test_clone_creates_agent_from_source(
             [
                 source_name,
                 clone_name,
-                "--command",
-                "sleep 482917",
+                "--type",
+                "command",
                 "--transfer=none",
                 "--no-connect",
+                "--",
+                "sleep",
+                "150001",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

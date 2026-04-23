@@ -1,11 +1,11 @@
-"""Release test for cloudflare_forwarding: exercises all routes against the real Cloudflare API.
+"""Release test for remote_service_connector: exercises all Cloudflare-tunnel routes against the real Cloudflare API.
 
 Requires env vars: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID,
                     CLOUDFLARE_DOMAIN, USER_CREDENTIALS
 
 Run with:
-    cd apps/cloudflare_forwarding && PYTEST_MAX_DURATION_SECONDS=300 uv run pytest \
-        imbue/cloudflare_forwarding/test_cloudflare_forwarding.py -v -s --no-cov --cov-fail-under=0
+    cd apps/remote_service_connector && PYTEST_MAX_DURATION_SECONDS=300 uv run pytest \
+        imbue/remote_service_connector/test_remote_service_connector.py -v -s --no-cov --cov-fail-under=0
 """
 
 import base64
@@ -16,10 +16,10 @@ import secrets
 import pytest
 from starlette.testclient import TestClient
 
-import imbue.cloudflare_forwarding.app as app_module
-from imbue.cloudflare_forwarding.app import ForwardingCtx
-from imbue.cloudflare_forwarding.app import HttpCloudflareOps
-from imbue.cloudflare_forwarding.app import web_app
+import imbue.remote_service_connector.app as app_module
+from imbue.remote_service_connector.app import ForwardingCtx
+from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import web_app
 
 
 def _skip_if_missing_env() -> None:

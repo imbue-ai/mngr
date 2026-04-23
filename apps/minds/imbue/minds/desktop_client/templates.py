@@ -9,7 +9,6 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
-from imbue.minds.primitives import ServerName
 from imbue.mngr.primitives import AgentId
 
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
@@ -98,7 +97,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
       </thead>
       <tbody>
         {% for agent_id in agent_ids %}
-        <tr onclick="window.location='/forwarding/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
+        <tr onclick="window.location='/goto/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
           <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
           <td><span class="shared-with">No one</span></td>
           <td>
@@ -463,111 +462,6 @@ def render_auth_error_page(message: str) -> str:
     return template.render(message=message)
 
 
-_AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
-<html>
-<head>
-  <title>Servers - {{ agent_id }}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
-    h1 { margin-bottom: 8px; color: rgb(26, 26, 46); }
-    .subtitle { margin-bottom: 24px; color: gray; font-size: 14px; }
-    .server-list { list-style: none; }
-    .server-list li {
-      margin-bottom: 12px; padding: 12px 16px;
-      background: white; border: 1px solid rgb(220, 220, 230); border-radius: 8px;
-      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    }
-    .server-name {
-      font-weight: bold; font-size: 16px; color: rgb(26, 26, 46);
-      min-width: 100px;
-    }
-    .server-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .server-links a {
-      display: inline-block; padding: 6px 12px;
-      background: rgb(26, 26, 46); color: white; text-decoration: none;
-      border-radius: 4px; font-size: 13px;
-    }
-    .server-links a:hover { background: rgb(42, 42, 78); }
-    .server-links a.global-link {
-      background: rgb(37, 99, 235);
-    }
-    .server-links a.global-link:hover { background: rgb(29, 78, 216); }
-    .toggle-btn {
-      padding: 4px 10px; border-radius: 4px; font-size: 12px;
-      border: 1px solid rgb(200, 200, 210); cursor: pointer;
-      background: white; color: rgb(60, 60, 80);
-    }
-    .toggle-btn:hover { background: rgb(240, 240, 245); }
-    .toggle-btn.enabled { background: rgb(220, 252, 231); border-color: rgb(134, 239, 172); color: rgb(22, 101, 52); }
-    .empty-state { color: gray; font-size: 16px; }
-    .back-link { margin-top: 24px; }
-    .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <h1>{{ agent_id }}</h1>
-  <p class="subtitle">Available servers</p>
-  {% if server_names %}
-  <ul class="server-list">
-    {% for server_name in server_names %}
-    <li>
-      <span class="server-name">{{ server_name }}</span>
-      <div class="server-links">
-        <a href="/forwarding/{{ agent_id }}/{{ server_name }}/">Local</a>
-        {% if cf_services and server_name in cf_services %}
-        <a href="https://{{ cf_services[server_name] }}" class="global-link" target="_blank">Global</a>
-        <button class="toggle-btn enabled" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', false)">Disable global</button>
-        {% else %}
-        <button class="toggle-btn" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', true)">Enable global</button>
-        {% endif %}
-      </div>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p class="empty-state">
-    No servers are currently running for this agent.
-  </p>
-  {% endif %}
-  <div class="back-link"><a href="/">Back to all projects</a></div>
-  <script>
-  async function toggleGlobal(agentId, serverName, enable) {
-    try {
-      const resp = await fetch('/forwarding/' + agentId + '/servers/' + serverName + '/global', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({enabled: enable})
-      });
-      if (resp.ok) {
-        window.location.reload();
-      } else {
-        const data = await resp.json();
-        alert('Failed: ' + (data.error || resp.statusText));
-      }
-    } catch (e) {
-      alert('Failed: ' + e.message);
-    }
-  }
-  </script>
-</body>
-</html>"""
-
-
-@pure
-def render_agent_servers_page(
-    agent_id: AgentId,
-    server_names: Sequence[ServerName],
-    cf_services: dict[str, str] | None = None,
-) -> str:
-    """Render a page listing all available servers for a specific agent.
-
-    cf_services maps server names to their cloudflare hostnames (if globally forwarded).
-    """
-    template = _JINJA_ENV.from_string(_AGENT_SERVERS_TEMPLATE)
-    return template.render(agent_id=agent_id, server_names=server_names, cf_services=cf_services or {})
-
-
 # -- Chrome (persistent shell) templates --
 
 _CHROME_TITLEBAR_HEIGHT: Final[int] = 38
@@ -757,7 +651,7 @@ function toggleSidebar() {
 }
 
 function selectWorkspace(agentId) {
-  navigateContent('/forwarding/' + agentId + '/');
+  navigateContent('/goto/' + agentId + '/');
   // Close sidebar. In Electron, navigate-content already removes the sidebar
   // WebContentsView on the main process side, so only reset the local state flag
   // without sending another toggle-sidebar IPC (which would re-create it).
@@ -792,9 +686,18 @@ function refreshAuthStatus() {
 }
 
 if (isElectron) {
-  window.minds.onContentTitleChange(function(title) {
-    document.getElementById('page-title').textContent = title || 'Minds';
-  });
+  // In Electron, main process pushes an authoritative per-window title
+  // (mirrors the OS window title: "{workspace-name} -- Minds" or "Minds").
+  // Ignore content document.title entirely.
+  if (window.minds.onWindowTitleChange) {
+    window.minds.onWindowTitleChange(function(title) {
+      document.getElementById('page-title').textContent = title || 'Minds';
+    });
+  } else {
+    window.minds.onContentTitleChange(function(title) {
+      document.getElementById('page-title').textContent = title || 'Minds';
+    });
+  }
   window.minds.onContentURLChange(function() {
     refreshAuthStatus();
   });
@@ -871,25 +774,35 @@ function updateRequestsBadge(count) {
   if (badge) badge.style.display = count > 0 ? 'block' : 'none';
 }
 
-var evtSource = null;
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/_chrome/events');
-  evtSource.onmessage = function(event) {
-    try {
-      var data = JSON.parse(event.data);
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
-      if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'request_count') updateRequestsBadge(data.count);
-    } catch(e) {}
-  };
-  evtSource.onerror = function() {
-    evtSource.close();
-    evtSource = null;
-    setTimeout(connectSSE, 5000);
-  };
+function handleChromeEvent(data) {
+  try {
+    if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+    if (data.type === 'auth_status') updateAuthUI(data);
+    if (data.type === 'request_count') updateRequestsBadge(data.count);
+  } catch(e) {}
 }
-connectSSE();
+
+if (isElectron && window.minds.onChromeEvent) {
+  // Electron: main process maintains a single SSE to /_chrome/events and
+  // pushes events to every chrome/sidebar view. Each view opening its own
+  // EventSource used to saturate Chromium's 6-connection-per-host cap.
+  window.minds.onChromeEvent(handleChromeEvent);
+} else {
+  var evtSource = null;
+  function connectSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource('/_chrome/events');
+    evtSource.onmessage = function(event) {
+      try { handleChromeEvent(JSON.parse(event.data)); } catch(e) {}
+    };
+    evtSource.onerror = function() {
+      evtSource.close();
+      evtSource = null;
+      setTimeout(connectSSE, 5000);
+    };
+  }
+  connectSSE();
+}
 </script>
 </body>
 </html>"""
@@ -916,11 +829,30 @@ h2 {
 }
 
 .sidebar-item {
-  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+  position: relative;
+  padding: 10px 36px 10px 12px;
+  cursor: pointer; font-size: 13px; font-weight: 500;
   color: #cbd5e1; border-radius: 6px; margin: 2px 0;
   transition: background 100ms;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
 .sidebar-item:hover { background: rgba(255,255,255,0.06); }
+
+.sidebar-item-label {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.sidebar-open-new {
+  display: none;
+  background: none; border: none; padding: 4px; cursor: pointer;
+  color: #94a3b8; border-radius: 4px;
+  align-items: center; justify-content: center;
+}
+.sidebar-open-new:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+.sidebar-open-new svg { width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar-item:hover .sidebar-open-new { display: inline-flex; }
+.sidebar-item.is-current .sidebar-open-new { display: none !important; }
 
 .sidebar-empty {
   padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
@@ -934,9 +866,23 @@ h2 {
 </div>
 <script>
 var isElectron = !!window.minds;
+var currentWorkspaceId = null;
+var lastWorkspaces = [];
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+  });
+}
 
 function selectWorkspace(agentId) {
-  if (isElectron) window.minds.navigateContent('/forwarding/' + agentId + '/');
+  if (isElectron) window.minds.navigateContent('/goto/' + agentId + '/');
+}
+
+function openInNewWindow(agentId) {
+  if (isElectron && window.minds.openWorkspaceInNewWindow) {
+    window.minds.openWorkspaceInNewWindow(agentId);
+  }
 }
 
 function renderWorkspaces(workspaces) {
@@ -956,34 +902,95 @@ function renderWorkspaces(workspaces) {
     if (b === 'Private') return 1;
     return a.localeCompare(b);
   });
+  var openIcon = '<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/>'
+    + '<path d="M10 14L21 3"/>'
+    + '<path d="M21 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5"/></svg>';
   var html = '';
   keys.forEach(function(key) {
-    var label = key === 'Private' ? 'PRIVATE' : key;
+    var label = key === 'Private' ? 'PRIVATE' : escapeHtml(key);
     html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
     groups[key].forEach(function(w) {
-      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+      var id = escapeHtml(w.id);
+      var name = escapeHtml(w.name || w.id);
+      var isCurrent = w.id === currentWorkspaceId;
+      var classes = 'sidebar-item' + (isCurrent ? ' is-current' : '');
+      html += '<div class="' + classes + '" data-agent-id="' + id + '">'
+        + '<span class="sidebar-item-label">' + name + '</span>'
+        + '<button class="sidebar-open-new" data-open-new="' + id + '" title="Open in new window" tabindex="-1">'
+        + openIcon
+        + '</button>'
+        + '</div>';
     });
   });
   container.innerHTML = html;
 }
 
-var evtSource = null;
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/_chrome/events');
-  evtSource.onmessage = function(event) {
-    try {
-      var data = JSON.parse(event.data);
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
-    } catch(e) {}
-  };
-  evtSource.onerror = function() {
-    evtSource.close();
-    evtSource = null;
-    setTimeout(connectSSE, 5000);
-  };
+function handleRowClick(target) {
+  var row = target.closest('.sidebar-item');
+  if (!row) return;
+  var openNewBtn = target.closest('.sidebar-open-new');
+  var agentId = row.getAttribute('data-agent-id');
+  if (!agentId) return;
+  if (openNewBtn) {
+    openInNewWindow(agentId);
+    return;
+  }
+  selectWorkspace(agentId);
 }
-connectSSE();
+
+document.addEventListener('click', function(e) {
+  handleRowClick(e.target);
+});
+
+document.addEventListener('contextmenu', function(e) {
+  var row = e.target.closest('.sidebar-item');
+  if (!row) return;
+  var agentId = row.getAttribute('data-agent-id');
+  if (!agentId) return;
+  // Suppress context menu for the current workspace row -- nothing actionable there.
+  if (agentId === currentWorkspaceId) {
+    e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  if (isElectron && window.minds.showWorkspaceContextMenu) {
+    window.minds.showWorkspaceContextMenu(agentId, e.clientX, e.clientY);
+  }
+});
+
+if (isElectron && window.minds.onCurrentWorkspaceChanged) {
+  window.minds.onCurrentWorkspaceChanged(function(agentId) {
+    currentWorkspaceId = agentId || null;
+    renderWorkspaces(lastWorkspaces);
+  });
+}
+
+function handleChromeEvent(data) {
+  if (data.type !== 'workspaces') return;
+  lastWorkspaces = data.workspaces || [];
+  renderWorkspaces(lastWorkspaces);
+}
+
+if (isElectron && window.minds.onChromeEvent) {
+  // In Electron, the main process maintains the single SSE connection and
+  // pushes events to us via IPC. See main.js/runChromeSSELoop.
+  window.minds.onChromeEvent(handleChromeEvent);
+} else {
+  var evtSource = null;
+  function connectSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource('/_chrome/events');
+    evtSource.onmessage = function(event) {
+      try { handleChromeEvent(JSON.parse(event.data)); } catch(e) {}
+    };
+    evtSource.onerror = function() {
+      evtSource.close();
+      evtSource = null;
+      setTimeout(connectSSE, 5000);
+    };
+  }
+  connectSSE();
+}
 </script>
 </body>
 </html>"""
@@ -1116,8 +1123,8 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 </head>
 <body>
   <div class="page">
-    <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ server_name }}</code>
-      in <a href="/forwarding/{{ agent_id }}/" style="font-size:20px;">{{ ws_name or agent_id }}</a>
+    <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ service_name }}</code>
+      in <a href="#" onclick="window.location='/goto/{{ agent_id }}/'; return false;" style="font-size:20px;">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
 
     {% if not has_account %}
@@ -1175,7 +1182,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 
   <script>
   var proposedEmails = {{ initial_emails | tojson }};
-  var serverName = {{ server_name | tojson }};
+  var serviceName = {{ service_name | tojson }};
   var agentId = {{ agent_id | tojson }};
   var isRequest = {{ is_request | tojson }};
   var requestId = {{ request_id | tojson }};
@@ -1185,8 +1192,8 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   function setHeading(isEnabled) {
     var h = document.getElementById('page-heading');
     if (!h) return;
-    var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serverName + '</code>';
-    var ws = '<a href="/forwarding/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
+    var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serviceName + '</code>';
+    var ws = '<a href="/goto/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
     var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
     if (isEnabled) {
       h.innerHTML = code + ' shared in ' + ws + acct;
@@ -1289,15 +1296,15 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     setSubmitting(true);
     var form = new FormData();
     form.append('emails', JSON.stringify(getFinalEmails()));
-    fetch('/sharing/' + agentId + '/' + serverName + '/enable', { method: 'POST', body: form })
-      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+    fetch('/sharing/' + agentId + '/' + serviceName + '/enable', { method: 'POST', body: form })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function(err) { alert('Failed: ' + err.message); setSubmitting(false); });
   }
 
   function submitDisable() {
     setSubmitting(true);
-    fetch('/sharing/' + agentId + '/' + serverName + '/disable', { method: 'POST' })
-      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serverName; })
+    fetch('/sharing/' + agentId + '/' + serviceName + '/disable', { method: 'POST' })
+      .then(function(r) { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function(err) { alert('Failed: ' + err.message); setSubmitting(false); });
   }
 
@@ -1317,7 +1324,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   }
 
   // Load current sharing status, then compute the diff
-  fetch('/api/sharing-status/' + agentId + '/' + serverName)
+  fetch('/api/sharing-status/' + agentId + '/' + serviceName)
     .then(function(r) { return r.json(); })
     .then(function(data) {
       document.getElementById('loading-state').style.display = 'none';
@@ -1382,7 +1389,7 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 @pure
 def render_sharing_editor(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     title: str,
     initial_emails: list[str] | None = None,
     is_request: bool = False,
@@ -1398,7 +1405,7 @@ def render_sharing_editor(
     return template.render(
         title=title,
         agent_id=agent_id,
-        server_name=server_name,
+        service_name=service_name,
         initial_emails=initial_emails or [],
         is_request=is_request,
         request_id=request_id,
