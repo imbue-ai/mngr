@@ -11,25 +11,17 @@ T = TypeVar("T")
 
 
 class ConcurrencyGroupExecutor(AbstractContextManager):
-    """Executor that runs callables in threads managed by a ConcurrencyGroup.
-
-    Accepts an optional ``on_thread_exit`` callback that is invoked in each
-    worker thread after its submitted callable completes. Use this to clean
-    up thread-local resources (e.g. gevent Hubs) that hold OS-level file
-    descriptors.
-    """
+    """Executor that runs callables in threads managed by a ConcurrencyGroup."""
 
     def __init__(
         self,
         parent_cg: ConcurrencyGroup,
         name: str,
         max_workers: int,
-        on_thread_exit: Callable[[], None] | None = None,
     ) -> None:
         self._parent_cg = parent_cg
         self._name = name
         self._semaphore = threading.BoundedSemaphore(max_workers)
-        self._on_thread_exit = on_thread_exit
         self._cg: ConcurrencyGroup | None = None
 
     def __enter__(self) -> "ConcurrencyGroupExecutor":
@@ -57,9 +49,6 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
                     future.set_exception(e)
                 else:
                     future.set_result(result)
-                finally:
-                    if self._on_thread_exit is not None:
-                        self._on_thread_exit()
 
         self._cg.start_new_thread(
             target=_run,
