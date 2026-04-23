@@ -211,8 +211,6 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     # start_on_boot means "restart this agent on host boot" -- doesn't apply
     # to a one-shot streaming agent.
     ("start_on_boot", "--start-on-boot/--no-start-on-boot"),
-    # --no-connect is allowed (redundant but consistent -- headless never connects);
-    # only explicit --connect=True is rejected. Handled in the function body below.
 )
 
 
