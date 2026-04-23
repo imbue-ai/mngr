@@ -331,10 +331,10 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
     # Resolve interactivity: explicit parameter takes priority, then fall back to TTY check
     is_interactive_resolved = is_interactive if is_interactive is not None else sys.stdin.isatty()
 
-    # In non-interactive mode, or when running under an autonomous runner
-    # (CI, scheduled agents), there's no human to copy-paste the `mngr create`
-    # command, so skip both the prompt-file write and the suggestion log.
-    if not is_interactive_resolved or os.environ.get("IS_AUTONOMOUS", "0") == "1":
+    # In non-interactive mode, exit without writing the prompt file (no stdout to
+    # display the suggestion). Autonomous runs still produce the log line below,
+    # which may be useful for post-hoc triage.
+    if not is_interactive_resolved:
         raise SystemExit(1)
 
     error_message = str(error) if str(error) else type(error).__name__
