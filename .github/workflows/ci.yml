@@ -78,7 +78,7 @@ jobs:
 
       - name: Run tests via offload
         id: tests
-        run: just test-offload
+        run: just test-offload "-v"
 
       - name: Save offload test durations for next run
         if: always()
@@ -265,7 +265,7 @@ jobs:
 
       - name: Run acceptance tests via offload
         id: tests
-        run: just test-offload-acceptance
+        run: just test-offload-acceptance "-v"
 
       - name: Save offload test durations for next run
         if: always()
