@@ -396,18 +396,8 @@ def test_write_diagnose_prompt_file_different_inputs(tmp_path: Path) -> None:
 # =============================================================================
 
 
-def test_print_diagnose_instructions_skips_when_autonomous(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_print_diagnose_instructions produces no output when IS_AUTONOMOUS=1."""
-    monkeypatch.setenv("IS_AUTONOMOUS", "1")
-    with capture_loguru(level="INFO") as log_output:
-        _print_diagnose_instructions(Path("/tmp/fake-prompt.txt"))
-    assert log_output.getvalue() == ""
-
-
-def test_print_diagnose_instructions_prints_create_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_print_diagnose_instructions_prints_create_command() -> None:
     """_print_diagnose_instructions prints a `mngr create` command referencing the prompt file."""
-    # Clear any inherited IS_AUTONOMOUS so the suppress-when-autonomous branch doesn't fire.
-    monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
     prompt_path = Path("/tmp/mngr-diagnose-prompt-abc123.txt")
     with capture_loguru(level="INFO") as log_output:
         _print_diagnose_instructions(prompt_path)
@@ -416,3 +406,19 @@ def test_print_diagnose_instructions_prints_create_command(monkeypatch: pytest.M
     assert f"--source {MNGR_REPO_URL}" in output
     assert "--branch main:" in output
     assert f"--message-file {prompt_path}" in output
+
+
+def test_handle_unexpected_error_autonomous_skips_diagnose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under IS_AUTONOMOUS=1, handle_unexpected_error exits without emitting the diagnose suggestion.
+
+    Uses ``is_interactive=True`` to bypass the non-interactive early-exit and verify
+    that the autonomous branch short-circuits before the `mngr create` message is logged.
+    """
+    monkeypatch.setenv("IS_AUTONOMOUS", "1")
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(SystemExit) as exc_info:
+            handle_unexpected_error(RuntimeError("boom"), is_interactive=True)
+
+    assert exc_info.value.code == 1
+    assert "mngr create" not in log_output.getvalue()

@@ -308,9 +308,6 @@ def write_diagnose_prompt_file(
 
 def _print_diagnose_instructions(prompt_file_path: Path) -> None:
     """Print a `mngr create` command the user can run to launch a diagnostic agent."""
-    if os.environ.get("IS_AUTONOMOUS", "0") == "1":
-        return
-
     create_cmd = f"mngr create --source {MNGR_REPO_URL} --branch main: --message-file {prompt_file_path}"
 
     logger.info("")
@@ -334,8 +331,10 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
     # Resolve interactivity: explicit parameter takes priority, then fall back to TTY check
     is_interactive_resolved = is_interactive if is_interactive is not None else sys.stdin.isatty()
 
-    # In non-interactive mode, just exit
-    if not is_interactive_resolved:
+    # In non-interactive mode, or when running under an autonomous runner
+    # (CI, scheduled agents), there's no human to copy-paste the `mngr create`
+    # command, so skip both the prompt-file write and the suggestion log.
+    if not is_interactive_resolved or os.environ.get("IS_AUTONOMOUS", "0") == "1":
         raise SystemExit(1)
 
     error_message = str(error) if str(error) else type(error).__name__
@@ -344,10 +343,10 @@ def handle_unexpected_error(error: Exception, is_interactive: bool | None = None
     # If writing the prompt raises (e.g. disk full), let it propagate -- the original
     # error has already been logged above.
     prompt_path = write_diagnose_prompt_file(
-        traceback_str=tb_str,
-        mngr_version=get_mngr_version(),
         error_type=type(error).__name__,
         error_message=error_message,
+        traceback_str=tb_str,
+        mngr_version=get_mngr_version(),
         base_dir=Path("/tmp"),
     )
     _print_diagnose_instructions(prompt_path)
