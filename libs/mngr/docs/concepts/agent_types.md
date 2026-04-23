@@ -51,10 +51,11 @@ mngr create my-agent my_claude
 
 Custom types can be scoped to a project by using `mngr config edit --scope project`. This is useful for project-specific configurations that shouldn't apply globally.
 
-For a reusable shortcut that runs a fixed shell command (instead of repeating `--type command -- ...` each time), set `command` on a custom type and omit `parent_type`:
+For a reusable shortcut that runs a fixed shell command (instead of repeating `--type command -- ...` each time), set `parent_type = "command"` on a custom type and pin the command in config:
 
 ```toml
 [agent_types.my_server]
+parent_type = "command"
 command = "python -m http.server 8080"
 ```
 
@@ -64,7 +65,7 @@ mngr create my-task my_server
 
 ### Available Settings
 
-- `command`: literal shell command to run as the agent. When set without a `parent_type`, defines a standalone command-based type. When set alongside `parent_type`, it overrides the command inherited from the parent. Arguments passed after `--` at invocation time are appended to this command.
+- `command`: literal shell command to run as the agent. Typically set alongside `parent_type = "command"` to pin a fixed command for a reusable custom type, or alongside another `parent_type` to override the command inherited from that parent. Arguments passed after `--` at invocation time are appended to this command.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
