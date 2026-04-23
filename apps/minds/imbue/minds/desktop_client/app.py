@@ -615,7 +615,15 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content="<p>Workspace server not yet available. Retrying...</p>")
+            return HTMLResponse(
+                content=(
+                    "<!doctype html><html><head>"
+                    '<meta http-equiv="refresh" content="1">'
+                    "</head><body>"
+                    "<p>Workspace server not yet available. Retrying...</p>"
+                    "</body></html>"
+                )
+            )
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:

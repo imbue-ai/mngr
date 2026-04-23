@@ -1237,3 +1237,51 @@ def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
     client.base_url = httpx.URL(f"http://{agent_id}.localhost")
     response = client.get("/")
     assert response.status_code == 404
+
+
+def _create_pending_subdomain_test_client(tmp_path: Path, agent_id: AgentId) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client where the given agent is a known workspace whose
+    workspace_server URL has not yet been registered (service_logs is empty).
+
+    This exercises the ``workspace_url is None`` branch in the subdomain
+    forwarder that serves the auto-refreshing "pending" placeholder.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        service_logs=None,
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=httpx.AsyncClient(),
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_pending_workspace_html_response_auto_refreshes(tmp_path: Path) -> None:
+    # Agent is a known workspace but its system_interface URL hasn't been
+    # registered yet (the workspace server is still booting). The HTML
+    # placeholder must embed a refresh mechanism so the page reloads itself.
+    agent_id = AgentId()
+    client, auth_store = _create_pending_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert 'http-equiv="refresh"' in response.text
+    assert "Workspace server not yet available" in response.text
+
+
+def test_subdomain_forward_pending_workspace_non_html_is_503(tmp_path: Path) -> None:
+    # Same state as above, but non-HTML clients get a plain 503 so they can
+    # distinguish transient unavailability from other errors.
+    agent_id = AgentId()
+    client, auth_store = _create_pending_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert response.status_code == 503
