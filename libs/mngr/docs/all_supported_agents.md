@@ -37,12 +37,14 @@ Or use the `--type` option:
 mngr create my-agent --type claude
 ```
 
-Any command in your PATH can also be used as an agent type:
+To run an arbitrary shell command as an agent, use the built-in `command` agent type:
 
 ```bash
-mngr create my-agent ./my-script
-mngr create my-agent python my_agent.py
+mngr create my-task --type command -- python my_agent.py
+mngr create my-task --type command -- sleep 3600
 ```
+
+For commands you run often, see [Custom Agent Types](./concepts/agent_types.md#custom-agent-types) for how to bind a fixed command to a reusable type name.
 
 ## Custom Agent Types
 
