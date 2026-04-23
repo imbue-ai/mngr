@@ -957,6 +957,46 @@ def test_create_headless_rejects_multiple_incompatible_flags(
     assert "--start-on-boot" in result.output
 
 
+@pytest.mark.parametrize(
+    "no_form_flag",
+    [
+        "--no-reconnect",
+        "--no-reuse",
+        "--no-update",
+        "--no-start-on-boot",
+    ],
+)
+def test_create_headless_allows_no_forms_of_boolean_pair_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    no_form_flag: str,
+) -> None:
+    """The --no-* forms of boolean-pair flags are redundant with headless and should be allowed.
+
+    Matches the --no-connect treatment: headless already does not
+    connect/reconnect/reuse/update/start-on-boot, so the --no-* form is a
+    redundant-but-compatible assertion, not a conflict. Pairs each
+    allowed flag with --attach-command (still rejected) so the validator
+    runs and we can confirm the allowed flag is not in the error listing.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            no_form_flag,
+            "--attach-command",
+            "tmux attach",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--attach-command" in result.output
+    assert no_form_flag not in result.output
+
+
 def test_create_headless_rejects_conflicting_positional_and_type_flag(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

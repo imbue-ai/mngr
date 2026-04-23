@@ -195,22 +195,39 @@ def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOption
 #   3. They only make sense for long-lived agents, not one-shot streaming
 #      agents (--reuse, --update, --start-on-boot).
 # Accepting any of these silently would confuse users, so we reject early.
+#
+# Only non-boolean-pair flags go in this bulk-rejection list: their
+# presence is unambiguous, so any explicit setting conflicts. Boolean-pair
+# flags like --reconnect/--no-reconnect are handled separately below so we
+# only reject the positive form -- the --no-* form is redundant-but-compatible
+# with headless (which already does not reconnect/reuse/update/etc.).
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
     # --edit-message opens an editor and delivers the result via send_message
     # after the agent boots. Headless agents have no send_message path.
     ("edit_message", "--edit-message"),
-    ("reconnect", "--reconnect/--no-reconnect"),
     ("attach_command", "--attach-command"),
     ("connect_command", "--connect-command"),
+)
+
+
+# Boolean-pair flags where only the positive (True) side conflicts with
+# headless semantics. Each entry is (click param name, positive-form display
+# name). Headless already never connects / reconnects / reuses / updates /
+# starts on boot, so passing the --no-* form is just a redundant assertion
+# of the actual behavior and is tolerated.
+_HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, str], ...] = (
+    # Post-create connect/attach phase that headless skips entirely.
+    ("connect", "--connect"),
+    ("reconnect", "--reconnect"),
     # --reuse / --update select an existing agent by name. Headless agents
     # are short-lived and auto-named (streaming then destroyed), so reusing
     # one would be surprising and --update (re-create with fresh work_dir)
-    # does not fit either. Rejecting them keeps the contract explicit.
-    ("reuse", "--reuse/--no-reuse"),
-    ("update", "--update/--no-update"),
+    # does not fit either.
+    ("reuse", "--reuse"),
+    ("update", "--update"),
     # start_on_boot means "restart this agent on host boot" -- doesn't apply
     # to a one-shot streaming agent.
-    ("start_on_boot", "--start-on-boot/--no-start-on-boot"),
+    ("start_on_boot", "--start-on-boot"),
 )
 
 
@@ -234,10 +251,14 @@ def _reject_incompatible_headless_flags(
         display_name for param_name, display_name in _HEADLESS_INCOMPATIBLE_FLAGS if is_param_explicit(ctx, param_name)
     ]
 
-    # --connect/--no-connect share a param. --no-connect is redundant (headless
-    # already never connects) so it's allowed; explicit --connect contradicts.
-    if is_param_explicit(ctx, "connect") and opts.connect:
-        explicit_flags.append("--connect")
+    # Boolean-pair flags: only the positive form conflicts with headless
+    # semantics. The --no-* form is redundant-but-compatible and is tolerated,
+    # matching the original --no-connect special case. Checks both
+    # is_param_explicit (to catch explicit use) and the resolved value (to
+    # distinguish --flag from --no-flag when they share a click param).
+    for param_name, positive_display_name in _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS:
+        if is_param_explicit(ctx, param_name) and getattr(opts, param_name):
+            explicit_flags.append(positive_display_name)
 
     if explicit_flags:
         flags_str = ", ".join(explicit_flags)
