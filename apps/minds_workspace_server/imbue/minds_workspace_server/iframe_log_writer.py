@@ -117,6 +117,12 @@ class IframeLogWriter(MutableModel):
                 envelope = _build_envelope(record, timestamp=timestamp)
                 line = json.dumps(envelope, separators=(",", ":"), default=str) + "\n"
                 line_bytes = len(line.encode("utf-8"))
+                # Open first so ``self._size`` reflects the on-disk size before
+                # the rotation check. Otherwise the first write after startup
+                # would observe the default ``_size = 0`` and skip rotation
+                # even when the existing file is already past ``max_size_bytes``
+                # (e.g. restart after a crash that left an oversized log).
+                self._ensure_open_locked()
                 self._rotate_if_needed_locked()
                 fh = self._ensure_open_locked()
                 fh.write(line)

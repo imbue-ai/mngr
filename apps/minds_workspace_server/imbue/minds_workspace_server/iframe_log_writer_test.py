@@ -98,6 +98,28 @@ def test_write_records_missing_fields_fall_back_in_source(tmp_path: Path) -> Non
     assert lines[0]["source"] == "electron/renderer/service/unknown/unknown"
 
 
+def test_first_write_rotates_pre_existing_oversized_file(tmp_path: Path) -> None:
+    """Simulates restart after a crash that left the file over the cap.
+
+    The writer's ``_size`` starts at 0 (pydantic default), so without
+    opening the file before the rotation check, the first record would
+    land in the oversized file. The rotation check must run against the
+    real on-disk size on the very first write.
+    """
+    path = tmp_path / "events.jsonl"
+    stale_payload = "x" * 200 + "\n"
+    path.write_text(stale_payload)
+    writer = IframeLogWriter(file_path=path, max_size_bytes=64)
+    writer.write_records([{"level": "info", "message": "fresh", "service_name": "web", "mind_id": "m1"}])
+    writer.close()
+    rotated = _find_rotated_siblings(tmp_path)
+    assert len(rotated) == 1, "pre-existing oversized file should be rotated before the first append"
+    assert rotated[0].read_text() == stale_payload, "rotated sibling keeps the stale payload untouched"
+    active_lines = _read_lines(path)
+    assert len(active_lines) == 1
+    assert active_lines[0]["message"] == "fresh"
+
+
 def test_rotation_prunes_oldest_beyond_retention_cap(tmp_path: Path) -> None:
     """Only the newest ``max_rotated_count`` rotated files survive rotation."""
     path = tmp_path / "events.jsonl"
