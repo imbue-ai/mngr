@@ -68,6 +68,12 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--daemonize`, `--no-daemonize` | boolean | When not daemonized (default), exit if the parent process dies. Use --daemonize to keep running independently. | `False` |
+
 ## See Also
 
 - [mngr list](../primary/list.md) - List agents and their current states
