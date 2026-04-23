@@ -59,8 +59,9 @@ class IframeLogBuffer {
   }
 
   /**
-   * Add a record to the per-mind queue. Returns true if an auto-flush was
-   * triggered by the size threshold (caller may await it, or ignore).
+   * Add a record to the per-mind queue. Returns the in-flight flush Promise
+   * when a size-threshold flush was triggered (caller may await it, or
+   * ignore), and null otherwise.
    *
    * @param {string} mindId
    * @param {number} port  desktop-client listening port
