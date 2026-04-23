@@ -1,7 +1,6 @@
 import hashlib
 import json
 import queue
-import re
 import shlex
 import tempfile
 import threading
@@ -21,6 +20,7 @@ from pydantic import model_validator
 from pygtail import Pygtail
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -42,7 +42,6 @@ FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
-_ROTATED_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^events\.jsonl\.(\d+)$")
 
 
 # =============================================================================
@@ -457,7 +456,7 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
     """
     timestamped: list[tuple[str, str]] = []
     for name in filenames:
-        match = _ROTATED_FILE_PATTERN.match(name)
+        match = ROTATED_JSONL_PATTERN.match(name)
         if match:
             timestamped.append((match.group(1), name))
     timestamped.sort(key=lambda pair: pair[0])
@@ -501,7 +500,7 @@ def _build_event_sources_from_grouped_files(
     """Build EventSourceInfo objects from files grouped by directory."""
     sources: list[EventSourceInfo] = []
     for dir_path, filenames in sorted(files_by_dir.items()):
-        rotated = [f for f in filenames if _ROTATED_FILE_PATTERN.match(f)]
+        rotated = [f for f in filenames if ROTATED_JSONL_PATTERN.match(f)]
         is_current_present = _EVENTS_JSONL_FILENAME in filenames
         sources.append(
             EventSourceInfo(
@@ -545,7 +544,7 @@ def _parse_discovered_files(find_output: str, events_path_str: str) -> list[Even
             file_part = relative
 
         # Only include events.jsonl files (current or rotated)
-        if file_part == _EVENTS_JSONL_FILENAME or _ROTATED_FILE_PATTERN.match(file_part):
+        if file_part == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(file_part):
             if dir_part not in files_by_dir:
                 files_by_dir[dir_part] = []
             files_by_dir[dir_part].append(file_part)
@@ -576,7 +575,7 @@ def _recursive_listdir_via_volume(volume: Volume, path: str) -> list[tuple[str, 
         if entry.file_type == VolumeFileType.FILE:
             filename = _extract_filename(entry.path)
             # Only include events.jsonl files
-            if filename == _EVENTS_JSONL_FILENAME or _ROTATED_FILE_PATTERN.match(filename):
+            if filename == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(filename):
                 result.append((path, filename))
         elif entry.file_type == VolumeFileType.DIRECTORY:
             child_path = entry.path if entry.path else path

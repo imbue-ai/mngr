@@ -237,7 +237,7 @@ def _build_flat_log_dict(
     return event
 
 
-ROTATED_JSONL_TIMESTAMP_PATTERN: Final[re.Pattern[str]] = re.compile(r"^events\.jsonl\.(\d+)$")
+ROTATED_JSONL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^events\.jsonl\.(\d+)$")
 
 
 def generate_rotation_timestamp() -> str:
@@ -250,7 +250,7 @@ def cleanup_old_rotated_files(directory: Path, max_rotated_count: int) -> None:
     """Remove the oldest rotated files, keeping at most max_rotated_count."""
     rotated_files: list[Path] = []
     for child in directory.iterdir():
-        if ROTATED_JSONL_TIMESTAMP_PATTERN.match(child.name):
+        if ROTATED_JSONL_PATTERN.match(child.name):
             rotated_files.append(child)
     rotated_files.sort(key=lambda p: p.name)
     files_to_remove = rotated_files[:-max_rotated_count] if max_rotated_count > 0 else rotated_files
