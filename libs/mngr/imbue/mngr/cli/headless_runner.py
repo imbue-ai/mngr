@@ -110,11 +110,14 @@ def ephemeral_work_location(host: OnlineHostInterface) -> Iterator[HostLocation]
 
     Use this when a headless caller wants a blank scratch dir rather than an
     existing checkout (e.g. ``mngr ask``). For the common case where the
-    caller is passing through to ``headless_agent_output``, wrap both::
+    caller is passing through to ``headless_agent_output``, stack both in a
+    single compound ``with`` statement::
 
-        with ephemeral_work_location(host) as work_location:
-            with headless_agent_output(source_location=work_location, ...):
-                ...
+        with (
+            ephemeral_work_location(host) as work_location,
+            headless_agent_output(source_location=work_location, ...) as agent,
+        ):
+            ...
     """
     work_path = create_work_dir_on_host(host)
     try:
