@@ -440,7 +440,7 @@ def test_schedule_remove_local_prompts_without_force(
         obj=plugin_manager,
         input="n\n",
     )
-    # User declined: code raises SystemExit(0), CliRunner reports exit_code=0.
+    # User declined: function returns normally, CliRunner reports exit_code=0.
     # The trigger was NOT removed because the user declined.
     assert "Are you sure" in result.output
     assert "Removed schedule" not in result.output

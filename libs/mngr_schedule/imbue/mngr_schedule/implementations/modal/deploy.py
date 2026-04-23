@@ -588,7 +588,9 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     invokes it remotely. Returns the full captured output of the command
     (from run_scheduled_trigger's return value).
 
-    Raises MngrError if the function is not found or the invocation fails.
+    Raises MngrError if the function is not found, the invocation fails,
+    or the returned value is not a string (signalling a deployed-function
+    signature drift).
     """
     try:
         fn = modal.Function.from_name(
@@ -597,7 +599,6 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
             environment_name=record.environment,
         )
         result = fn.remote()
-        return result if isinstance(result, str) else ""
     except modal.exception.NotFoundError:
         raise MngrError(
             f"Modal function not found (app: {record.app_name}, env: {record.environment}). "
@@ -605,6 +606,12 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
+    if not isinstance(result, str):
+        raise MngrError(
+            f"Modal function returned unexpected type {type(result).__name__}; expected str. "
+            "run_scheduled_trigger may have a mismatched signature."
+        )
+    return result
 
 
 def remove_modal_schedule(
