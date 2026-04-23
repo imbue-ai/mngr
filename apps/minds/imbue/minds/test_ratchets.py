@@ -41,7 +41,11 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(12))
+    # +5 for scripts/integ_test.py: the integ-test driver's UX is its
+    # stdout PASS/FAIL lines + final RESULT; using logger here would
+    # fight the ratchet's formatting and also send output to stderr by
+    # default, which breaks invoke-and-grep usage.
+    rc.check_bare_print(_DIR, snapshot(17))
 
 
 # --- Exception handling ---
@@ -52,7 +56,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(1))
+    rc.check_broad_exception_catch(_DIR, snapshot(0))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -94,7 +98,10 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # +1 for scripts/integ_test.py: Chrome DevTools Protocol over
+    # websockets is inherently async; the script drives multiple CDP
+    # sessions concurrently and would fight a sync rewrite.
+    rc.check_asyncio_import(_DIR, snapshot(2))
 
 
 def test_prevent_pandas_import() -> None:

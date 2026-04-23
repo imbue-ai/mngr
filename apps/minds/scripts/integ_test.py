@@ -23,19 +23,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import dataclasses
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 import websockets
+import websockets.exceptions
+
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.errors import MngrError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 APP_DIR = REPO_ROOT / "apps" / "minds"
@@ -44,13 +47,33 @@ CDP_PORT = 9222
 DEFAULT_AGENT_NAME = os.environ.get("MINDS_INTEG_AGENT_NAME", "integtest")
 
 
-@dataclasses.dataclass
-class StepResult:
+class MindsIntegTestError(MngrError):
+    """Raised when an integ-test precondition or step fails fatally."""
+
+
+# Transient errors we tolerate inside polling loops. CDP / websockets / httpx
+# all race with subprocess lifecycle, so any of these can show up briefly
+# while the app is still coming up or tearing down.
+_TRANSIENT: tuple[type[BaseException], ...] = (
+    OSError,
+    TimeoutError,
+    asyncio.TimeoutError,
+    json.JSONDecodeError,
+    ValueError,
+    TypeError,
+    httpx.RequestError,
+    httpx.HTTPStatusError,
+    websockets.exceptions.WebSocketException,
+    MindsIntegTestError,
+)
+
+
+class StepResult(FrozenModel):
     name: str
     ok: bool
     detail: str = ""
 
-    def __str__(self) -> str:
+    def format(self) -> str:
         icon = "PASS" if self.ok else "FAIL"
         return f"[{icon}] {self.name}" + (f" -- {self.detail}" if self.detail else "")
 
@@ -71,7 +94,8 @@ def kill_existing_minds() -> None:
     ]
     for pat in patterns:
         subprocess.run(["pkill", "-f", pat], check=False)
-    time.sleep(2)
+    # Give the OS a moment to reap and release the CDP port.
+    threading.Event().wait(2.0)
 
 
 def launch_electron() -> subprocess.Popen[bytes]:
@@ -121,7 +145,7 @@ async def wait_for_cdp(timeout: float = 30.0) -> None:
         except (httpx.RequestError, httpx.HTTPStatusError):
             pass
         await asyncio.sleep(0.5)
-    raise RuntimeError(f"CDP not ready on :{CDP_PORT} within {timeout}s")
+    raise MindsIntegTestError(f"CDP not ready on :{CDP_PORT} within {timeout}s")
 
 
 async def wait_for_login_url(timeout: float = 30.0) -> str:
@@ -134,7 +158,7 @@ async def wait_for_login_url(timeout: float = 30.0) -> str:
             if match:
                 return match.group(0)
         await asyncio.sleep(0.5)
-    raise RuntimeError(f"Backend login URL not seen within {timeout}s; log: {LOG_PATH}")
+    raise MindsIntegTestError(f"Backend login URL not seen within {timeout}s; log: {LOG_PATH}")
 
 
 async def find_content_view(timeout: float = 30.0) -> dict[str, Any]:
@@ -158,7 +182,7 @@ async def find_content_view(timeout: float = 30.0) -> dict[str, Any]:
             return content[0]
         await asyncio.sleep(0.5)
     pages = await _cdp_list()
-    raise RuntimeError(
+    raise MindsIntegTestError(
         f"No content view found within {timeout}s. Pages seen: {[p.get('url') for p in pages]}"
     )
 
@@ -183,7 +207,7 @@ async def cdp_eval(ws_url: str, expression: str, return_by_value: bool = True) -
         msg = json.loads(raw)
         result = msg.get("result", {}).get("result", {})
         if "exceptionDetails" in msg.get("result", {}):
-            raise RuntimeError(f"JS exception: {msg['result']['exceptionDetails']}")
+            raise MindsIntegTestError(f"JS exception: {msg['result']['exceptionDetails']}")
         return result.get("value")
 
 
@@ -208,7 +232,7 @@ async def poll_for_dom(
         try:
             if await cdp_eval(ws_url, expr):
                 return True
-        except Exception:
+        except _TRANSIENT:
             pass
         await asyncio.sleep(poll_interval)
     return False
@@ -225,7 +249,7 @@ async def run() -> list[StepResult]:
     def rec(name: str, ok: bool, detail: str = "") -> StepResult:
         r = StepResult(name=name, ok=ok, detail=detail)
         results.append(r)
-        print(r, flush=True)
+        print(r.format(), flush=True)
         return r
 
     kill_existing_minds()
@@ -235,14 +259,14 @@ async def run() -> list[StepResult]:
         try:
             await wait_for_cdp(timeout=45)
             rec("CDP endpoint up", True)
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("CDP endpoint up", False, str(e))
             return results
 
         try:
             login_url = await wait_for_login_url(timeout=45)
             rec("Backend emitted login URL", True, login_url)
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Backend emitted login URL", False, str(e))
             return results
 
@@ -251,7 +275,7 @@ async def run() -> list[StepResult]:
         try:
             page = await find_content_view(timeout=30)
             rec("Found content view in CDP", True, page.get("url", "?"))
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Found content view in CDP", False, str(e))
             return results
 
@@ -263,7 +287,7 @@ async def run() -> list[StepResult]:
             # Give it a beat; login consumes code + sets cookie + redirects to /.
             await asyncio.sleep(3)
             rec("Navigated content view to login URL", True)
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Navigated content view to login URL", False, str(e))
             return results
 
@@ -271,11 +295,8 @@ async def run() -> list[StepResult]:
         # as [data-agent-id] divs, or "No projects yet" empty state, or a
         # "Discovering agents..." auto-reloading loader. Any of those three
         # means we landed on the list page. Poll past the transient discovering
-        # state (auto-reloads every 2s).
-        landing_signals = (
-            '[data-agent-id], a[href="/create"], p:-soft-match("No projects yet")'
-        )
-        # CSS doesn't natively support text match; emulate with querySelectorAll + filter in JS.
+        # state (auto-reloads every 2s). CSS doesn't natively support text
+        # match; emulate with querySelectorAll + filter in JS.
         landing_probe = """
         (function() {
             if (document.querySelector('[data-agent-id]')) return 'AGENTS_LISTED';
@@ -291,7 +312,7 @@ async def run() -> list[StepResult]:
         while time.time() < deadline:
             try:
                 landing_state = await cdp_eval(ws_url, landing_probe) or ""
-            except Exception as e:
+            except _TRANSIENT as e:
                 landing_state = f"EVAL_ERROR:{e}"
             if landing_state in ("AGENTS_LISTED", "EMPTY_STATE", "LANDING_HEADING"):
                 landing_ok = True
@@ -302,7 +323,7 @@ async def run() -> list[StepResult]:
             try:
                 dump = await cdp_eval(ws_url, "document.body.innerText.substring(0, 400)")
                 rec("Landing DOM diagnostic", False, repr(dump)[:360])
-            except Exception:
+            except _TRANSIENT:
                 pass
             return results
 
@@ -311,7 +332,7 @@ async def run() -> list[StepResult]:
             await cdp_eval(ws_url, 'window.location.href = "/create"')
             await asyncio.sleep(2)
             rec("Navigated to /create", True)
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Navigated to /create", False, str(e))
             return results
 
@@ -331,7 +352,7 @@ async def run() -> list[StepResult]:
             rec("Submitted create form", status == "SUBMITTED", status or "")
             if status != "SUBMITTED":
                 return results
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Submitted create form", False, str(e))
             return results
 
@@ -349,7 +370,7 @@ async def run() -> list[StepResult]:
         while time.time() < deadline:
             try:
                 href = await cdp_eval(ws_url, "window.location.href")
-            except Exception:
+            except _TRANSIENT:
                 href = None
             if href:
                 m = re.search(r"/creating/(agent-[0-9a-f]+)", str(href))
@@ -384,7 +405,7 @@ async def run() -> list[StepResult]:
         while time.time() < deadline:
             try:
                 known_state = await cdp_eval(ws_url, known_probe) or ""
-            except Exception as e:
+            except _TRANSIENT as e:
                 known_state = f"EVAL_ERROR:{e}"
             if isinstance(known_state, str) and (
                 known_state.startswith(("302", "303", "307"))
@@ -406,7 +427,7 @@ async def run() -> list[StepResult]:
         try:
             await cdp_eval(ws_url, f'window.location.href = "/goto/{agent_id}/"')
             rec("Navigated to /goto/<agent_id>/", True)
-        except Exception as e:
+        except _TRANSIENT as e:
             rec("Navigated to /goto/<agent_id>/", False, str(e))
             return results
 
@@ -446,7 +467,7 @@ async def run() -> list[StepResult]:
         while time.time() < deadline:
             try:
                 subdomain_state = await cdp_eval(ws_url, chat_probe) or ""
-            except Exception as e:
+            except _TRANSIENT as e:
                 subdomain_state = f"EVAL_ERROR:{e}"
             if isinstance(subdomain_state, str) and not subdomain_state.startswith(
                 ("NOT_SUBDOMAIN", "EVAL_ERROR")
@@ -470,7 +491,7 @@ async def run() -> list[StepResult]:
         while time.time() < deadline:
             try:
                 chat_state = await cdp_eval(ws_url, chat_probe) or ""
-            except Exception as e:
+            except _TRANSIENT as e:
                 chat_state = f"EVAL_ERROR:{e}"
             if isinstance(chat_state, str) and chat_state.startswith("CHAT_READY"):
                 chat_ok = True
@@ -501,7 +522,7 @@ async def run() -> list[StepResult]:
             try:
                 url_now = await cdp_eval(ws_url, "window.location.href")
                 rec("Final URL (chat UI)", True, str(url_now))
-            except Exception as e:
+            except _TRANSIENT as e:
                 rec("Final URL (chat UI)", False, str(e))
 
         return results
@@ -509,14 +530,15 @@ async def run() -> list[StepResult]:
         try:
             proc.terminate()
             proc.wait(timeout=5)
-        except Exception:
+        except _TRANSIENT:
             with contextlib.suppress(Exception):
                 proc.kill()
         teardown()
 
 
 def main() -> int:
-    global DEFAULT_AGENT_NAME  # mutated below; keep declaration before any read
+    # Declare DEFAULT_AGENT_NAME global before any read below.
+    global DEFAULT_AGENT_NAME
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent-name", default=DEFAULT_AGENT_NAME)
     args = parser.parse_args()
@@ -532,7 +554,7 @@ def main() -> int:
     all_ok = all(r.ok for r in results)
     print("\n=== SUMMARY ===", flush=True)
     for r in results:
-        print(r, flush=True)
+        print(r.format(), flush=True)
     print(f"\nRESULT: {'PASS' if all_ok else 'FAIL'}", flush=True)
     return 0 if all_ok else 1
 
