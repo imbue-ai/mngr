@@ -22,7 +22,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -31,7 +31,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token
-from imbue.minds.primitives import ServerName
+from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
@@ -99,7 +99,7 @@ def _json_error(message: str, status_code: int) -> Response:
 
 def get_cf_client_with_auth(
     request: Request, agent_id: AgentId | None = None
-) -> tuple[CloudflareForwardingClient | None, Response | None]:
+) -> tuple[CloudflareClient | None, Response | None]:
     """Get a cloudflare client enriched with the active account's SuperTokens session.
 
     Returns ``(client, None)`` when the workspace has an associated signed-in
@@ -108,7 +108,7 @@ def get_cf_client_with_auth(
     workspace-account association, or an unrefreshable token. Without a valid
     session there is no way to authenticate to the forwarding backend.
     """
-    cf_client: CloudflareForwardingClient | None = request.app.state.cloudflare_client
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
 
     if cf_client is None:
@@ -126,7 +126,7 @@ def get_cf_client_with_auth(
 
     # Preserve the concrete subclass (tests swap in subclasses that stub HTTP methods).
     enriched_client = type(cf_client)(
-        forwarding_url=cf_client.forwarding_url,
+        connector_url=cf_client.connector_url,
         supertokens_token=access_token,
         supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
         supertokens_email=account.email,
@@ -155,7 +155,7 @@ class _CloudflareEnableBody(FrozenModel):
 
 def _handle_cloudflare_status(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     _caller_agent_id: CallerAgentIdDep,
 ) -> Response:
@@ -179,10 +179,10 @@ def _handle_cloudflare_status(
         default_rules = cf_client.get_tunnel_auth(parsed_id)
         return _json_response({"enabled": False, "url": None, "auth_rules": default_rules or owner_default_rules})
 
-    hostname = services.get(server_name)
+    hostname = services.get(service_name)
     if hostname:
         # Service is enabled -- get its specific auth policy
-        auth_rules = cf_client.get_service_auth(parsed_id, server_name)
+        auth_rules = cf_client.get_service_auth(parsed_id, service_name)
         if auth_rules is None:
             auth_rules = cf_client.get_tunnel_auth(parsed_id) or owner_default_rules
         return _json_response({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules})
@@ -194,7 +194,7 @@ def _handle_cloudflare_status(
 
 def _handle_cloudflare_enable(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     _caller_agent_id: CallerAgentIdDep,
     backend_resolver: BackendResolverDep,
@@ -207,11 +207,11 @@ def _handle_cloudflare_enable(
     assert cf_client is not None
 
     parsed_id = AgentId(agent_id)
-    parsed_server = ServerName(server_name)
+    parsed_service = ServiceName(service_name)
 
     service_url = body.service_url if body is not None else None
     if service_url is None:
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
         if backend_url is None:
             return _json_error("Server not found locally", 404)
         service_url = backend_url
@@ -228,21 +228,21 @@ def _handle_cloudflare_enable(
         save_tunnel_token(paths.data_dir, parsed_id, token)
         inject_tunnel_token_into_agent(parsed_id, token)
 
-    is_success = cf_client.add_service(parsed_id, parsed_server, service_url)
+    is_success = cf_client.add_service(parsed_id, parsed_service, service_url)
     if not is_success:
         return _json_error("Cloudflare API call failed", 502)
 
     # Apply auth rules if provided
     auth_rules = body.auth_rules if body is not None else None
     if auth_rules is not None:
-        cf_client.set_service_auth(parsed_id, str(parsed_server), auth_rules)
+        cf_client.set_service_auth(parsed_id, str(parsed_service), auth_rules)
 
     return _json_response({"ok": True})
 
 
 def _handle_cloudflare_disable(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     request: Request,
     _caller_agent_id: CallerAgentIdDep,
 ) -> Response:
@@ -253,9 +253,9 @@ def _handle_cloudflare_disable(
     assert cf_client is not None
 
     parsed_id = AgentId(agent_id)
-    parsed_server = ServerName(server_name)
+    parsed_service = ServiceName(service_name)
 
-    is_success = cf_client.remove_service(parsed_id, parsed_server)
+    is_success = cf_client.remove_service(parsed_id, parsed_service)
 
     if is_success:
         return _json_response({"ok": True})
@@ -389,13 +389,13 @@ def create_api_v1_router() -> APIRouter:
 
     # Cloudflare forwarding
     router.get(
-        "/agents/{agent_id}/servers/{server_name}/cloudflare",
+        "/agents/{agent_id}/services/{service_name}/cloudflare",
     )(_handle_cloudflare_status)
     router.put(
-        "/agents/{agent_id}/servers/{server_name}/cloudflare",
+        "/agents/{agent_id}/services/{service_name}/cloudflare",
     )(_handle_cloudflare_enable)
     router.delete(
-        "/agents/{agent_id}/servers/{server_name}/cloudflare",
+        "/agents/{agent_id}/services/{service_name}/cloudflare",
     )(_handle_cloudflare_disable)
 
     # Telegram

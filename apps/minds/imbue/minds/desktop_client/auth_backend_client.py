@@ -1,6 +1,6 @@
-"""HTTP client for the `cloudflare_forwarding` server's `/auth/*` endpoints.
+"""HTTP client for the `remote_service_connector` server's `/auth/*` endpoints.
 
-The `cloudflare_forwarding` service holds the SuperTokens API key and OAuth
+The `remote_service_connector` service holds the SuperTokens API key and OAuth
 client secrets. All supertokens operations that the desktop client used to
 perform directly via the SDK are now proxied through that service. This module
 provides a small, typed HTTP client used by the desktop client's auth routes
@@ -51,9 +51,9 @@ class AuthBackendError(RuntimeError):
 
 
 class AuthBackendClient(FrozenModel):
-    """Thin HTTP client for the `/auth/*` endpoints on `cloudflare_forwarding`."""
+    """Thin HTTP client for the `/auth/*` endpoints on `remote_service_connector`."""
 
-    base_url: AnyUrl = Field(description="Base URL of the cloudflare_forwarding server")
+    base_url: AnyUrl = Field(description="Base URL of the remote_service_connector server")
     timeout_seconds: float = Field(default=_DEFAULT_TIMEOUT_SECONDS, description="HTTP request timeout")
 
     def _url(self, path: str) -> str:

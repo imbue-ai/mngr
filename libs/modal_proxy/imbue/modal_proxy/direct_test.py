@@ -16,6 +16,7 @@ from imbue.modal_proxy.direct import DirectApp
 from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
+from imbue.modal_proxy.direct import _should_retry_volume_op
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
 from imbue.modal_proxy.direct import _translate_modal_cli_not_found
@@ -183,3 +184,35 @@ def test_translate_resource_exhausted_to_rate_limit_error() -> None:
     result = _translate_modal_error(modal_err)
     assert isinstance(result, ModalProxyRateLimitError)
     assert "rate limit" in str(result)
+
+
+# --- Volume retry predicate tests ---
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        pytest.param(modal.exception.InternalError("server error"), True, id="internal_error"),
+        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), True, id="resource_exhausted"),
+        pytest.param(
+            modal.exception.NotFoundError("Environment 'mngr-abc123' not found"),
+            True,
+            id="environment_not_found",
+        ),
+        pytest.param(
+            modal.exception.NotFoundError("File '/hosts/foo.json' not found"),
+            False,
+            id="path_not_found",
+        ),
+        # Regression: a path-level not-found whose path contains the substring "Environment"
+        # must not be misclassified as an environment-not-found error.
+        pytest.param(
+            modal.exception.NotFoundError("File '/Environment/foo.json' not found"),
+            False,
+            id="path_containing_environment_substring",
+        ),
+        pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
+    ],
+)
+def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
+    assert _should_retry_volume_op(exc) is expected

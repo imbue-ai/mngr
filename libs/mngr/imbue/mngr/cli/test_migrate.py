@@ -13,6 +13,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(60)
 def test_migrate_clones_and_destroys_source(
     cli_runner: CliRunner,
     create_test_agent,
@@ -22,7 +23,7 @@ def test_migrate_clones_and_destroys_source(
     """Test that migrate creates a new agent and destroys the source."""
     source_name = f"test-migrate-source-{uuid4().hex}"
     target_name = f"test-migrate-target-{uuid4().hex}"
-    source_session = create_test_agent(source_name)
+    source_session = create_test_agent(source_name, "sleep 300002")
     target_session = f"{mngr_test_prefix}{target_name}"
 
     # Target session is created by migrate, not by create_test_agent, so clean it up separately
@@ -33,10 +34,13 @@ def test_migrate_clones_and_destroys_source(
             [
                 source_name,
                 target_name,
-                "--command",
-                "sleep 482917",
+                "--type",
+                "command",
                 "--transfer=none",
                 "--no-connect",
+                "--",
+                "sleep",
+                "300003",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

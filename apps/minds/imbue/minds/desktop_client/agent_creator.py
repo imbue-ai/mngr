@@ -381,6 +381,16 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
+    server_port: int = Field(
+        default=0,
+        frozen=True,
+        description=(
+            "Port the desktop client is listening on. Used to build the absolute "
+            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
+            "The default of 0 is only appropriate for tests that never exercise the "
+            "happy-path redirect."
+        ),
+    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -536,9 +546,17 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
+                # After phase 6 deleted the legacy /forwarding/ routes the new
+                # workspace entry point is http://<agent-id>.localhost:<port>/,
+                # which the desktop client's subdomain middleware forwards to the
+                # per-agent minds_workspace_server. Construct the absolute URL
+                # here because the browser uses it verbatim in window.location.
+                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
+                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
-                    self._redirect_urls[aid] = "/forwarding/{}/".format(agent_id)
+                    self._redirect_urls[aid] = redirect_url
 
         except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)

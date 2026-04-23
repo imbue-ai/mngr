@@ -1,6 +1,6 @@
-# cloudflare_forwarding
+# remote_service_connector
 
-A lightweight service deployed as a Modal Function that wraps the Cloudflare tunnel API behind authenticated HTTP endpoints.
+A lightweight service deployed as a Modal Function that connects minds clients to the remote services they need: Cloudflare tunnels today, SuperTokens authentication today, and more remote capabilities (e.g. creating remote hosts on behalf of users) over time. All endpoints are authenticated.
 
 ## What it does
 
@@ -54,14 +54,14 @@ This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-pro
 
 - `SUPERTOKENS_CONNECTION_URI` (required): URL of the SuperTokens core.
 - `SUPERTOKENS_API_KEY` (required for most deployments): SuperTokens core API key.
-- `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in password-reset and email-verification links. Must match the URL Modal assigns to the deployed function. If unset, the app derives `https://{workspace}--cloudflare-forwarding-<env>-fastapi-app.modal.run` (using the hardcoded default workspace in `app.py`), which is only correct for that specific Modal workspace -- set this explicitly for every deploy.
+- `AUTH_WEBSITE_DOMAIN` (optional): Public base URL embedded in password-reset and email-verification links. Must match the URL Modal assigns to the deployed function. If unset, the app derives `https://{workspace}--remote-service-connector-<env>-fastapi-app.modal.run` (using the hardcoded default workspace in `app.py`), which is only correct for that specific Modal workspace -- set this explicitly for every deploy.
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (optional): override Google OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (optional): override GitHub OAuth client credentials. Leave blank to inherit from the SuperTokens core's dashboard.
 
 ### 2. Deploy the Modal app
 
 ```bash
-scripts/deploy_cloudflare_forwarding.sh production
+scripts/deploy_remote_service_connector.sh production
 ```
 
 The script sets `MNGR_DEPLOY_ENV=production` in the shell that runs `modal deploy`, which is read at module level by `app.py` to pin the secret names (`cloudflare-production`, `supertokens-production`) and also baked into a `Secret.from_dict` so the container can read `MNGR_DEPLOY_ENV` at runtime. Running `modal deploy` directly without the wrapper defaults to `production`.

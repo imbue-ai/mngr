@@ -1,16 +1,16 @@
 import pytest
 
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.mngr.primitives import AgentId
 
 
 def _make_client(
     url: str = "http://127.0.0.1:1",
     supertokens_email: str | None = "test@example.com",
-) -> CloudflareForwardingClient:
-    return CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl(url),
+) -> CloudflareClient:
+    return CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl(url),
         supertokens_token="jwt-token",
         supertokens_user_id_prefix="a1b2c3d4e5f67890",
         supertokens_email=supertokens_email,
@@ -33,8 +33,8 @@ def test_auth_header_is_bearer() -> None:
 
 def test_auth_header_raises_without_supertokens_token() -> None:
     """A client built without a SuperTokens session cannot authenticate."""
-    client = CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+    client = CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"),
     )
     with pytest.raises(ValueError, match="supertokens_token"):
         client._auth_header()
@@ -42,8 +42,8 @@ def test_auth_header_raises_without_supertokens_token() -> None:
 
 def test_effective_username_raises_without_user_id_prefix() -> None:
     """Tunnel naming requires a user-id prefix from the session."""
-    client = CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
+    client = CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"),
         supertokens_token="jwt-token",
     )
     with pytest.raises(ValueError, match="supertokens_user_id_prefix"):

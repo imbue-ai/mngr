@@ -37,9 +37,9 @@ type WsEvent =
       parent_agent_id: string | null;
     }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
-  | { type: "refresh_service"; server_name: string };
+  | { type: "refresh_service"; service_name: string };
 
-export type RefreshServiceListener = (serverName: string) => void;
+export type RefreshServiceListener = (serviceName: string) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
@@ -128,7 +128,7 @@ function handleEvent(event: WsEvent): void {
 
     case "refresh_service":
       for (const listener of refreshListeners) {
-        listener(event.server_name);
+        listener(event.service_name);
       }
       break;
   }

@@ -211,7 +211,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     if (!isConversationNotFound(agentId)) {
       connectToStream(agentId);
     } else {
-      disconnectFromStream();
+      disconnectFromStream(agentId);
     }
   }
 
@@ -294,7 +294,18 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       return renderBuildLog(agentId);
     }
 
-    // Agent finished creating -- disconnect log WebSocket and force reload
+    // Creation completed but failed -- keep the build log visible so the
+    // user can read the error and the last few log lines. Without this the
+    // build-log view transitions to the empty-chat / "no conversation data"
+    // screen the instant proto_agent_completed arrives and the error flashes
+    // by unreadably. The agent will never be added to getAgents() on
+    // failure, so nothing else in the UI would surface the error either.
+    if (logAgentId === agentId && logDone && !logSuccess) {
+      return renderBuildLog(agentId);
+    }
+
+    // Agent finished creating successfully -- disconnect log WebSocket and
+    // force reload
     if (logAgentId === agentId) {
       disconnectLogWs();
       currentAgentId = null;
@@ -384,6 +395,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   return {
     onremove() {
       disconnectLogWs();
+      if (currentAgentId !== null) {
+        disconnectFromStream(currentAgentId);
+      }
     },
 
     view(vnode) {

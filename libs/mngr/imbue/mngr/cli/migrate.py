@@ -8,7 +8,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 
 
 @click.command(
-    context_settings={"ignore_unknown_options": True},
+    context_settings={"allow_interspersed_args": False, "ignore_unknown_options": True},
 )
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context

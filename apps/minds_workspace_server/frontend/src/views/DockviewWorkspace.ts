@@ -12,7 +12,7 @@ import {
   type SerializedDockview,
 } from "dockview-core";
 import { ChatPanel } from "./ChatPanel";
-import { IframePanel, reloadIframesForServer } from "./IframePanel";
+import { IframePanel, reloadIframesForService } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
@@ -30,35 +30,6 @@ import {
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-type AccessMode = "cloudflare" | "local" | "dev";
-
-/**
- * Detect the forwarding prefix from the <base> tag injected by the desktop
- * client proxy. Returns e.g. "/forwarding/{agentId}/web" or null if not proxied.
- */
-function getForwardingPrefix(): string | null {
-  const baseEl = document.querySelector("base[href]");
-  if (!baseEl) return null;
-  const href = baseEl.getAttribute("href") ?? "";
-  if (href.includes("/forwarding/")) {
-    return href.replace(/\/+$/, "");
-  }
-  return null;
-}
-
-function getAccessMode(): AccessMode {
-  const hostname = window.location.hostname;
-  if (hostname.match(/^[^-]+--(.*)/)) {
-    return "cloudflare";
-  }
-  // Local mode: the desktop client proxy injects a <base> tag with
-  // href="/forwarding/{agentId}/{serverName}/" into the HTML.
-  if (getForwardingPrefix() !== null) {
-    return "local";
-  }
-  return "dev";
-}
-
 // SVG path constants for tab action icons
 const SVG_CLOSE = '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>';
 const SVG_TRASH =
@@ -68,46 +39,15 @@ const SVG_SHARE =
 const SVG_REFRESH =
   '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>';
 
-function getApplicationUrl(appName: string, rawUrl: string): string {
-  const hostname = window.location.hostname;
-  const primaryId = getPrimaryAgentId();
-
-  // Cloudflare proxy: server--agentid--username.domain
-  const cfMatch = hostname.match(/^[^-]+--(.*)/);
-  if (cfMatch) {
-    const proto = window.location.protocol;
-    const port = window.location.port ? `:${window.location.port}` : "";
-    return `${proto}//${appName}--${cfMatch[1]}${port}/`;
-  }
-
-  // Local forwarding server: desktop client proxy injects <base> with /forwarding/
-  if (primaryId && getForwardingPrefix() !== null) {
-    return `/forwarding/${primaryId}/${appName}/`;
-  }
-
-  // Dev mode: use the raw URL from applications.toml
-  return rawUrl;
+// Every non-system_interface service is reached at /service/<name>/ on the
+// same origin as the dockview UI itself. The workspace_server's service
+// dispatcher handles the proxying, SW bootstrap, and header rewriting.
+function getServiceUrl(serviceName: string): string {
+  return `/service/${serviceName}/`;
 }
 
 export function getTerminalUrl(): string {
-  const hostname = window.location.hostname;
-
-  // Cloudflare proxy: terminal--agentid--username.domain
-  const cfMatch = hostname.match(/^[^-]+--(.*)/);
-  if (cfMatch) {
-    const proto = window.location.protocol;
-    const port = window.location.port ? `:${window.location.port}` : "";
-    return `${proto}//terminal--${cfMatch[1]}${port}/`;
-  }
-
-  // Local forwarding server: always use the primary agent's terminal
-  const primaryId = getPrimaryAgentId();
-  if (primaryId && getForwardingPrefix() !== null) {
-    return `/forwarding/${primaryId}/terminal/`;
-  }
-
-  // Dev mode
-  return "http://localhost:7681";
+  return getServiceUrl("terminal");
 }
 
 type PanelType = "chat" | "iframe" | "subagent";
@@ -124,7 +64,7 @@ interface PanelParams {
   // undefined for ad-hoc URL tabs, terminals, and agent-owned iframes.
   // Drives both the WS-driven `refresh_service` broadcast match and the
   // presence of the per-tab Refresh button.
-  serverName?: string;
+  serviceName?: string;
 }
 
 // Modal state
@@ -139,7 +79,7 @@ let destroyTargetPanelId: string | null = null;
 
 // Share modal state
 let showShareModal = false;
-let shareServerName: string | null = null;
+let shareServiceName: string | null = null;
 
 interface SavedLayout {
   dockview: SerializedDockview;
@@ -241,24 +181,24 @@ function createCustomTab(options: { id: string; name: string }): {
       const panelType = pp?.panelType ?? "chat";
 
       // Share and Refresh buttons -- only on iframe/application tabs.
-      // The Refresh button matches open iframes by their data-server-name
+      // The Refresh button matches open iframes by their data-service-name
       // attribute, which is populated only when the tab is tied to a real
-      // workspace service. For tabs without an explicit serverName
+      // workspace service. For tabs without an explicit serviceName
       // (terminals, custom URLs, agent-owned iframes), suppress the Refresh
       // button since there is nothing to match against.
       if (panelType === "iframe") {
-        const shareName = pp?.serverName ?? pp?.title ?? "web";
-        if (pp?.serverName) {
-          const serverName = pp.serverName;
+        const shareName = pp?.serviceName ?? pp?.title ?? "web";
+        if (pp?.serviceName) {
+          const serviceName = pp.serviceName;
           actions.appendChild(
             createTabActionButton("Refresh", SVG_REFRESH, () => {
-              reloadIframesForServer(serverName);
+              reloadIframesForService(serviceName);
             }),
           );
         }
         actions.appendChild(
           createTabActionButton("Share", SVG_SHARE, () => {
-            shareServerName = shareName;
+            shareServiceName = shareName;
             showShareModal = true;
             m.redraw();
           }),
@@ -355,7 +295,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   const apps = getApplications().filter((app) => app.name !== "system_interface" && app.name !== "terminal");
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
-      const proxyUrl = getApplicationUrl(app.name, app.url);
+      const proxyUrl = getServiceUrl(app.name);
       items.push({
         label: app.name,
         action: () => openIframeTab(proxyUrl, app.name, "iframe", app.name),
@@ -517,11 +457,11 @@ function addChatPanel(chatAgentId: string, chatAgentName: string): void {
   });
 }
 
-function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serverName?: string): void {
+function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serviceName?: string): void {
   if (!dockview) return;
   const primaryId = getPrimaryAgentId();
   const panelId = `${panelType}-${primaryId}-${Date.now()}`;
-  const params: PanelParams = { panelType, agentId: primaryId, url, title, serverName };
+  const params: PanelParams = { panelType, agentId: primaryId, url, title, serviceName };
   panelParams.set(panelId, params);
   dockview.addPanel({
     id: panelId,
@@ -628,8 +568,6 @@ function showCustomUrlDialog(): void {
 
 async function saveLayout(): Promise<void> {
   if (!dockview) return;
-  const primaryId = getPrimaryAgentId();
-  if (!primaryId) return;
 
   const dockviewJson = dockview.toJSON();
   const serializedParams: Record<string, PanelParams> = {};
@@ -637,10 +575,9 @@ async function saveLayout(): Promise<void> {
     serializedParams[id] = params;
   }
   const payload: SavedLayout = { dockview: dockviewJson, panelParams: serializedParams };
-  const mode = getAccessMode();
 
   try {
-    await fetch(apiUrl(`/api/agents/${encodeURIComponent(primaryId)}/layout?mode=${mode}`), {
+    await fetch(apiUrl(`/api/layout`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -661,11 +598,8 @@ function scheduleSave(): void {
 }
 
 async function loadLayout(): Promise<SavedLayout | null> {
-  const primaryId = getPrimaryAgentId();
-  if (!primaryId) return null;
-  const mode = getAccessMode();
   try {
-    const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(primaryId)}/layout?mode=${mode}`));
+    const response = await fetch(apiUrl(`/api/layout`));
     if (!response.ok) return null;
     return (await response.json()) as SavedLayout;
   } catch {
@@ -700,7 +634,7 @@ function initializeDockview(parentElement: HTMLElement): void {
           return createMithrilRenderer(IframePanel, {
             url: params?.url ?? "",
             title: params?.title ?? "Tab",
-            serverName: params?.serverName,
+            serviceName: params?.serviceName,
           });
 
         case "subagent":
@@ -734,11 +668,11 @@ function initializeDockview(parentElement: HTMLElement): void {
   });
 
   // Agent-triggered refresh: reload every open iframe tab whose
-  // data-server-name attribute matches the server_name the agent named. This
+  // data-service-name attribute matches the server_name the agent named. This
   // arrives over the existing workspace server WebSocket as
   // {type: "refresh_service", server_name}.
-  _refreshServiceListener = (serverName: string) => {
-    reloadIframesForServer(serverName);
+  _refreshServiceListener = (serviceName: string) => {
+    reloadIframesForService(serviceName);
   };
   addRefreshServiceListener(_refreshServiceListener);
 
@@ -870,12 +804,12 @@ export const DockviewWorkspace: m.Component = {
             })
           : null,
 
-        showShareModal && shareServerName
+        showShareModal && shareServiceName
           ? m(ShareModal, {
-              serverName: shareServerName,
+              serviceName: shareServiceName,
               onClose() {
                 showShareModal = false;
-                shareServerName = null;
+                shareServiceName = null;
               },
             })
           : null,

@@ -83,9 +83,9 @@ class WebSocketBroadcaster(MutableModel):
             }
         )
 
-    def broadcast_refresh_service(self, server_name: str) -> None:
+    def broadcast_refresh_service(self, service_name: str) -> None:
         """Broadcast a refresh_service event telling the frontend to reload a web-service tab."""
-        self.broadcast({"type": "refresh_service", "server_name": server_name})
+        self.broadcast({"type": "refresh_service", "service_name": service_name})
 
     def shutdown(self) -> None:
         """Signal all clients to disconnect by sending None sentinel."""

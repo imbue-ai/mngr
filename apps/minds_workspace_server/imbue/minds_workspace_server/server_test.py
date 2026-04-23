@@ -179,91 +179,52 @@ def test_send_message_success(client: TestClient) -> None:
     mock_send.assert_called_once_with("test-agent", "hello")
 
 
-def test_get_layout_returns_404_for_unknown_agent(client: TestClient) -> None:
-    """Getting layout for a nonexistent agent returns 404."""
-    with patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]):
-        response = client.get("/api/agents/nonexistent/layout")
-    assert response.status_code == 404
-
-
-def test_get_layout_returns_404_when_no_layout_saved(client: TestClient, tmp_path: Path) -> None:
+def test_get_layout_returns_404_when_no_layout_saved(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Getting layout returns 404 when no layout file exists."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        response = client.get("/api/agents/agent-123/layout")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.get("/api/layout")
 
     assert response.status_code == 404
 
 
-def test_save_and_get_layout(client: TestClient, tmp_path: Path) -> None:
+def test_save_and_get_layout(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving and retrieving a layout round-trips correctly."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
 
     layout_data = {"dockview": {"panels": {}}, "panelParams": {"chat-1": {"panelType": "chat"}}}
 
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        save_response = client.post("/api/agents/agent-123/layout", json=layout_data)
-        assert save_response.status_code == 200
-        assert save_response.json()["status"] == "ok"
+    save_response = client.post("/api/layout", json=layout_data)
+    assert save_response.status_code == 200
+    assert save_response.json()["status"] == "ok"
 
-        get_response = client.get("/api/agents/agent-123/layout")
-        assert get_response.status_code == 200
-        assert get_response.json() == layout_data
+    get_response = client.get("/api/layout")
+    assert get_response.status_code == 200
+    assert get_response.json() == layout_data
 
 
-def test_save_layout_creates_directory(client: TestClient, tmp_path: Path) -> None:
+def test_save_layout_creates_directory(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving a layout creates the workspace_layout directory if needed."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
 
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
-    )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        client.post("/api/agents/agent-123/layout", json={"test": True})
+    client.post("/api/layout", json={"test": True})
 
-    assert (agent_state_dir / "workspace_layout" / "layout.json").exists()
+    assert (tmp_path / "agents" / "agent-123" / "workspace_layout" / "layout.json").exists()
 
 
-def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path) -> None:
+def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Saving invalid JSON returns 400."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-
-    agent_info = AgentInfo(
-        id="agent-123",
-        name="test-agent",
-        state="RUNNING",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=Path("/tmp/.claude"),
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.post(
+        "/api/layout",
+        content=b"not valid json",
+        headers={"Content-Type": "application/json"},
     )
-    with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
-        response = client.post(
-            "/api/agents/agent-123/layout",
-            content=b"not valid json",
-            headers={"Content-Type": "application/json"},
-        )
 
     assert response.status_code == 400
 
@@ -328,7 +289,7 @@ def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
 def test_refresh_service_request_writes_event(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POST /api/refresh-service/{server_name} appends a refresh event to the agent state dir."""
+    """POST /api/refresh-service/{service_name} appends a refresh event to the agent state dir."""
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
 
     response = client.post("/api/refresh-service/web")
@@ -339,7 +300,7 @@ def test_refresh_service_request_writes_event(
     assert events_file.exists()
     event = json.loads(events_file.read_text().splitlines()[0])
     assert event["type"] == "refresh_service"
-    assert event["server_name"] == "web"
+    assert event["service_name"] == "web"
 
 
 def test_refresh_service_request_without_agent_state_dir(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,7 +312,7 @@ def test_refresh_service_request_without_agent_state_dir(client: TestClient, mon
 
 @pytest.mark.timeout(10)
 def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
-    """POST /api/refresh-service/{server_name}/broadcast sends a refresh_service WS message."""
+    """POST /api/refresh-service/{service_name}/broadcast sends a refresh_service WS message."""
     with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         with loopback_client.websocket_connect("/api/ws") as ws:
             # Drain the initial snapshot messages.
@@ -362,7 +323,7 @@ def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
             assert response.status_code == 200
 
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "refresh_service", "server_name": "web"}
+            assert msg == {"type": "refresh_service", "service_name": "web"}
 
 
 def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:

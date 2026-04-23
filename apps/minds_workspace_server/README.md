@@ -42,7 +42,7 @@ This appends a `refresh_service` event to the agent's
 via `mngr events --follow`, then POSTs back to the workspace server which
 broadcasts a WebSocket message telling the frontend to reload every open
 iframe tab tied to the given service (matched by the iframe's
-`data-server-name` attribute). Replace `web` with whichever service name
+`data-service-name` attribute). Replace `web` with whichever service name
 (as listed in `runtime/applications.toml` / the tab dropdown) you want to
 refresh.
 

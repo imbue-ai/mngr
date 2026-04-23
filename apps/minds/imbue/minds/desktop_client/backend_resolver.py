@@ -20,7 +20,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.primitives import ServerName
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -30,7 +30,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 
-SERVERS_EVENT_SOURCE_NAME: Final[str] = "servers"
+SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
@@ -42,31 +42,31 @@ class AgentDisplayInfo(FrozenModel):
     host_id: str = Field(description="Host identifier (e.g. 'localhost' or a remote host ID)")
 
 
-class ServerLogParseError(ValueError):
-    """Raised when a server log record cannot be parsed."""
+class ServiceLogParseError(ValueError):
+    """Raised when a service log record cannot be parsed."""
 
 
-class ServerLogRecord(FrozenModel):
-    """A record of a server started by an agent, as written to servers/events.jsonl.
+class ServiceLogRecord(FrozenModel):
+    """A record of a service started by an agent, as written to services/events.jsonl.
 
-    Each line of servers/events.jsonl is a JSON object with these fields.
+    Each line of services/events.jsonl is a JSON object with these fields.
     Agents write these records on startup so the desktop client can discover them.
     """
 
-    server: ServerName = Field(description="Name of the server (e.g., 'web')")
-    url: str = Field(description="URL where the server is accessible (e.g., 'http://127.0.0.1:9100')")
+    service: ServiceName = Field(description="Name of the service (e.g., 'web')")
+    url: str = Field(description="URL where the service is accessible (e.g., 'http://127.0.0.1:9100')")
 
 
 class BackendResolverInterface(MutableModel, ABC):
-    """Resolves agent IDs and server names to their backend server URLs.
+    """Resolves agent IDs and service names to their backend service URLs.
 
-    Each agent may run multiple servers (e.g. 'web', 'api'), each accessible
-    at a different URL. The resolver maps (agent_id, server_name) pairs to URLs.
+    Each agent may run multiple services (e.g. 'web', 'api'), each accessible
+    at a different URL. The resolver maps (agent_id, service_name) pairs to URLs.
     """
 
     @abstractmethod
-    def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
-        """Return the backend URL for a specific server of an agent, or None if unknown/offline."""
+    def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
+        """Return the backend URL for a specific service of an agent, or None if unknown/offline."""
 
     @abstractmethod
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
@@ -81,8 +81,8 @@ class BackendResolverInterface(MutableModel, ABC):
         return self.list_known_agent_ids()
 
     @abstractmethod
-    def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
-        """Return all known server names for an agent, sorted alphabetically."""
+    def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
+        """Return all known service names for an agent, sorted alphabetically."""
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH connection info for the agent's host, or None for local agents.
@@ -123,28 +123,28 @@ class BackendResolverInterface(MutableModel, ABC):
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.
 
-    The mapping is structured as {agent_id: {server_name: url}}.
+    The mapping is structured as {agent_id: {service_name: url}}.
     """
 
-    url_by_agent_and_server: Mapping[str, Mapping[str, str]] = Field(
+    url_by_agent_and_service: Mapping[str, Mapping[str, str]] = Field(
         frozen=True,
-        description="Mapping of agent ID to mapping of server name to backend URL",
+        description="Mapping of agent ID to mapping of service name to backend URL",
     )
 
-    def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
-        servers = self.url_by_agent_and_server.get(str(agent_id))
-        if servers is None:
+    def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
+        services = self.url_by_agent_and_service.get(str(agent_id))
+        if services is None:
             return None
-        return servers.get(str(server_name))
+        return services.get(str(service_name))
 
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
-        return tuple(AgentId(agent_id) for agent_id in sorted(self.url_by_agent_and_server.keys()))
+        return tuple(AgentId(agent_id) for agent_id in sorted(self.url_by_agent_and_service.keys()))
 
-    def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
-        servers = self.url_by_agent_and_server.get(str(agent_id))
-        if servers is None:
+    def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
+        services = self.url_by_agent_and_service.get(str(agent_id))
+        if services is None:
             return ()
-        return tuple(ServerName(name) for name in sorted(servers.keys()))
+        return tuple(ServiceName(name) for name in sorted(services.keys()))
 
 
 # -- Parsing helpers --
@@ -216,53 +216,53 @@ def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
     return parse_agents_from_json(json_output).agent_ids
 
 
-class ServerDeregisteredRecord(FrozenModel):
-    """A record of a server being deregistered by an agent.
+class ServiceDeregisteredRecord(FrozenModel):
+    """A record of a service being deregistered by an agent.
 
-    Written to servers/events.jsonl when an application is removed.
+    Written to services/events.jsonl when an application is removed.
     """
 
-    server: ServerName = Field(description="Name of the server being deregistered")
+    service: ServiceName = Field(description="Name of the service being deregistered")
 
 
-def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord | ServerDeregisteredRecord:
-    """Parse a single JSON dict into a ServerLogRecord or ServerDeregisteredRecord.
+def parse_service_log_record(raw: dict[str, object]) -> ServiceLogRecord | ServiceDeregisteredRecord:
+    """Parse a single JSON dict into a ServiceLogRecord or ServiceDeregisteredRecord.
 
-    Extracts the 'server' field and checks the 'type' field.
-    For 'server_deregistered' events, returns a ServerDeregisteredRecord.
-    For all other events, returns a ServerLogRecord with 'server' and 'url'.
+    Extracts the 'service' field and checks the 'type' field.
+    For 'service_deregistered' events, returns a ServiceDeregisteredRecord.
+    For all other events, returns a ServiceLogRecord with 'service' and 'url'.
     Raises ValueError if required fields are missing.
     """
-    event_type = raw.get("type", "server_registered")
-    server = raw.get("server")
+    event_type = raw.get("type", "service_registered")
+    service = raw.get("service")
 
-    if not server:
-        raise ServerLogParseError("Server log record missing 'server' field")
+    if not service:
+        raise ServiceLogParseError("Service log record missing 'service' field")
 
-    if event_type == "server_deregistered":
-        return ServerDeregisteredRecord(server=ServerName(str(server)))
+    if event_type == "service_deregistered":
+        return ServiceDeregisteredRecord(service=ServiceName(str(service)))
 
     url = raw.get("url")
     if not url:
-        raise ServerLogParseError(f"Server log record missing required fields (server={server!r}, url={url!r})")
-    return ServerLogRecord(server=ServerName(str(server)), url=str(url))
+        raise ServiceLogParseError(f"Service log record missing required fields (service={service!r}, url={url!r})")
+    return ServiceLogRecord(service=ServiceName(str(service)), url=str(url))
 
 
-def parse_server_log_records(text: str) -> list[ServerLogRecord | ServerDeregisteredRecord]:
-    """Parse JSONL text into server log records (registered or deregistered).
+def parse_service_log_records(text: str) -> list[ServiceLogRecord | ServiceDeregisteredRecord]:
+    """Parse JSONL text into service log records (registered or deregistered).
 
     Uses the 'type' field to distinguish registered from deregistered events.
-    Registered events require 'server' and 'url'; deregistered events require
-    only 'server'. Other envelope fields (timestamp, event_id, source) are ignored.
+    Registered events require 'service' and 'url'; deregistered events require
+    only 'service'. Other envelope fields (timestamp, event_id, source) are ignored.
     Raises on malformed lines rather than silently skipping them.
     """
-    records: list[ServerLogRecord | ServerDeregisteredRecord] = []
+    records: list[ServiceLogRecord | ServiceDeregisteredRecord] = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
         raw = json.loads(line)
-        records.append(parse_server_log_record(raw))
+        records.append(parse_service_log_record(raw))
     return records
 
 
@@ -272,7 +272,7 @@ def parse_server_log_records(text: str) -> list[ServerLogRecord | ServerDeregist
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
-    State is updated externally via update_agents() and update_servers() methods.
+    State is updated externally via update_agents() and update_services() methods.
     In production, a MngrStreamManager calls these methods from background threads
     that stream data from `mngr observe --discovery-only` and `mngr events --follow`.
 
@@ -280,7 +280,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     """
 
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
-    _servers_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
@@ -288,7 +288,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
-        """Register a callback invoked whenever agent or server data changes.
+        """Register a callback invoked whenever agent or service data changes.
 
         Callbacks are invoked synchronously from the thread that made the change
         (typically a MngrStreamManager background thread). Keep callbacks fast
@@ -332,21 +332,21 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._initial_discovery_done = True
         self._fire_on_change()
 
-    def update_servers(self, agent_id: AgentId, servers: dict[str, str]) -> None:
-        """Replace the known servers for a single agent. Thread-safe."""
+    def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
+        """Replace the known services for a single agent. Thread-safe."""
         with self._lock:
-            self._servers_by_agent[str(agent_id)] = servers
+            self._services_by_agent[str(agent_id)] = services
         self._fire_on_change()
 
-    def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
+    def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
         with self._lock:
-            servers = self._servers_by_agent.get(str(agent_id), {})
-            return servers.get(str(server_name))
+            services = self._services_by_agent.get(str(agent_id), {})
+            return services.get(str(service_name))
 
-    def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
+    def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
         with self._lock:
-            servers = self._servers_by_agent.get(str(agent_id), {})
-            return tuple(ServerName(name) for name in sorted(servers.keys()))
+            services = self._services_by_agent.get(str(agent_id), {})
+            return tuple(ServiceName(name) for name in sorted(services.keys()))
 
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         with self._lock:
@@ -476,7 +476,7 @@ class MngrStreamManager(MutableModel):
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _observe_process: RunningProcess | None = PrivateAttr(default=None)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -668,12 +668,12 @@ class MngrStreamManager(MutableModel):
             process = self._events_processes.pop(aid_str, None)
             if process is not None:
                 process.terminate()
-            self._events_servers.pop(aid_str, None)
+            self._events_services.pop(aid_str, None)
             agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
             discovered_agents = self._discovered_agents
 
         self._update_resolver(agent_ids, discovered_agents)
-        self.resolver.update_servers(event.agent_id, {})
+        self.resolver.update_services(event.agent_id, {})
 
     def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
         """Remove all agents on a destroyed host from the resolver."""
@@ -686,7 +686,7 @@ class MngrStreamManager(MutableModel):
                 process = self._events_processes.pop(aid_str, None)
                 if process is not None:
                     process.terminate()
-                self._events_servers.pop(aid_str, None)
+                self._events_services.pop(aid_str, None)
             self._discovered_agents = tuple(a for a in self._discovered_agents if str(a.agent_id) not in destroyed_ids)
             self._ssh_by_host_id.pop(str(event.host_id), None)
             agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
@@ -694,7 +694,7 @@ class MngrStreamManager(MutableModel):
 
         self._update_resolver(agent_ids, discovered_agents)
         for agent_id in event.agent_ids:
-            self.resolver.update_servers(agent_id, {})
+            self.resolver.update_services(agent_id, {})
 
     def _get_provider_name_for_agent(self, agent_id: AgentId) -> str:
         """Look up the provider name for an agent. Returns 'unknown' if not found."""
@@ -766,7 +766,7 @@ class MngrStreamManager(MutableModel):
                 if process is not None:
                     logger.info("Stopping events stream for removed agent {}", aid_str)
                     process.terminate()
-                self._events_servers.pop(aid_str, None)
+                self._events_services.pop(aid_str, None)
 
             # Start streams for newly discovered agents
             for aid_str in added:
@@ -776,7 +776,7 @@ class MngrStreamManager(MutableModel):
         """Handle a line of output from mngr events --follow for a specific agent.
 
         Dispatches based on the ``source`` field in the event envelope:
-        server events update the resolver's server map, request events are
+        service events update the resolver's service map, request events are
         forwarded to registered request callbacks, and refresh events are
         forwarded to registered refresh callbacks.
         """
@@ -798,26 +798,26 @@ class MngrStreamManager(MutableModel):
             if source == REFRESH_EVENT_SOURCE_NAME:
                 self.resolver._fire_on_refresh(aid_str, stripped)
                 return
-            record = parse_server_log_record(raw)
-            servers = self._events_servers.get(aid_str)
-            if servers is None:
+            record = parse_service_log_record(raw)
+            services = self._events_services.get(aid_str)
+            if services is None:
                 return
-            if isinstance(record, ServerDeregisteredRecord):
-                servers.pop(str(record.server), None)
+            if isinstance(record, ServiceDeregisteredRecord):
+                services.pop(str(record.service), None)
             else:
-                servers[str(record.server)] = record.url
-            self.resolver.update_servers(agent_id, dict(servers))
+                services[str(record.service)] = record.url
+            self.resolver.update_services(agent_id, dict(services))
         except (json.JSONDecodeError, ValueError) as e:
             logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> servers requests refresh --follow for a workspace agent."""
+        """Start mngr events <agent-id> services requests refresh --follow for a workspace agent."""
         if self._cg.is_shutting_down():
             logger.debug("Skipping events stream for {} -- shutting down", agent_id)
             return
 
         aid_str = str(agent_id)
-        self._events_servers[aid_str] = {}
+        self._events_services[aid_str] = {}
 
         logger.info("Starting events stream for agent {}", aid_str)
         try:
@@ -826,7 +826,7 @@ class MngrStreamManager(MutableModel):
                     self.mngr_binary,
                     "events",
                     aid_str,
-                    SERVERS_EVENT_SOURCE_NAME,
+                    SERVICES_EVENT_SOURCE_NAME,
                     REQUESTS_EVENT_SOURCE_NAME,
                     REFRESH_EVENT_SOURCE_NAME,
                     "--follow",

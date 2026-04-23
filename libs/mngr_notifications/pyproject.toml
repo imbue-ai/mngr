@@ -35,7 +35,6 @@ testpaths = ["."]
 addopts = [
     "--cov=imbue.mngr_notifications",
     "--cov-report=term-missing",
-    "--cov-fail-under=80",
     "--timeout=30",
 ]
 
@@ -46,3 +45,6 @@ omit = [
     "test_*.py",
     "*/conftest.py",
 ]
+
+[tool.coverage.report]
+fail_under = 80

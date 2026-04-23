@@ -2,9 +2,10 @@
 
 These routes render the sign-in / sign-up / password-reset / settings pages
 and provide JSON APIs consumed by those pages' vanilla JS. All actual
-SuperTokens operations are delegated to the `cloudflare_forwarding` backend
-via `AuthBackendClient`; the desktop client never sees the SuperTokens API
-key, OAuth client secrets, or any other server-only credential.
+SuperTokens operations are delegated to the `remote_service_connector`
+backend via `AuthBackendClient`; the desktop client never sees the
+SuperTokens API key, OAuth client secrets, or any other server-only
+credential.
 """
 
 import html
@@ -99,7 +100,6 @@ def _handle_auth_page(request: Request, message: str | None = None) -> HTMLRespo
         render_auth_page(
             default_to_signup=default_to_signup,
             message=message,
-            server_port=_get_server_port(request),
         )
     )
 

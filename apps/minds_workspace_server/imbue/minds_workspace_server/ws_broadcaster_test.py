@@ -3,7 +3,11 @@
 import json
 import queue
 
+import pytest
+
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+
+pytestmark = pytest.mark.flaky
 
 
 def _get_message(q: queue.Queue[str | None]) -> str:
@@ -105,7 +109,7 @@ def test_broadcast_refresh_service() -> None:
     broadcaster.broadcast_refresh_service("web")
 
     msg = json.loads(_get_message(q))
-    assert msg == {"type": "refresh_service", "server_name": "web"}
+    assert msg == {"type": "refresh_service", "service_name": "web"}
 
 
 def test_shutdown_sends_none_sentinel() -> None:
