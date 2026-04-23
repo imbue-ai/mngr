@@ -817,13 +817,17 @@ function handleChromeSSEEvent(evt) {
     }));
     const newIds = new Set(workspaceList.map((w) => w.id));
 
-    // Close windows for workspaces that disappeared (destroyed)
+    // Navigate windows for destroyed workspaces back to home
     for (const oldId of oldIds) {
       if (!newIds.has(oldId)) {
         for (const b of bundles) {
-          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-            b.window.close();
+          if (b.window.isDestroyed()) continue;
+          if (b.currentWorkspaceId !== oldId) continue;
+          b.currentWorkspaceId = null;
+          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+            b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
+          updateOsTitle(b);
         }
       }
     }

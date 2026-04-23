@@ -93,7 +93,7 @@
           .then(function(resp) { return resp.json(); })
           .then(function(data) {
             if (data.status === 'destroying' || data.status === 'done') {
-              window.close();
+              window.location.href = '/';
             } else {
               destroySpinner.classList.add('hidden');
               destroyBtn.disabled = false;
