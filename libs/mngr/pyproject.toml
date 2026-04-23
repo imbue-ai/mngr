@@ -64,6 +64,7 @@ imbue-common = { workspace = true }
 concurrency-group = { workspace = true }
 resource-guards = { workspace = true }
 # skitwright is used by e2e tests (not a runtime dependency); resolved via workspace
+# mngr_modal is used by e2e conftest (shared truncate_modal_name); resolved via workspace
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

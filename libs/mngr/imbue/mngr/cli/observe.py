@@ -15,6 +15,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
 
 class ObserveCliOptions(CommonCliOptions):
@@ -23,6 +24,7 @@ class ObserveCliOptions(CommonCliOptions):
     events_dir: Path | None = None
     discovery_only: bool = False
     on_error: str = "abort"
+    daemonize: bool = False
 
 
 @click.command(name="observe")
@@ -46,6 +48,13 @@ class ObserveCliOptions(CommonCliOptions):
     default="abort",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
 )
+@click.option(
+    "--daemonize/--no-daemonize",
+    default=False,
+    show_default=True,
+    help="When not daemonized (default), exit if the parent process dies. "
+    "Use --daemonize to keep running independently.",
+)
 @add_common_options
 @click.pass_context
 def observe(ctx: click.Context, **kwargs: Any) -> None:
@@ -55,6 +64,10 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ObserveCliOptions,
         is_format_template_supported=False,
     )
+
+    # Start parent death watcher unless running as a daemon
+    if not opts.daemonize:
+        start_parent_death_watcher(mngr_ctx.concurrency_group)
 
     events_base_dir = opts.events_dir
     if events_base_dir is None:

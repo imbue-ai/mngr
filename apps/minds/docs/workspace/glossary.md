@@ -12,10 +12,10 @@ Key concepts in the minds system:
 
 - **application**: a service that exposes a port for forwarding. Registered in `runtime/applications.toml` via `scripts/forward_port.py`. Each application gets both a local URL (via the desktop client) and optionally a global URL (via Cloudflare tunnel).
 
-- **app watcher**: a background service that monitors `runtime/applications.toml`, writes server events to `events.jsonl`, and reconciles with the Cloudflare forwarding API.
+- **app watcher**: a background service that monitors `runtime/applications.toml`, writes service events to `events/services/events.jsonl`, and reconciles with the Cloudflare forwarding API.
 
 - **cloudflare tunnel**: a persistent connection from the agent container to Cloudflare's network, managed by `cloudflared`. Enables global access to agent applications protected by Cloudflare Access (Google OAuth, service tokens).
 
-- **server event**: a JSON line in `events/servers/events.jsonl` that registers (or deregisters) a server name and URL. The desktop client's MngrStreamManager watches these events to discover agent backends.
+- **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a service name and URL. The desktop client's MngrStreamManager watches these events to discover agent backends.
 
 - **launch mode**: how the agent runs. DEV mode runs in-place on the local host. LOCAL mode runs in a Docker container. CLOUD mode is not yet implemented.
