@@ -468,7 +468,7 @@ def test_extra_window_with_named_window(
                 "--no-ensure-clean",
                 "--",
                 "sleep",
-                "130003",
+                "130018",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
