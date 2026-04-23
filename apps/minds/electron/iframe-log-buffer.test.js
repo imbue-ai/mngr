@@ -5,6 +5,17 @@ const assert = require('node:assert/strict');
 
 const { IframeLogBuffer } = require('./iframe-log-buffer');
 
+// Snapshot the buffer's per-mind queue sizes by reading the internal state
+// directly. Used only by these tests; the production class does not expose
+// a helper for it (see CLAUDE.md: no test-only hooks in production code).
+function queueSizes(buffer) {
+  const out = {};
+  for (const [mindId, entry] of buffer._queues.entries()) {
+    out[mindId] = entry.records.length;
+  }
+  return out;
+}
+
 function makeRecorder() {
   /** @type {Array<{url: string, body: object}>} */
   const calls = [];
@@ -32,7 +43,7 @@ test('enqueue below threshold does not trigger a flush', () => {
   const buffer = new IframeLogBuffer({ fetchFn, flushAtSize: 3 });
   buffer.enqueue('agent-abc', 8420, aRecord());
   assert.equal(calls.length, 0);
-  assert.deepEqual(buffer._queueSizes(), { 'agent-abc': 1 });
+  assert.deepEqual(queueSizes(buffer), { 'agent-abc': 1 });
 });
 
 test('enqueue at threshold auto-flushes', async () => {
@@ -48,7 +59,7 @@ test('enqueue at threshold auto-flushes', async () => {
     calls[0].body.records.map((/** @type {{message: string}} */ r) => r.message),
     ['a', 'b'],
   );
-  assert.deepEqual(buffer._queueSizes(), { 'agent-abc': 0 });
+  assert.deepEqual(queueSizes(buffer), { 'agent-abc': 0 });
 });
 
 test('flushAll POSTs one batch per mind with the correct port', async () => {
@@ -69,7 +80,7 @@ test('overflow drops oldest records, preserves newest', async () => {
   for (let i = 0; i < 5; i += 1) {
     buffer.enqueue('agent-abc', 8420, aRecord({ message: `msg-${i}` }));
   }
-  assert.deepEqual(buffer._queueSizes(), { 'agent-abc': 3 });
+  assert.deepEqual(queueSizes(buffer), { 'agent-abc': 3 });
   await buffer.flush('agent-abc');
   assert.equal(calls.length, 1);
   const messages = calls[0].body.records.map((/** @type {{message: string}} */ r) => r.message);
@@ -123,7 +134,7 @@ test('close blocks further enqueues', () => {
   buffer.close();
   const result = buffer.enqueue('agent-abc', 8420, aRecord());
   assert.equal(result, null);
-  assert.deepEqual(buffer._queueSizes(), {});
+  assert.deepEqual(queueSizes(buffer), {});
   assert.equal(calls.length, 0);
 });
 

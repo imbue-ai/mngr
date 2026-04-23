@@ -133,18 +133,6 @@ class IframeLogBuffer {
   close() {
     this._closed = true;
   }
-
-  /**
-   * Test helper: snapshot of current queue sizes.
-   * @returns {Record<string, number>}
-   */
-  _queueSizes() {
-    const out = {};
-    for (const [mindId, entry] of this._queues.entries()) {
-      out[mindId] = entry.records.length;
-    }
-    return out;
-  }
 }
 
 module.exports = { IframeLogBuffer, DEFAULT_FLUSH_AT_SIZE, DEFAULT_MAX_QUEUE_SIZE };
