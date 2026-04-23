@@ -211,7 +211,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     if (!isConversationNotFound(agentId)) {
       connectToStream(agentId);
     } else {
-      disconnectFromStream();
+      disconnectFromStream(agentId);
     }
   }
 
@@ -395,6 +395,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   return {
     onremove() {
       disconnectLogWs();
+      if (currentAgentId !== null) {
+        disconnectFromStream(currentAgentId);
+      }
     },
 
     view(vnode) {
