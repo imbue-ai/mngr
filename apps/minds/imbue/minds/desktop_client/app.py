@@ -617,11 +617,11 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
         if "text/html" in request.headers.get("accept", ""):
             return HTMLResponse(
                 content=(
-                    '<!doctype html><html><head>'
+                    "<!doctype html><html><head>"
                     '<meta http-equiv="refresh" content="1">'
-                    '</head><body>'
-                    '<p>Workspace server not yet available. Retrying...</p>'
-                    '</body></html>'
+                    "</head><body>"
+                    "<p>Workspace server not yet available. Retrying...</p>"
+                    "</body></html>"
                 )
             )
         return Response(status_code=503, content="Workspace server not yet available")
