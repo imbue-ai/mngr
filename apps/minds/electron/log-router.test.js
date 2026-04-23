@@ -67,7 +67,7 @@ test('mind-destined records queue when the port is not yet known', () => {
   );
   assert.equal(writer.writes.length, 0, 'never write mind records locally even pre-port');
   assert.equal(buffer.enqueues.length, 0, 'buffer must not see records until port is known');
-  assert.equal(router._pendingCount(), 1);
+  assert.equal(router._pendingMindRecords.length, 1);
 });
 
 test('setBackendPort drains pending records into the buffer in order', () => {
@@ -82,9 +82,9 @@ test('setBackendPort drains pending records into the buffer in order', () => {
     makeConsoleDetails('http://agent-def.localhost:8420/service/terminal/', { message: 'second' }),
     'content',
   );
-  assert.equal(router._pendingCount(), 2);
+  assert.equal(router._pendingMindRecords.length, 2);
   router.setBackendPort(9000);
-  assert.equal(router._pendingCount(), 0);
+  assert.equal(router._pendingMindRecords.length, 0);
   assert.equal(buffer.enqueues.length, 2);
   assert.deepEqual(
     buffer.enqueues.map((c) => ({ mindId: c.mindId, message: c.record.message, port: c.port })),
@@ -107,7 +107,7 @@ test('pending queue bounded by maxPendingRecords, dropping oldest', () => {
       'content',
     );
   }
-  assert.equal(router._pendingCount(), 2);
+  assert.equal(router._pendingMindRecords.length, 2);
   router.setBackendPort(8420);
   assert.equal(buffer.enqueues.length, 2);
   assert.deepEqual(
@@ -169,9 +169,9 @@ test('pending mind records are dropped on close, not flushed to the local writer
     makeConsoleDetails('http://agent-abc.localhost:8420/service/web/', { message: 'queued' }),
     'content',
   );
-  assert.equal(router._pendingCount(), 1);
+  assert.equal(router._pendingMindRecords.length, 1);
   router.close();
-  assert.equal(router._pendingCount(), 0);
+  assert.equal(router._pendingMindRecords.length, 0);
   assert.equal(writer.writes.length, 0, 'mind records must never reach the local writer');
 });
 

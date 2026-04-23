@@ -143,15 +143,6 @@ class LogRouter {
     this._closed = true;
     this._pendingMindRecords = [];
   }
-
-  /**
-   * Test helper: snapshot of the pending queue size.
-   *
-   * @returns {number}
-   */
-  _pendingCount() {
-    return this._pendingMindRecords.length;
-  }
 }
 
 module.exports = { LogRouter, DEFAULT_MAX_PENDING_RECORDS };
