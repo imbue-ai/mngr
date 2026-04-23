@@ -2,7 +2,7 @@
 
 A Modal-deployed [Bifrost](https://github.com/maximhq/bifrost) LLM gateway backed by Neon.tech PostgreSQL, with a SuperTokens-authenticated management API.
 
-Agents running inside containers send LLM requests with a virtual key (`sk-bf-*`); bifrost enforces per-agent budgets and rate limits, then forwards the request to Anthropic using the real API key. Humans manage virtual keys through a FastAPI endpoint that authenticates via SuperTokens and proxies to bifrost's admin API.
+Agents running inside containers send LLM requests with a virtual key (`sk-bf-*`); bifrost enforces per-agent budgets, then forwards the request to Anthropic using the real API key. Humans manage virtual keys through a FastAPI endpoint that authenticates via SuperTokens and proxies to bifrost's admin API.
 
 ## What it does
 
@@ -14,7 +14,7 @@ Allows authenticated users to:
 - Update a key's budget.
 - Delete a key.
 
-Agents use the virtual key's `sk-bf-*` value with the inference Function as a drop-in OpenAI-compatible endpoint, and get budget enforcement + rate limiting for free.
+Agents use the virtual key's `sk-bf-*` value with the inference Function as a drop-in OpenAI-compatible endpoint, and get budget enforcement for free. (Rate limits are not configured on virtual keys today; see the spec's Open Questions for context.)
 
 ## Architecture
 
@@ -75,7 +75,7 @@ Requires a SuperTokens JWT in `Authorization: Bearer <access_token>`. The user's
 
 ### Inference API (`/v1/*`)
 
-Requires a `sk-bf-*` virtual key in `Authorization: Bearer <virtual_key>` (or any of the other header forms bifrost accepts: `x-api-key`, `x-bf-vk`, etc.). Bifrost enforces the budget and rate limits attached to that key.
+Requires a `sk-bf-*` virtual key in `Authorization: Bearer <virtual_key>` (or any of the other header forms bifrost accepts: `x-api-key`, `x-bf-vk`, etc.). Bifrost enforces the budget attached to that key.
 
 ### Admin API (`/api/*`)
 

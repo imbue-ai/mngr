@@ -6,7 +6,7 @@ a Neon.tech PostgreSQL database. Exposes two Modal Functions:
 * An **inference** Function (``bifrost_inference``) that runs bifrost's
   Go server directly via ``@modal.web_server(port=8080)``. Agents hit this
   endpoint with an ``Authorization: Bearer sk-bf-*`` virtual key to make LLM
-  calls against Anthropic through bifrost's budget/rate-limit enforcement.
+  calls against Anthropic through bifrost's per-key budget enforcement.
 * A **management** Function (``bifrost_management``) that exposes a
   SuperTokens-authenticated FastAPI app for creating, listing, reading,
   updating, and deleting virtual keys scoped to the signed-in user. It runs
