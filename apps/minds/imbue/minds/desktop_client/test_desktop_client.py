@@ -1564,6 +1564,98 @@ def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+# -- Subdomain forward health-tracker integration --
+
+
+def _get_health_tracker(client: TestClient) -> WorkspaceServerHealthTracker:
+    """Pull the WorkspaceServerHealthTracker off the TestClient's app state.
+
+    Wrapped in isinstance assertions so the type checker stops complaining
+    about Starlette's loosely-typed ``state`` attribute.
+    """
+    app = client.app
+    assert isinstance(app, FastAPI)
+    tracker = app.state.workspace_server_health_tracker
+    assert isinstance(tracker, WorkspaceServerHealthTracker)
+    return tracker
+
+
+def _create_subdomain_client_with_disconnecting_workspace(
+    tmp_path: Path,
+    agent_id: AgentId,
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a subdomain-routed desktop client whose workspace backend always
+    raises RemoteProtocolError, simulating a wedged workspace_server that
+    accepts the TCP connection but never writes an HTTP response."""
+
+    class _DisconnectingWorkspaceTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.host == "workspace-backend":
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+            return httpx.Response(502, content=b"unknown host")
+
+    routing_client = httpx.AsyncClient(
+        transport=_DisconnectingWorkspaceTransport(), follow_redirects=False, timeout=5.0
+    )
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    discovered_agents = make_agents_json(agent_id)
+    resolver = make_resolver_with_data(
+        agents_json=discovered_agents,
+        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=routing_client,
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_failure_records_in_health_tracker(tmp_path: Path) -> None:
+    """A wedged workspace_server (RemoteProtocolError on forward) must register
+    as a failure in the tracker and cross the stuck threshold."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    tracker = _get_health_tracker(client)
+    # Threshold 1 lets a single request cross the wedge boundary so the
+    # assertion is not timing-dependent.
+    tracker.failure_threshold = 1
+
+    response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert response.status_code == 502
+    stuck = tracker.snapshot_stuck()
+    assert len(stuck) == 1
+    assert stuck[0].agent_id == str(agent_id)
+    # The desktop client only proxies the workspace_server now, so the
+    # tracker tags every failure under the canonical system_interface name.
+    assert stuck[0].server_name == "system_interface"
+    assert stuck[0].last_error_class == "RemoteProtocolError"
+
+
+def test_subdomain_forward_success_clears_stuck_state(tmp_path: Path) -> None:
+    """A 2xx response from the workspace_server must clear a prior stuck mark."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    tracker = _get_health_tracker(client)
+    # Seed the tracker as if this server had previously been marked stuck.
+    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
+    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
+    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
+    assert len(tracker.snapshot_stuck()) == 1
+
+    response = client.get("/api/layout")
+
+    assert response.status_code == 200
+    assert tracker.snapshot_stuck() == ()
+
+
 # -- Session cookie stripping tests --
 
 
