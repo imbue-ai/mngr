@@ -90,11 +90,10 @@ from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# Name of the bootstrap-managed service that runs the minds-workspace-server
-# uvicorn process inside each agent container.
-_WORKSPACE_SERVER_SERVICE_NAME: Final[str] = "system_interface"
 # Prefix used for the tmux session both inside minds agent containers and on
-# the local host for non-docker minds.
+# the local host for non-docker minds. The canonical workspace-server service
+# name (`_WORKSPACE_SERVER_SERVICE_NAME`) is defined further down next to the
+# subdomain-routing helpers that consume it.
 _MINDS_TMUX_SESSION_PREFIX: Final[str] = "minds-"
 # Path to services.toml inside a minds agent container. `touch`-ing this file
 # bumps its mtime, which wakes bootstrap's reconcile loop and causes it to
