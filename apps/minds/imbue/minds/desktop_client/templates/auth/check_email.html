@@ -1,0 +1,53 @@
+{% extends 'auth/_auth_base.html' %}
+{% block title %}Check your email{% endblock %}
+{% block card_content %}
+  <div class="text-center">
+    <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Check your email</h1>
+    <p class="text-zinc-500 mb-3">We sent a verification link to <strong>{{ email }}</strong></p>
+    <p class="text-sm text-zinc-500 mb-5">
+      Click the link in the email to verify your account, then come back here.
+    </p>
+    <div id="status-msg" class="text-blue-900 text-sm mb-3 px-3 py-2 bg-blue-50 rounded-md border border-blue-100">Waiting for verification...</div>
+    <div id="success-msg" class="hidden text-emerald-700 text-sm mb-3 px-3 py-2 bg-emerald-50 rounded-md border border-emerald-200">Email verified. Redirecting...</div>
+    <button id="resend-btn"
+            class="mt-4 w-full py-3 rounded-lg bg-zinc-900 text-zinc-50 font-semibold cursor-pointer transition-colors hover:bg-zinc-800 disabled:bg-zinc-400 disabled:cursor-not-allowed">
+      Resend verification email
+    </button>
+    <div class="text-center mt-3 text-sm text-zinc-500">
+      <a href="/" class="text-blue-600 hover:underline">Go to home</a>
+    </div>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    var pollInterval = setInterval(async function () {
+      try {
+        var res = await fetch('/auth/api/email-verified');
+        var data = await res.json();
+        if (data.verified) {
+          clearInterval(pollInterval);
+          document.getElementById('status-msg').classList.add('hidden');
+          document.getElementById('success-msg').classList.remove('hidden');
+          setTimeout(function () { window.location.href = '/'; }, 1500);
+        }
+      } catch (e) {}
+    }, 3000);
+
+    document.getElementById('resend-btn').addEventListener('click', async function () {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      try {
+        await fetch('/auth/api/resend-verification', { method: 'POST' });
+        btn.textContent = 'Sent. Check your inbox';
+        setTimeout(function () {
+          btn.disabled = false;
+          btn.textContent = 'Resend verification email';
+        }, 5000);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Resend verification email';
+      }
+    });
+  </script>
+{% endblock %}

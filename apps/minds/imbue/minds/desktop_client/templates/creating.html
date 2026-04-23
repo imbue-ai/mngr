@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Creating your project...{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 class="text-2xl font-semibold text-zinc-900 leading-tight">Creating your project</h1>
+    <p class="text-xs text-zinc-400 mb-5">This usually takes 10-30 seconds.</p>
+    <p id="status" class="my-4 flex items-center gap-2">
+      {{ ui.spinner() }}
+      <span id="status-text">{{ status_text }}</span>
+    </p>
+    <div id="logs"
+         class="mt-4 p-3 bg-zinc-900 text-zinc-200 font-mono text-xs rounded-xl max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-zinc-900"
+         data-agent-id="{{ agent_id }}"></div>
+  {% endcall %}
+{% endblock %}
+{% block scripts %}
+  <script src="/_static/creating.js" defer></script>
+{% endblock %}

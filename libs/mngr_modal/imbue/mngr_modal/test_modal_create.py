@@ -52,13 +52,15 @@ def test_mngr_create_echo_command_on_modal(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "echo",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
@@ -91,7 +93,8 @@ def test_mngr_create_with_transfer_git_worktree_on_modal_raises_error(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "echo",
+            "--type",
+            "command",
             "--new-host",
             "--transfer=git-worktree",
             "--no-connect",
@@ -99,6 +102,7 @@ def test_mngr_create_with_transfer_git_worktree_on_modal_raises_error(
             "--source",
             str(temp_source_dir),
             "--",
+            "echo",
             "hello",
         ],
         capture_output=True,
@@ -181,7 +185,8 @@ def test_mngr_create_with_build_args_on_modal(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "echo",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -196,6 +201,7 @@ def test_mngr_create_with_build_args_on_modal(
             "-b",
             "0.5",
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
@@ -250,7 +256,8 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "echo",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -259,6 +266,7 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "-b",
             f"--file={dockerfile_path}",
             "--",
+            "echo",
             expected_output,
         ],
         capture_output=True,
@@ -306,7 +314,8 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "echo",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -315,6 +324,7 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
             "-b",
             f"--file={dockerfile_path}",
             "--",
+            "echo",
             "should-not-reach-here",
         ],
         capture_output=True,
@@ -372,14 +382,16 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "generic",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
             "--",
-            "sleep 3600",
+            "sleep",
+            "100310",
         ],
         capture_output=True,
         text=True,
@@ -412,14 +424,16 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal",
-            "generic",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
             "--",
-            "git rev-parse --abbrev-ref HEAD && sleep 3600",
+            "sleep",
+            "100311",
         ],
         capture_output=True,
         text=True,
@@ -449,15 +463,19 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 ) -> None:
     """Test creating an agent on Modal using the mngr default Dockerfile.
 
-    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile:
-    1. Builds successfully on Modal
-    2. Has the expected tools installed (uv, claude code)
-    3. Can run agents properly
+    This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile
+    builds successfully on Modal and that ``mngr create`` can launch an agent on the
+    resulting image (reporting "Done.").
+
+    Assertions here are weak: ``mngr create`` returns as soon as the agent is launched
+    in its detached tmux session, so the agent's own command never gates the test.
+    A stronger check would add a synchronous ``mngr exec`` after create to verify
+    image contents (e.g. ``which uv && which claude``). Deferred to a follow-up that
+    also fixes the repo-root-relative path resolution so the test runs locally.
 
     This test is marked as release since it takes longer due to the image build.
     """
     agent_name = f"test-modal-default-df-{get_short_random_string()}"
-    unique_marker = f"default-dockerfile-{get_short_random_string()}"
 
     dockerfile_path = _get_mngr_default_dockerfile_path()
     assert dockerfile_path.exists(), f"Default Dockerfile not found at {dockerfile_path}"
@@ -488,7 +506,8 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "mngr",
             "create",
             f"{agent_name}@{agent_name}.modal:/code/mngr",
-            "generic",
+            "--type",
+            "command",
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
@@ -499,7 +518,8 @@ def test_mngr_create_with_default_dockerfile_on_modal(
             "-b",
             f"context-dir={temp_dir_with_tar}",
             "--",
-            f"echo {unique_marker} && which uv && which claude && sleep 30",
+            "sleep",
+            "100312",
         ],
         capture_output=True,
         text=True,

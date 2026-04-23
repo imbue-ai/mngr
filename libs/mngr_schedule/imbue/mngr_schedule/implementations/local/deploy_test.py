@@ -1,5 +1,6 @@
 """Unit tests for local deploy.py."""
 
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -10,21 +11,16 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.data_types import ScheduleCreationRecord
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
+from imbue.mngr_schedule.implementations.local.deploy import _get_records_dir
 from imbue.mngr_schedule.implementations.local.deploy import _save_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import _stage_env_file
 from imbue.mngr_schedule.implementations.local.deploy import build_wrapper_script
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
+from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
+from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.local.deploy import list_local_schedule_creation_records
 
-
-def _make_test_trigger(name: str = "test-trigger") -> ScheduleTriggerDefinition:
-    return ScheduleTriggerDefinition(
-        name=name,
-        command=ScheduledMngrCommand.CREATE,
-        args="--message hello",
-        schedule_cron="0 2 * * *",
-        provider="local",
-    )
+TriggerFactory = Callable[..., ScheduleTriggerDefinition]
 
 
 # =============================================================================
@@ -32,8 +28,8 @@ def _make_test_trigger(name: str = "test-trigger") -> ScheduleTriggerDefinition:
 # =============================================================================
 
 
-def test_build_wrapper_script_contains_path() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_contains_path(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/home/user/project",
@@ -44,8 +40,8 @@ def test_build_wrapper_script_contains_path() -> None:
     assert "/usr/local/bin:/usr/bin" in script
 
 
-def test_build_wrapper_script_contains_cd_to_working_dir() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_contains_cd_to_working_dir(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/home/user/project",
@@ -74,8 +70,8 @@ def test_build_wrapper_script_contains_mngr_command_and_args() -> None:
     assert "do work" in script
 
 
-def test_build_wrapper_script_includes_env_sourcing() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_includes_env_sourcing(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/tmp",
@@ -86,8 +82,8 @@ def test_build_wrapper_script_includes_env_sourcing() -> None:
     assert ".env" in script
 
 
-def test_build_wrapper_script_omits_env_when_none() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_omits_env_when_none(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/tmp",
@@ -97,8 +93,8 @@ def test_build_wrapper_script_omits_env_when_none() -> None:
     assert "source" not in script
 
 
-def test_build_wrapper_script_starts_with_shebang() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_starts_with_shebang(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/tmp",
@@ -108,8 +104,8 @@ def test_build_wrapper_script_starts_with_shebang() -> None:
     assert script.startswith("#!/usr/bin/env bash\n")
 
 
-def test_build_wrapper_script_uses_exec() -> None:
-    trigger = _make_test_trigger()
+def test_build_wrapper_script_uses_exec(make_test_trigger: TriggerFactory) -> None:
+    trigger = make_test_trigger()
     script = build_wrapper_script(
         trigger=trigger,
         working_directory="/tmp",
@@ -184,11 +180,12 @@ def test_stage_env_file_skips_missing_env_vars(
 def test_deploy_local_schedule_creates_files_and_record(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """Test the full deploy flow with injected crontab and git hash stubs."""
     captured_crontab: list[str] = []
 
-    trigger = _make_test_trigger()
+    trigger = make_test_trigger()
     deploy_local_schedule(
         trigger,
         temp_mngr_ctx,
@@ -219,11 +216,12 @@ def test_deploy_local_schedule_with_env_vars(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """Test that pass-env vars are included in the wrapper script."""
     monkeypatch.setenv("MY_API_KEY", "sk-test-123")
 
-    trigger = _make_test_trigger()
+    trigger = make_test_trigger()
     deploy_local_schedule(
         trigger,
         temp_mngr_ctx,
@@ -308,9 +306,10 @@ def test_list_local_schedule_creation_records_empty(
 
 def test_list_local_schedule_creation_records_round_trip(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """Test that saved records can be read back."""
-    trigger = _make_test_trigger("my-schedule")
+    trigger = make_test_trigger("my-schedule")
     record = ScheduleCreationRecord(
         trigger=trigger,
         full_commandline="mngr schedule add ...",
@@ -330,10 +329,11 @@ def test_list_local_schedule_creation_records_round_trip(
 
 def test_list_local_schedule_creation_records_multiple(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """Test listing multiple records."""
     for name in ["alpha", "beta", "gamma"]:
-        trigger = _make_test_trigger(name)
+        trigger = make_test_trigger(name)
         record = ScheduleCreationRecord(
             trigger=trigger,
             full_commandline=f"mngr schedule add --name {name}",
@@ -416,9 +416,10 @@ def test_deploy_then_list_round_trip_preserves_all_fields(
 
 def test_list_local_schedule_creation_records_skips_non_json_files(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """list_local_schedule_creation_records should skip non-JSON files."""
-    trigger = _make_test_trigger("with-non-json")
+    trigger = make_test_trigger("with-non-json")
     deploy_local_schedule(
         trigger,
         temp_mngr_ctx,
@@ -438,9 +439,10 @@ def test_list_local_schedule_creation_records_skips_non_json_files(
 
 def test_list_local_schedule_creation_records_skips_unreadable_files(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
 ) -> None:
     """list_local_schedule_creation_records should skip files that cannot be read."""
-    trigger = _make_test_trigger("readable-trigger")
+    trigger = make_test_trigger("readable-trigger")
     deploy_local_schedule(
         trigger,
         temp_mngr_ctx,
@@ -459,3 +461,82 @@ def test_list_local_schedule_creation_records_skips_unreadable_files(
     assert records[0].trigger.name == "readable-trigger"
 
     unreadable.chmod(0o644)
+
+
+# =============================================================================
+# get_local_schedule_creation_record tests
+# =============================================================================
+
+
+def test_get_local_schedule_creation_record_found(
+    temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
+) -> None:
+    """Looking up a deployed trigger by name should return its record."""
+    trigger = make_test_trigger("my-trigger")
+    deploy_local_schedule(
+        trigger,
+        temp_mngr_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "fakehash",
+    )
+
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "my-trigger")
+    assert record is not None
+    assert record.trigger.name == "my-trigger"
+    assert record.trigger.command == ScheduledMngrCommand.CREATE
+
+
+def test_get_local_schedule_creation_record_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up a nonexistent trigger should return None."""
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "nonexistent")
+    assert record is None
+
+
+def test_get_local_schedule_creation_record_invalid_json(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up a trigger with invalid JSON should return None."""
+    # Resolve the records dir via the same helper the production code uses
+    # so this test does not silently decouple from a layout change.
+    records_dir = _get_records_dir(temp_mngr_ctx)
+    records_dir.mkdir(parents=True, exist_ok=True)
+    (records_dir / "bad-trigger.json").write_text("not valid json")
+
+    record = get_local_schedule_creation_record(temp_mngr_ctx, "bad-trigger")
+    assert record is None
+
+
+# =============================================================================
+# get_local_trigger_run_script tests
+# =============================================================================
+
+
+def test_get_local_trigger_run_script_returns_correct_path(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Should return the path to run.sh inside the trigger directory."""
+    path = get_local_trigger_run_script(temp_mngr_ctx, "my-trigger")
+    assert path.name == "run.sh"
+    assert "my-trigger" in str(path)
+
+
+def test_get_local_trigger_run_script_exists_after_deploy(
+    temp_mngr_ctx: MngrContext,
+    make_test_trigger: TriggerFactory,
+) -> None:
+    """After deploying a trigger, its run.sh should exist."""
+    trigger = make_test_trigger("deployed-trigger")
+    deploy_local_schedule(
+        trigger,
+        temp_mngr_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "fakehash",
+    )
+
+    path = get_local_trigger_run_script(temp_mngr_ctx, "deployed-trigger")
+    assert path.is_file()
