@@ -22,12 +22,23 @@ const { classifyFrame } = require('./classify-frame');
 
 const FLUSH_INTERVAL_MS = 1000;
 
+const MAX_PENDING_RECORDS = 1000;
+
 let _writer = null;
 let _buffer = null;
 /** @type {NodeJS.Timeout|null} */
 let _flushTimer = null;
 /** @type {number|null} */
 let _backendPort = null;
+/**
+ * Records classified as MIND-destined but received before the desktop-client
+ * backend port is known. These cannot be POSTed yet, and dropping them into
+ * the local file would cross the local/mind privacy boundary -- so we queue
+ * them here and drain into `_buffer` when `setBackendPort` fires.
+ *
+ * @type {Array<{mindId: string, record: object}>}
+ */
+let _pendingMindRecords = [];
 
 function init() {
   if (_writer !== null) return;
@@ -58,6 +69,15 @@ function init() {
 
 function setBackendPort(port) {
   _backendPort = port;
+  // Drain any records queued before the port was known. We enqueue through
+  // the normal buffer so back-pressure and flushing behave identically to
+  // the steady-state path.
+  if (_buffer === null || _pendingMindRecords.length === 0) return;
+  const pending = _pendingMindRecords;
+  _pendingMindRecords = [];
+  for (const entry of pending) {
+    _buffer.enqueue(entry.mindId, port, entry.record);
+  }
 }
 
 async function close() {
@@ -74,6 +94,7 @@ async function close() {
     _writer.close();
     _writer = null;
   }
+  _pendingMindRecords = [];
 }
 
 function handleWillQuit() {
@@ -114,13 +135,7 @@ function handleConsoleMessage(details, viewName) {
   const line = typeof details.lineNumber === 'number' ? details.lineNumber : 0;
 
   if (classification.destination === 'mind' && _buffer !== null) {
-    if (_backendPort === null) {
-      // The desktop-client proxy port is not known yet; fall back to local
-      // so the record isn't dropped entirely.
-      fallbackLocal(level, message, frameUrl, sourceId, line, classification);
-      return;
-    }
-    _buffer.enqueue(classification.mindId, _backendPort, {
+    const mindRecord = {
       level,
       message,
       frame_url: frameUrl,
@@ -129,7 +144,18 @@ function handleConsoleMessage(details, viewName) {
       service_name: classification.serviceName,
       mind_id: classification.mindId,
       client_timestamp: new Date().toISOString(),
-    });
+    };
+    if (_backendPort === null) {
+      // Port not yet known. Queue the record rather than writing it to the
+      // local file; routing a mind-owned service log to the user's laptop
+      // would cross the privacy boundary the classifier just established.
+      _pendingMindRecords.push({ mindId: classification.mindId, record: mindRecord });
+      while (_pendingMindRecords.length > MAX_PENDING_RECORDS) {
+        _pendingMindRecords.shift();
+      }
+      return;
+    }
+    _buffer.enqueue(classification.mindId, _backendPort, mindRecord);
     return;
   }
 

@@ -1022,7 +1022,7 @@ function setupContentPartitionCookieSync() {
     }).then(() => {
       kickChromeSSEReconnect();
     }).catch((err) => {
-      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
+      logger.logMain('warning', '[cookie-sync] Failed to sync cookie to default session: ' + err.message);
     });
   });
 }
@@ -1033,7 +1033,7 @@ async function syncContentCookiesToDefaultSession() {
   try {
     cookies = await contentSession.cookies.get({ name: 'minds_session' });
   } catch (err) {
-    console.warn('[cookie-sync] Failed to read cookies from content partition:', err);
+    logger.logMain('warning', '[cookie-sync] Failed to read cookies from content partition: ' + err.message);
     return;
   }
   for (const cookie of cookies) {
@@ -1049,7 +1049,7 @@ async function syncContentCookiesToDefaultSession() {
         sameSite: cookie.sameSite || 'lax',
       });
     } catch (err) {
-      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
+      logger.logMain('warning', '[cookie-sync] Failed to sync cookie to default session: ' + err.message);
     }
   }
 }
