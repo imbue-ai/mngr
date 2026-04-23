@@ -422,7 +422,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Register a callback invoked when a refresh event arrives.
 
         The callback receives (agent_id_str, raw_json_line). Refresh events
-        tell the desktop client to reload open web-service tabs for a server.
+        tell the desktop client to reload open web-service tabs for a service.
         """
         with self._lock:
             self._on_refresh_callbacks.append(callback)
