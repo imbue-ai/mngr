@@ -102,6 +102,11 @@ class LogWriter {
     };
     const line = JSON.stringify(envelope) + '\n';
     const lineBytes = Buffer.byteLength(line, 'utf8');
+    // Open first so `_size` reflects the current on-disk size before the
+    // rotation check. Otherwise the first write after startup would observe
+    // the constructor's `_size = 0` and skip rotation even when the existing
+    // file is already over the cap.
+    this._ensureOpen();
     this._rotateIfNeeded();
     const fd = this._ensureOpen();
     fs.writeSync(fd, line);

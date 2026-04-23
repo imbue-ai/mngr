@@ -176,3 +176,30 @@ test('parent directory is created automatically', () => {
   writer.close();
   assert.ok(fs.existsSync(file));
 });
+
+test('first write rotates a pre-existing oversized file before appending', () => {
+  // Simulates an Electron restart after a crash left the file over the cap.
+  // Without opening the file before the rotation check, `_size` stays at 0
+  // and the first write would land in the oversized file.
+  const dir = makeTmpDir('logwriter');
+  const file = path.join(dir, 'electron.jsonl');
+  const stalePayload = 'x'.repeat(200) + '\n';
+  fs.writeFileSync(file, stalePayload);
+  const writer = new LogWriter(file, {
+    maxSizeBytes: 64,
+    now: () => new Date('2026-04-23T12:00:00.000Z'),
+  });
+  writer.write({ level: 'info', message: 'fresh', source: 'electron/main' });
+  writer.close();
+
+  const rotated = listRotatedSiblings(dir);
+  assert.equal(rotated.length, 1, 'pre-existing oversized file should be rotated');
+  assert.equal(
+    fs.readFileSync(path.join(dir, rotated[0]), 'utf8'),
+    stalePayload,
+    'rotated sibling keeps the stale payload untouched',
+  );
+  const activeLines = readLines(file);
+  assert.equal(activeLines.length, 1);
+  assert.equal(activeLines[0].message, 'fresh');
+});
