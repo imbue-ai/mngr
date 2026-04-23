@@ -1,6 +1,7 @@
 """Integration tests for the cleanup CLI command."""
 
 import json
+import shlex
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -163,20 +164,28 @@ def _create_agent(
     agent_name: str,
     temp_work_dir: Path,
     mngr_test_prefix: str,
+    agent_command: str,
 ) -> None:
-    """Create a local agent via the CLI. Asserts success."""
+    """Create a local agent via the CLI. Asserts success.
+
+    ``agent_command`` is the literal shell command the agent should run
+    (e.g. ``"sleep 100030"``). It is fed into the ``command`` agent type
+    as ``--type command -- <agent_command>``.
+    """
     result = cli_runner.invoke(
         create,
         [
             "--name",
             agent_name,
-            "--command",
-            "sleep 728451",
+            "--type",
+            "command",
             "--source",
             str(temp_work_dir),
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            *shlex.split(agent_command),
         ],
         obj=plugin_manager,
         catch_exceptions=False,
@@ -204,7 +213,7 @@ def test_cleanup_destroy_single_agent(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200001")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(
@@ -235,7 +244,7 @@ def test_cleanup_dry_run_with_real_agent(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200002")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(
@@ -268,7 +277,7 @@ def test_cleanup_stop_action_with_real_agent(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200003")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(
@@ -300,8 +309,8 @@ def test_cleanup_destroy_multiple_agents(
         stack.enter_context(tmux_session_cleanup(session_name1))
         stack.enter_context(tmux_session_cleanup(session_name2))
 
-        _create_agent(cli_runner, plugin_manager, agent_name1, temp_work_dir, mngr_test_prefix)
-        _create_agent(cli_runner, plugin_manager, agent_name2, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name1, temp_work_dir, mngr_test_prefix, "sleep 200004")
+        _create_agent(cli_runner, plugin_manager, agent_name2, temp_work_dir, mngr_test_prefix, "sleep 200005")
 
         wait_for(
             lambda: tmux_session_exists(session_name1) and tmux_session_exists(session_name2),
@@ -336,7 +345,7 @@ def test_cleanup_destroy_with_provider_filter_matches(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200006")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(
@@ -367,7 +376,7 @@ def test_cleanup_destroy_with_provider_filter_excludes(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200007")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(
@@ -396,7 +405,7 @@ def test_cleanup_destroy_json_output_with_real_agent(
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix)
+        _create_agent(cli_runner, plugin_manager, agent_name, temp_work_dir, mngr_test_prefix, "sleep 200008")
         assert tmux_session_exists(session_name)
 
         cleanup_result = cli_runner.invoke(

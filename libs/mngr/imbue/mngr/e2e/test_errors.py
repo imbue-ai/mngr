@@ -20,13 +20,13 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     expect(
         e2e.run(
-            "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect",
+            "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100099",
             comment="Create first agent",
         )
     ).to_succeed()
 
     duplicate_result = e2e.run(
-        "mngr create my-task --command 'sleep 99999' --no-ensure-clean --no-connect",
+        "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100123",
         comment="Attempt to create agent with duplicate name",
     )
     expect(duplicate_result).to_fail()

@@ -46,13 +46,14 @@ mngr create my-task -- --model opus
 mngr create my-task --provider modal
 # see more details below in "CREATING AGENTS REMOTELY" for relevant options
 
-# you can run *any* literal command instead of a named agent type:
-mngr create my-task --command python -- my_script.py
+# to run an arbitrary shell command, use the built-in `command` agent type
+# and put the command (and its args) after `--`:
+mngr create my-task --type command -- python my_script.py
 # remember that the arguments to the "agent" (or command) come after the `--` separator
 
 # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
 # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-mngr create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
+mngr create my-task --type command --idle-mode run --idle-timeout 60 -- python my_long_running_script.py extra-args
 # see "RUNNING NON-AGENT PROCESSES" below for more details
 
 # alternatively, you can simply add extra tmux windows that run alongside your agent:
@@ -81,7 +82,7 @@ mngr create my-task --project my-project
 # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mngr create my-task --from /tmp/my_random_folder --command python -- script.py
+mngr create my-task --from /tmp/my_random_folder --type command -- python script.py
 
 # however, if you do use git, mngr makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -938,16 +939,16 @@ mngr create my-task --template modal-big --template with-tests
 
 ##############################################################################
 # CUSTOM AGENT TYPES
-#   Define your own agent types in config, or use any command in your PATH
-#   as an agent. Wrap existing tools with custom defaults and permissions.
+#   Define your own agent types in config, or use the built-in `command` type
+#   to run any shell command. Wrap existing tools with custom defaults and permissions.
 ##############################################################################
 
 # mngr supports multiple agent types out of the box (claude, codex, etc.)
-# you can also run any command as an "agent" using --command:
-mngr create my-server --command python -- -m http.server 8080
+# you can also run any shell command as an "agent" using the built-in `command` type:
+mngr create my-server --type command -- python -m http.server 8080
 
 # run a custom script as an agent
-mngr create my-task --command /path/to/my-tool -- --some-flag
+mngr create my-task --type command -- my-tool --some-flag
 
 # agent types are provided by plugins -- see MANAGING PLUGINS above
 # to see which agent types are available:
@@ -1077,7 +1078,7 @@ mngr create my-task --provider modal --idle-timeout 60
 mngr create my-task --provider modal --idle-mode ssh --idle-timeout 300
 
 # for long-running scripts, "run" mode stops the host when the script finishes
-mngr create my-task --provider modal --command python --idle-mode run --idle-timeout 60 -- long_job.py
+mngr create my-task --provider modal --type command --idle-mode run --idle-timeout 60 -- python long_job.py
 
 # TODO: make a few more examples here--there's lots of useful stuff you can do with this!
 
@@ -1108,16 +1109,16 @@ mngr stop agent-1
 ##############################################################################
 
 # run a Python script as a managed process
-mngr create my-server --command python -- -m http.server 8080
+mngr create my-server --type command -- python -m http.server 8080
 
 # run a long-running data pipeline
-mngr create etl-job --command python --idle-mode run --idle-timeout 60 -- etl_pipeline.py
+mngr create etl-job --type command --idle-mode run --idle-timeout 60 -- python etl_pipeline.py
 
 # run a dev server with extra tmux windows for logs
-mngr create dev-env --command "npm run dev" -w logs="tail -f /var/log/app.log"
+mngr create dev-env --type command -w logs="tail -f /var/log/app.log" -- npm run dev
 
 # use --idle-mode run so the host stops when the process finishes
-mngr create batch-job --provider modal --command bash --idle-mode run --idle-timeout 30 -- -c "python train.py && python evaluate.py"
+mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 -- bash -c "python train.py && python evaluate.py"
 # the container will be automatically snapshotted when completed, so you can later come back and connect (and start) to see the results:
 mngr conn batch-job
 
