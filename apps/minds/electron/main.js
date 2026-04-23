@@ -1023,7 +1023,8 @@ async function syncContentCookiesToDefaultSession() {
   let cookies;
   try {
     cookies = await contentSession.cookies.get({ name: 'minds_session' });
-  } catch {
+  } catch (err) {
+    console.warn('[cookie-sync] Failed to read cookies from content partition:', err);
     return;
   }
   for (const cookie of cookies) {
