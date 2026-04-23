@@ -237,18 +237,26 @@ def render_workspace_settings(
     current_account: object | None,
     accounts: Sequence[object],
     servers: Sequence[str],
-    telegram_section: str = "",
-    telegram_js: str = "",
+    telegram_state: str | None = None,
 ) -> str:
-    """Render the workspace settings page."""
+    """Render the workspace settings page.
+
+    telegram_state controls whether the Telegram section is shown:
+
+    - ``None`` -- no Telegram orchestrator configured; section is hidden.
+    - ``"active"`` -- Telegram is already set up for this workspace.
+    - ``"pending"`` -- setup button is shown.
+
+    Interactivity for the setup flow lives in ``static/workspace_settings.js``,
+    which reads the agent id from the page's ``data-agent-id`` attribute.
+    """
     return _JINJA_ENV.get_template("workspace_settings.html").render(
         agent_id=agent_id,
         ws_name=ws_name,
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_section=telegram_section,
-        telegram_js=telegram_js,
+        telegram_state=telegram_state,
         accent=workspace_accent(agent_id),
     )
 

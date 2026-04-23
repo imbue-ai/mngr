@@ -1214,40 +1214,10 @@ def _handle_workspace_settings(
 
     servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
 
-    # Telegram section
-    telegram_section = ""
-    telegram_js = ""
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_state: str | None = None
     if telegram_orchestrator is not None:
-        has_telegram = telegram_orchestrator.agent_has_telegram(AgentId(agent_id))
-        if has_telegram:
-            telegram_section = '<p style="color:#16a34a;">Telegram is active for this workspace.</p>'
-        else:
-            telegram_section = (
-                f'<button class="btn btn-primary" id="tg-btn" '
-                f"onclick=\"setupTelegram('{agent_id}')\">Setup Telegram</button>"
-            )
-            telegram_js = (
-                "async function setupTelegram(agentId) {"
-                '  var btn = document.getElementById("tg-btn");'
-                '  btn.disabled = true; btn.textContent = "Setting up...";'
-                "  try {"
-                '    var resp = await fetch("/api/agents/" + agentId + "/telegram/setup", {method: "POST"});'
-                '    if (!resp.ok) { var data = await resp.json(); alert("Failed: " + (data.error || resp.statusText));'
-                '      btn.disabled = false; btn.textContent = "Setup Telegram"; return; }'
-                "    var interval = setInterval(async function() {"
-                '      try { var r = await fetch("/api/agents/" + agentId + "/telegram/status");'
-                "        if (!r.ok) return; var d = await r.json();"
-                '        if (d.status === "DONE") { clearInterval(interval);'
-                '          btn.textContent = "Telegram active"; btn.style.color = "#16a34a"; }'
-                '        else if (d.status === "FAILED") { clearInterval(interval);'
-                '          btn.textContent = "Setup failed"; btn.disabled = false; }'
-                "        else { btn.textContent = d.status; }"
-                "      } catch (e) {}"
-                "    }, 2000);"
-                '  } catch (e) { alert("Failed: " + e.message); btn.disabled = false; btn.textContent = "Setup Telegram"; }'
-                "}"
-            )
+        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -1255,8 +1225,7 @@ def _handle_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_section=telegram_section,
-        telegram_js=telegram_js,
+        telegram_state=telegram_state,
     )
     return HTMLResponse(content=html)
 
