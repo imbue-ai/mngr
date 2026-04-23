@@ -15,9 +15,9 @@ def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
     e2e.write_tutorial_block("""
-    # any program on PATH can be used directly as an agent type (falls back to
-    # running the program as-is), and arguments to the program go after `--`:
-    mngr create my-task python -- my_script.py
+    # to run an arbitrary shell command, use the built-in `command` agent type
+    # and put the command (and its args) after `--`:
+    mngr create my-task --type command -- python my_script.py
     # remember that the arguments to the "agent" (or command) come after the `--` separator
     """)
     expect(
