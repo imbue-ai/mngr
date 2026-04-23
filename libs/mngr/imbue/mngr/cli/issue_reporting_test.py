@@ -422,3 +422,42 @@ def test_handle_unexpected_error_autonomous_skips_diagnose(monkeypatch: pytest.M
 
     assert exc_info.value.code == 1
     assert "mngr create" not in log_output.getvalue()
+
+
+def test_handle_unexpected_error_interactive_writes_prompt_and_logs_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In interactive+non-autonomous mode, handle_unexpected_error writes the prompt file and logs the mngr create command.
+
+    End-to-end cover for the 'happy path' of handle_unexpected_error, which was
+    otherwise only exercised through its building-block helpers.
+    """
+    monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
+
+    marker = f"interactive-write-test-{uuid4().hex}"
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(SystemExit) as exc_info:
+            handle_unexpected_error(RuntimeError(marker), is_interactive=True)
+
+    assert exc_info.value.code == 1
+
+    output = log_output.getvalue()
+    assert "mngr create" in output
+    assert f"--source {MNGR_REPO_URL}" in output
+
+    # Extract the prompt file path from the logged command and verify the file exists
+    # and contains the error marker. The filename is content-addressed off the prompt,
+    # so pulling it from the log is reliable.
+    prefix = "--message-file "
+    assert prefix in output
+    # Grab the token that follows the prefix (the path ends at the newline)
+    prompt_path_str = output.split(prefix, 1)[1].splitlines()[0].strip()
+    prompt_path = Path(prompt_path_str)
+    try:
+        assert prompt_path.exists()
+        content = prompt_path.read_text(encoding="utf-8")
+        assert marker in content
+        assert "RuntimeError" in content
+    finally:
+        prompt_path.unlink(missing_ok=True)
