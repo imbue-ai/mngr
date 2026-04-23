@@ -53,7 +53,7 @@ ENV UV_LINK_MODE=copy
 COPY . /code/
 
 # extract our code into the project directory
-RUN mkdir -p /code/mngr/ && tar -xzf /code/current.tar.gz -C /code/mngr/ && rm /code/*.tar.gz && git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/
+RUN mkdir -p /code/mngr/ && tar -xzf /code/current.tar.gz -C /code/mngr/ && rm /code/*.tar.gz && git config --global --add safe.directory /code/mngr/ && chown -R root:root /code/mngr/ && (git -C /code/mngr/ symbolic-ref --delete refs/remotes/origin/HEAD 2>/dev/null || true)
 
 # set working directory to the project root -- this is where `mngr schedule`
 # will copy project deploy files and where scheduled commands will run
