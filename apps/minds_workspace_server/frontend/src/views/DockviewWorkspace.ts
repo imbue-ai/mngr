@@ -262,9 +262,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
   // (reachable via the "New terminal" menu item further down). Everything
   // else, including the default "web" example server, is openable.
-  const apps = getApplications().filter(
-    (app) => app.name !== "system_interface" && app.name !== "terminal",
-  );
+  const apps = getApplications().filter((app) => app.name !== "system_interface" && app.name !== "terminal");
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getServiceUrl(app.name);
