@@ -166,10 +166,7 @@ def _resolve_agent_type_name(
 
     Precedence: --type flag > positional argument.
     """
-    resolved = type_flag
-    if positional_agent_type and resolved is None:
-        resolved = positional_agent_type
-    return resolved
+    return type_flag if type_flag is not None else positional_agent_type
 
 
 def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
