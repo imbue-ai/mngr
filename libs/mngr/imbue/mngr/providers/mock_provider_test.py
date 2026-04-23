@@ -17,6 +17,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -143,6 +144,7 @@ def make_offline_host(
     certified_data: CertifiedHostData,
     provider: MockProviderInstance,
     mngr_ctx: MngrContext,
+    observed_state: HostState | None = None,
 ) -> OfflineHost:
     host_id = HostId(certified_data.host_id)
     return OfflineHost(
@@ -150,4 +152,5 @@ def make_offline_host(
         certified_host_data=certified_data,
         provider_instance=provider,
         mngr_ctx=mngr_ctx,
+        observed_state=observed_state,
     )
