@@ -2,8 +2,7 @@ import re
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.primitives import ServerName
-from imbue.mngr.primitives import AgentId
+from imbue.minds_workspace_server.primitives import ServiceName
 
 _COOKIE_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"(;\s*[Pp]ath\s*=\s*)([^;]*)")
 
@@ -16,15 +15,15 @@ _ABSOLUTE_PATH_ATTR_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 @pure
-def _get_server_prefix(agent_id: AgentId, server_name: ServerName) -> str:
-    """Return the URL prefix for a specific server of an agent."""
-    return f"/forwarding/{agent_id}/{server_name}"
+def get_service_prefix(service_name: ServiceName) -> str:
+    """Return the URL prefix under which a service is mounted (e.g. ``/service/web``)."""
+    return f"/service/{service_name}"
 
 
 @pure
-def generate_bootstrap_html(agent_id: AgentId, server_name: ServerName) -> str:
+def generate_bootstrap_html(service_name: ServiceName) -> str:
     """Generate the bootstrap HTML that installs the Service Worker on first visit."""
-    prefix = _get_server_prefix(agent_id, server_name)
+    prefix = get_service_prefix(service_name)
     return f"""<!DOCTYPE html>
 <html><head><title>Loading...</title></head>
 <body>
@@ -38,7 +37,7 @@ async function boot() {{
   const sw = reg.installing || reg.waiting || reg.active;
 
   function onActivated() {{
-    document.cookie = 'sw_installed_{agent_id}_{server_name}=1; path=' + PREFIX;
+    document.cookie = 'sw_installed_{service_name}=1; path=' + PREFIX;
     location.reload();
   }}
 
@@ -60,9 +59,9 @@ boot().catch(err => {{
 
 
 @pure
-def generate_service_worker_js(agent_id: AgentId, server_name: ServerName) -> str:
+def generate_service_worker_js(service_name: ServiceName) -> str:
     """Generate the Service Worker JavaScript for transparent path rewriting."""
-    prefix = _get_server_prefix(agent_id, server_name)
+    prefix = get_service_prefix(service_name)
     return f"""
 const PREFIX = '{prefix}';
 
@@ -101,9 +100,9 @@ self.addEventListener('fetch', (event) => {{
 
 
 @pure
-def generate_websocket_shim_js(agent_id: AgentId, server_name: ServerName) -> str:
-    """Generate the WebSocket shim script that rewrites WS URLs to include the server prefix."""
-    prefix = _get_server_prefix(agent_id, server_name)
+def generate_websocket_shim_js(service_name: ServiceName) -> str:
+    """Generate the WebSocket shim script that rewrites WS URLs to include the service prefix."""
+    prefix = get_service_prefix(service_name)
     return f"""<script>
 (function() {{
   var PREFIX = '{prefix}';
@@ -136,11 +135,10 @@ def generate_websocket_shim_js(agent_id: AgentId, server_name: ServerName) -> st
 @pure
 def rewrite_cookie_path(
     set_cookie_header: str,
-    agent_id: AgentId,
-    server_name: ServerName,
+    service_name: ServiceName,
 ) -> str:
-    """Rewrite the Path attribute in a Set-Cookie header to scope under the server prefix."""
-    prefix = _get_server_prefix(agent_id, server_name)
+    """Rewrite the Path attribute in a Set-Cookie header to scope under the service prefix."""
+    prefix = get_service_prefix(service_name)
 
     match = _COOKIE_PATH_PATTERN.search(set_cookie_header)
 
@@ -158,15 +156,14 @@ def rewrite_cookie_path(
 @pure
 def rewrite_absolute_paths_in_html(
     html_content: str,
-    agent_id: AgentId,
-    server_name: ServerName,
+    service_name: ServiceName,
 ) -> str:
-    """Rewrite absolute-path URLs in HTML attributes to include the server prefix.
+    """Rewrite absolute-path URLs in HTML attributes to include the service prefix.
 
-    Handles href, src, action, formaction attributes. Rewrites /foo to /forwarding/{id}/{server}/foo
+    Handles href, src, action, formaction attributes. Rewrites /foo to /service/{name}/foo
     but leaves already-prefixed paths and protocol-relative URLs (//...) unchanged.
     """
-    prefix = _get_server_prefix(agent_id, server_name)
+    prefix = get_service_prefix(service_name)
     result_parts: list[str] = []
     last_end = 0
 
@@ -205,54 +202,40 @@ def _inject_into_head(html_content: str, injection: str) -> str:
 _BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
 
 
-_CONVENTION_SERVERS: Final[tuple[ServerName, ...]] = (
-    ServerName("terminal"),
-    ServerName("agent"),
-)
-
-
 @pure
 def generate_backend_loading_html(
-    agent_id: AgentId | None = None,
-    current_server: ServerName | None = None,
-    other_servers: tuple[ServerName, ...] = (),
+    current_service: ServiceName | None = None,
+    other_services: tuple[ServiceName, ...] = (),
 ) -> str:
     """Generate a lightweight loading page that retries the current URL after a short delay.
 
-    Returned when the backend server is not yet available. The page shows a
+    Returned when the backend service is not yet available. The page shows a
     "Loading..." message and uses JavaScript to reload the page after 1 second,
     which will either succeed (backend is now up) or return this page again.
 
-    When ``agent_id`` is provided, the page unconditionally includes links to
-    the terminal and agent servers (convention-based, always present) plus any
-    additional servers from ``other_servers``. These links go through the
-    desktop client proxy, so clicking one before the target server is ready
-    simply shows that server's own auto-retrying loading page.
+    When ``other_services`` is non-empty, the page includes fallback links to
+    those services (scoped under ``/service/<name>/`` on the same origin).
+    Clicking one before the target service is ready simply shows that
+    service's own auto-retrying loading page.
     """
     links_html = ""
-    if agent_id is not None:
-        # Build the set of servers to link: convention-based servers
-        # (always shown) plus any additional registered servers.
-        servers_to_show: list[ServerName] = []
-        for s in _CONVENTION_SERVERS:
-            if s != current_server:
-                servers_to_show.append(s)
-        for s in other_servers:
-            if s != current_server and s not in servers_to_show:
-                servers_to_show.append(s)
+    services_to_show: list[ServiceName] = []
+    for s in other_services:
+        if s != current_service and s not in services_to_show:
+            services_to_show.append(s)
 
-        if servers_to_show:
-            link_items = "".join(
-                '<a href="/forwarding/{agent_id}/{server}/" target="_top"'
-                ' style="color: rgb(100, 149, 237); text-decoration: none;'
-                ' margin: 0 8px;">{server}</a>'.format(agent_id=agent_id, server=server)
-                for server in servers_to_show
-            )
-            links_html = (
-                '<div style="position: fixed; bottom: 40px; text-align: center;'
-                ' width: 100%; color: rgb(100, 100, 100); font-size: 14px;">'
-                "While waiting, you can open: {links}</div>"
-            ).format(links=link_items)
+    if services_to_show:
+        link_items = "".join(
+            '<a href="/service/{service}/" target="_top"'
+            ' style="color: rgb(100, 149, 237); text-decoration: none;'
+            ' margin: 0 8px;">{service}</a>'.format(service=service)
+            for service in services_to_show
+        )
+        links_html = (
+            '<div style="position: fixed; bottom: 40px; text-align: center;'
+            ' width: 100%; color: rgb(100, 100, 100); font-size: 14px;">'
+            "While waiting, you can open: {links}</div>"
+        ).format(links=link_items)
 
     return """<!DOCTYPE html>
 <html>
@@ -284,26 +267,24 @@ setTimeout(function() {{ location.reload(); }}, {interval});
 @pure
 def rewrite_proxied_html(
     html_content: str,
-    agent_id: AgentId,
-    server_name: ServerName,
+    service_name: ServiceName,
 ) -> str:
     """Apply all HTML transformations needed for proxied responses.
 
     This rewrites absolute-path URLs, injects a <base> tag for relative URL resolution,
     and injects the WebSocket shim script.
     """
-    prefix = _get_server_prefix(agent_id, server_name)
+    prefix = get_service_prefix(service_name)
 
     # Rewrite absolute paths in HTML attributes
     rewritten = rewrite_absolute_paths_in_html(
         html_content=html_content,
-        agent_id=agent_id,
-        server_name=server_name,
+        service_name=service_name,
     )
 
     # Build the injection: base tag + WS shim
     base_tag = f'<base href="{prefix}/">'
-    shim = generate_websocket_shim_js(agent_id, server_name)
+    shim = generate_websocket_shim_js(service_name)
     injection = base_tag + shim
 
     return _inject_into_head(html_content=rewritten, injection=injection)

@@ -1,22 +1,13 @@
 """Unit tests for the schedule remove command."""
 
+from collections.abc import Callable
+
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
-from imbue.mngr_schedule.data_types import ScheduledMngrCommand
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
 from imbue.mngr_schedule.implementations.local.deploy import get_local_schedule_creation_record
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 from imbue.mngr_schedule.implementations.local.deploy import remove_local_schedule
-
-
-def _make_test_trigger(name: str = "test-trigger") -> ScheduleTriggerDefinition:
-    return ScheduleTriggerDefinition(
-        name=name,
-        command=ScheduledMngrCommand.CREATE,
-        args="--message hello",
-        schedule_cron="0 2 * * *",
-        provider="local",
-    )
 
 
 def _deploy(trigger: ScheduleTriggerDefinition, mngr_ctx: MngrContext) -> list[str]:
@@ -34,9 +25,10 @@ def _deploy(trigger: ScheduleTriggerDefinition, mngr_ctx: MngrContext) -> list[s
 
 def test_remove_local_schedule_cleans_all_artifacts(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """Removing a trigger should delete the crontab entry, trigger dir, and record."""
-    trigger = _make_test_trigger()
+    trigger = make_test_trigger()
     deployed_crontab = _deploy(trigger, temp_mngr_ctx)
 
     removed_crontab: list[str] = []
@@ -73,10 +65,11 @@ def test_remove_local_schedule_idempotent(
 
 def test_remove_local_schedule_leaves_other_triggers(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """Removing one trigger should not affect other triggers."""
-    trigger_a = _make_test_trigger("trigger-a")
-    trigger_b = _make_test_trigger("trigger-b")
+    trigger_a = make_test_trigger("trigger-a")
+    trigger_b = make_test_trigger("trigger-b")
 
     crontab_state = {"content": ""}
 

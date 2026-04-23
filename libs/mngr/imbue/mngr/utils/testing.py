@@ -605,10 +605,10 @@ def create_test_agent_via_cli(
 ) -> str:
     """Create a test agent via the CLI and return the session name.
 
-    Uses the ``command`` agent type with ``command`` (typically ``"sleep
-    <N>"`` with a pinned per-test value so leaked processes grep back to
-    the test). Used by integration tests that just need an existing agent
-    to operate on (e.g., clone, migrate, destroy).
+    Uses the ``command`` agent type and passes ``command`` after ``--``
+    (typically ``"sleep <N>"`` with a pinned per-test value so leaked
+    processes grep back to the test). Used by integration tests that just
+    need an existing agent to operate on (e.g., clone, migrate, destroy).
 
     The caller should wrap this call inside a tmux_session_cleanup context
     manager to ensure the session is cleaned up even if assertions fail.

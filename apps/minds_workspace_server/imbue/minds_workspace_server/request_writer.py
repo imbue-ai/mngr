@@ -32,7 +32,7 @@ def _get_events_file() -> Path:
 
 def write_sharing_request(
     agent_id: str,
-    server_name: str,
+    service_name: str,
     is_user_requested: bool = False,
     current_status: dict[str, object] | None = None,
     suggested_emails: list[str] | None = None,
@@ -46,7 +46,7 @@ def write_sharing_request(
         "agent_id": agent_id,
         "request_type": "SHARING",
         "is_user_requested": is_user_requested,
-        "server_name": server_name,
+        "service_name": service_name,
     }
     if current_status is not None:
         event["current_status"] = current_status
@@ -58,4 +58,4 @@ def write_sharing_request(
     line = json.dumps(event) + "\n"
     with events_file.open("a") as f:
         f.write(line)
-    logger.info("Wrote sharing request event for agent {} server {}", agent_id, server_name)
+    logger.info("Wrote sharing request event for agent {} service {}", agent_id, service_name)

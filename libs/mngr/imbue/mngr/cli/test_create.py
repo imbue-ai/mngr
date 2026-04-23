@@ -98,6 +98,61 @@ def test_cli_create_via_subprocess(
         )
 
 
+def test_cli_create_rejects_dirty_tree_by_default(
+    temp_git_repo: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+) -> None:
+    """Without --no-ensure-clean, create should fail if the source git repo has uncommitted changes."""
+    agent_name = f"test-dirty-{int(time.time())}"
+
+    (temp_git_repo / "untracked-file.txt").write_text("")
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "add", "untracked-file.txt"],
+        check=True,
+        capture_output=True,
+    )
+
+    env = os.environ.copy()
+    env["MNGR_HOST_DIR"] = str(temp_host_dir)
+    env["MNGR_PREFIX"] = mngr_test_prefix
+    env["MNGR_ROOT_NAME"] = mngr_test_root_name
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "mngr",
+            "create",
+            "--name",
+            agent_name,
+            "--type",
+            "command",
+            "--source",
+            str(temp_git_repo),
+            "--no-connect",
+            "--disable-plugin",
+            "modal",
+            "--disable-plugin",
+            "docker",
+            "--",
+            "sleep",
+            "130003",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode != 0, f"Expected create to fail on dirty tree, got {result.returncode}"
+    combined = (result.stdout + result.stderr).lower()
+    assert "uncommitted changes" in combined or "ensure-clean" in combined, (
+        f"Expected ensure-clean error message. stderr: {result.stderr}\nstdout: {result.stdout}"
+    )
+
+
 @pytest.mark.tmux
 def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_work_dir: Path,
@@ -214,7 +269,7 @@ def test_message_file_flag_reads_message_from_file(
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--message-file",
                 str(message_file),
                 "--source",
@@ -222,6 +277,8 @@ def test_message_file_flag_reads_message_from_file(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -260,7 +317,7 @@ def test_message_and_message_file_both_provided_raises_error(
             "--name",
             agent_name,
             "--type",
-            "cat",
+            "command",
             "--message",
             "Hello from flag",
             "--message-file",
@@ -270,6 +327,8 @@ def test_message_and_message_file_both_provided_raises_error(
             "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
+            "--",
+            "cat",
         ],
         obj=plugin_manager,
     )
@@ -301,7 +360,7 @@ def test_multiline_message_creates_file_and_pipes(
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--message-file",
                 str(message_file),
                 "--source",
@@ -309,6 +368,8 @@ def test_multiline_message_creates_file_and_pipes(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -349,7 +410,7 @@ def test_single_line_message_uses_echo(
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--message",
                 single_line_message,
                 "--source",
@@ -357,6 +418,8 @@ def test_single_line_message_uses_echo(
                 "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -405,7 +468,7 @@ def test_extra_window_with_named_window(
                 "--no-ensure-clean",
                 "--",
                 "sleep",
-                "130003",
+                "130018",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -524,13 +587,15 @@ def test_edit_message_sends_edited_content(
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -583,7 +648,7 @@ def test_edit_message_with_initial_content(
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--edit-message",
                 "--message",
                 initial_content,
@@ -592,6 +657,8 @@ def test_edit_message_with_initial_content(
                 "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
@@ -766,7 +833,7 @@ ensure_clean = false
                 "--name",
                 agent_name,
                 "--type",
-                "cat",
+                "command",
                 "--source",
                 str(temp_work_dir),
                 "--transfer=none",
@@ -775,6 +842,8 @@ ensure_clean = false
                 "mytemplate",
                 "--message",
                 "cli-message",
+                "--",
+                "cat",
             ],
             obj=plugin_manager,
             catch_exceptions=False,

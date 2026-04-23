@@ -63,6 +63,7 @@ def test_list_json(minimal_install_env: MinimalInstallEnv) -> None:
     )
     parsed = json.loads(result.stdout)
     assert parsed["agents"] == []
+    assert parsed["errors"] == []
 
 
 @pytest.mark.release
@@ -75,8 +76,9 @@ def test_no_eager_plugin_imports(minimal_install_env: MinimalInstallEnv) -> None
     """
     check_script = (
         "import imbue.mngr.main; import sys; "
-        "optional = ['modal', 'imbue.mngr_modal', 'imbue.mngr_claude']; "
-        "imported = [m for m in optional if m in sys.modules]; "
+        "plugin_mods = [m for m in sys.modules if m.startswith('imbue.mngr_')]; "
+        "optional_3p = [m for m in ['modal'] if m in sys.modules]; "
+        "imported = sorted(set(plugin_mods + optional_3p)); "
         "assert not imported, f'Unexpected eager imports: {imported}'"
     )
     result = minimal_install_env.run_python(check_script)

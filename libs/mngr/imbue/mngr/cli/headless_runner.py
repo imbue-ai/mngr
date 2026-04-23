@@ -1,3 +1,4 @@
+import shlex
 import sys
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -28,14 +29,24 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
-def check_streaming_headless_agent_type(agent_type: str) -> None:
-    """Verify the given agent type implements StreamingHeadlessAgentMixin.
+def is_streaming_headless_agent_type(agent_type: str) -> bool:
+    """Return True if the given agent type implements StreamingHeadlessAgentMixin.
 
-    Raises MngrError if the agent type is not registered or does not
-    support streaming headless output.
+    Looks up the agent class in the registry and checks its MRO. Used by
+    both the CLI entry point (to branch to the headless flow) and the
+    raising check below.
     """
-    agent_class = get_agent_class(agent_type)
-    if not issubclass(agent_class, StreamingHeadlessAgentMixin):
+    return issubclass(get_agent_class(agent_type), StreamingHeadlessAgentMixin)
+
+
+def check_streaming_headless_agent_type(agent_type: str) -> None:
+    """Verify the agent type resolves to a class implementing StreamingHeadlessAgentMixin.
+
+    Looks up the agent class via ``get_agent_class`` (which may fall back
+    to the default agent class for unregistered types) and raises MngrError
+    if the resolved class does not implement StreamingHeadlessAgentMixin.
+    """
+    if not is_streaming_headless_agent_type(agent_type):
         raise MngrError(
             f"The '{agent_type}' agent type does not support streaming headless output. "
             f"Only agent types implementing StreamingHeadlessAgentMixin can be used."
@@ -60,11 +71,21 @@ def create_work_dir_on_host(host: OnlineHostInterface) -> Path:
 
 
 def remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
-    """Remove a work directory on the host, suppressing errors."""
+    """Remove a work directory on the host, best-effort.
+
+    Logs a warning (but does not raise) on transport-level failures or
+    non-zero exit codes so cleanup errors are visible without breaking
+    the main flow. execute_idempotent_command returns a CommandResult and
+    does not raise on non-zero exit, so explicitly check result.success.
+    """
     try:
-        host.execute_idempotent_command(f"rm -rf '{work_path}'")
+        result = host.execute_idempotent_command(f"rm -rf {shlex.quote(str(work_path))}")
     except (OSError, BaseMngrError) as exc:
         logger.warning("Failed to remove work dir {}: {}", work_path, exc)
+        return
+    if not result.success:
+        detail = result.stderr.strip() or result.stdout.strip()
+        logger.warning("Failed to remove work dir {}: {}", work_path, detail)
 
 
 @contextmanager

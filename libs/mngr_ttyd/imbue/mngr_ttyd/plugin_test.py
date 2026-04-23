@@ -8,7 +8,7 @@ from typing import cast
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr_ttyd.plugin import TTYD_COMMAND
 from imbue.mngr_ttyd.plugin import TTYD_INSTALL_COMMAND
-from imbue.mngr_ttyd.plugin import TTYD_SERVER_NAME
+from imbue.mngr_ttyd.plugin import TTYD_SERVICE_NAME
 from imbue.mngr_ttyd.plugin import TTYD_VERSION
 from imbue.mngr_ttyd.plugin import TTYD_WINDOW_NAME
 from imbue.mngr_ttyd.plugin import on_after_provisioning
@@ -130,12 +130,12 @@ def test_ttyd_command_enables_url_arg_dispatch() -> None:
     assert "ttyd -p 0 -a" in TTYD_COMMAND
 
 
-def test_ttyd_command_writes_server_log() -> None:
-    """Verify that the ttyd command writes to servers/events.jsonl for forwarding server discovery."""
-    assert "servers/events.jsonl" in TTYD_COMMAND
-    assert TTYD_SERVER_NAME in TTYD_COMMAND
+def test_ttyd_command_writes_service_log() -> None:
+    """Verify that the ttyd command writes to services/events.jsonl for forwarding service discovery."""
+    assert "services/events.jsonl" in TTYD_COMMAND
+    assert TTYD_SERVICE_NAME in TTYD_COMMAND
     assert "MNGR_AGENT_STATE_DIR" in TTYD_COMMAND
-    assert "server_registered" in TTYD_COMMAND
+    assert "service_registered" in TTYD_COMMAND
     assert "timestamp" in TTYD_COMMAND
     assert "event_id" in TTYD_COMMAND
 
