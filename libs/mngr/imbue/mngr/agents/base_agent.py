@@ -106,9 +106,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Raises ``UserInputError`` if the final command would be empty -- i.e.
         no base, no ``cli_args``, and no ``agent_args``.
 
-        ``initial_message`` is accepted for interface compatibility; the base
-        implementation does not use it (interactive agents deliver the message
-        via ``send_message`` after the agent is up).
+        ``initial_message`` is accepted for interface compatibility but is
+        not used here. Subclasses that bake the prompt into the command line
+        (e.g. streaming headless agents that ``cat`` a staged prompt file)
+        should override to consume it; subclasses that deliver the prompt
+        some other way, or ignore it entirely, can inherit this no-op.
         """
         if command_override is not None:
             base = str(command_override)
