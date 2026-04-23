@@ -226,17 +226,9 @@ test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
-# This is a one-time fetch (no build step, no node dependencies, no recompile
-# when you touch a template) -- the Play CDN script generates utility classes
-# at runtime in the browser. Output lives in
-# apps/minds/imbue/minds/desktop_client/static/tailwind.js and is gitignored.
-# Ship the file with the distributable so the app works offline.
+# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
+# same script also runs automatically as a pnpm `postinstall` hook, so
+# normally you do not need to invoke this recipe. Use it when you want to
+# force-verify the file or after nuking the static/ dir.
 minds-tailwind:
-  #!/bin/bash
-  set -ueo pipefail
-  dest=apps/minds/imbue/minds/desktop_client/static/tailwind.js
-  # Pinned to 3.4.17 so the bundle is reproducible.
-  url=https://cdn.tailwindcss.com/3.4.17
-  echo "Downloading Tailwind Play CDN -> $dest"
-  curl -fsSL "$url" -o "$dest"
-  echo "Done. $(wc -c < "$dest") bytes."
+  bash apps/minds/scripts/fetch_tailwind.sh
