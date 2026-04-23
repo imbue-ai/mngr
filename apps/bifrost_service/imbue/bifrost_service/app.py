@@ -234,7 +234,18 @@ class BifrostAdminClient:
 
     def _check(self, response: httpx.Response) -> Any:
         if response.status_code == 404:
-            raise VirtualKeyNotFoundError(response.request.url.path.rsplit("/", maxsplit=1)[-1])
+            # Only translate 404 into VirtualKeyNotFoundError when the request
+            # was targeting a specific key (``/virtual-keys/{id}...``). A 404
+            # on the collection endpoint itself (``/virtual-keys``) indicates a
+            # bifrost routing/config problem, not a missing key, and should
+            # surface as BifrostAdminApiError so the real cause is preserved.
+            path = response.request.url.path.rstrip("/")
+            collection_marker = "/virtual-keys/"
+            marker_index = path.find(collection_marker)
+            if marker_index != -1:
+                key_id = path[marker_index + len(collection_marker) :].split("/", maxsplit=1)[0]
+                if key_id:
+                    raise VirtualKeyNotFoundError(key_id)
         if response.status_code >= 400:
             raise BifrostAdminApiError(response.status_code, response.text)
         return response.json()
