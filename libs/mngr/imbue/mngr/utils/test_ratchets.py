@@ -54,7 +54,14 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(2))
+    # Bumped 2 -> 4 for two catches in discovery_events.py (phase-4 polling and
+    # initial-sync wrapper). The observe subprocess is long-lived and any
+    # uncaught provider exception (e.g. ModalProxyError wrapping a gRPC DNS
+    # failure) would silently kill it, freezing every downstream UI. The fix
+    # honors the spirit of the ratchet -- both sites log the exception with a
+    # full traceback at ERROR via `logger.opt(exception=e)`, so errors are
+    # surfaced loudly rather than swallowed.
+    rc.check_broad_exception_catch(_DIR, snapshot(4))
 
 
 def test_prevent_base_exception_catch() -> None:
