@@ -54,16 +54,18 @@ def _build_envelope(record: dict[str, Any], *, timestamp: str) -> dict[str, Any]
 
     The ``source`` field is built from the record's ``service_name`` and
     ``mind_id`` so each line is self-describing without needing the filename.
+
+    Envelope-owned fields (``timestamp``, ``type``, ``event_id``, ``source``)
+    take precedence over the caller's record so that system metadata cannot
+    be silently clobbered by a future addition to ``IframeLogRecord``.
     """
     service_name = str(record.get("service_name", "unknown"))
     mind_id = str(record.get("mind_id", "unknown"))
-    envelope: dict[str, Any] = {
-        "timestamp": timestamp,
-        "type": "electron",
-        "event_id": _new_event_id(),
-        "source": f"electron/renderer/service/{service_name}/{mind_id}",
-    }
-    envelope.update(record)
+    envelope: dict[str, Any] = dict(record)
+    envelope["timestamp"] = timestamp
+    envelope["type"] = "electron"
+    envelope["event_id"] = _new_event_id()
+    envelope["source"] = f"electron/renderer/service/{service_name}/{mind_id}"
     return envelope
 
 
