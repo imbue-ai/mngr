@@ -45,10 +45,13 @@ Note: All `WebContentsView` instances in the Electron app share the **default se
 **Cookies: NO.** The desktop client's session cookie is set on the bare `localhost:PORT` origin as a host-only cookie (no `Domain` attribute). The code explicitly documents why `Domain=localhost` is not used:
 
 ```python
-# app.py:255-258
-# We do NOT try to share the cookie across `<agent-id>.localhost` subdomains
-# via ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
-# a public suffix and refuse to send such cookies to subdomains.
+# app.py:254-259
+# Set a host-only session cookie on the bare origin. We do NOT try to
+# share the cookie across `<agent-id>.localhost` subdomains via
+# ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
+# a public suffix and refuse to send such cookies to subdomains. Each
+# subdomain gets its own cookie set on first visit, minted via the
+# ``/goto/{agent_id}/`` auth-bridge redirect below.
 ```
 
 The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subdomains. Agents cannot read it.
