@@ -8,9 +8,16 @@ import m from "mithril";
 import "./style.css";
 import { App } from "./views/App";
 
+interface MindsDesktopBridge {
+  setCloseActiveTabHandler?: (handler: () => boolean) => void;
+}
+
 declare global {
   interface Window {
     $llm: LlmApi;
+    // Provided by the Electron preload script in the minds desktop shell;
+    // undefined when the workspace frontend is served in a plain browser.
+    minds?: MindsDesktopBridge;
   }
   var $llm: LlmApi;
 }

@@ -629,8 +629,7 @@ function initializeDockview(parentElement: HTMLElement): void {
   // Register a handler so the Electron shell can forward cmd+w to close the
   // active dockview tab. The handler returns true when a panel was closed;
   // the shell falls back to closing the window otherwise.
-  const minds = (window as { minds?: { setCloseActiveTabHandler?: (handler: () => boolean) => void } }).minds;
-  minds?.setCloseActiveTabHandler?.(() => {
+  window.minds?.setCloseActiveTabHandler?.(() => {
     const active = dv.activePanel;
     if (!active) return false;
     active.api.close();
