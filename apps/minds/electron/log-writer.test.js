@@ -8,6 +8,12 @@ const path = require('node:path');
 
 const { LogWriter } = require('./log-writer');
 
+// Matches the rotation suffix produced by log-writer.js (20-digit timestamp,
+// optional `.<tie>` numeric disambiguator). Mirrors the Python side's
+// `ROTATED_JSONL_PATTERN` which is `^events\.jsonl\.\d+$` and therefore
+// accepts both the primary suffix and a tiebreaker continuation.
+const ROTATED_NAME_PATTERN = /^electron\.jsonl\.\d{20}(?:\.\d+)?$/;
+
 function makeTmpDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `${label}-`));
 }
@@ -18,6 +24,13 @@ function readLines(filePath) {
     .split('\n')
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line));
+}
+
+function listRotatedSiblings(dir) {
+  return fs
+    .readdirSync(dir)
+    .filter((name) => ROTATED_NAME_PATTERN.test(name))
+    .sort();
 }
 
 test('write creates the file and appends a JSONL record with envelope', () => {
@@ -56,10 +69,13 @@ test('successive writes append to the same file', () => {
   );
 });
 
-test('rotation: when size exceeds cap, current file renames to .1 and next write starts fresh', () => {
+test('rotation: rename uses the 20-digit UTC timestamp suffix and active file restarts', () => {
   const dir = makeTmpDir('logwriter');
   const file = path.join(dir, 'electron.jsonl');
-  const writer = new LogWriter(file, { maxSizeBytes: 64 });
+  const writer = new LogWriter(file, {
+    maxSizeBytes: 64,
+    now: () => new Date('2026-04-23T12:00:00.000Z'),
+  });
   // First write is ~100 bytes and pushes the file over the cap.
   writer.write({
     level: 'info',
@@ -74,26 +90,67 @@ test('rotation: when size exceeds cap, current file renames to .1 and next write
   });
   writer.close();
 
-  assert.ok(fs.existsSync(path.join(dir, 'electron.jsonl.1')), 'rotated file exists');
+  const rotated = listRotatedSiblings(dir);
+  assert.equal(rotated.length, 1, 'exactly one rotated sibling exists');
+  // Expected suffix for 2026-04-23T12:00:00.000Z: YYYYMMDDHHMMSS + ms*1000.
+  assert.equal(rotated[0], 'electron.jsonl.20260423120000000000');
   assert.ok(fs.existsSync(file), 'active file exists');
-  const rotated = readLines(path.join(dir, 'electron.jsonl.1'));
-  const current = readLines(file);
-  assert.equal(rotated.length, 1);
-  assert.equal(current.length, 1);
-  assert.equal(current[0].message, 'short');
+  const rotatedLines = readLines(path.join(dir, rotated[0]));
+  const currentLines = readLines(file);
+  assert.equal(rotatedLines.length, 1);
+  assert.equal(currentLines.length, 1);
+  assert.equal(currentLines[0].message, 'short');
 });
 
-test('rotation finds next free numeric suffix when .1 already exists', () => {
+test('rotation: a collision on the same millisecond falls back to a numeric tiebreaker', () => {
   const dir = makeTmpDir('logwriter');
   const file = path.join(dir, 'electron.jsonl');
-  fs.writeFileSync(path.join(dir, 'electron.jsonl.1'), 'stale\n');
-  const writer = new LogWriter(file, { maxSizeBytes: 32 });
+  // Pre-create the primary suffix for the fixed clock so the writer is forced
+  // to use the tiebreaker branch.
+  fs.writeFileSync(path.join(dir, 'electron.jsonl.20260423120000000000'), 'stale\n');
+  const writer = new LogWriter(file, {
+    maxSizeBytes: 32,
+    now: () => new Date('2026-04-23T12:00:00.000Z'),
+  });
   writer.write({ level: 'info', message: 'a'.repeat(40), source: 'electron/main' });
   writer.write({ level: 'info', message: 'tiny', source: 'electron/main' });
   writer.close();
 
-  assert.equal(fs.readFileSync(path.join(dir, 'electron.jsonl.1'), 'utf8'), 'stale\n');
-  assert.ok(fs.existsSync(path.join(dir, 'electron.jsonl.2')));
+  assert.equal(
+    fs.readFileSync(path.join(dir, 'electron.jsonl.20260423120000000000'), 'utf8'),
+    'stale\n',
+  );
+  assert.ok(fs.existsSync(path.join(dir, 'electron.jsonl.20260423120000000000.1')));
+});
+
+test('rotation: retention cap prunes the oldest siblings beyond maxRotatedCount', () => {
+  const dir = makeTmpDir('logwriter');
+  const file = path.join(dir, 'electron.jsonl');
+  // Monotonic fake clock: each time the writer asks for `now`, advance by
+  // one second so every rotation lands on a distinct suffix.
+  let tick = 0;
+  const writer = new LogWriter(file, {
+    maxSizeBytes: 64,
+    maxRotatedCount: 2,
+    now: () => {
+      tick += 1;
+      return new Date(Date.UTC(2026, 0, 1, 0, 0, tick));
+    },
+  });
+  // Four rotations: each pair is one large write that pushes over the cap
+  // plus one short write that triggers the pre-write rotation check.
+  for (let index = 0; index < 4; index += 1) {
+    writer.write({ level: 'info', message: 'x'.repeat(80), source: 'electron/main' });
+    writer.write({ level: 'info', message: 'short', source: 'electron/main' });
+  }
+  writer.close();
+
+  const rotated = listRotatedSiblings(dir);
+  assert.equal(
+    rotated.length,
+    2,
+    `expected 2 retained rotations, found ${rotated.length}: ${rotated.join(', ')}`,
+  );
 });
 
 test('close is idempotent and subsequent writes reopen the file', () => {
