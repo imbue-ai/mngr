@@ -100,7 +100,7 @@ def test_create_simple_echo_agent(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("echo 'Hello from mngr test' && sleep 365817"),
         )
@@ -134,7 +134,7 @@ def test_create_agent_with_new_host(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("echo 'Created with new host' && sleep 816394"),
         )
@@ -864,7 +864,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847291"),
         )
@@ -884,7 +884,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
                 source_location=source_location,
                 target_host=local_host,
                 agent_options=CreateAgentOptions(
-                    agent_type=AgentTypeName("echo"),
+                    agent_type=AgentTypeName("command"),
                     name=agent_name,
                     command=CommandString("sleep 847292"),
                 ),
@@ -916,7 +916,7 @@ def test_create_with_update_flag_updates_existing_agent(
 
         # Step 1: Create the agent normally
         original_options = CreateAgentOptions(
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847291"),
             label_options=AgentLabelOptions(labels={"project": "old-project"}),
@@ -937,7 +937,7 @@ def test_create_with_update_flag_updates_existing_agent(
         # Step 3: Call create() with is_update=True and the same agent_id + work_dir
         update_options = CreateAgentOptions(
             agent_id=original_agent_id,
-            agent_type=AgentTypeName("echo"),
+            agent_type=AgentTypeName("command"),
             name=agent_name,
             command=CommandString("sleep 847292"),
             target_path=original_work_dir,
