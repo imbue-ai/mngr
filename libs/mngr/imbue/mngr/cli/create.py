@@ -170,68 +170,32 @@ def _resolve_agent_type_name(
 
 
 def _resolve_or_generate_agent_name(address: AgentAddress, opts: CreateCliOptions) -> AgentName:
-    """Return the agent name from the address, or auto-generate one from --name-style.
-
-    Called from ``_parse_agent_opts`` as part of the shared create pipeline
-    (which now handles both interactive and headless agents). Callers that
-    need to treat "no explicit name" differently from "auto-generate" should
-    read ``address.agent_name`` directly rather than going through this
-    helper.
-    """
+    """Return the agent name from the address, or auto-generate one from --name-style."""
     if address.agent_name is not None:
         return address.agent_name
     return generate_agent_name(AgentNameStyle(opts.name_style.upper()))
 
 
-# Flags that only make sense on the interactive-create path. Everything
-# related to source resolution, transfer, git, environment, provisioning,
-# and agent identity now flows through the shared _setup_create /
-# _create_agent pipeline and so works for headless too. Flags are
-# rejected when they fall into one of three categories: driving the
-# post-create connect/attach phase that headless skips; requiring
-# send_message-based delivery (which headless agents do not support);
-# or being tied to long-lived agents rather than one-shot streaming
-# runs. Accepting any such flag silently would confuse users, so we
-# reject early.
-#
-# Incompatible flags are split across two tuples. This one holds
-# unconditionally-rejected flags (anything explicitly set conflicts).
-# The `_HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS` tuple below holds
-# --flag/--no-flag pairs where only the positive form conflicts --
-# passing the --no-* form is a redundant-but-compatible assertion of
-# the actual headless behavior and is tolerated.
+# Flags rejected on the headless path. Everything else (source resolution,
+# transfer, git, env, provisioning, agent identity) flows through the
+# shared pipeline and works for headless too. See
+# ``_reject_incompatible_headless_flags`` for rationale.
 _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
-    # Opens an editor and delivers the result via send_message after the
-    # agent boots. Headless agents have no send_message path.
     ("edit_message", "--edit-message"),
-    # Post-create connect/attach phase that headless skips entirely.
     ("attach_command", "--attach-command"),
     ("connect_command", "--connect-command"),
 )
 
 
-# Boolean-pair flags where only the positive (True) side conflicts with
-# headless semantics. Each entry is (click param name, value extractor,
-# positive-form display name). Headless already never connects / reconnects
-# / reuses / updates / starts on boot, so passing the --no-* form is just a
-# redundant assertion of the actual behavior and is tolerated.
-#
-# The value extractor is a direct attribute access (not getattr) so the type
-# checker can verify each field exists on CreateCliOptions. The param-name
-# string is still needed because is_param_explicit keys on click's parameter
-# source map, which is keyed by string.
+# Boolean-pair flags where only the positive form conflicts; passing
+# ``--no-<flag>`` is tolerated since it just re-asserts the headless default.
+# The value getter is a direct attribute access (rather than ``getattr``) so
+# the type checker verifies each field exists on ``CreateCliOptions``.
 _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, Callable[[CreateCliOptions], bool], str], ...] = (
-    # Post-create connect/attach phase that headless skips entirely.
     ("connect", lambda o: o.connect, "--connect"),
     ("reconnect", lambda o: o.reconnect, "--reconnect"),
-    # --reuse / --update select an existing agent by name. Headless agents
-    # are short-lived and auto-named (streaming then destroyed), so reusing
-    # one would be surprising and --update (re-create with fresh work_dir)
-    # does not fit either.
     ("reuse", lambda o: o.reuse, "--reuse"),
     ("update", lambda o: o.update, "--update"),
-    # start_on_boot means "restart this agent on host boot" -- doesn't apply
-    # to a one-shot streaming agent.
     ("start_on_boot", lambda o: bool(o.start_on_boot), "--start-on-boot"),
 )
 
@@ -418,7 +382,7 @@ class _CreateCommand(click.Command):
     "--foreground",
     is_flag=True,
     default=False,
-    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types. Uses the same source resolution, transfer, and provisioning as non-headless create (pass --transfer=none to run in-place at --source)",
+    help="Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types",
 )
 @optgroup.option(
     "--auto-start/--no-auto-start",
@@ -1428,8 +1392,7 @@ def _parse_agent_opts(
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
-    # otherwise auto-generate. Runs on both interactive and headless agents
-    # since they share this pipeline.
+    # otherwise auto-generate.
     parsed_agent_name = _resolve_or_generate_agent_name(address, opts)
 
     # Determine transfer mode
@@ -1697,12 +1660,9 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 def _apply_host_labels(host: OnlineHostInterface, label_strings: tuple[str, ...]) -> None:
     """Parse KEY=VALUE host label strings and apply them to an existing host.
 
-    Raises UserInputError for any entry without '=', matching the
-    validation done for the new-host path in _parse_target_host.
-    Silently dropping malformed entries would hide user mistakes,
-    particularly on the existing-host and local-host paths where this
-    helper is the only --host-label validator (_parse_target_host returns
-    early before its own validation runs on those paths).
+    Raises UserInputError for any entry without ``=``. Mirrors the new-host
+    validation in ``_parse_target_host``; on the existing-host and local-host
+    branches this helper is the only place that validates --host-label.
     """
     labels_to_add: dict[str, str] = {}
     for label_string in label_strings:
@@ -1801,13 +1761,9 @@ command, use the built-in 'command' agent type:
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
 like headless_command and headless_claude) require the --foreground flag.
-This runs the headless flow: source resolution, transfer, git,
-environment, and provisioning all work the same as non-headless create,
-but the agent streams its output to stdout and is destroyed when done
-instead of being connected to. Flags that do not fit this one-shot model
-are rejected: connect/attach-phase flags (e.g. --reconnect,
---attach-command), send-message-based delivery (--edit-message), and
-long-lived-agent flags (e.g. --reuse, --start-on-boot). Pass
+Source resolution, transfer, git, environment, and provisioning all work
+the same as non-headless create; the agent streams its output to stdout
+and is destroyed when done instead of being connected to. Pass
 --transfer=none to run the agent in-place at the source directory.
 
 For local agents in git repos, mngr creates a git worktree that shares objects

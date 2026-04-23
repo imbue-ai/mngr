@@ -230,10 +230,7 @@ class ClaudeBackendInterface(MutableModel, ABC):
 
 
 # Extra claude CLI args for ask's stream-json tailing. The user prompt is
-# passed via initial_message (HeadlessClaude.stage_initial_message writes
-# it to .mngr-prompt under $MNGR_AGENT_STATE_DIR, and assemble_command
-# appends the cat reference), so this tuple only contains the ask-specific
-# flags and the system-prompt file reference.
+# passed via ``initial_message``, not included here.
 _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--system-prompt",
     '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
