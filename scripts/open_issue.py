@@ -23,7 +23,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    body = args.body_file.read_text()
+    body = args.body_file.read_text(encoding="utf-8")
     url = build_new_issue_url(args.title, body)
     print(f"Opening issue in browser: {args.title}")
     webbrowser.open(url)
