@@ -20,7 +20,7 @@ The minds desktop app uses a layered proxy architecture:
 
 **Via the agent's backend code: Previously YES, now FIXED.** This was the main finding of this audit.
 
-The desktop client sets a `minds_session` cookie on each agent's subdomain via the auth bridge (`/goto/{agent_id}/` -> `/_subdomain_auth`). The cookie is signed with `itsdangerous.URLSafeTimedSerializer` using a single signing key, and the payload is always the string `"authenticated"` (see `cookie_manager.py:14`). Every agent's subdomain gets an independently-minted cookie, but they are all functionally identical -- any one of them would be valid on any other agent's subdomain if it could be obtained.
+The desktop client sets a `minds_session` cookie on each agent's subdomain via the auth bridge (`/goto/{agent_id}/` -> `/_subdomain_auth`). The cookie is signed with `itsdangerous.URLSafeTimedSerializer` using a single signing key, and the payload is always the string `"authenticated"` (see `cookie_manager.py:13`). Every agent's subdomain gets an independently-minted cookie, but they are all functionally identical -- any one of them would be valid on any other agent's subdomain if it could be obtained.
 
 Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all request headers except `host` to the workspace server, including the `minds_session` cookie. A malicious workspace server could have extracted the cookie and reused it against other agents.
 
@@ -37,7 +37,7 @@ Note: Content views now use a separate Electron session partition (`persist:work
 **Cookies: NO.** The desktop client's session cookie is set on the bare `localhost:PORT` origin as a host-only cookie (no `Domain` attribute). The code explicitly documents why `Domain=localhost` is not used:
 
 ```python
-# app.py:254-259
+# app.py:256-261
 # Set a host-only session cookie on the bare origin. We do NOT try to
 # share the cookie across `<agent-id>.localhost` subdomains via
 # ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
@@ -50,7 +50,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 **localStorage: NO.** The desktop client's chrome UI pages load from `localhost:PORT` (e.g., `/_chrome`, `/_chrome/sidebar`). Agent content loads from `agent-X.localhost:PORT`. Different origins = separate localStorage.
 
-**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and requestsPanelView. The contentView (where agent pages render) is created without a preload script (`main.js:217-222`), so agent pages cannot access Electron IPC.
+**Electron IPC: NO.** The preload script (which exposes `window.minds` IPC bridge) is only loaded in chromeView, sidebarView, and requestsPanelView. The contentView (where agent pages render) is created without a preload script (`main.js:218-224`), so agent pages cannot access Electron IPC.
 
 ## Detailed isolation mechanisms
 
