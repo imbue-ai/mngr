@@ -211,23 +211,28 @@ _HEADLESS_INCOMPATIBLE_FLAGS: tuple[tuple[str, str], ...] = (
 
 
 # Boolean-pair flags where only the positive (True) side conflicts with
-# headless semantics. Each entry is (click param name, positive-form display
-# name). Headless already never connects / reconnects / reuses / updates /
-# starts on boot, so passing the --no-* form is just a redundant assertion
-# of the actual behavior and is tolerated.
-_HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, str], ...] = (
+# headless semantics. Each entry is (click param name, value extractor,
+# positive-form display name). Headless already never connects / reconnects
+# / reuses / updates / starts on boot, so passing the --no-* form is just a
+# redundant assertion of the actual behavior and is tolerated.
+#
+# The value extractor is a direct attribute access (not getattr) so the type
+# checker can verify each field exists on CreateCliOptions. The param-name
+# string is still needed because is_param_explicit keys on click's parameter
+# source map, which is keyed by string.
+_HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, Callable[[CreateCliOptions], bool], str], ...] = (
     # Post-create connect/attach phase that headless skips entirely.
-    ("connect", "--connect"),
-    ("reconnect", "--reconnect"),
+    ("connect", lambda o: o.connect, "--connect"),
+    ("reconnect", lambda o: o.reconnect, "--reconnect"),
     # --reuse / --update select an existing agent by name. Headless agents
     # are short-lived and auto-named (streaming then destroyed), so reusing
     # one would be surprising and --update (re-create with fresh work_dir)
     # does not fit either.
-    ("reuse", "--reuse"),
-    ("update", "--update"),
+    ("reuse", lambda o: o.reuse, "--reuse"),
+    ("update", lambda o: o.update, "--update"),
     # start_on_boot means "restart this agent on host boot" -- doesn't apply
     # to a one-shot streaming agent.
-    ("start_on_boot", "--start-on-boot"),
+    ("start_on_boot", lambda o: bool(o.start_on_boot), "--start-on-boot"),
 )
 
 
@@ -256,8 +261,8 @@ def _reject_incompatible_headless_flags(
     # matching the original --no-connect special case. Checks both
     # is_param_explicit (to catch explicit use) and the resolved value (to
     # distinguish --flag from --no-flag when they share a click param).
-    for param_name, positive_display_name in _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS:
-        if is_param_explicit(ctx, param_name) and getattr(opts, param_name):
+    for param_name, value_getter, positive_display_name in _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS:
+        if is_param_explicit(ctx, param_name) and value_getter(opts):
             explicit_flags.append(positive_display_name)
 
     if explicit_flags:
