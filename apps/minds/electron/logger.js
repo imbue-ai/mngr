@@ -44,11 +44,20 @@ function init() {
       // Degrade gracefully: a failed POST is recorded locally so the user can
       // see mind-side logging outages, but we don't retry the batch.
       if (_writer === null) return;
-      _writer.write({
-        level: 'warning',
-        source: 'electron/main',
-        message: `iframe-logs POST failed for mind ${mindId}: ${err.message}`,
-      });
+      // Must not throw: IframeLogBuffer.flush catches errors from this
+      // callback and re-invokes onError with the new error, so a writer
+      // fault here would produce unbounded recursion between flush's catch
+      // and this callback. Swallow writer failures silently; if the local
+      // writer itself is broken we have nowhere useful to report it.
+      try {
+        _writer.write({
+          level: 'warning',
+          source: 'electron/main',
+          message: `iframe-logs POST failed for mind ${mindId}: ${err.message}`,
+        });
+      } catch {
+        // Intentionally empty: see comment above.
+      }
     },
   });
   _router = new LogRouter({ writer: _writer, buffer: _buffer });
