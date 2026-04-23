@@ -18,7 +18,7 @@ jobs:
     # explicitly avoids depending on the repo-level default, which may be
     # restricted (contents: read only).
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -27,8 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
+          # Full history needed for offload checkpoint resolution.
+          # ref: check out the PR branch tip (not the merge commit),
+          # so checkpoint SHAs match the git notes written by local runs.
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -204,8 +207,9 @@ jobs:
     # See note on `test-offload` above: the report-flaky-aware-tests
     # composite action needs `checks: write` to post both its junit-report
     # check-run and (on flaky-recovered runs) its neutral check-run.
+    # `contents: write` needed for offload to push image cache notes.
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -214,8 +218,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history needed for git diff in patch generation
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
