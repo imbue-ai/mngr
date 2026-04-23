@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
@@ -1201,12 +1202,8 @@ def _setup_restart_test_server(
     """Set up a desktop client wired to a recording tunnel manager for restart endpoint tests."""
     agent_id = AgentId()
     servers_map = {"system_interface": "http://127.0.0.1:8000"}
-    workspace_name_by_agent_id: dict[str, str] = (
-        {str(agent_id): workspace_name} if workspace_name is not None else {}
-    )
-    work_dir_by_agent_id: dict[str, Path] = (
-        {str(agent_id): work_dir} if work_dir is not None else {}
-    )
+    workspace_name_by_agent_id: dict[str, str] = {str(agent_id): workspace_name} if workspace_name is not None else {}
+    work_dir_by_agent_id: dict[str, Path] = {str(agent_id): work_dir} if work_dir is not None else {}
     resolver = _RestartBackendResolver(
         url_by_agent_and_service={str(agent_id): servers_map},
         ssh_info=_TEST_SSH_INFO if with_ssh_info else None,
@@ -1253,6 +1250,7 @@ def test_restart_workspace_server_returns_500_for_local_without_work_dir(tmp_pat
     assert "work_dir" in response.text
 
 
+@pytest.mark.tmux
 def test_restart_workspace_server_local_happy_path_touches_services_toml(tmp_path: Path) -> None:
     """For a local agent with a known work_dir, restart runs locally and touches services.toml."""
     work_dir = tmp_path / "agent-workdir"
@@ -1362,6 +1360,8 @@ def test_snapshot_stuck_for_chrome_orders_and_serializes() -> None:
     }
     for entry in snapshot:
         assert set(entry.keys()) == expected_fields
+
+
 def _build_refresh_test_app(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,

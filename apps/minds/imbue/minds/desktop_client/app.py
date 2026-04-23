@@ -1148,9 +1148,7 @@ async def _handle_restart_workspace_server(
 
     command = _build_restart_workspace_server_command(workspace_name, _MINDS_CONTAINER_SERVICES_TOML_PATH)
     try:
-        exit_status, stderr_output = await asyncio.to_thread(
-            tunnel_manager.exec_remote_command, ssh_info, command
-        )
+        exit_status, stderr_output = await asyncio.to_thread(tunnel_manager.exec_remote_command, ssh_info, command)
     except SSHTunnelError as e:
         logger.warning("Restart workspace server failed for {}: {}", agent_id, e)
         return Response(
@@ -1160,14 +1158,10 @@ async def _handle_restart_workspace_server(
         )
 
     if exit_status != 0:
-        logger.warning(
-            "Restart workspace server exited {} for {}: {}", exit_status, agent_id, stderr_output
-        )
+        logger.warning("Restart workspace server exited {} for {}: {}", exit_status, agent_id, stderr_output)
         return Response(
             status_code=500,
-            content=json.dumps(
-                {"error": f"Remote command failed (exit {exit_status}): {stderr_output}"}
-            ),
+            content=json.dumps({"error": f"Remote command failed (exit {exit_status}): {stderr_output}"}),
             media_type="application/json",
         )
 
@@ -1226,9 +1220,7 @@ async def _restart_workspace_server_locally(
     if work_dir is None:
         return Response(
             status_code=500,
-            content=json.dumps(
-                {"error": "Cannot locate services.toml for local agent: work_dir unavailable"}
-            ),
+            content=json.dumps({"error": "Cannot locate services.toml for local agent: work_dir unavailable"}),
             media_type="application/json",
         )
 
@@ -1238,14 +1230,10 @@ async def _restart_workspace_server_locally(
     )
 
     if exit_status != 0:
-        logger.warning(
-            "Local restart for {} exited {}: {}", agent_id, exit_status, stderr_output
-        )
+        logger.warning("Local restart for {} exited {}: {}", agent_id, exit_status, stderr_output)
         return Response(
             status_code=500,
-            content=json.dumps(
-                {"error": f"Local command failed (exit {exit_status}): {stderr_output}"}
-            ),
+            content=json.dumps({"error": f"Local command failed (exit {exit_status}): {stderr_output}"}),
             media_type="application/json",
         )
 
@@ -1332,9 +1320,7 @@ async def _handle_chrome_events(
             last_request_count = inbox.get_pending_count() if inbox else 0
             yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
             last_stuck_servers = _snapshot_stuck_for_chrome(health_tracker)
-            yield "data: {}\n\n".format(
-                json.dumps({"type": "workspace_server_status", "stuck": last_stuck_servers})
-            )
+            yield "data: {}\n\n".format(json.dumps({"type": "workspace_server_status", "stuck": last_stuck_servers}))
 
             # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
