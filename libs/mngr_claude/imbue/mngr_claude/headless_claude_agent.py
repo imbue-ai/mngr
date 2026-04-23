@@ -274,48 +274,16 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         if all_extra_args:
             parts.extend(all_extra_args)
 
-        # DIAGNOSTIC: bisect the test_ask_simple_query silent-exit failure
-        # mode (0 chars stdout + 0 chars stderr inside Modal-in-Modal offload
-        # sandboxes, despite the ANTHROPIC_API_KEY propagation fix in
-        # fdc68196e landing the key into the agent env file). Three probes
-        # wrapped around the real invocation:
-        #   1. `before-claude` marker + `claude --version` / `--help | wc`
-        #      liveness snapshot before the real call. If the marker lands
-        #      but version/help don't, the claude binary is broken in the
-        #      sandbox; if they do, the API call itself is the problem.
-        #   2. `after-claude rc=$?` marker + exit code after the real call.
-        #      Missing `after` marker ⇒ claude is hanging; present with rc=0
-        #      and zero output ⇒ claude exited clean with nothing to say;
-        #      present with rc≠0 and zero output ⇒ claude crashed silently.
-        #   3. `--debug all --debug-file .../claude-debug.log` on the real
-        #      claude call itself. Free if claude dies before argv parse;
-        #      if it gets past, we get a debug log in a path independent of
-        #      the possibly-busted stdout/stderr redirection.
-        # All three revert together by backing out this commit.
-        parts.extend(["--debug", "all", "--debug-file", '"$MNGR_AGENT_STATE_DIR/claude-debug.log"'])
         cmd_str = " ".join(parts)
-        # Wrap the real invocation in `timeout 60` so the after-marker always
-        # lands (rc=124 = GNU timeout fired) even if claude itself hangs.
-        # Trivial-call probe runs first: if `claude --print "just say hi"`
-        # (no system prompt, no flags) also hangs/silent-exits, the hang is
-        # intrinsic to claude-in-sandbox. If it succeeds, the 110KB system
-        # prompt or one of the specific flags is the trigger.
-        probe_before = (
-            'echo "== DIAG before-claude $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            '(claude --version; echo "help-lines=$(claude --help 2>&1 | wc -l)") '
-            '>> "$MNGR_AGENT_STATE_DIR/stderr.log" 2>&1; '
-            'echo "== DIAG trivial-call start $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            'timeout 20 claude --print "just say hi" > "$MNGR_AGENT_STATE_DIR/trivial-stdout.txt" '
-            '2>> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            'echo "== DIAG trivial-call rc=$? $(date -Iseconds) bytes=$(wc -c < \\"$MNGR_AGENT_STATE_DIR/trivial-stdout.txt\\") ==" '
-            '>> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            'echo "== DIAG pre-invoke done ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"'
-        )
-        probe_after = 'echo "== DIAG after-claude rc=$? $(date -Iseconds) ==" >> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+        # DIAGNOSTIC (ablation 1): only the trivial-print primer. If this
+        # alone keeps test_ask_simple_query passing, the primer is the fix
+        # (warms claude's Node.js runtime / config probes before the real
+        # 110KB-system-prompt call, which hangs cold in Modal/gVisor
+        # sandboxes). If this fails, something else in the previous probe
+        # bundle was carrying the win.
+        primer = 'timeout 20 claude --print "hi" >/dev/null 2>&1 || true; '
         return CommandString(
-            f"{probe_before}; "
-            f'timeout 60 {cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2>> "$MNGR_AGENT_STATE_DIR/stderr.log"; '
-            f"{probe_after}"
+            f'{primer}{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
         )
 
     def _get_stdout_path(self) -> Path:
