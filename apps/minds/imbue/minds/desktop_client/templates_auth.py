@@ -3,20 +3,12 @@
 Thin wrappers around the Jinja2 templates under ``templates/auth/``. All
 interactivity lives in ``static/auth.js`` and the per-page inline script
 blocks that remain (check-email polling, forgot-password POST, etc.)
+
+Shares the Jinja2 ``Environment`` from :mod:`templates` so both modules
+see the same template cache, loader, and autoescape configuration.
 """
 
-from typing import Final
-
-from jinja2 import Environment
-from jinja2 import FileSystemLoader
-from jinja2 import select_autoescape
-
-from imbue.minds.desktop_client.templates import TEMPLATE_DIR
-
-_JINJA_ENV: Final[Environment] = Environment(
-    loader=FileSystemLoader(str(TEMPLATE_DIR)),
-    autoescape=select_autoescape(default_for_string=True, default=True),
-)
+from imbue.minds.desktop_client.templates import _JINJA_ENV
 
 
 def render_auth_page(
