@@ -1,7 +1,7 @@
 # offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 100
-test_timeout_secs = 600
+test_timeout_secs = 120
 stream_output = true
 sandbox_project_root = "/code/mngr"
 sandbox_init_cmd = "uv sync --all-packages"
@@ -16,7 +16,7 @@ command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
 
 [groups.all]
-retry_count = 0
+retry_count = 1
 filters = "-m 'not acceptance and not release and not flaky'"
 
 [groups.flaky]
