@@ -1,11 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+ * Design tokens + a handful of custom CSS that Tailwind doesn't cover
+ * (chrome colors, per-workspace accent stripe, spinner keyframes).
+ *
+ * This file is committed and loaded alongside the Tailwind Play CDN JS
+ * (which generates utility classes at runtime -- see static/tailwind.js).
+ */
 
-/* Design tokens the templates read via var(...). Tailwind covers colors,
-   spacing, typography, and radii; everything else lives here. */
 :root {
-  /* Chrome + content surface custom tints that we want stable across pages. */
   --bg-chrome: #18181b;
   --bg-chrome-elev: #27272a;
   --bg-chrome-hover: rgba(255, 255, 255, 0.06);
@@ -14,15 +15,12 @@
   --text-chrome: #e4e4e7;
   --text-chrome-muted: #a1a1aa;
 
-  /* Link / focus ring */
   --link: #2563eb;
   --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.18);
 
-  /* Chrome seam shadow */
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
 }
 
-/* Workspace identity stripe -- 3px band in the project's accent at the very top. */
 .page-workspace::before {
   content: '';
   position: fixed;
@@ -34,7 +32,6 @@
   z-index: 1000;
 }
 
-/* The 3px spine on landing rows + sidebar rows. */
 .accent-spine::before {
   content: '';
   position: absolute;
@@ -65,7 +62,6 @@
   opacity: 1;
 }
 
-/* Deterministic per-workspace swatch block for the titlebar. */
 .accent-swatch {
   background: var(--workspace-accent, oklch(65% 0.15 230));
 }

@@ -1,8 +1,11 @@
 {#
-  Base layout: every page extends this. Provides the <head> (with the Tailwind
-  bundle + design-token overlay from static/_tailwind_input.css), a sensible
-  body scaffold, and two optional blocks:
+  Base layout: every page extends this. Pulls in the Tailwind Play CDN JS
+  (downloaded once into /_static/tailwind.js and served locally, so this is
+  offline-safe after the first fetch) plus the hand-written tokens.css.
+  The Play CDN script generates utility classes at runtime, so there is no
+  "rebuild when you add a class" step.
 
+  Blocks:
     title           -- <title> contents. Defaults to "Minds".
     head            -- extra <head> content (page-specific <link>/<meta>).
     body_class      -- classes on <body>. Default is the light page surface.
@@ -18,7 +21,8 @@
 <head>
   <meta charset="UTF-8">
   <title>{% block title %}Minds{% endblock %}</title>
-  <link rel="stylesheet" href="/_static/tailwind.css">
+  <script src="/_static/tailwind.js"></script>
+  <link rel="stylesheet" href="/_static/tokens.css">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased{% endblock %}"
