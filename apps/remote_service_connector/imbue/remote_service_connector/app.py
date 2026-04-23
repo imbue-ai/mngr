@@ -279,7 +279,7 @@ class LeaseHostRequest(BaseModel):
 
 
 class LeaseHostResponse(BaseModel):
-    host_db_id: int = Field(description="Database ID of the leased host")
+    host_db_id: str = Field(description="Database ID of the leased host")
     vps_ip: str = Field(description="VPS IP address")
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -294,7 +294,7 @@ class ReleaseHostResponse(BaseModel):
 
 
 class LeasedHostInfo(BaseModel):
-    host_db_id: int = Field(description="Database ID of the leased host")
+    host_db_id: str = Field(description="Database ID of the leased host")
     vps_ip: str = Field(description="VPS IP address")
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -1444,7 +1444,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 
 
 @web_app.post("/hosts/{host_db_id}/release")
-def release_host(request: Request, host_db_id: int) -> dict[str, object]:
+def release_host(request: Request, host_db_id: str) -> dict[str, object]:
     """Release a leased host back to the pool."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)

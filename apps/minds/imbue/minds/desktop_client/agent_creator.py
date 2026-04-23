@@ -450,22 +450,20 @@ def _remove_dynamic_host_entry(dynamic_hosts_file: Path, host_name: str) -> None
     tmp_path.rename(dynamic_hosts_file)
 
 
-def _save_lease_info(data_dir: Path, agent_id: AgentId, host_db_id: int) -> None:
+def _save_lease_info(data_dir: Path, agent_id: AgentId, host_db_id: str) -> None:
     """Persist the lease's host_db_id so release can retrieve it later."""
     lease_dir = data_dir / "leases"
     lease_dir.mkdir(parents=True, exist_ok=True)
     (lease_dir / str(agent_id)).write_text(str(host_db_id))
 
 
-def _load_lease_info(data_dir: Path, agent_id: AgentId) -> int | None:
+def _load_lease_info(data_dir: Path, agent_id: AgentId) -> str | None:
     """Load the host_db_id for a leased agent, or None if not found."""
     lease_file = data_dir / "leases" / str(agent_id)
     if not lease_file.exists():
         return None
-    try:
-        return int(lease_file.read_text().strip())
-    except ValueError:
-        return None
+    value = lease_file.read_text().strip()
+    return value if value else None
 
 
 def _remove_lease_info(data_dir: Path, agent_id: AgentId) -> None:
@@ -1114,7 +1112,7 @@ class AgentCreator(MutableModel):
         self,
         agent_id: AgentId,
         access_token: str,
-        host_db_id: int,
+        host_db_id: str,
         dynamic_hosts_file: Path,
         host_entry_name: str,
         log_queue: queue.Queue[str],

@@ -174,24 +174,25 @@ def _insert_pool_host_row(
     host_id: str,
     container_ssh_port: int,
     version: str,
-) -> int:
-    """Insert a row into the pool_hosts table and return the row ID."""
+) -> str:
+    """Insert a row into the pool_hosts table and return the row ID (UUID)."""
+    row_id = uuid4().hex
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO pool_hosts "
-                "(vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, container_ssh_port, status, version) "
-                "VALUES (%s, %s, %s, %s, 22, 'root', %s, 'available', %s) "
+                "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                "container_ssh_port, status, version, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s, NOW()) "
                 "RETURNING id",
-                (vps_ip, vps_instance_id, agent_id, host_id, container_ssh_port, version),
+                (row_id, vps_ip, vps_instance_id, agent_id, host_id, container_ssh_port, version),
             )
             row = cur.fetchone()
             if row is None:
                 conn.rollback()
                 logger.error("INSERT did not return an id")
                 sys.exit(1)
-            row_id: int = row[0]
             conn.commit()
     finally:
         conn.close()

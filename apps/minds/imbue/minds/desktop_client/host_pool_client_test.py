@@ -47,7 +47,7 @@ def test_lease_host_raises_on_connection_error() -> None:
 def test_release_host_returns_false_on_connection_error() -> None:
     """Releasing to an unreachable server returns False without raising."""
     client = _make_client()
-    result = client.release_host(access_token="token", host_db_id=42)
+    result = client.release_host(access_token="token", host_db_id="uuid-42")
     assert result is False
 
 
@@ -68,7 +68,7 @@ def test_lease_host_happy_path(fake_pool_server: HostPoolClient) -> None:
         version="v0.1.0",
     )
     assert isinstance(result, LeaseHostResult)
-    assert result.host_db_id == 7
+    assert result.host_db_id == "a1b2c3d4e5f6789012345678"
     assert result.vps_ip == "203.0.113.10"
     assert result.container_ssh_port == 2222
     assert result.agent_id == "agent-abc123"
@@ -76,13 +76,13 @@ def test_lease_host_happy_path(fake_pool_server: HostPoolClient) -> None:
 
 
 def test_release_host_happy_path(fake_pool_server: HostPoolClient) -> None:
-    result = fake_pool_server.release_host(access_token="test-token", host_db_id=7)
+    result = fake_pool_server.release_host(access_token="test-token", host_db_id="a1b2c3d4e5f6789012345678")
     assert result is True
 
 
 def test_list_leased_hosts_happy_path(fake_pool_server: HostPoolClient) -> None:
     hosts = fake_pool_server.list_leased_hosts(access_token="test-token")
     assert len(hosts) == 1
-    assert hosts[0].host_db_id == 7
+    assert hosts[0].host_db_id == "a1b2c3d4e5f6789012345678"
     assert hosts[0].vps_ip == "203.0.113.10"
     assert hosts[0].leased_at == "2026-01-01T00:00:00Z"
