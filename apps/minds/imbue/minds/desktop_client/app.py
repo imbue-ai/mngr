@@ -72,6 +72,7 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import workspace_hue
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
 from imbue.minds.primitives import LaunchMode
@@ -1119,16 +1120,21 @@ async def _handle_chrome_events(
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
-) -> list[dict[str, str]]:
-    """Build a JSON-serializable list of workspaces from the backend resolver."""
+) -> list[dict[str, str | int]]:
+    """Build a JSON-serializable list of workspaces from the backend resolver.
+
+    Each entry carries a deterministic "hue" derived from the agent id so the
+    chrome and sidebar can render a per-workspace accent color without running
+    a digest in JS.
+    """
     agent_ids = backend_resolver.list_known_workspace_ids()
-    workspaces: list[dict[str, str]] = []
+    workspaces: list[dict[str, str | int]] = []
     for aid in agent_ids:
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             info = backend_resolver.get_agent_display_info(aid)
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name}
+        entry: dict[str, str | int] = {"id": str(aid), "name": ws_name, "hue": workspace_hue(str(aid))}
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:

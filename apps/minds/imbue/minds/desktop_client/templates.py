@@ -1,3 +1,4 @@
+import hashlib
 import os
 from collections.abc import Sequence
 from typing import Final
@@ -13,113 +14,303 @@ from imbue.mngr.primitives import AgentId
 
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
 
-_COMMON_STYLES: Final[str] = """
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
-    h1 { margin-bottom: 24px; color: rgb(26, 26, 46); }
-    .btn {
-      display: inline-block; padding: 12px 20px;
-      background: rgb(26, 26, 46); color: white; text-decoration: none;
-      border-radius: 6px; font-size: 16px; border: none; cursor: pointer;
-    }
-    .btn:hover { background: rgb(42, 42, 78); }
+
+# -- Per-workspace identity color --
+# The hue is a deterministic function of the agent id, so each workspace has
+# a stable visual accent across sidebar, titlebar, and in-workspace pages.
+# Shared between Python and JS so both sides pick the same color for a given
+# agent (JS version lives in the chrome template).
+
+
+@pure
+def workspace_hue(agent_id: str) -> int:
+    """Deterministically map an agent id to an HSL hue in [0, 360).
+
+    Paired with fixed saturation/lightness in CSS so every workspace lands
+    in a readable mid-tone range -- no eye-searing yellows, no muddy browns.
+    """
+    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % 360
+
+
+# -- Shared design tokens --
+# Every template includes this block. Colors, spacing, type scale, radii,
+# plus the primitive component classes (.btn, .card, .input, .spinner,
+# .page, .notice). Page-specific CSS is only for layout unique to that page.
+TOKENS: Final[str] = """
+:root {
+  --bg-page: #f7f7f8;
+  --bg-surface: #ffffff;
+  --bg-muted: #f4f4f5;
+  --bg-chrome: #18181b;
+  --bg-chrome-elev: #27272a;
+  --bg-chrome-hover: rgba(255,255,255,0.06);
+  --bg-chrome-active: rgba(255,255,255,0.10);
+
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --border-chrome: rgba(255,255,255,0.08);
+
+  --text: #18181b;
+  --text-muted: #52525b;
+  --text-subtle: #a1a1aa;
+  --text-invert: #fafafa;
+  --text-chrome: #e4e4e7;
+  --text-chrome-muted: #a1a1aa;
+
+  --accent: hsl(var(--workspace-hue, 235) 60% 55%);
+  --link: #2563eb;
+
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+  --success: #15803d;
+  --success-bg: #f0fdf4;
+  --success-border: #bbf7d0;
+  --warning-text: #92400e;
+  --warning-bg: #fffbeb;
+  --warning-border: #fde68a;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-card: 12px;
+
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-seam: 0 4px 10px -6px rgba(0,0,0,0.35);
+  --focus-ring: 0 0 0 3px rgba(37,99,235,0.18);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.page { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+.page-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-bottom: 24px;
+}
+.page-header__back {
+  color: var(--text-muted); font-size: var(--fs-sm);
+}
+.page-header__back:hover { color: var(--text); text-decoration: none; }
+
+/* Workspace identity stripe -- 3px band in the project's hue at the very top. */
+.page-workspace { position: relative; }
+.page-workspace::before {
+  content: "";
+  position: fixed; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--accent);
+  z-index: 1000;
+}
+
+h1 { font-size: var(--fs-xl); font-weight: 600; color: var(--text); line-height: 1.3; }
+h1.display { font-size: var(--fs-2xl); }
+h2 {
+  font-size: var(--fs-md); font-weight: 500; color: var(--text-muted);
+  margin-top: 32px; margin-bottom: 12px; padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+h2.tight { margin-top: 0; padding-top: 0; border-top: none; }
+p { color: var(--text); line-height: 1.5; }
+.subtitle { color: var(--text-subtle); font-size: var(--fs-xs); margin-bottom: 20px; }
+.muted { color: var(--text-muted); }
+.subtle { color: var(--text-subtle); }
+
+code {
+  background: var(--bg-muted); padding: 2px 6px; border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 0.95em;
+}
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+}
+.card + .card { margin-top: 8px; }
+.card-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-family: inherit; font-size: var(--fs-sm); font-weight: 500;
+  cursor: pointer; text-decoration: none;
+  background: transparent; color: var(--text);
+  transition: background 100ms, border-color 100ms, color 100ms;
+  line-height: 1.2;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--text); color: var(--text-invert); }
+.btn-primary:hover { background: var(--bg-chrome-elev); text-decoration: none; color: var(--text-invert); }
+.btn-secondary { background: var(--bg-muted); border-color: var(--border); color: var(--text); }
+.btn-secondary:hover { background: var(--border); text-decoration: none; color: var(--text); }
+.btn-danger { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-border); }
+.btn-danger:hover { background: #fee2e2; text-decoration: none; color: var(--danger); }
+.btn-success { background: #166534; color: #ecfdf5; }
+.btn-success:hover { background: #14532d; text-decoration: none; color: #ecfdf5; }
+.btn-ghost { color: var(--text-muted); }
+.btn-ghost:hover { background: var(--bg-muted); color: var(--text); text-decoration: none; }
+.btn-sm { padding: 4px 10px; font-size: var(--fs-xs); }
+.btn-block { width: 100%; }
+
+.input, select.input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--text);
+  font-family: inherit; font-size: var(--fs-sm);
+  outline: none;
+  transition: border-color 100ms, box-shadow 100ms;
+}
+.input:focus, select.input:focus { border-color: var(--link); box-shadow: var(--focus-ring); }
+
+.input-row { display: flex; gap: 8px; align-items: center; }
+.input-row .input { flex: 1; }
+
+.form-group { display: flex; gap: 24px; margin-bottom: 16px; align-items: flex-start; }
+.form-label { flex: 0 0 200px; padding-top: 10px; }
+.form-label label { font-size: var(--fs-sm); color: var(--text); font-weight: 500; display: block; }
+.form-help { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-subtle); }
+.form-input { flex: 1; }
+
+.spinner {
+  display: inline-block; vertical-align: middle;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--text);
+  animation: spin 800ms linear infinite;
+}
+.spinner-lg { width: 32px; height: 32px; border-width: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.notice { padding: 10px 12px; border-radius: var(--radius); font-size: var(--fs-sm); margin: 8px 0; }
+.notice-info { background: #eff6ff; color: #1e40af; border: 1px solid #dbeafe; }
+.notice-warn { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
+.notice-success { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+.notice-error { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-border); }
+
+.empty-state { color: var(--text-subtle); font-size: var(--fs-md); text-align: center; padding: 48px 0; }
+
+.url-box {
+  display: flex; gap: 8px; align-items: center;
+  background: var(--bg-muted); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 12px; margin: 8px 0;
+}
+.url-box input {
+  flex: 1; background: transparent; border: none; font-size: var(--fs-sm);
+  color: var(--text); font-family: var(--font-mono); outline: none;
+}
+
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-enabled { background: var(--success); }
+.status-disabled { background: var(--text-subtle); }
+
+.actions { display: flex; gap: 8px; margin-top: 20px; }
+
+/* Accent swatch -- tiny colored square tied to the workspace hue. */
+.accent-swatch {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  background: var(--accent);
+  vertical-align: middle;
+  flex-shrink: 0;
+}
 """
+
 
 _LANDING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
   <title>Projects</title>
-  <style>
-    """
-    + _COMMON_STYLES
+  <style>"""
+    + TOKENS
     + """
-    body { background: #f8fafc; padding: 0; font-size: 14px; }
-    .page { max-width: 800px; margin: 0 auto; padding: 48px 0; }
-    .create-btn {
-      padding: 6px 16px; background: #1e293b; color: white; border: none;
-      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
-      text-decoration: none; display: inline-block; font-family: inherit;
+    .landing-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .project-list { display: flex; flex-direction: column; gap: 6px; }
+    .project-row {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+      padding: 14px 16px; cursor: pointer;
+      transition: border-color 100ms, box-shadow 100ms;
+      position: relative; overflow: hidden;
     }
-    .create-btn:hover { background: #334155; }
-    table { width: 100%; border-collapse: collapse; }
-    thead th {
-      text-align: left; padding: 10px 16px; font-size: 14px; font-weight: 400;
-      color: #94a3b8; border-bottom: 1px solid #e2e8f0;
+    .project-row:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
+    .project-row::before {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: var(--accent);
     }
-    thead th:last-child { text-align: right; }
-    tbody tr { cursor: pointer; transition: background 0.1s; }
-    tbody tr:hover { background: #f1f5f9; }
-    tbody td {
-      padding: 20px 16px; font-size: 14px; color: #334155;
-      border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+    .project-row__name { flex: 1; font-weight: 500; color: var(--text); padding-left: 4px; }
+    .project-row__cog {
+      background: none; border: 1px solid transparent; border-radius: var(--radius);
+      cursor: pointer; padding: 6px; color: var(--text-subtle);
+      display: flex; align-items: center; justify-content: center;
     }
-    tbody td:last-child { width: 48px; }
-    tbody td:last-child .menu-btn { float: right; }
-    .ws-name { font-weight: 500; color: #0f172a; }
-    .shared-with { color: #94a3b8; }
-    .menu-wrapper { position: relative; display: inline-block; }
-    .menu-btn {
-      background: none; border: 1px solid transparent; border-radius: 4px;
-      cursor: pointer; padding: 4px 6px; color: #94a3b8; line-height: 1;
-      display: flex; align-items: center;
-    }
-    .menu-btn:hover { background: #e2e8f0; border-color: #cbd5e1; color: #64748b; }
-    .menu-btn svg { width: 16px; height: 16px; }
-    .menu-dropdown {
-      display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
-      background: white; border: 1px solid #e2e8f0; border-radius: 6px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.08); min-width: 160px; z-index: 10;
-      padding: 4px 0;
-    }
-    .menu-dropdown.open { display: block; }
-    .menu-item {
-      display: block; width: 100%; padding: 8px 14px; font-size: 13px;
-      text-align: left; background: none; border: none; cursor: pointer;
-      color: #334155;
-    }
-    .menu-item:hover { background: #f1f5f9; }
-    .menu-item.destructive { color: #dc2626; }
-    .menu-item.destructive:hover { background: #fef2f2; }
-    .empty-state { color: #94a3b8; font-size: 15px; text-align: center; padding: 48px 0; }
+    .project-row__cog:hover { background: var(--bg-muted); color: var(--text-muted); }
+    .project-row__cog svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   </style>
 </head>
 <body>
   <div class="page">
     {% if agent_ids %}
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Shared with</th>
-          <th style="text-align: right;"><a href="/create" class="create-btn">Create</a></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for agent_id in agent_ids %}
-        <tr onclick="window.location='/goto/{{ agent_id }}/'" data-agent-id="{{ agent_id }}">
-          <td><span class="ws-name">{{ agent_names.get(agent_id | string, agent_id) }}</span></td>
-          <td><span class="shared-with">No one</span></td>
-          <td>
-            <button class="menu-btn" onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'" title="Settings">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            </button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    <script></script>
+    <div class="landing-header">
+      <h1>Projects</h1>
+      <a href="/create" class="btn btn-primary">Create</a>
+    </div>
+    <div class="project-list">
+      {% for agent_id in agent_ids %}
+      <div class="project-row"
+           style="--workspace-hue: {{ agent_hues.get(agent_id | string, 235) }};"
+           data-agent-id="{{ agent_id }}"
+           onclick="window.location='/goto/{{ agent_id }}/'">
+        <span class="project-row__name">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+        <button class="project-row__cog"
+                onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
+                title="Settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+      {% endfor %}
+    </div>
     {% else %}
       {% if is_discovering %}
     <div style="display: flex; align-items: center; justify-content: center; min-height: 80vh;">
-      <p class="empty-state" style="padding: 0;">Discovering agents...</p>
+      <p class="empty-state">Discovering agents...</p>
     </div>
     <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
     <div style="text-align: center; padding: 48px 0;">
-      <p class="empty-state" style="margin-bottom: 24px;">No projects yet</p>
-      <a href="/create" class="create-btn">Create</a>
+      <p class="empty-state" style="padding: 0 0 24px;">No projects yet</p>
+      <a href="/create" class="btn btn-primary">Create</a>
     </div>
       {% endif %}
     {% endif %}
@@ -128,44 +319,22 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
 </html>"""
 )
 
+
 _CREATE_FORM_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
   <title>Create a Project</title>
-  <style>
-    """
-    + _COMMON_STYLES
+  <style>"""
+    + TOKENS
     + """
-    body { background: #f8fafc; padding: 0; font-size: 14px; }
-    .page { max-width: 800px; margin: 0 auto; padding: 48px 16px; }
-    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; padding-top: 10px; }
-    .page-header a { color: #64748b; text-decoration: none; font-size: 14px; }
-    .page-header a:hover { color: #334155; }
-    .submit-btn {
-      padding: 6px 16px; background: #1e293b; color: white; border: none;
-      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
-      font-family: inherit;
-    }
-    .submit-btn:hover { background: #334155; }
-    .form-group { display: flex; gap: 24px; margin-bottom: 16px; align-items: flex-start; }
-    .form-label { flex: 0 0 200px; padding-top: 10px; }
-    .form-label label { font-size: 14px; color: #334155; font-weight: 500; display: block; }
-    .form-label .help-text { margin-top: 2px; font-size: 13px; color: #94a3b8; }
-    .form-input { flex: 1; }
-    input[type="text"], select {
-      width: 100%; padding: 10px 12px;
-      border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;
-      font-family: inherit; background: white; color: #0f172a;
-    }
-    input[type="text"]:focus, select:focus { outline: none; border-color: #94a3b8; }
   </style>
 </head>
 <body>
   <div class="page">
     <div class="page-header">
-      <a href="/">Back to project list</a>
-      <button type="submit" form="create-form" class="submit-btn">Create</button>
+      <a href="/" class="page-header__back">&larr; Back to projects</a>
+      <button type="submit" form="create-form" class="btn btn-primary">Create</button>
     </div>
     <form id="create-form" action="/create" method="post">
       <div class="form-group">
@@ -173,37 +342,37 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
           <label for="agent_name">Name</label>
         </div>
         <div class="form-input">
-          <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
+          <input type="text" class="input" id="agent_name" name="agent_name" value="{{ agent_name }}"
                  placeholder="selene" required>
         </div>
       </div>
       <div class="form-group">
         <div class="form-label">
           <label for="git_url">Repository</label>
-          <p class="help-text">Git URL or local path</p>
+          <p class="form-help">Git URL or local path</p>
         </div>
         <div class="form-input">
-          <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
+          <input type="text" class="input" id="git_url" name="git_url" value="{{ git_url }}"
                  placeholder="https://github.com/user/repo.git" required>
         </div>
       </div>
       <div class="form-group">
         <div class="form-label">
           <label for="branch">Branch</label>
-          <p class="help-text">Leave empty for default</p>
+          <p class="form-help">Leave empty for default</p>
         </div>
         <div class="form-input">
-          <input type="text" id="branch" name="branch" value="{{ branch }}"
+          <input type="text" class="input" id="branch" name="branch" value="{{ branch }}"
                  placeholder="main">
         </div>
       </div>
       <div class="form-group">
         <div class="form-label">
           <label for="launch_mode">Launch mode</label>
-          <p class="help-text">Local: Docker. Dev: this host.</p>
+          <p class="form-help">Local: Docker. Dev: this host.</p>
         </div>
         <div class="form-input">
-          <select id="launch_mode" name="launch_mode">
+          <select id="launch_mode" name="launch_mode" class="input">
             {% for mode in launch_modes %}
             <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
             {% endfor %}
@@ -213,7 +382,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       <div class="form-group">
         <div class="form-label">
           <label for="include_env_file">Include .env file</label>
-          <p class="help-text">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+          <p class="form-help">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
         </div>
         <div class="form-input">
           <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
@@ -225,39 +394,36 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
 </html>"""
 )
 
+
 _CREATING_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
   <title>Creating your project...</title>
-  <style>
-    """
-    + _COMMON_STYLES
+  <style>"""
+    + TOKENS
     + """
-    .status { margin-top: 16px; font-size: 16px; color: rgb(60, 60, 80); }
-    .error { margin-top: 16px; color: darkred; }
-    .spinner {
-      display: inline-block; width: 20px; height: 20px;
-      border: 3px solid rgb(200, 200, 210); border-top: 3px solid rgb(26, 26, 46);
-      border-radius: 50%; animation: spin 1s linear infinite;
-      vertical-align: middle; margin-right: 8px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #logs {
-      margin-top: 16px; padding: 12px; background: rgb(26, 26, 46); color: rgb(200, 210, 220);
-      font-family: monospace; font-size: 13px; border-radius: 6px;
-      max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+    .logs {
+      margin-top: 16px; padding: 12px;
+      background: var(--bg-chrome); color: var(--text-chrome);
+      font-family: var(--font-mono); font-size: var(--fs-xs);
+      border-radius: var(--radius-lg);
+      max-height: 420px; overflow-y: auto; white-space: pre-wrap;
+      border: 1px solid var(--bg-chrome);
     }
   </style>
 </head>
-<body>
-  <h1>Creating your project...</h1>
-  <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
-  <div id="logs"></div>
+<body class="page-workspace" style="--workspace-hue: {{ hue }};">
+  <div class="page">
+    <h1 class="display">Creating your project</h1>
+    <p class="subtitle">This usually takes 10-30 seconds.</p>
+    <p id="status" style="margin: 16px 0;"><span class="spinner"></span> <span id="status-text">{{ status_text }}</span></p>
+    <div id="logs" class="logs"></div>
+  </div>
   <script>
     const agentId = '{{ agent_id }}';
     const logsEl = document.getElementById('logs');
-    const statusEl = document.getElementById('status');
+    const statusTextEl = document.getElementById('status-text');
     const source = new EventSource('/api/create-agent/' + agentId + '/logs');
 
     var pendingLines = [];
@@ -280,11 +446,11 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
           source.close();
           flushLogs();
           if (data.status === 'DONE' && data.redirect_url) {
-            statusEl.textContent = 'Done! Redirecting...';
+            statusTextEl.textContent = 'Done. Redirecting...';
             window.location.href = data.redirect_url;
           } else if (data.status === 'FAILED') {
-            statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
-            statusEl.classList.add('error');
+            statusTextEl.textContent = 'Failed: ' + (data.error || 'unknown error');
+            document.getElementById('status').classList.add('error-text');
           }
         } else if (data.log) {
           pendingLines.push(data.log);
@@ -306,26 +472,32 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
 </html>"""
 )
 
+
 _LOGIN_PAGE_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
   <title>Login - Projects</title>
-  <style>
-    """
-    + _COMMON_STYLES
+  <style>"""
+    + TOKENS
     + """
-    .login-message { color: gray; font-size: 16px; }
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-card { max-width: 420px; width: 100%; padding: 32px; margin: 16px; }
   </style>
 </head>
 <body>
-  <h1>Projects</h1>
-  <p class="login-message">
-    Please use the login URL printed in the terminal where the server is running.
-  </p>
+  <div class="card login-card">
+    <h1>Sign in to Minds</h1>
+    <p class="subtitle" style="margin-top: 6px;">Use the login URL printed in the terminal.</p>
+    <p class="muted">
+      Each login URL can only be used once. If you've already used yours, restart the server to
+      generate a new one.
+    </p>
+  </div>
 </body>
 </html>"""
 )
+
 
 _LOGIN_REDIRECT_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <html>
@@ -338,23 +510,31 @@ window.location.href = '/authenticate?one_time_code={{ one_time_code }}';
 </body>
 </html>"""
 
-_AUTH_ERROR_TEMPLATE: Final[str] = """<!DOCTYPE html>
+
+_AUTH_ERROR_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
 <html>
 <head>
   <title>Authentication Error</title>
-  <style>
-    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
-    .error { background: rgb(255, 238, 238); border: 1px solid rgb(255, 204, 204); padding: 20px; border-radius: 6px; color: darkred; }
+  <style>"""
+    + TOKENS
+    + """
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .auth-error-card { max-width: 460px; width: 100%; padding: 32px; margin: 16px; }
   </style>
 </head>
 <body>
-  <div class="error">
-    <h2>Authentication Failed</h2>
-    <p>{{ message }}</p>
-    <p>Each login URL can only be used once. Please use the login URL printed in the terminal where the server is running, or restart the server to generate a new one.</p>
+  <div class="card auth-error-card">
+    <h1>Authentication Failed</h1>
+    <p class="muted" style="margin-top: 8px;">{{ message }}</p>
+    <p class="muted" style="margin-top: 8px;">
+      Each login URL can only be used once. Please use the login URL printed in the terminal where
+      the server is running, or restart the server to generate a new one.
+    </p>
   </div>
 </body>
 </html>"""
+)
 
 
 @pure
@@ -375,9 +555,11 @@ def render_landing_page(
     with auto-refresh instead of the empty state. This is used when the stream
     manager hasn't completed initial agent discovery yet.
     """
+    agent_hues = {str(aid): workspace_hue(str(aid)) for aid in accessible_agent_ids}
     template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
     return template.render(
         agent_ids=accessible_agent_ids,
+        agent_hues=agent_hues,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
@@ -431,12 +613,16 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
     status_text_map = {
         "CLONING": "Cloning repository...",
         "CREATING": "Creating agent...",
-        "DONE": "Done! Redirecting...",
+        "DONE": "Done. Redirecting...",
         "FAILED": "Failed: {}".format(info.error or "unknown error"),
     }
     status_text = status_text_map.get(str(info.status), "Working...")
     template = _JINJA_ENV.from_string(_CREATING_PAGE_TEMPLATE)
-    return template.render(agent_id=agent_id, status_text=status_text)
+    return template.render(
+        agent_id=agent_id,
+        status_text=status_text,
+        hue=workspace_hue(str(agent_id)),
+    )
 
 
 @pure
@@ -466,71 +652,80 @@ def render_auth_error_page(message: str) -> str:
 
 _CHROME_TITLEBAR_HEIGHT: Final[int] = 38
 
+
 _CHROME_TEMPLATE: Final[str] = (
     """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <title>Minds</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { height: 100%; overflow: hidden; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #0f172a;
-}
+<style>"""
+    + TOKENS
+    + """
+html, body { overflow: hidden; background: var(--bg-chrome); }
 
 #minds-titlebar {
   position: fixed; top: 0; left: 0; right: 0;
   height: """
     + str(_CHROME_TITLEBAR_HEIGHT)
     + """px;
-  background: #1e293b;
+  background: var(--bg-chrome);
   display: flex; align-items: center;
   user-select: none;
   -webkit-app-region: drag;
   z-index: 100;
-  border-bottom: 1px solid #334155;
+  border-bottom: 1px solid var(--border-chrome);
+  box-shadow: var(--shadow-seam);
   padding: 0 4px;
 }
 {% if is_mac %}#minds-titlebar { padding-left: 72px; }{% endif %}
 
 #minds-titlebar button {
   -webkit-app-region: no-drag;
-  background: none; border: none; color: #94a3b8; cursor: pointer;
+  background: none; border: none; color: var(--text-chrome-muted); cursor: pointer;
   width: 32px; height: 28px;
   display: flex; align-items: center; justify-content: center;
-  border-radius: 4px; font-size: 14px; line-height: 1;
+  border-radius: var(--radius-sm); font-size: var(--fs-md); line-height: 1;
 }
-#minds-titlebar button:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
-#minds-titlebar button:active { background: rgba(255,255,255,0.12); }
+#minds-titlebar button:hover { color: var(--text-chrome); background: var(--bg-chrome-hover); }
+#minds-titlebar button:active { background: var(--bg-chrome-active); }
 #minds-titlebar svg {
   width: 16px; height: 16px; fill: none; stroke: currentColor;
   stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
 }
 
 .minds-nav { display: flex; gap: 2px; }
+.minds-title-area {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 0 8px; min-width: 0;
+}
+.minds-title-swatch {
+  display: none; width: 10px; height: 10px; border-radius: 2px;
+  background: hsl(var(--workspace-hue, 235) 60% 55%);
+  flex-shrink: 0;
+}
+.minds-title-swatch.visible { display: inline-block; }
 .minds-title {
-  flex: 1; color: #cbd5e1; font-size: 12px;
+  color: var(--text-chrome); font-size: var(--fs-xs);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  text-align: center; padding: 0 8px;
 }
 
 .minds-user-area { position: relative; -webkit-app-region: no-drag; flex-shrink: 0; }
 .minds-user-btn {
   width: auto !important; height: auto !important; display: inline-block !important;
-  color: #94a3b8; cursor: pointer; padding: 4px 10px; border-radius: 4px;
-  font-size: 12px; font-family: inherit; white-space: nowrap;
+  color: var(--text-chrome-muted); cursor: pointer; padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs); font-family: inherit; white-space: nowrap;
 }
-.minds-user-btn:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
+.minds-user-btn:hover { background: var(--bg-chrome-hover); color: var(--text-chrome); }
 
 .minds-wc { display: flex; }
 {% if is_mac %}.minds-wc { display: none; }{% endif %}
 .minds-wc button { border-radius: 0; width: 36px; height: """
     + str(_CHROME_TITLEBAR_HEIGHT)
     + """px; }
-.minds-wc button:hover { background: rgba(255,255,255,0.08); border-radius: 0; }
-.minds-wc button:last-child:hover { background: rgb(220, 38, 38); color: white; border-radius: 0; }
+.minds-wc button:hover { background: var(--bg-chrome-hover); border-radius: 0; }
+.minds-wc button:last-child:hover { background: #dc2626; color: white; border-radius: 0; }
 
 /* Sidebar (browser mode) */
 #sidebar-panel {
@@ -540,35 +735,44 @@ body {
   width: 260px; height: calc(100% - """
     + str(_CHROME_TITLEBAR_HEIGHT)
     + """px);
-  background: #0f172a; z-index: 50;
+  background: var(--bg-chrome); z-index: 50;
   box-shadow: 4px 0 12px rgba(0,0,0,0.3);
   transform: translateX(-100%);
   transition: transform 200ms ease-in-out;
-  overflow-y: auto;
-  padding: 0;
+  overflow-y: auto; padding: 0;
+  border-right: 1px solid var(--border-chrome);
 }
 #sidebar-panel.sidebar-visible { transform: translateX(0); }
 
 .sidebar-item {
-  padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
+  position: relative;
+  padding: 10px 12px 10px 16px;
+  cursor: pointer; font-size: var(--fs-sm); font-weight: 500;
+  color: var(--text-chrome); margin: 2px 6px; border-radius: var(--radius);
   transition: background 100ms;
 }
-.sidebar-item:hover { background: rgba(255,255,255,0.06); }
-
+.sidebar-item::before {
+  content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 2px; background: hsl(var(--workspace-hue, 235) 60% 55%);
+  opacity: 0.55;
+}
+.sidebar-item:hover { background: var(--bg-chrome-hover); }
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
+  padding: 24px 16px; font-size: var(--fs-sm); color: var(--text-chrome-muted); text-align: center;
 }
 
-/* Content area (browser mode) */
+/* Content area (browser mode). Inset 6px so the chrome color frames it. */
 #content-frame {
-  position: fixed; left: 0; top: """
+  position: fixed; left: 6px; top: """
     + str(_CHROME_TITLEBAR_HEIGHT)
     + """px;
-  width: 100%; height: calc(100% - """
-    + str(_CHROME_TITLEBAR_HEIGHT)
+  width: calc(100% - 12px); height: calc(100% - """
+    + str(_CHROME_TITLEBAR_HEIGHT + 6)
     + """px);
   border: none;
+  border-radius: var(--radius-lg);
+  background: var(--bg-page);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;
 }
 </style>
 </head>
@@ -579,7 +783,7 @@ body {
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
     </button>
     <button id="home-btn" title="Home">
-      <svg viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0h4"/></svg>
+      <svg viewBox="0 0 24 24"><path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
     </button>
     <button id="back-btn" title="Back">
       <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
@@ -588,12 +792,15 @@ body {
       <svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
     </button>
   </div>
-  <span class="minds-title" id="page-title">Minds</span>
+  <div class="minds-title-area">
+    <span class="minds-title-swatch" id="title-swatch"></span>
+    <span class="minds-title" id="page-title">Minds</span>
+  </div>
   <div class="minds-user-area">
     <button id="user-btn" class="minds-user-btn" title="Account">Log in</button>
   </div>
   <button id="requests-toggle" title="Requests" style="position:relative;">
-    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     <span id="requests-badge" style="display:none;position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#ef4444;"></span>
   </button>
   <div class="minds-wc">
@@ -621,6 +828,22 @@ body {
 
 <script>
 var isElectron = !!window.minds;
+
+// Stable workspace id -> HSL hue. Matches Python workspace_hue() in templates.py.
+// SHA-256 gives stable output across Python/JS; we only need the first 4 bytes.
+async function hueForAgentId(agentId) {
+  var enc = new TextEncoder().encode(agentId);
+  var digest = await crypto.subtle.digest('SHA-256', enc);
+  var view = new DataView(digest);
+  return view.getUint32(0, false) % 360;
+}
+
+// Cached hue map so we never pay the digest cost twice for the same id.
+var hueCache = {};
+function getHue(agentId, cb) {
+  if (hueCache[agentId] !== undefined) { cb(hueCache[agentId]); return; }
+  hueForAgentId(agentId).then(function(h) { hueCache[agentId] = h; cb(h); });
+}
 
 // -- Navigation adapter --
 function navigateContent(url) {
@@ -652,9 +875,6 @@ function toggleSidebar() {
 
 function selectWorkspace(agentId) {
   navigateContent('/goto/' + agentId + '/');
-  // Close sidebar. In Electron, navigate-content already removes the sidebar
-  // WebContentsView on the main process side, so only reset the local state flag
-  // without sending another toggle-sidebar IPC (which would re-create it).
   if (isElectron) {
     sidebarOpen = false;
   } else {
@@ -663,20 +883,35 @@ function selectWorkspace(agentId) {
   }
 }
 
+// -- Titlebar per-project swatch --
+var currentTitleAgentId = null;
+function applyTitleSwatch(agentId) {
+  var swatch = document.getElementById('title-swatch');
+  if (!agentId) {
+    swatch.classList.remove('visible');
+    document.documentElement.style.removeProperty('--workspace-hue');
+    currentTitleAgentId = null;
+    return;
+  }
+  currentTitleAgentId = agentId;
+  getHue(agentId, function(h) {
+    if (currentTitleAgentId !== agentId) return;
+    document.documentElement.style.setProperty('--workspace-hue', String(h));
+    swatch.classList.add('visible');
+  });
+}
+
 // -- Button handlers --
 document.getElementById('sidebar-toggle').onclick = toggleSidebar;
 document.getElementById('home-btn').onclick = function() { navigateContent('/'); };
 document.getElementById('back-btn').onclick = goBack;
 document.getElementById('forward-btn').onclick = goForward;
 
-// Window controls (Electron only)
 if (isElectron) {
   document.getElementById('min-btn').onclick = function() { window.minds.minimize(); };
   document.getElementById('max-btn').onclick = function() { window.minds.maximize(); };
   document.getElementById('close-btn').onclick = function() { window.minds.close(); };
-  // Hide iframe in Electron (content is in WebContentsView)
   document.getElementById('content-frame').style.display = 'none';
-  // Hide browser sidebar panel in Electron (separate WebContentsView)
   document.getElementById('sidebar-panel').style.display = 'none';
 }
 
@@ -686,9 +921,6 @@ function refreshAuthStatus() {
 }
 
 if (isElectron) {
-  // In Electron, main process pushes an authoritative per-window title
-  // (mirrors the OS window title: "{workspace-name} -- Minds" or "Minds").
-  // Ignore content document.title entirely.
   if (window.minds.onWindowTitleChange) {
     window.minds.onWindowTitleChange(function(title) {
       document.getElementById('page-title').textContent = title || 'Minds';
@@ -698,17 +930,30 @@ if (isElectron) {
       document.getElementById('page-title').textContent = title || 'Minds';
     });
   }
-  window.minds.onContentURLChange(function() {
+  window.minds.onContentURLChange(function(url) {
     refreshAuthStatus();
+    // Pull agent id out of /goto/{agentId}/... to show the titlebar swatch.
+    try {
+      var u = new URL(url);
+      var m = u.pathname.match(/^\\/goto\\/([^/]+)/);
+      applyTitleSwatch(m ? m[1] : null);
+    } catch (e) {}
   });
+  if (window.minds.onCurrentWorkspaceChanged) {
+    window.minds.onCurrentWorkspaceChanged(function(agentId) {
+      applyTitleSwatch(agentId || null);
+    });
+  }
 } else {
   setInterval(function() {
     try {
       var t = document.getElementById('content-frame').contentDocument.title;
       if (t) document.getElementById('page-title').textContent = t;
+      var loc = document.getElementById('content-frame').contentWindow.location.pathname;
+      var m = loc.match(/^\\/goto\\/([^/]+)/);
+      applyTitleSwatch(m ? m[1] : null);
     } catch(e) {}
   }, 500);
-  // Re-check auth on iframe navigation
   document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
 }
 
@@ -733,7 +978,6 @@ document.getElementById('user-btn').onclick = function() {
   else navigateContent('/auth/login');
 };
 
-// -- Requests panel toggle --
 document.getElementById('requests-toggle').onclick = function() {
   if (isElectron) window.minds.toggleRequestsPanel();
 };
@@ -741,32 +985,44 @@ document.getElementById('requests-toggle').onclick = function() {
 // -- SSE for workspace list (browser mode sidebar) --
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
+  container.textContent = '';
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
+    var empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.textContent = 'No projects';
+    container.appendChild(empty);
     return;
   }
-  // Group by account
   var groups = {};
   workspaces.forEach(function(w) {
     var key = w.account || 'Private';
     if (!groups[key]) groups[key] = [];
     groups[key].push(w);
   });
-  // Render with Private first, then alphabetical
   var keys = Object.keys(groups).sort(function(a, b) {
     if (a === 'Private') return -1;
     if (b === 'Private') return 1;
     return a.localeCompare(b);
   });
-  var html = '';
   keys.forEach(function(key) {
-    var label = key === 'Private' ? 'PRIVATE' : key;
-    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
+    var header = document.createElement('div');
+    header.style.cssText = 'padding:8px 12px 2px;font-size:11px;color:var(--text-chrome-muted);letter-spacing:0.3px;';
+    header.textContent = key === 'Private' ? 'PRIVATE' : key;
+    container.appendChild(header);
     groups[key].forEach(function(w) {
-      html += '<div class="sidebar-item" onclick="selectWorkspace(\\'' + w.id + '\\')">' + (w.name || w.id) + '</div>';
+      var row = document.createElement('div');
+      row.className = 'sidebar-item';
+      row.textContent = w.name || w.id;
+      row.setAttribute('data-agent-id', w.id);
+      if (typeof w.hue === 'number') {
+        row.style.setProperty('--workspace-hue', String(w.hue));
+      } else {
+        getHue(w.id, function(h) { row.style.setProperty('--workspace-hue', String(h)); });
+      }
+      row.addEventListener('click', function() { selectWorkspace(w.id); });
+      container.appendChild(row);
     });
   });
-  container.innerHTML = html;
 }
 
 function updateRequestsBadge(count) {
@@ -783,9 +1039,6 @@ function handleChromeEvent(data) {
 }
 
 if (isElectron && window.minds.onChromeEvent) {
-  // Electron: main process maintains a single SSE to /_chrome/events and
-  // pushes events to every chrome/sidebar view. Each view opening its own
-  // EventSource used to saturate Chromium's 6-connection-per-host cap.
   window.minds.onChromeEvent(handleChromeEvent);
 } else {
   var evtSource = null;
@@ -809,34 +1062,43 @@ if (isElectron && window.minds.onChromeEvent) {
 )
 
 
-_SIDEBAR_TEMPLATE: Final[str] = """<!DOCTYPE html>
+_SIDEBAR_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <title>Projects</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #0f172a;
-  overflow-y: auto;
-  padding: 0;
+<style>"""
+    + TOKENS
+    + """
+body { background: var(--bg-chrome); overflow-y: auto; }
+
+h2.sidebar-heading {
+  font-size: var(--fs-md); color: var(--text-chrome); padding: 12px;
+  margin: 0; border-top: none; border-bottom: 1px solid var(--border-chrome); font-weight: 500;
 }
 
-h2 {
-  font-size: 15px; color: #e2e8f0; padding: 12px;
-  margin: 0; border-bottom: 1px solid #334155; font-weight: 500;
+.sidebar-group-label {
+  padding: 8px 12px 2px; font-size: 11px; color: var(--text-chrome-muted); letter-spacing: 0.3px;
 }
 
 .sidebar-item {
   position: relative;
-  padding: 10px 36px 10px 12px;
-  cursor: pointer; font-size: 13px; font-weight: 500;
-  color: #cbd5e1; border-radius: 6px; margin: 2px 0;
+  padding: 10px 36px 10px 16px;
+  cursor: pointer; font-size: var(--fs-sm); font-weight: 500;
+  color: var(--text-chrome); border-radius: var(--radius); margin: 2px 6px;
   transition: background 100ms;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
-.sidebar-item:hover { background: rgba(255,255,255,0.06); }
+.sidebar-item::before {
+  content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 2px; background: hsl(var(--workspace-hue, 235) 60% 55%);
+  opacity: 0.55;
+}
+.sidebar-item.is-current::before { opacity: 1; }
+.sidebar-item.is-current { background: var(--bg-chrome-hover); }
+.sidebar-item:hover { background: var(--bg-chrome-hover); }
+.sidebar-item:hover::before { opacity: 1; }
 
 .sidebar-item-label {
   flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -845,22 +1107,22 @@ h2 {
 .sidebar-open-new {
   display: none;
   background: none; border: none; padding: 4px; cursor: pointer;
-  color: #94a3b8; border-radius: 4px;
+  color: var(--text-chrome-muted); border-radius: var(--radius-sm);
   align-items: center; justify-content: center;
 }
-.sidebar-open-new:hover { color: #e2e8f0; background: rgba(255,255,255,0.08); }
+.sidebar-open-new:hover { color: var(--text-chrome); background: var(--bg-chrome-hover); }
 .sidebar-open-new svg { width: 14px; height: 14px; fill: none; stroke: currentColor;
   stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar-item:hover .sidebar-open-new { display: inline-flex; }
 .sidebar-item.is-current .sidebar-open-new { display: none !important; }
 
 .sidebar-empty {
-  padding: 24px 16px; font-size: 13px; color: #64748b; text-align: center;
+  padding: 24px 16px; font-size: var(--fs-sm); color: var(--text-chrome-muted); text-align: center;
 }
 </style>
 </head>
 <body>
-<h2>Projects</h2>
+<h2 class="sidebar-heading">Projects</h2>
 <div id="sidebar-workspaces">
   <div class="sidebar-empty">No projects</div>
 </div>
@@ -868,11 +1130,17 @@ h2 {
 var isElectron = !!window.minds;
 var currentWorkspaceId = null;
 var lastWorkspaces = [];
+var hueCache = {};
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, function(c) {
-    return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
-  });
+async function hueForAgentId(agentId) {
+  var enc = new TextEncoder().encode(agentId);
+  var digest = await crypto.subtle.digest('SHA-256', enc);
+  var view = new DataView(digest);
+  return view.getUint32(0, false) % 360;
+}
+function getHue(agentId, cb) {
+  if (hueCache[agentId] !== undefined) { cb(hueCache[agentId]); return; }
+  hueForAgentId(agentId).then(function(h) { hueCache[agentId] = h; cb(h); });
 }
 
 function selectWorkspace(agentId) {
@@ -885,10 +1153,27 @@ function openInNewWindow(agentId) {
   }
 }
 
+function buildOpenNewBtn(agentId) {
+  var btn = document.createElement('button');
+  btn.className = 'sidebar-open-new';
+  btn.title = 'Open in new window';
+  btn.tabIndex = -1;
+  btn.setAttribute('data-open-new', agentId);
+  btn.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/>' +
+    '<path d="M10 14L21 3"/>' +
+    '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>';
+  return btn;
+}
+
 function renderWorkspaces(workspaces) {
   var container = document.getElementById('sidebar-workspaces');
+  container.textContent = '';
   if (!workspaces || workspaces.length === 0) {
-    container.innerHTML = '<div class="sidebar-empty">No projects</div>';
+    var empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.textContent = 'No projects';
+    container.appendChild(empty);
     return;
   }
   var groups = {};
@@ -902,27 +1187,29 @@ function renderWorkspaces(workspaces) {
     if (b === 'Private') return 1;
     return a.localeCompare(b);
   });
-  var openIcon = '<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/>'
-    + '<path d="M10 14L21 3"/>'
-    + '<path d="M21 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5"/></svg>';
-  var html = '';
   keys.forEach(function(key) {
-    var label = key === 'Private' ? 'PRIVATE' : escapeHtml(key);
-    html += '<div style="padding:8px 12px 2px;font-size:11px;color:#64748b;letter-spacing:0.3px;">' + label + '</div>';
+    var header = document.createElement('div');
+    header.className = 'sidebar-group-label';
+    header.textContent = key === 'Private' ? 'PRIVATE' : key;
+    container.appendChild(header);
     groups[key].forEach(function(w) {
-      var id = escapeHtml(w.id);
-      var name = escapeHtml(w.name || w.id);
+      var row = document.createElement('div');
       var isCurrent = w.id === currentWorkspaceId;
-      var classes = 'sidebar-item' + (isCurrent ? ' is-current' : '');
-      html += '<div class="' + classes + '" data-agent-id="' + id + '">'
-        + '<span class="sidebar-item-label">' + name + '</span>'
-        + '<button class="sidebar-open-new" data-open-new="' + id + '" title="Open in new window" tabindex="-1">'
-        + openIcon
-        + '</button>'
-        + '</div>';
+      row.className = 'sidebar-item' + (isCurrent ? ' is-current' : '');
+      row.setAttribute('data-agent-id', w.id);
+      var label = document.createElement('span');
+      label.className = 'sidebar-item-label';
+      label.textContent = w.name || w.id;
+      row.appendChild(label);
+      row.appendChild(buildOpenNewBtn(w.id));
+      if (typeof w.hue === 'number') {
+        row.style.setProperty('--workspace-hue', String(w.hue));
+      } else {
+        getHue(w.id, function(h) { row.style.setProperty('--workspace-hue', String(h)); });
+      }
+      container.appendChild(row);
     });
   });
-  container.innerHTML = html;
 }
 
 function handleRowClick(target) {
@@ -931,27 +1218,18 @@ function handleRowClick(target) {
   var openNewBtn = target.closest('.sidebar-open-new');
   var agentId = row.getAttribute('data-agent-id');
   if (!agentId) return;
-  if (openNewBtn) {
-    openInNewWindow(agentId);
-    return;
-  }
+  if (openNewBtn) { openInNewWindow(agentId); return; }
   selectWorkspace(agentId);
 }
 
-document.addEventListener('click', function(e) {
-  handleRowClick(e.target);
-});
+document.addEventListener('click', function(e) { handleRowClick(e.target); });
 
 document.addEventListener('contextmenu', function(e) {
   var row = e.target.closest('.sidebar-item');
   if (!row) return;
   var agentId = row.getAttribute('data-agent-id');
   if (!agentId) return;
-  // Suppress context menu for the current workspace row -- nothing actionable there.
-  if (agentId === currentWorkspaceId) {
-    e.preventDefault();
-    return;
-  }
+  if (agentId === currentWorkspaceId) { e.preventDefault(); return; }
   e.preventDefault();
   if (isElectron && window.minds.showWorkspaceContextMenu) {
     window.minds.showWorkspaceContextMenu(agentId, e.clientX, e.clientY);
@@ -972,8 +1250,6 @@ function handleChromeEvent(data) {
 }
 
 if (isElectron && window.minds.onChromeEvent) {
-  // In Electron, the main process maintains the single SSE connection and
-  // pushes events to us via IPC. See main.js/runChromeSSELoop.
   window.minds.onChromeEvent(handleChromeEvent);
 } else {
   var evtSource = null;
@@ -994,13 +1270,14 @@ if (isElectron && window.minds.onChromeEvent) {
 </script>
 </body>
 </html>"""
+)
 
 
 @pure
 def render_chrome_page(
     is_mac: bool = False,
     is_authenticated: bool = False,
-    initial_workspaces: Sequence[dict[str, str]] | None = None,
+    initial_workspaces: Sequence[dict[str, str | int]] | None = None,
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
 
@@ -1030,62 +1307,17 @@ def render_sidebar_page() -> str:
     return template.render()
 
 
-# -- Page styles shared across settings, sharing, and accounts pages --
-
-_PAGE_STYLES: Final[str] = """
-    body { background: #f8fafc; padding: 0; font-size: 14px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; }
-    .page { max-width: 640px; margin: 0 auto; padding: 48px 24px; }
-    h1 { font-size: 20px; color: #0f172a; margin-bottom: 4px; }
-    h2 { font-size: 15px; color: #64748b; margin: 28px 0 10px; padding-top: 20px;
-      border-top: 1px solid #e2e8f0; font-weight: 500; }
-    p { color: #334155; margin: 6px 0; font-size: 14px; line-height: 1.5; }
-    a { color: #2563eb; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .subtitle { color: #94a3b8; font-size: 12px; margin-bottom: 20px; }
-    .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 6px;
-      cursor: pointer; font-size: 13px; font-weight: 500; font-family: inherit; }
-    .btn-primary { background: #1e293b; color: white; }
-    .btn-primary:hover { background: #334155; }
-    .btn-success { background: #065f46; color: #d1fae5; }
-    .btn-success:hover { background: #047857; }
-    .btn-danger { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-    .btn-danger:hover { background: #fee2e2; }
-    .btn-secondary { background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; }
-    .btn-secondary:hover { background: #e2e8f0; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .select-input { padding: 8px 12px; border-radius: 6px; background: white;
-      color: #0f172a; border: 1px solid #cbd5e1; font-size: 13px; font-family: inherit; }
-    .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 8px 0; }
-    .warning { color: #92400e; font-size: 13px; background: #fffbeb; border: 1px solid #fde68a;
-      border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
-    .input-row { display: flex; gap: 8px; margin: 8px 0; }
-    .text-input { flex: 1; padding: 8px 12px; border-radius: 6px; border: 1px solid #cbd5e1;
-      font-size: 13px; font-family: inherit; }
-    .email-tag { display: inline-flex; align-items: center; gap: 4px; background: #f1f5f9;
-      border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px 8px; margin: 2px; font-size: 13px; }
-    .email-tag button { background: none; border: none; cursor: pointer; color: #94a3b8;
-      font-size: 16px; line-height: 1; padding: 0 2px; }
-    .email-tag button:hover { color: #dc2626; }
-    .url-box { display: flex; gap: 8px; align-items: center; background: #f8fafc;
-      border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
-    .url-box input { flex: 1; background: none; border: none; font-size: 13px; color: #0f172a;
-      font-family: monospace; outline: none; }
-    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-    .status-enabled { background: #22c55e; }
-    .status-disabled { background: #94a3b8; }
-    .loading { color: #94a3b8; padding: 16px 0; }
-    .error { color: #dc2626; margin: 8px 0; }
-    .actions { display: flex; gap: 8px; margin-top: 20px; }
-"""
-
+# -- Sharing editor, workspace settings, accounts --
 
 _ASSOCIATE_SNIPPET: Final[str] = """
-    <div class="card" style="margin:12px 0;">
-      <p style="font-weight:500;margin-bottom:8px;">This workspace needs to be associated with an account before sharing can be configured.</p>
+    <div class="card" style="margin: 12px 0;">
+      <p style="font-weight: 500; margin-bottom: 8px;">
+        This workspace needs to be associated with an account before sharing can be configured.
+      </p>
       {% if accounts %}
-      <form method="POST" action="/workspace/{{ agent_id }}/associate" style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-        <select name="user_id" class="select-input">
+      <form method="POST" action="/workspace/{{ agent_id }}/associate"
+            style="display: flex; gap: 8px; align-items: center; margin-top: 8px;">
+        <select name="user_id" class="input" style="width: auto;">
           {% for acct in accounts %}
           <option value="{{ acct.user_id }}">{{ acct.email }}</option>
           {% endfor %}
@@ -1094,7 +1326,7 @@ _ASSOCIATE_SNIPPET: Final[str] = """
         <button type="submit" class="btn btn-primary">Associate</button>
       </form>
       {% else %}
-      <p style="margin-top:8px;"><a href="/auth/login">Sign in or create an account</a> to enable sharing.</p>
+      <p style="margin-top: 8px;"><a href="/auth/login">Sign in or create an account</a> to enable sharing.</p>
       {% endif %}
     </div>
 """
@@ -1106,25 +1338,26 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
 <head>
   <title>{{ title }}</title>
   <style>"""
-    + _PAGE_STYLES
+    + TOKENS
     + """
-    .acl-row { display:flex; align-items:center; justify-content:space-between;
-      padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; margin:4px 0; }
-    .acl-existing { background:white; }
-    .acl-added { background:#f0fdf4; border-color:#bbf7d0; }
-    .acl-removed { background:#fef2f2; border-color:#fecaca; text-decoration:line-through; }
-    .acl-prefix { font-weight:600; margin-right:6px; font-size:14px; }
-    .acl-prefix-add { color:#16a34a; }
-    .acl-prefix-remove { color:#dc2626; }
-    .acl-x { background:none; border:none; cursor:pointer; color:#94a3b8;
-      font-size:18px; line-height:1; padding:0 4px; }
-    .acl-x:hover { color:#64748b; }
+    .acl-row { display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); margin: 4px 0;
+      background: var(--bg-surface); }
+    .acl-added { background: var(--success-bg); border-color: var(--success-border); }
+    .acl-removed { background: var(--danger-bg); border-color: var(--danger-border); text-decoration: line-through; }
+    .acl-email { font-size: var(--fs-sm); color: var(--text); }
+    .acl-prefix { font-weight: 600; margin-right: 6px; font-size: var(--fs-md); }
+    .acl-prefix-add { color: var(--success); }
+    .acl-prefix-remove { color: var(--danger); }
+    .acl-x { background: none; border: none; cursor: pointer; color: var(--text-subtle);
+      font-size: var(--fs-lg); line-height: 1; padding: 0 4px; }
+    .acl-x:hover { color: var(--text-muted); }
   </style>
 </head>
-<body>
+<body class="page-workspace" style="--workspace-hue: {{ hue }};">
   <div class="page">
-    <h1 id="page-heading">Share <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">{{ service_name }}</code>
-      in <a href="#" onclick="window.location='/goto/{{ agent_id }}/'; return false;" style="font-size:20px;">{{ ws_name or agent_id }}</a>
+    <h1 id="page-heading" class="display">Share <code>{{ service_name }}</code>
+      in <a href="/goto/{{ agent_id }}/">{{ ws_name or agent_id }}</a>
       {% if account_email %}(<a href="/accounts">{{ account_email }}</a>){% endif %}?</h1>
 
     {% if not has_account %}
@@ -1132,50 +1365,49 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     + _ASSOCIATE_SNIPPET
     + """
     {% if is_request %}
-    <form method="POST" action="/requests/{{ request_id }}/deny" style="margin-top:8px;">
+    <form method="POST" action="/requests/{{ request_id }}/deny" style="margin-top: 8px;">
       <button type="submit" class="btn btn-danger">Deny request</button>
     </form>
     {% endif %}
     {% else %}
 
     <div id="sharing-editor">
-      <div class="loading" id="loading-state">Loading...</div>
+      <p class="muted" id="loading-state" style="padding: 16px 0;">Loading...</p>
     </div>
 
-    <div id="editor-content" style="display:none;">
-      <div id="url-section" style="display:none;margin-bottom:16px;">
-        <p style="font-weight:500;margin-bottom:4px;">Shared URL</p>
+    <div id="editor-content" style="display: none;">
+      <div id="url-section" style="display: none; margin-bottom: 16px;">
+        <p style="font-weight: 500; margin-bottom: 4px;">Shared URL</p>
         <div class="url-box">
           <input type="text" id="share-url" readonly onclick="this.select()">
           <button class="btn btn-secondary" onclick="copyUrl()" id="copy-btn">Copy</button>
         </div>
       </div>
 
-      <h2 style="border-top:none;padding-top:0;margin-top:0;">Access List</h2>
+      <h2 class="tight">Access List</h2>
       <div id="email-list"></div>
-      <div class="input-row">
-        <input type="email" class="text-input" id="new-email" placeholder="Add email address"
-          onkeydown="if(event.key==='Enter'){event.preventDefault();addEmail();}">
+      <div class="input-row" style="margin-top: 8px;">
+        <input type="email" class="input" id="new-email" placeholder="Add email address"
+          onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }">
         <button class="btn btn-secondary" onclick="addEmail()">Add</button>
       </div>
 
-      <div class="actions" id="action-buttons" style="justify-content:space-between;">
+      <div class="actions" id="action-buttons" style="justify-content: space-between;">
         {% if is_request %}
         <button class="btn btn-danger" id="deny-btn" onclick="submitDeny()">Deny</button>
         {% else %}
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-secondary" onclick="window.location='/workspace/{{ agent_id }}/settings'">Cancel</button>
-          <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display:none;">
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary"
+                  onclick="window.location='/workspace/{{ agent_id }}/settings'">Cancel</button>
+          <button class="btn btn-danger" id="disable-btn" onclick="submitDisable()" style="display: none;">
             Disable Sharing
           </button>
         </div>
         {% endif %}
-        <button class="btn btn-success" id="action-btn" onclick="submitUpdate()">
-          Update
-        </button>
+        <button class="btn btn-success" id="action-btn" onclick="submitUpdate()">Update</button>
       </div>
-      <div id="submit-spinner" style="display:none;padding:16px 0;">
-        <span style="color:#94a3b8;">Saving changes...</span>
+      <div id="submit-spinner" style="display: none; padding: 16px 0;">
+        <span class="muted">Saving changes...</span>
       </div>
     </div>
   </div>
@@ -1190,69 +1422,116 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
   var accountEmail = {{ (account_email or '') | tojson }};
 
   function setHeading(isEnabled) {
+    // Rebuild the heading via DOM so none of the dynamic values ever land in innerHTML.
     var h = document.getElementById('page-heading');
     if (!h) return;
-    var code = '<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:18px;">' + serviceName + '</code>';
-    var ws = '<a href="/goto/' + agentId + '/" style="font-size:20px;">' + wsName + '</a>';
-    var acct = accountEmail ? ' (<a href="/accounts">' + accountEmail + '</a>)' : '';
-    if (isEnabled) {
-      h.innerHTML = code + ' shared in ' + ws + acct;
-    } else {
-      h.innerHTML = 'Share ' + code + ' in ' + ws + acct + '?';
+    h.textContent = '';
+
+    h.appendChild(document.createTextNode(isEnabled ? '' : 'Share '));
+
+    var codeEl = document.createElement('code');
+    codeEl.textContent = serviceName;
+    h.appendChild(codeEl);
+
+    h.appendChild(document.createTextNode(isEnabled ? ' shared in ' : ' in '));
+
+    var link = document.createElement('a');
+    link.href = '/goto/' + agentId + '/';
+    link.textContent = wsName;
+    h.appendChild(link);
+
+    if (accountEmail) {
+      h.appendChild(document.createTextNode(' ('));
+      var acctLink = document.createElement('a');
+      acctLink.href = '/accounts';
+      acctLink.textContent = accountEmail;
+      h.appendChild(acctLink);
+      h.appendChild(document.createTextNode(')'));
     }
+
+    if (!isEnabled) h.appendChild(document.createTextNode('?'));
   }
 
-  // Three-state ACL: existing (already on server), added (proposed new), removed (proposed removal)
-  var existing = [];  // emails currently on the server
-  var added = [];     // emails to add
-  var removed = [];   // emails to remove from existing
+  // Three-state ACL: existing (already on server), added (proposed new),
+  // removed (proposed removal). Every email is rendered via textContent/dataset,
+  // never string-concatenated into HTML, so a maliciously crafted email
+  // (e.g. from a sharing request) cannot inject script.
+  var existing = [];
+  var added = [];
+  var removed = [];
+
+  function createAclRow(email, variant) {
+    var row = document.createElement('div');
+    row.className = 'acl-row' + (variant === 'added' ? ' acl-added' : variant === 'removed' ? ' acl-removed' : '');
+
+    var left = document.createElement('span');
+    if (variant === 'added' || variant === 'removed') {
+      var prefix = document.createElement('span');
+      prefix.className = 'acl-prefix ' + (variant === 'added' ? 'acl-prefix-add' : 'acl-prefix-remove');
+      prefix.textContent = variant === 'added' ? '+' : '\\u2212';
+      left.appendChild(prefix);
+    }
+    var emailEl = document.createElement('span');
+    emailEl.className = 'acl-email' + (variant === 'removed' ? ' muted' : '');
+    emailEl.textContent = email;
+    left.appendChild(emailEl);
+    row.appendChild(left);
+
+    var btn = document.createElement('button');
+    btn.className = 'acl-x';
+    btn.setAttribute('aria-label', 'Remove');
+    btn.setAttribute('data-action', variant === 'added' ? 'unmark-added'
+      : variant === 'removed' ? 'unmark-removed' : 'mark-removed');
+    btn.dataset.email = email;
+    btn.innerHTML = '&times;';
+    row.appendChild(btn);
+
+    return row;
+  }
 
   function renderACL() {
     var container = document.getElementById('email-list');
-    var rows = [];
+    container.textContent = '';
 
-    // Existing emails (not removed)
+    var rowCount = 0;
     existing.forEach(function(e) {
       if (removed.indexOf(e) >= 0) return;
-      rows.push(
-        '<div class="acl-row acl-existing">' +
-        '<span style="font-size:13px;color:#334155;">' + e + '</span>' +
-        '<button class="acl-x" onclick="markRemoved(\\'' + e + '\\')">&times;</button></div>'
-      );
+      container.appendChild(createAclRow(e, 'existing'));
+      rowCount++;
     });
-
-    // Added emails
     added.forEach(function(e) {
-      rows.push(
-        '<div class="acl-row acl-added">' +
-        '<span><span class="acl-prefix acl-prefix-add">+</span>' +
-        '<span style="font-size:13px;color:#334155;">' + e + '</span></span>' +
-        '<button class="acl-x" onclick="unmarkAdded(\\'' + e + '\\')">&times;</button></div>'
-      );
+      container.appendChild(createAclRow(e, 'added'));
+      rowCount++;
     });
-
-    // Removed emails
     removed.forEach(function(e) {
-      rows.push(
-        '<div class="acl-row acl-removed">' +
-        '<span><span class="acl-prefix acl-prefix-remove">&minus;</span>' +
-        '<span style="font-size:13px;color:#94a3b8;">' + e + '</span></span>' +
-        '<button class="acl-x" onclick="unmarkRemoved(\\'' + e + '\\')">&times;</button></div>'
-      );
+      container.appendChild(createAclRow(e, 'removed'));
+      rowCount++;
     });
 
-    if (rows.length === 0) {
-      container.innerHTML = '<p style="color:#94a3b8;font-size:13px;">No one in the access list</p>';
-    } else {
-      container.innerHTML = rows.join('');
+    if (rowCount === 0) {
+      var empty = document.createElement('p');
+      empty.className = 'subtle';
+      empty.style.fontSize = 'var(--fs-sm)';
+      empty.textContent = 'No one in the access list';
+      container.appendChild(empty);
     }
   }
+
+  document.addEventListener('click', function(event) {
+    var btn = event.target.closest('.acl-x');
+    if (!btn) return;
+    var action = btn.getAttribute('data-action');
+    var email = btn.dataset.email;
+    if (!action || !email) return;
+    if (action === 'mark-removed') markRemoved(email);
+    else if (action === 'unmark-added') unmarkAdded(email);
+    else if (action === 'unmark-removed') unmarkRemoved(email);
+  });
 
   function addEmail() {
     var input = document.getElementById('new-email');
     var email = input.value.trim();
     if (!email) return;
-    // If it's in removed, just un-remove it (restore to existing)
     if (removed.indexOf(email) >= 0) {
       removed = removed.filter(function(e) { return e !== email; });
     } else if (existing.indexOf(email) < 0 && added.indexOf(email) < 0) {
@@ -1266,12 +1545,10 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     if (removed.indexOf(email) < 0) removed.push(email);
     renderACL();
   }
-
   function unmarkAdded(email) {
     added = added.filter(function(e) { return e !== email; });
     renderACL();
   }
-
   function unmarkRemoved(email) {
     removed = removed.filter(function(e) { return e !== email; });
     renderACL();
@@ -1323,14 +1600,12 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
     setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
   }
 
-  // Load current sharing status, then compute the diff
   fetch('/api/sharing-status/' + agentId + '/' + serviceName)
     .then(function(r) { return r.json(); })
     .then(function(data) {
       document.getElementById('loading-state').style.display = 'none';
       document.getElementById('editor-content').style.display = 'block';
 
-      // Extract emails from auth_rules
       var serverEmails = [];
       if (data.auth_rules) {
         data.auth_rules.forEach(function(rule) {
@@ -1343,7 +1618,6 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
       }
 
       if (data.enabled) {
-        // Sharing is already on: server emails are "existing"
         existing = serverEmails;
         document.getElementById('action-btn').textContent = 'Update';
         setHeading(true);
@@ -1352,9 +1626,8 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
           document.getElementById('share-url').value = data.url;
         }
         var disableBtn = document.getElementById('disable-btn');
-        if (disableBtn) disableBtn.style.display = 'inline-block';
+        if (disableBtn) disableBtn.style.display = 'inline-flex';
       } else {
-        // Not yet enabled: default tunnel permissions + proposed are all "added"
         serverEmails.forEach(function(e) {
           if (added.indexOf(e) < 0) added.push(e);
         });
@@ -1362,7 +1635,6 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
         setHeading(false);
       }
 
-      // Proposed emails that aren't already existing or added go to added
       proposedEmails.forEach(function(e) {
         if (existing.indexOf(e) < 0 && added.indexOf(e) < 0) {
           added.push(e);
@@ -1372,10 +1644,10 @@ _SHARING_EDITOR_TEMPLATE: Final[str] = (
       renderACL();
     })
     .catch(function(err) {
-      document.getElementById('loading-state').innerHTML =
-        '<p class="error">Failed to load sharing status: ' + err.message + '</p>';
+      var state = document.getElementById('loading-state');
+      state.textContent = 'Failed to load sharing status: ' + err.message;
+      state.className = 'error-text';
       document.getElementById('editor-content').style.display = 'block';
-      // Fall back: treat all proposed as added
       added = proposedEmails.slice();
       renderACL();
     });
@@ -1414,6 +1686,7 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
+        hue=workspace_hue(agent_id),
     )
 
 
@@ -1423,23 +1696,25 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
 <head>
   <title>Settings: {{ ws_name }}</title>
   <style>"""
-    + _PAGE_STYLES
+    + TOKENS
     + """
   </style>
 </head>
-<body>
+<body class="page-workspace" style="--workspace-hue: {{ hue }};">
   <div class="page">
     <h1>{{ ws_name }}</h1>
     <p class="subtitle">{{ agent_id }}</p>
 
-    <h2>Account</h2>
+    <h2 class="tight">Account</h2>
     <div id="account-section">
     {% if current_account %}
     <p>Associated with: <strong>{{ current_account.email }}</strong></p>
-    <p class="warning">Disassociating will remove all sharing (tunnels) for this workspace.
-      You will need to set up sharing again after re-associating.</p>
+    <p class="notice notice-warn" style="margin: 12px 0;">
+      Disassociating will remove all sharing (tunnels) for this workspace.
+      You will need to set up sharing again after re-associating.
+    </p>
     <button class="btn btn-danger" id="disassociate-btn" onclick="submitDisassociate()">Disassociate</button>
-    <span id="disassociate-spinner" style="display:none;color:#94a3b8;margin-left:8px;">Disassociating...</span>
+    <span id="disassociate-spinner" class="muted" style="display: none; margin-left: 8px;">Disassociating...</span>
     {% else %}
     """
     + _ASSOCIATE_SNIPPET
@@ -1449,12 +1724,12 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
 
     <h2>Sharing</h2>
     {% for server in servers %}
-    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-weight:500;">{{ server }}</span>
+    <div class="card card-row">
+      <span style="font-weight: 500;">{{ server }}</span>
       <a href="/sharing/{{ agent_id }}/{{ server }}" class="btn btn-secondary">Manage sharing</a>
     </div>
     {% else %}
-    <p style="color:#94a3b8;">No servers discovered for this workspace.</p>
+    <p class="muted">No servers discovered for this workspace.</p>
     {% endfor %}
 
     {% if telegram_section %}
@@ -1462,12 +1737,7 @@ _WORKSPACE_SETTINGS_TEMPLATE: Final[str] = (
     {{ telegram_section | safe }}
     {% endif %}
 
-    <h2>Danger Zone</h2>
-    <p style="color:#94a3b8;font-size:13px;margin-bottom:8px;">
-      Permanently delete this workspace and all its data.</p>
-    <button class="btn btn-danger" onclick="alert('Not implemented')">Delete workspace</button>
-
-    <div style="margin-top:24px;"><a href="/">&larr; Back to workspaces</a></div>
+    <div style="margin-top: 32px;"><a href="/">&larr; Back to projects</a></div>
   </div>
 
   <script>
@@ -1518,6 +1788,7 @@ def render_workspace_settings(
         servers=servers,
         telegram_section=telegram_section,
         telegram_js=telegram_js,
+        hue=workspace_hue(agent_id),
     )
 
 
@@ -1527,7 +1798,7 @@ _ACCOUNTS_PAGE_TEMPLATE: Final[str] = (
 <head>
   <title>Manage Accounts</title>
   <style>"""
-    + _PAGE_STYLES
+    + TOKENS
     + """
   </style>
 </head>
@@ -1537,20 +1808,22 @@ _ACCOUNTS_PAGE_TEMPLATE: Final[str] = (
 
     {% if accounts %}
     {% for acct in accounts %}
-    <div class="card" style="display:flex;justify-content:space-between;align-items:center;">
+    <div class="card card-row">
       <div>
-        <div style="font-weight:500;color:#0f172a;">{{ acct.email }}</div>
-        <div style="font-size:12px;color:#94a3b8;">{{ acct.workspace_ids | length }} workspace(s)
-          {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}</div>
+        <div style="font-weight: 500;">{{ acct.email }}</div>
+        <div class="subtle" style="font-size: var(--fs-xs);">
+          {{ acct.workspace_ids | length }} workspace(s)
+          {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
+        </div>
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display: flex; gap: 8px;">
         {% if acct.user_id | string != default_account_id %}
         <form method="POST" action="/accounts/set-default">
           <input type="hidden" name="user_id" value="{{ acct.user_id }}">
           <button type="submit" class="btn btn-secondary">Set default</button>
         </form>
         {% else %}
-        <span class="btn btn-secondary" style="cursor:default;opacity:0.6;">Default</span>
+        <span class="btn btn-secondary" style="cursor: default; opacity: 0.6;">Default</span>
         {% endif %}
         <form method="POST" action="/accounts/{{ acct.user_id }}/logout">
           <button type="submit" class="btn btn-danger">Log out</button>
@@ -1559,13 +1832,13 @@ _ACCOUNTS_PAGE_TEMPLATE: Final[str] = (
     </div>
     {% endfor %}
     {% else %}
-    <p style="color:#94a3b8;">No accounts logged in.</p>
+    <p class="muted">No accounts logged in.</p>
     {% endif %}
 
-    <div style="margin-top:16px;">
+    <div style="margin-top: 16px;">
       <a href="/auth/login" class="btn btn-primary">Add account</a>
     </div>
-    <div style="margin-top:16px;"><a href="/">&larr; Back to workspaces</a></div>
+    <div style="margin-top: 16px;"><a href="/">&larr; Back to projects</a></div>
   </div>
 </body>
 </html>"""

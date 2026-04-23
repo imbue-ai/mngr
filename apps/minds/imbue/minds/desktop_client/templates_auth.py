@@ -9,63 +9,85 @@ from typing import Final
 from jinja2 import Environment
 from jinja2 import select_autoescape
 
+from imbue.minds.desktop_client.templates import TOKENS
+
 _JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
 
-_AUTH_STYLES: Final[str] = """
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+# Auth-specific overrides: a centered card with its own fixed width, and the
+# OAuth button row. Everything else comes from the shared design tokens.
+_AUTH_STYLES: Final[str] = (
+    TOKENS
+    + """
     body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #f8fafc;
       display: flex; justify-content: center; align-items: center;
       min-height: 100vh; padding: 20px;
     }
     .auth-card {
-      background: white; border-radius: 12px; padding: 40px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 420px; width: 100%;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: 40px;
+      box-shadow: var(--shadow-card);
+      max-width: 420px; width: 100%;
     }
-    .auth-card h1 { font-size: 24px; font-weight: 600; color: #0f172a; margin-bottom: 8px; }
-    .auth-card .subtitle { color: #64748b; font-size: 14px; margin-bottom: 24px; }
+    .auth-card h1 { font-size: var(--fs-2xl); margin-bottom: 8px; }
+    .auth-card .subtitle { color: var(--text-muted); font-size: var(--fs-md); margin-bottom: 24px; }
     .form-group { margin-bottom: 16px; }
-    .form-group label { display: block; font-size: 13px; font-weight: 500; color: #334155; margin-bottom: 6px; }
+    .form-group label {
+      display: block; font-size: var(--fs-sm); font-weight: 500;
+      color: var(--text); margin-bottom: 6px;
+    }
     .form-group input {
-      width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px;
-      font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s;
+      width: 100%; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: var(--radius-lg);
+      font-size: var(--fs-md); font-family: inherit; outline: none;
+      background: var(--bg-surface); color: var(--text);
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
-    .form-group input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+    .form-group input:focus { border-color: var(--link); box-shadow: var(--focus-ring); }
     .btn-primary {
-      width: 100%; padding: 12px; background: #1e293b; color: white; border: none;
-      border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
-      font-family: inherit; transition: background 0.15s;
+      width: 100%; padding: 12px;
+      border-radius: var(--radius-lg);
+      font-size: var(--fs-md); font-weight: 600;
     }
-    .btn-primary:hover { background: #334155; }
-    .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
     .divider {
-      display: flex; align-items: center; margin: 20px 0; color: #94a3b8; font-size: 12px;
+      display: flex; align-items: center; margin: 20px 0;
+      color: var(--text-subtle); font-size: var(--fs-xs);
     }
-    .divider::before, .divider::after {
-      content: ''; flex: 1; border-bottom: 1px solid #e2e8f0;
-    }
+    .divider::before, .divider::after { content: ''; flex: 1; border-bottom: 1px solid var(--border); }
     .divider span { padding: 0 12px; }
     .oauth-btn {
-      width: 100%; padding: 10px 12px; background: white; border: 1px solid #e2e8f0;
-      border-radius: 8px; font-size: 14px; cursor: pointer; font-family: inherit;
+      width: 100%; padding: 10px 12px;
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); font-size: var(--fs-md); cursor: pointer;
+      font-family: inherit;
       display: flex; align-items: center; justify-content: center; gap: 8px;
-      color: #334155; transition: background 0.15s; margin-bottom: 8px;
+      color: var(--text); transition: background 0.15s; margin-bottom: 8px;
     }
-    .oauth-btn:hover { background: #f8fafc; }
+    .oauth-btn:hover { background: var(--bg-muted); }
     .oauth-btn svg { width: 18px; height: 18px; }
     .toggle-link {
-      text-align: center; margin-top: 20px; font-size: 13px; color: #64748b;
+      text-align: center; margin-top: 20px; font-size: var(--fs-sm); color: var(--text-muted);
     }
-    .toggle-link a { color: #3b82f6; text-decoration: none; font-weight: 500; }
-    .toggle-link a:hover { text-decoration: underline; }
+    .toggle-link a { color: var(--link); font-weight: 500; }
     .forgot-link { text-align: right; margin-top: -8px; margin-bottom: 16px; }
-    .forgot-link a { font-size: 12px; color: #3b82f6; text-decoration: none; }
-    .forgot-link a:hover { text-decoration: underline; }
-    .error-msg { color: #dc2626; font-size: 13px; margin-bottom: 12px; padding: 8px 12px; background: #fef2f2; border-radius: 6px; display: none; }
-    .info-msg { color: #1e40af; font-size: 13px; margin-bottom: 12px; padding: 8px 12px; background: #eff6ff; border-radius: 6px; }
-    .success-msg { color: #15803d; font-size: 13px; margin-bottom: 12px; padding: 8px 12px; background: #f0fdf4; border-radius: 6px; display: none; }
+    .forgot-link a { font-size: var(--fs-xs); color: var(--link); }
+    .error-msg {
+      color: var(--danger); font-size: var(--fs-sm); margin-bottom: 12px;
+      padding: 8px 12px; background: var(--danger-bg); border-radius: var(--radius);
+      display: none;
+    }
+    .info-msg {
+      color: #1e40af; font-size: var(--fs-sm); margin-bottom: 12px;
+      padding: 8px 12px; background: #eff6ff; border-radius: var(--radius);
+    }
+    .success-msg {
+      color: var(--success); font-size: var(--fs-sm); margin-bottom: 12px;
+      padding: 8px 12px; background: var(--success-bg); border-radius: var(--radius);
+      display: none;
+    }
 """
+)
 
 _GOOGLE_SVG: Final[str] = (
     '<svg viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>'
@@ -106,7 +128,7 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
           <label for="signup-password">Password</label>
           <input type="password" id="signup-password" name="password" required minlength="8" autocomplete="new-password">
         </div>
-        <button type="submit" class="btn-primary" id="signup-btn">Create account</button>
+        <button type="submit" class="btn btn-primary" id="signup-btn">Create account</button>
       </form>
       <div class="divider"><span>or</span></div>
       <button class="oauth-btn" onclick="oauthSignIn('google')">"""
@@ -132,7 +154,7 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
           <input type="password" id="signin-password" name="password" required autocomplete="current-password">
         </div>
         <div class="forgot-link"><a href="/auth/forgot-password">Forgot password?</a></div>
-        <button type="submit" class="btn-primary" id="signin-btn">Sign in</button>
+        <button type="submit" class="btn btn-primary" id="signin-btn">Sign in</button>
       </form>
       <div class="divider"><span>or</span></div>
       <button class="oauth-btn" onclick="oauthSignIn('google')">"""
@@ -233,10 +255,8 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
   function oauthShowWaiting(provider) {
     var nameMap = { google: 'Google', github: 'GitHub' };
     var providerLabel = nameMap[provider] || provider;
-    // Disable both tabs' OAuth buttons while we wait so the user can't re-trigger.
     var buttons = document.querySelectorAll('.oauth-btn');
     for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = true; }
-    // Surface progress in both tabs' info bars so it shows up wherever the user is.
     var msg = 'Waiting for you to finish signing in with ' + providerLabel + ' in the browser...';
     var banners = [
       document.getElementById('signup-error'),
@@ -267,10 +287,6 @@ _AUTH_PAGE_TEMPLATE: Final[str] = (
       return;
     }
 
-    // Session is created server-side by the OAuth callback in the system
-    // browser; poll /auth/api/status until it flips to signedIn=true, then
-    // leave the sign-in page. Time out after 3 minutes so an abandoned OAuth
-    // attempt doesn't leave the page stuck forever.
     oauthShowWaiting(provider);
     if (oauthPollInterval) clearInterval(oauthPollInterval);
     oauthPollDeadline = Date.now() + 3 * 60 * 1000;
@@ -313,12 +329,16 @@ _CHECK_EMAIL_TEMPLATE: Final[str] = (
   <div class="auth-card" style="text-align: center;">
     <h1>Check your email</h1>
     <p class="subtitle">We sent a verification link to <strong>{{ email }}</strong></p>
-    <p style="color: #64748b; font-size: 13px; margin-bottom: 20px;">Click the link in the email to verify your account, then come back here.</p>
+    <p class="muted" style="font-size: var(--fs-sm); margin-bottom: 20px;">
+      Click the link in the email to verify your account, then come back here.
+    </p>
     <div id="status-msg" class="info-msg">Waiting for verification...</div>
-    <div id="success-msg" class="success-msg">Email verified! Redirecting...</div>
-    <button class="btn-primary" style="margin-top: 16px;" onclick="resendEmail()" id="resend-btn">Resend verification email</button>
+    <div id="success-msg" class="success-msg">Email verified. Redirecting...</div>
+    <button class="btn btn-primary" style="margin-top: 16px;" onclick="resendEmail()" id="resend-btn">
+      Resend verification email
+    </button>
     <div class="toggle-link" style="margin-top: 12px;">
-      <a href="/" >Go to home</a>
+      <a href="/">Go to home</a>
     </div>
   </div>
   <script>
@@ -342,7 +362,7 @@ _CHECK_EMAIL_TEMPLATE: Final[str] = (
     btn.textContent = 'Sending...';
     try {
       await fetch('/auth/api/resend-verification', { method: 'POST' });
-      btn.textContent = 'Sent! Check your inbox';
+      btn.textContent = 'Sent. Check your inbox';
       setTimeout(function() {
         btn.disabled = false;
         btn.textContent = 'Resend verification email';
@@ -371,7 +391,7 @@ _OAUTH_CLOSE_TEMPLATE: Final[str] = (
   <div class="auth-card" style="text-align: center;">
     <h1>Signed in</h1>
     <p class="subtitle">Signed in as <strong>{{ display_name or email }}</strong></p>
-    <p style="color: #64748b; font-size: 13px;">You can close this tab and return to the app.</p>
+    <p class="muted" style="font-size: var(--fs-sm);">You can close this tab and return to the app.</p>
   </div>
 </body>
 </html>"""
@@ -398,7 +418,7 @@ _FORGOT_PASSWORD_TEMPLATE: Final[str] = (
         <label for="email">Email</label>
         <input type="email" id="email" required autocomplete="email">
       </div>
-      <button type="submit" class="btn-primary" id="submit-btn">Send reset link</button>
+      <button type="submit" class="btn btn-primary" id="submit-btn">Send reset link</button>
     </form>
     <div class="toggle-link"><a href="/auth/login">Back to sign in</a></div>
   </div>
@@ -440,22 +460,14 @@ _SETTINGS_TEMPLATE: Final[str] = (
     + _AUTH_STYLES
     + """
     .auth-card { max-width: 480px; }
-    .detail-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f1f5f9; }
-    .detail-label { font-size: 13px; color: #64748b; }
-    .detail-value { font-size: 14px; color: #0f172a; font-weight: 500; }
-    .actions { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
-    .btn-secondary {
-      width: 100%; padding: 10px; background: white; color: #334155; border: 1px solid #e2e8f0;
-      border-radius: 8px; font-size: 14px; cursor: pointer; font-family: inherit;
-      transition: background 0.15s;
+    .detail-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0; border-bottom: 1px solid var(--bg-muted);
     }
-    .btn-secondary:hover { background: #f8fafc; }
-    .btn-danger {
-      width: 100%; padding: 10px; background: white; color: #dc2626; border: 1px solid #fecaca;
-      border-radius: 8px; font-size: 14px; cursor: pointer; font-family: inherit;
-      transition: background 0.15s;
-    }
-    .btn-danger:hover { background: #fef2f2; }
+    .detail-label { font-size: var(--fs-sm); color: var(--text-muted); }
+    .detail-value { font-size: var(--fs-md); color: var(--text); font-weight: 500; }
+    .auth-actions { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+    .auth-actions .btn { width: 100%; padding: 10px; border-radius: var(--radius-lg); font-size: var(--fs-md); }
   </style>
 </head>
 <body>
@@ -478,13 +490,13 @@ _SETTINGS_TEMPLATE: Final[str] = (
     </div>
     <div class="detail-row">
       <span class="detail-label">User ID prefix</span>
-      <span class="detail-value" style="font-family: monospace; font-size: 12px;">{{ user_id_prefix }}</span>
+      <span class="detail-value" style="font-family: var(--font-mono); font-size: var(--fs-xs);">{{ user_id_prefix }}</span>
     </div>
-    <div class="actions">
+    <div class="auth-actions">
       {% if provider == 'email' %}
-      <a href="/auth/forgot-password" class="btn-secondary" style="text-align: center; text-decoration: none;">Change password</a>
+      <a href="/auth/forgot-password" class="btn btn-secondary" style="text-align: center;">Change password</a>
       {% endif %}
-      <button class="btn-danger" onclick="signOut()">Sign out</button>
+      <button class="btn btn-danger" onclick="signOut()">Sign out</button>
     </div>
     <div class="toggle-link"><a href="/">Back to home</a></div>
   </div>
