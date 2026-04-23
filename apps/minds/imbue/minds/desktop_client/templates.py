@@ -58,7 +58,12 @@ TOKENS: Final[str] = """
   --text-chrome: #e4e4e7;
   --text-chrome-muted: #a1a1aa;
 
-  --accent: hsl(var(--workspace-hue, 235) 60% 55%);
+  /* The per-workspace accent must be expanded inline wherever it is used
+     (e.g. hsl(var(--workspace-hue, 235) 60% 55%)), NOT routed through a
+     secondary custom property declared here. Nested var() inside a custom
+     property on :root resolves against :root, so `var(--accent)` at a child
+     element would always use the :root fallback for --workspace-hue and
+     every workspace would render the same color. */
   --link: #2563eb;
 
   --danger: #dc2626;
@@ -121,7 +126,7 @@ a:hover { text-decoration: underline; }
 .page-workspace::before {
   content: "";
   position: fixed; top: 0; left: 0; right: 0; height: 3px;
-  background: var(--accent);
+  background: hsl(var(--workspace-hue, 235) 60% 55%);
   z-index: 1000;
 }
 
@@ -239,7 +244,7 @@ code {
   display: inline-block;
   width: 10px; height: 10px;
   border-radius: 2px;
-  background: var(--accent);
+  background: hsl(var(--workspace-hue, 235) 60% 55%);
   vertical-align: middle;
   flex-shrink: 0;
 }
@@ -266,7 +271,7 @@ _LANDING_PAGE_TEMPLATE: Final[str] = (
     .project-row:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
     .project-row::before {
       content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-      background: var(--accent);
+      background: hsl(var(--workspace-hue, 235) 60% 55%);
     }
     .project-row__name { flex: 1; font-weight: 500; color: var(--text); padding-left: 4px; }
     .project-row__cog {
