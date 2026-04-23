@@ -29,6 +29,8 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from collections.abc import Generator
 from enum import StrEnum
@@ -39,6 +41,26 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+
+_DIAG_LOG_ENV_VAR = "_PYTEST_GUARD_DIAG_LOG"
+_DIAG_LOG_DEFAULT_RELDIR = Path(".test_output")
+_DIAG_LOG_DEFAULT_BASENAME = "pytest_guard_diag"
+
+
+def _diag_log_path() -> str | None:
+    return os.environ.get(_DIAG_LOG_ENV_VAR)
+
+
+def _append_diag(lines: list[str]) -> None:
+    """Append a diagnostic block to the diag log if configured. Best-effort."""
+    path = _diag_log_path()
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
 
 
 class ResourceGuardViolation(Exception):
@@ -120,6 +142,36 @@ def register_guarded_resource_markers(
             )
 
 
+_BLOCK_DIAGNOSTIC_SNIPPET = r"""
+if [ -n "$_PYTEST_GUARD_DIAG_LOG" ]; then
+    {{
+        echo "--- WRAPPER BLOCK {resource} ts=$(date +%s.%N) ---"
+        echo "pid=$$ ppid=$PPID pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+        echo "argv=$*"
+        echo "cwd=$(pwd)"
+        env | grep -E '^_PYTEST_GUARD_' | LC_ALL=C sort
+        echo "PATH=$PATH"
+        if [ -r "/proc/$PPID/cmdline" ]; then
+            echo "ppid_cmdline=$(tr '\0' ' ' < /proc/$PPID/cmdline)"
+        fi
+        if [ -r "/proc/$PPID/environ" ]; then
+            echo "ppid_guard_env:"
+            tr '\0' '\n' < /proc/$PPID/environ | grep -E '^_PYTEST_GUARD_' | LC_ALL=C sort
+        fi
+        if [ -n "$_PYTEST_GUARD_TRACKING_DIR" ] && [ -d "$_PYTEST_GUARD_TRACKING_DIR" ]; then
+            echo "tracking_dir_listing:"
+            ls -la "$_PYTEST_GUARD_TRACKING_DIR" 2>&1
+        fi
+        echo "--- END ---"
+    }} >> "$_PYTEST_GUARD_DIAG_LOG" 2>/dev/null
+fi
+"""
+
+
+def _format_block_diagnostic(resource: str) -> str:
+    return _BLOCK_DIAGNOSTIC_SNIPPET.format(resource=resource)
+
+
 def generate_wrapper_script(resource: str, real_path: str) -> str:
     """Generate a bash wrapper script for a guarded resource.
 
@@ -129,6 +181,9 @@ def generate_wrapper_script(resource: str, real_path: str) -> str:
       this variable is unset and the wrapper delegates unconditionally.
     - _PYTEST_GUARD_<RESOURCE>: "block" if the test lacks the mark, "allow" if it has it
     - _PYTEST_GUARD_TRACKING_DIR: Directory where tracking files are created
+    - _PYTEST_GUARD_DIAG_LOG: If set, the block path appends a diagnostic dump
+      (env vars, argv, PID/PPID, parent cmdline, parent env) to this file so we
+      can correlate a block firing with the Python-side test-lifecycle log.
 
     When guard env vars are active (during a test's lifecycle):
     - If the guard is "block", the wrapper records the violation, prints an error,
@@ -139,12 +194,14 @@ def generate_wrapper_script(resource: str, real_path: str) -> str:
     always delegates to the real binary.
     """
     bash_guard_var = f"$_PYTEST_GUARD_{resource.upper()}"
+    diagnostic = _format_block_diagnostic(resource)
     return f"""#!/bin/bash
 if [ "$_PYTEST_GUARD_PHASE" = "call" ]; then
     if [ "{bash_guard_var}" = "block" ]; then
         if [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
             touch "$_PYTEST_GUARD_TRACKING_DIR/blocked_{resource}"
         fi
+{diagnostic}
         echo "RESOURCE GUARD: Test invoked '{resource}' without @pytest.mark.{resource} mark." >&2
         echo "Add @pytest.mark.{resource} to the test, or remove the {resource} usage." >&2
         exit 127
@@ -167,12 +224,14 @@ def generate_stub_wrapper_script(resource: str) -> str:
     enforcement still catches missing/superfluous marks.
     """
     bash_guard_var = f"$_PYTEST_GUARD_{resource.upper()}"
+    diagnostic = _format_block_diagnostic(resource)
     return f"""#!/bin/bash
 if [ "$_PYTEST_GUARD_PHASE" = "call" ]; then
     if [ "{bash_guard_var}" = "block" ]; then
         if [ -n "$_PYTEST_GUARD_TRACKING_DIR" ]; then
             touch "$_PYTEST_GUARD_TRACKING_DIR/blocked_{resource}"
         fi
+{diagnostic}
         echo "RESOURCE GUARD: Test invoked '{resource}' without @pytest.mark.{resource} mark." >&2
         echo "Add @pytest.mark.{resource} to the test, or remove the {resource} usage." >&2
         exit 127
@@ -226,14 +285,28 @@ def create_resource_guard_wrappers() -> None:
     # Prepend wrapper directory to PATH and advertise to xdist workers.
     # patch.dict saves the original PATH and restores it when stopped.
     original_path = os.environ.get("PATH", "")
-    _session_env_patcher = patch.dict(
-        os.environ,
-        {
-            "PATH": f"{_guard_wrapper_dir}{os.pathsep}{original_path}",
-            "_PYTEST_GUARD_WRAPPER_DIR": _guard_wrapper_dir,
-        },
-    )
+    session_env: dict[str, str] = {
+        "PATH": f"{_guard_wrapper_dir}{os.pathsep}{original_path}",
+        "_PYTEST_GUARD_WRAPPER_DIR": _guard_wrapper_dir,
+    }
+    if _DIAG_LOG_ENV_VAR not in os.environ:
+        diag_dir = Path.cwd() / _DIAG_LOG_DEFAULT_RELDIR
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        diag_path = diag_dir / f"{_DIAG_LOG_DEFAULT_BASENAME}_pid{os.getpid()}.log"
+        session_env[_DIAG_LOG_ENV_VAR] = str(diag_path)
+    _session_env_patcher = patch.dict(os.environ, session_env)
     _session_env_patcher.start()
+
+    _append_diag(
+        [
+            f"=== SESSION START pid={os.getpid()} tid={threading.get_ident()} ts={time.time()} ===",
+            f"cwd={Path.cwd()}",
+            f"wrapper_dir={_guard_wrapper_dir}",
+            f"owns_wrapper_dir={_owns_guard_wrapper_dir}",
+            f"binary_guards={sorted(_binary_guarded_resources)}",
+            f"all_guards={sorted(_guarded_resources)}",
+        ]
+    )
 
 
 def cleanup_resource_guard_wrappers() -> None:
@@ -497,13 +570,24 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
 
     marks = {m.name for m in item.iter_markers()}
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
-    env_patcher = patch.dict(os.environ, _build_per_test_guard_env(marks, tracking_dir))
+    per_test_env = _build_per_test_guard_env(marks, tracking_dir)
+    env_patcher = patch.dict(os.environ, per_test_env)
     env_patcher.start()
 
     item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
         tracking_dir=tracking_dir,
         marks=marks,
         env_patcher=env_patcher,
+    )
+
+    _append_diag(
+        [
+            f"--- SETUP nodeid={item.nodeid} ts={time.time()} pid={os.getpid()} tid={threading.get_ident()} ---",
+            f"marks={sorted(marks)}",
+            f"built_env={sorted(per_test_env.items())}",
+            f"observed_env={sorted((k, os.environ.get(k, '<unset>')) for k in per_test_env)}",
+            f"tracking_dir={tracking_dir}",
+        ]
     )
 
     yield
@@ -515,7 +599,25 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
     yield
 
     state: _PerTestGuardState = item._guard_state  # ty: ignore[unresolved-attribute]
+    _append_diag(
+        [
+            f"--- TEARDOWN nodeid={item.nodeid} ts={time.time()} pid={os.getpid()} tid={threading.get_ident()} ---",
+            f"env_before_stop={sorted((k, os.environ.get(k, '<unset>')) for k in _guarded_resources_env_keys())}",
+        ]
+    )
     state.env_patcher.stop()
+    _append_diag(
+        [
+            f"--- TEARDOWN_POST_STOP nodeid={item.nodeid} ts={time.time()} ---",
+            f"env_after_stop={sorted((k, os.environ.get(k, '<unset>')) for k in _guarded_resources_env_keys())}",
+        ]
+    )
+
+
+def _guarded_resources_env_keys() -> list[str]:
+    keys = ["_PYTEST_GUARD_PHASE", "_PYTEST_GUARD_TRACKING_DIR"]
+    keys.extend(f"_PYTEST_GUARD_{r.upper()}" for r in _guarded_resources)
+    return keys
 
 
 def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
@@ -534,6 +636,14 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
     for resource in _guarded_resources:
         blocked_file = Path(tracking_dir) / f"blocked_{resource}"
         if blocked_file.exists():
+            _append_diag(
+                [
+                    f"--- VIOLATION nodeid={getattr(report, 'nodeid', '<unknown>')} resource={resource} ts={time.time()} ---",
+                    f"marks_seen={sorted(marks)}",
+                    f"tracking_dir={tracking_dir}",
+                    f"env_at_report={sorted((k, os.environ.get(k, '<unset>')) for k in _guarded_resources_env_keys())}",
+                ]
+            )
             msg = (
                 f"RESOURCE GUARD: Test invoked '{resource}' without @pytest.mark.{resource}.\n"
                 f"Add @pytest.mark.{resource} to the test, or remove the {resource} usage."

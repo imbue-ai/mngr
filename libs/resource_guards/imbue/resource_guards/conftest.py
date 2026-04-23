@@ -19,6 +19,7 @@ def clean_guard_env(monkeypatch: pytest.MonkeyPatch) -> None:
     the child would see the parent's _PYTEST_GUARD_WRAPPER_DIR and its wrapper scripts
     first on PATH, which shadows any wrappers the child creates.
     """
+    monkeypatch.delenv("_PYTEST_GUARD_DIAG_LOG", raising=False)
     outer_dir = os.environ.get("_PYTEST_GUARD_WRAPPER_DIR")
     if outer_dir is None:
         return
