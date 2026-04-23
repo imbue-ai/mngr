@@ -50,4 +50,4 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
         comment="Verify the renamed agent is still running its command",
     )
     expect(exec_result).to_succeed()
-    expect(exec_result.stdout).to_contain("sleep 99999")
+    expect(exec_result.stdout).to_contain("sleep 100104")
