@@ -95,10 +95,14 @@ def test_get_repo_root_raises_outside_git_repo(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """get_repo_root should raise ScheduleDeployError when not inside a git repo."""
+    """get_repo_root should raise ScheduleDeployError including git stderr when not inside a git repo."""
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(ScheduleDeployError, match="Could not find git repository root"):
+    with pytest.raises(ScheduleDeployError, match="Could not find git repository root") as excinfo:
         get_repo_root()
+    # The error must surface git's stderr for diagnostics -- this is the
+    # contract of `_try_get_repo_root_with_error`. We only assert on our own
+    # fixed prefix, not the variable git-version-specific stderr content.
+    assert "git stderr:" in str(excinfo.value)
 
 
 def test_package_repo_at_commit_succeeds_with_valid_script(tmp_path: Path) -> None:

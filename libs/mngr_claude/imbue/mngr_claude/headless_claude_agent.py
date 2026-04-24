@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
+from imbue.mngr.agents.base_headless_agent import render_file_diagnostic
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -108,20 +110,34 @@ class _StreamTailState(MutableModel):
     stdout_path: Path
     host: OnlineHostInterface
     is_finished: Callable[[], bool]
+    # Monotonic deadline before which is_finished() is only trusted if the
+    # stdout file has some content. Guards against the race where tmux still
+    # shows the pre-send-keys idle pane at the moment we first check
+    # lifecycle; without this gate tail_until_done's loop exits immediately
+    # and we raise "no output" seconds before claude's output arrives.
+    startup_deadline: float
     last_mtime: datetime | None = None
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
 
+    def _authoritatively_finished(self) -> bool:
+        if time.monotonic() < self.startup_deadline:
+            try:
+                return self.is_finished() and self.host.read_text_file(self.stdout_path) != ""
+            except FileNotFoundError:
+                return False
+        return self.is_finished()
+
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
         if current_mtime is not None and current_mtime != self.last_mtime:
             return True
-        return self.is_finished()
+        return self._authoritatively_finished()
 
     def tail_until_done(self) -> Iterator[str]:
         got_result = False
-        while not got_result and not self.is_finished():
+        while not got_result and not self._authoritatively_finished():
             poll_until(
                 self._has_new_data_or_finished,
                 timeout=TAIL_POLL_TIMEOUT,
@@ -285,9 +301,40 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         return self._get_agent_dir() / "stderr.log"
 
     def _get_extra_error_sources(self) -> list[str]:
-        """Check stdout.jsonl for stream-json error results."""
+        """Return the stream-json stdout error (if any) and the work-dir diagnostic.
+
+        The work-dir diagnostic is always appended -- it's cheap to compute
+        and most valuable for silent-exit post-mortems (e.g. the
+        test_ask_simple_query failure mode, where stdout/stderr are both
+        empty because the stream-json error check can't find a result event).
+        Listing the .mngr-prompt / .mngr-system-prompt files that the command
+        substitution reads helps distinguish "claude never ran because its
+        prompt inputs were empty/missing" from "claude ran but produced no
+        output." When a stream-json error *is* present, the work-dir
+        diagnostic still provides useful triage context alongside it.
+        """
+        sources: list[str] = []
         stdout_error = self._get_stdout_stream_json_error()
-        return [stdout_error] if stdout_error else []
+        if stdout_error:
+            sources.append(stdout_error)
+        sources.append(f"[work-dir]\n{self._get_work_dir_diagnostic()}")
+        return sources
+
+    def _get_work_dir_diagnostic(self) -> str:
+        """Summarize the agent's work dir for silent-exit post-mortems.
+
+        Lists the .mngr-prompt and .mngr-system-prompt files by existence +
+        char count. Delegates per-file rendering to
+        :func:`render_file_diagnostic` so the format stays in lockstep with
+        BaseHeadlessAgent's state-dir diagnostic.
+        """
+        work_dir = self.work_dir
+        lines: list[str] = [f"work_dir: {work_dir}"]
+        for name in (".mngr-prompt", ".mngr-system-prompt"):
+            # show_path=False: the `work_dir:` line already reports the
+            # directory, so per-file lines only need the filename label.
+            lines.append(render_file_diagnostic(self.host, work_dir / name, f"  {name}", show_path=False))
+        return "\n".join(lines)
 
     def _get_stdout_stream_json_error(self) -> str | None:
         """Extract error message from a stream-json result event in stdout.jsonl."""
@@ -317,6 +364,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         without producing any output (startup failure, auth error, etc.).
         """
         stdout_path = self._get_stdout_path()
+        startup_deadline = time.monotonic() + self._startup_grace_seconds
 
         if not self._wait_for_stdout_file(stdout_path):
             self._raise_no_output_error()
@@ -325,6 +373,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
             stdout_path=stdout_path,
             host=self.host,
             is_finished=self._is_agent_finished,
+            startup_deadline=startup_deadline,
         )
         is_any_output_yielded = False
         for chunk in state.tail_until_done():

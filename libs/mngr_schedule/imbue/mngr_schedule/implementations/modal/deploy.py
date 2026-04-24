@@ -97,11 +97,16 @@ def get_repo_root() -> Path:
 
     Raises ScheduleDeployError if not inside a git repository.
     """
-    repo_root = try_get_repo_root()
+    repo_root, error = _try_get_repo_root_with_error()
     if repo_root is None:
-        raise ScheduleDeployError(
-            "Could not find git repository root. Must be run from within a git repository."
-        ) from None
+        base_message = "Could not find git repository root. Must be run from within a git repository."
+        # `error` is guaranteed to be a str when `repo_root` is None -- see
+        # _try_get_repo_root_with_error's contract. An empty string just
+        # means git ran but produced no stderr, which still warrants its
+        # own distinct message for triage.
+        if error:
+            raise ScheduleDeployError(f"{base_message} git stderr: {error}")
+        raise ScheduleDeployError(f"{base_message} git ran but produced no stderr.")
     return repo_root
 
 
@@ -110,14 +115,26 @@ def try_get_repo_root() -> Path | None:
 
     Returns the repo root Path if inside a git repo, or None if not.
     """
+    return _try_get_repo_root_with_error()[0]
+
+
+def _try_get_repo_root_with_error() -> tuple[Path | None, str | None]:
+    """Internal: like try_get_repo_root but also returns git stderr on failure.
+
+    On success returns ``(repo_root, None)``; on failure returns
+    ``(None, result.stderr.strip())`` where the stderr string may be empty.
+    The second tuple element is therefore always a ``str`` whenever the
+    first is ``None`` -- callers that see ``repo_root is None`` can treat
+    ``error`` as a plain (possibly empty) stderr string.
+    """
     with ConcurrencyGroup(name="git-toplevel") as cg:
         result = cg.run_process_to_completion(
             ["git", "rev-parse", "--show-toplevel"],
             is_checked_after=False,
         )
     if result.returncode != 0:
-        return None
-    return Path(result.stdout.strip())
+        return None, result.stderr.strip()
+    return Path(result.stdout.strip()), None
 
 
 def _ensure_modal_environment(environment_name: str) -> None:
