@@ -5,6 +5,7 @@ import json
 import secrets
 import uuid
 from typing import Any
+from uuid import UUID
 
 import pytest
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
@@ -750,7 +751,7 @@ def make_fake_supertokens_backend() -> FakeSuperTokensBackend:
 class FakePoolRow:
     """In-memory record for a single pool_hosts row."""
 
-    host_id: int
+    host_id: UUID
     vps_ip: str
     vps_instance_id: str
     agent_id: str
@@ -766,7 +767,7 @@ class FakePoolRow:
 
 
 def _make_pool_row(
-    host_id: int,
+    host_id: UUID,
     vps_ip: str,
     agent_id: str,
     host_id_str: str,
@@ -958,7 +959,7 @@ class FakePoolBackend:
 
     def add_available_host(
         self,
-        host_id: int,
+        host_id: UUID,
         version: str,
         vps_ip: str = "203.0.113.10",
         ssh_port: int = 22,
@@ -983,7 +984,7 @@ class FakePoolBackend:
 
     def add_leased_host(
         self,
-        host_id: int,
+        host_id: UUID,
         version: str,
         leased_to_user: str,
         vps_ip: str = "203.0.113.10",

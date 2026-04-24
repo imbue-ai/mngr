@@ -4,6 +4,8 @@ Encapsulates HTTP calls to lease, release, and list pre-provisioned SSH hosts
 from the Vultr host pool. Authentication uses the caller's SuperTokens JWT.
 """
 
+from uuid import UUID
+
 import httpx
 from loguru import logger
 from pydantic import AnyUrl
@@ -30,7 +32,7 @@ class HostPoolEmptyError(HostPoolError):
 class LeaseHostResult(FrozenModel):
     """Result of a successful host lease from the pool."""
 
-    host_db_id: int = Field(description="Database ID of the leased host")
+    host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_ip: str = Field(description="IP address of the VPS")
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -43,7 +45,7 @@ class LeaseHostResult(FrozenModel):
 class LeasedHostInfo(FrozenModel):
     """Information about a currently leased host, including lease timestamp."""
 
-    host_db_id: int = Field(description="Database ID of the leased host")
+    host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_ip: str = Field(description="IP address of the VPS")
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -95,7 +97,7 @@ class HostPoolClient(FrozenModel):
 
         return LeaseHostResult.model_validate(response.json())
 
-    def release_host(self, access_token: str, host_db_id: int) -> bool:
+    def release_host(self, access_token: str, host_db_id: UUID) -> bool:
         """Release a leased host back to the pool.
 
         Returns True on success. Logs a warning and returns False on failure.

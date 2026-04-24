@@ -53,6 +53,59 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
 }
 
 /**
+ * Check whether a port is free (nothing listening on it).
+ *
+ * Attempts a TCP connection to 127.0.0.1:port. If the connection succeeds
+ * (something is listening), the port is occupied. If it fails with ECONNREFUSED,
+ * the port is free.
+ *
+ * Returns a Promise<boolean> -- true if free, false if occupied.
+ */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(500);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.connect(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Wait for a port to become free, polling at intervalMs up to timeoutMs.
+ *
+ * Returns a Promise<boolean> -- true if the port became free within the
+ * timeout, false if it is still occupied.
+ */
+function waitForPortFree(port, timeoutMs = 6000, intervalMs = 200) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    function poll() {
+      isPortFree(port).then((free) => {
+        if (free) {
+          resolve(true);
+        } else if (Date.now() >= deadline) {
+          resolve(false);
+        } else {
+          setTimeout(poll, intervalMs);
+        }
+      });
+    }
+    poll();
+  });
+}
+
+/**
  * Spawn the Python backend and wait for the login URL.
  *
  * The backend emits structured JSONL events to stdout (via --format jsonl)
@@ -69,7 +122,14 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
-    findAvailablePort().then((port) => {
+    findAvailablePort().then(async (port) => {
+      // A stale backend from a previous app instance may still be shutting
+      // down on this port. Wait up to 6 seconds for it to release the port.
+      const isFree = await waitForPortFree(port);
+      if (!isFree) {
+        // Port is still occupied -- pick a different one.
+        port = await findAvailablePort();
+      }
       const logDir = paths.getLogDir();
 
       // Ensure log directory exists

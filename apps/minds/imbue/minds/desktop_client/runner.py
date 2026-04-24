@@ -127,8 +127,10 @@ def start_desktop_client(
     """
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
+    is_electron = os.getenv("MINDS_ELECTRON") == "1"
+    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver()
-    stream_manager = MngrStreamManager(resolver=backend_resolver)
+    stream_manager = MngrStreamManager(resolver=backend_resolver, notification_dispatcher=notification_dispatcher)
     tunnel_manager = SSHTunnelManager()
 
     minds_config = MindsConfig(data_dir=data_directory)
@@ -137,8 +139,6 @@ def start_desktop_client(
     host_pool_client = _build_host_pool_client(minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(paths=paths, server_port=port, host_pool_client=host_pool_client)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    is_electron = os.getenv("MINDS_ELECTRON") == "1"
-    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
     # Initialize multi-account session store
     session_store = MultiAccountSessionStore(

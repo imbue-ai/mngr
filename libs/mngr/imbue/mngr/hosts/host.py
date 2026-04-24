@@ -2543,7 +2543,7 @@ class Host(BaseHost, OnlineHostInterface):
                         updated_lines.append(f"MNGR_AGENT_NAME={new_name}")
                     else:
                         updated_lines.append(line)
-                self.write_text_file(env_path, "\n".join(updated_lines) + "\n")
+                self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
                 logger.debug("No env file found for agent {}, skipping env update", agent.id)
 
@@ -2551,7 +2551,7 @@ class Host(BaseHost, OnlineHostInterface):
             content = self.read_text_file(data_path)
             data = json.loads(content)
             data["name"] = str(new_name)
-            self.write_text_file(data_path, json.dumps(data, indent=2))
+            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
             self.save_agent_data(agent.id, data)
 
             # Reload and return the updated agent

@@ -18,6 +18,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
+from imbue.mngr.api.discovery_events import emit_discovery_error_to_stdout
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
@@ -375,9 +376,17 @@ def _discover_and_emit_details_for_provider(
         for future in host_futures:
             future.result()
 
-    except MngrError as e:
+    except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            raise
+            if isinstance(e, MngrError):
+                raise
+            raise MngrError(str(e)) from e
+        logger.exception("Error discovering agents for provider {}", provider.name)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(provider.name),
+        )
         error_info = ProviderErrorInfo.build_for_provider(e, provider.name)
         with results_lock:
             result.errors.append(error_info)
@@ -453,9 +462,17 @@ def _process_host_with_error_handling(
             results_lock,
         )
 
-    except (MngrError, BaseMngrError) as e:
+    except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            raise
+            if isinstance(e, (MngrError, BaseMngrError)):
+                raise
+            raise MngrError(str(e)) from e
+        logger.exception("Error processing host {}", host_ref.host_id)
+        emit_discovery_error_to_stdout(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            source_name=str(host_ref.host_id),
+        )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
         with results_lock:
             result.errors.append(error_info)

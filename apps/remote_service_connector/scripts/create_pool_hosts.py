@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from typing import Final
+from uuid import UUID
 from uuid import uuid4
 
 import click
@@ -61,23 +62,23 @@ def _get_agent_info(agent_name: str) -> dict[str, Any] | None:
         return None
 
     # mngr list --format json outputs one JSON object per line (jsonl-style) or a JSON array
-    for line in result.stdout.strip().splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            data = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        # Parse the JSON output: it may be a list of agents or a single agent object
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and item.get("name") == agent_name:
-                    return item
-        elif isinstance(data, dict) and data.get("name") == agent_name:
-            return data
-        else:
-            logger.debug("Skipped unrecognized JSON line: {}", stripped[:100])
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse mngr list output as JSON")
+        return None
+
+    agents: list[dict[str, Any]] = []
+    if isinstance(data, dict) and "agents" in data:
+        agents = data["agents"]
+    elif isinstance(data, list):
+        agents = data
+    elif isinstance(data, dict):
+        agents = [data]
+
+    for agent in agents:
+        if isinstance(agent, dict) and agent.get("name") == agent_name:
+            return agent
     return None
 
 
@@ -107,6 +108,40 @@ def _extract_ssh_key_path(agent_info: dict[str, Any]) -> str | None:
     if isinstance(key_path, str):
         return key_path
     return None
+
+
+def _run_ssh_command_on_vps(
+    vps_ip: str,
+    ssh_key_path: str,
+    command: str,
+) -> bool:
+    """Run a command on the VPS via SSH. Returns True on success."""
+    ssh_command = [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=15",
+        "-i",
+        ssh_key_path,
+        "-p",
+        "22",
+        "root@{}".format(vps_ip),
+        command,
+    ]
+    logger.info("  Running on VPS {}: {}", vps_ip, command)
+    result = subprocess.run(
+        ssh_command,
+        capture_output=True,
+        text=True,
+        timeout=_SSH_COMMAND_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        logger.warning("SSH command failed on {}: {}", vps_ip, result.stderr)
+        return False
+    return True
 
 
 def _install_management_key_via_ssh(
@@ -174,24 +209,25 @@ def _insert_pool_host_row(
     host_id: str,
     container_ssh_port: int,
     version: str,
-) -> int:
-    """Insert a row into the pool_hosts table and return the row ID."""
+) -> UUID:
+    """Insert a row into the pool_hosts table and return the row ID (UUID)."""
+    row_id = uuid4()
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO pool_hosts "
-                "(vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, container_ssh_port, status, version) "
-                "VALUES (%s, %s, %s, %s, 22, 'root', %s, 'available', %s) "
+                "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                "container_ssh_port, status, version, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s, NOW()) "
                 "RETURNING id",
-                (vps_ip, vps_instance_id, agent_id, host_id, container_ssh_port, version),
+                (row_id, vps_ip, vps_instance_id, agent_id, host_id, container_ssh_port, version),
             )
             row = cur.fetchone()
             if row is None:
                 conn.rollback()
                 logger.error("INSERT did not return an id")
                 sys.exit(1)
-            row_id: int = row[0]
             conn.commit()
     finally:
         conn.close()
@@ -219,6 +255,7 @@ def _create_single_pool_host(
         [
             "create",
             address,
+            "--new-host",
             "--no-connect",
             "--label",
             f"pool_version={version}",
@@ -234,10 +271,15 @@ def _create_single_pool_host(
 
     logger.info("  Created agent: {}", agent_name)
 
-    # Stop the agent
-    stop_result = _run_mngr_command(["stop", agent_name, "--no-graceful"])
+    # Stop the agent process but keep the container running (sshd must stay
+    # accessible for the lease flow to inject user SSH keys via the management key).
+    stop_result = _run_mngr_command(["stop", agent_name])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
+
+    # Ensure sshd is running in the container (it may not auto-start after stop)
+    logger.info("  Ensuring sshd is running in the container")
+    _run_mngr_command(["exec", agent_name, "/usr/sbin/sshd"], timeout=30)
 
     # Get agent info from mngr list
     agent_info = _get_agent_info(agent_name)
@@ -268,14 +310,23 @@ def _create_single_pool_host(
     # Use the host_id as a fallback for vps_instance_id
     vps_instance_id = host_id
 
-    ssh_key_path = _extract_ssh_key_path(agent_info)
-    if ssh_key_path is None:
+    container_key_path = _extract_ssh_key_path(agent_info)
+    if container_key_path is None:
         logger.warning("Could not extract SSH key path, skipping VPS key installation")
     else:
-        # Install management key on the VPS
+        vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
+
+        # Open the container SSH port in the VPS firewall
+        _run_ssh_command_on_vps(
+            vps_ip=vps_ip,
+            ssh_key_path=vps_key_path,
+            command="ufw allow {}/tcp".format(_CONTAINER_SSH_PORT),
+        )
+
+        # Install management key on both VPS and container
         _install_management_key_via_ssh(
             vps_ip=vps_ip,
-            ssh_key_path=ssh_key_path,
+            ssh_key_path=vps_key_path,
             management_public_key=management_public_key,
             port=22,
             user="root",

@@ -2,6 +2,7 @@ import queue as queue_mod
 import threading
 import tomllib
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -582,9 +583,10 @@ def test_remove_dynamic_host_entry_noop_for_missing_section(tmp_path: Path) -> N
 
 def test_save_and_load_lease_info(tmp_path: Path) -> None:
     agent_id = AgentId()
-    _save_lease_info(tmp_path, agent_id, 42)
+    test_uuid = UUID("a1b2c3d4-0000-0000-0000-000000000001")
+    _save_lease_info(tmp_path, agent_id, test_uuid)
     loaded = _load_lease_info(tmp_path, agent_id)
-    assert loaded == 42
+    assert loaded == test_uuid
 
 
 def test_load_lease_info_returns_none_for_missing(tmp_path: Path) -> None:
@@ -594,7 +596,7 @@ def test_load_lease_info_returns_none_for_missing(tmp_path: Path) -> None:
 
 def test_remove_lease_info_deletes_file(tmp_path: Path) -> None:
     agent_id = AgentId()
-    _save_lease_info(tmp_path, agent_id, 99)
+    _save_lease_info(tmp_path, agent_id, UUID("e5f60000-0000-0000-0000-000000000002"))
     _remove_lease_info(tmp_path, agent_id)
     assert _load_lease_info(tmp_path, agent_id) is None
 
@@ -619,7 +621,7 @@ def test_release_leased_host_with_pool_client(
     )
 
     # Set up state: lease info and a dynamic host entry
-    _save_lease_info(tmp_path, agent_id, 7)
+    _save_lease_info(tmp_path, agent_id, UUID("00000000-0000-0000-0000-000000000007"))
     dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
     host_name = "leased-{}".format(agent_id)
     _write_dynamic_host_entry(
@@ -653,11 +655,12 @@ def test_release_leased_host_without_pool_client(tmp_path: Path) -> None:
     agent_id = AgentId()
     creator = AgentCreator(paths=paths)
 
-    _save_lease_info(tmp_path, agent_id, 7)
+    test_uuid = UUID("00000000-0000-0000-0000-000000000007")
+    _save_lease_info(tmp_path, agent_id, test_uuid)
     creator.release_leased_host(agent_id, access_token="test-token")
 
     # Lease info should NOT be removed (release was not successful)
-    assert _load_lease_info(tmp_path, agent_id) == 7
+    assert _load_lease_info(tmp_path, agent_id) == test_uuid
 
 
 def test_agent_creator_has_host_pool_client_field(tmp_path: Path) -> None:
@@ -671,69 +674,52 @@ def test_agent_creator_has_host_pool_client_field(tmp_path: Path) -> None:
     assert creator_with.host_pool_client is not None
 
 
-def test_start_creation_accepts_access_token_and_version(tmp_path: Path) -> None:
-    """start_creation accepts access_token and version kwargs without error."""
+def test_start_creation_leased_raises_without_pool_client(tmp_path: Path) -> None:
+    """start_creation with LEASED mode raises immediately if no host_pool_client."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths)
-    # LEASED mode will fail in the background thread (no host_pool_client),
-    # but start_creation itself should return immediately with an agent ID.
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="test-token",
-        version="v0.1.0",
-    )
-    assert agent_id is not None
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    # Should fail because host_pool_client is None
-    assert info.status == AgentCreationStatus.FAILED
+    with pytest.raises(MngrCommandError, match="host_pool_client"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="v0.1.0",
+        )
 
 
 def test_create_leased_agent_fails_without_access_token(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
 ) -> None:
-    """_create_leased_agent raises when access_token is empty."""
+    """start_creation raises synchronously when access_token is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="",
-        version="v0.1.0",
-    )
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-    assert info.error is not None
-    assert "access_token" in info.error
+    with pytest.raises(MngrCommandError, match="access_token"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="",
+            version="v0.1.0",
+        )
 
 
 def test_create_leased_agent_fails_without_version(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
 ) -> None:
-    """_create_leased_agent raises when version is empty."""
+    """start_creation raises synchronously when version is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="test-token",
-        version="",
-    )
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-    assert info.error is not None
-    assert "version" in info.error
+    with pytest.raises(MngrCommandError, match="version"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="",
+        )
 
 
 def test_create_leased_agent_leases_and_writes_dynamic_host(
@@ -774,7 +760,8 @@ def test_cleanup_failed_lease(
     host_entry_name = "leased-{}".format(agent_id)
 
     # Set up state as if a lease succeeded but setup failed
-    _save_lease_info(tmp_path, agent_id, 7)
+    cleanup_uuid = UUID("00000000-0000-0000-0000-000000000099")
+    _save_lease_info(tmp_path, agent_id, cleanup_uuid)
     _write_dynamic_host_entry(
         dynamic_hosts_file=dynamic_hosts_file,
         host_name=host_entry_name,
@@ -787,7 +774,7 @@ def test_cleanup_failed_lease(
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
     creator._cleanup_failed_lease(
         agent_id=agent_id,
-        host_db_id=7,
+        host_db_id=cleanup_uuid,
         access_token="test-token",
         dynamic_hosts_file=dynamic_hosts_file,
         host_entry_name=host_entry_name,
