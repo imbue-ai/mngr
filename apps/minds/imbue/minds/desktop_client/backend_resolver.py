@@ -483,6 +483,7 @@ class MngrStreamManager(MutableModel):
     _on_agent_discovered_callbacks: list[Callable[[AgentId, RemoteSSHInfo | None, str], None]] = PrivateAttr(
         default_factory=list
     )
+    _on_agent_destroyed_callbacks: list[Callable[[AgentId], None]] = PrivateAttr(default_factory=list)
 
     def add_on_agent_discovered_callback(
         self,
@@ -494,6 +495,10 @@ class MngrStreamManager(MutableModel):
         and the provider name (e.g. "docker", "local").
         """
         self._on_agent_discovered_callbacks.append(callback)
+
+    def add_on_agent_destroyed_callback(self, callback: Callable[[AgentId], None]) -> None:
+        """Register a callback invoked when an agent is destroyed (directly or with its host)."""
+        self._on_agent_destroyed_callbacks.append(callback)
 
     def start(self) -> None:
         """Start the streaming subprocess for continuous agent discovery."""
@@ -674,6 +679,7 @@ class MngrStreamManager(MutableModel):
 
         self._update_resolver(agent_ids, discovered_agents)
         self.resolver.update_services(event.agent_id, {})
+        self._fire_agent_destroyed_callbacks(event.agent_id)
 
     def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
         """Remove all agents on a destroyed host from the resolver."""
@@ -695,6 +701,7 @@ class MngrStreamManager(MutableModel):
         self._update_resolver(agent_ids, discovered_agents)
         for agent_id in event.agent_ids:
             self.resolver.update_services(agent_id, {})
+            self._fire_agent_destroyed_callbacks(agent_id)
 
     def _get_provider_name_for_agent(self, agent_id: AgentId) -> str:
         """Look up the provider name for an agent. Returns 'unknown' if not found."""
@@ -724,6 +731,14 @@ class MngrStreamManager(MutableModel):
                 callback(agent_id, ssh_info, provider_name)
             except (OSError, ValueError, RuntimeError, paramiko.SSHException, SSHTunnelError) as e:
                 logger.warning("Agent discovery callback failed for {}: {}", agent_id, e)
+
+    def _fire_agent_destroyed_callbacks(self, agent_id: AgentId) -> None:
+        """Invoke all registered on_agent_destroyed callbacks."""
+        for callback in self._on_agent_destroyed_callbacks:
+            try:
+                callback(agent_id)
+            except (OSError, ValueError, RuntimeError) as e:
+                logger.warning("Agent destruction callback failed for {}: {}", agent_id, e)
 
     def _update_resolver(
         self,

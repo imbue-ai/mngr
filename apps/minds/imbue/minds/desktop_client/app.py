@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_toke
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -226,6 +227,11 @@ async def _managed_lifespan(
             logger.info("Stopping stream manager subprocesses...")
             stream_manager.stop()
             logger.info("Stream manager stopped.")
+        latchkey_gateway_manager: LatchkeyGatewayManager | None = inner_app.state.latchkey_gateway_manager
+        if latchkey_gateway_manager is not None:
+            logger.info("Stopping latchkey gateway manager...")
+            latchkey_gateway_manager.stop()
+            logger.info("Latchkey gateway manager stopped.")
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
@@ -1827,6 +1833,7 @@ def create_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
+    latchkey_gateway_manager: LatchkeyGatewayManager | None = None,
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
@@ -1889,6 +1896,7 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
+    app.state.latchkey_gateway_manager = latchkey_gateway_manager
     app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
