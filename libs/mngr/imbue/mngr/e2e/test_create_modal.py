@@ -12,6 +12,11 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 _REMOTE_TIMEOUT = 120.0
+# test_create_modal_build_args uses a custom image (-b image=python:3.12) that
+# has to pull the image and apt-install openssh/tmux/rsync/jq/xxd at runtime,
+# which pushes the total past the default _REMOTE_TIMEOUT. Bumping just this
+# test's wait rather than all of them keeps the common case tight.
+_REMOTE_TIMEOUT_CUSTOM_IMAGE = 240.0
 
 
 # All tests in this file invoke the Modal CLI indirectly (via environment_create
@@ -191,7 +196,7 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12 --no-connect --no-ensure-clean",
         comment="build arguments let you customize that new remote host",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
     )
     expect(result).to_succeed()
 
