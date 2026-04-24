@@ -74,13 +74,13 @@ def test_load_flaky_manifest_unions_files(tmp_path: Path) -> None:
     }
 
 
-def test_render_markdown_marks_flaky_tests(tmp_path: Path) -> None:
+def test_render_markdown_marks_flaky_tests() -> None:
     a = AttemptsRecord(name="pkg/test_x.py::test_a")
-    a.record(outcome="passed", time_seconds=0.1)
-    a.record(outcome="failed", time_seconds=0.2)
-    a.record(outcome="passed", time_seconds=0.1)
+    a.record(outcome="passed")
+    a.record(outcome="failed")
+    a.record(outcome="passed")
     b = AttemptsRecord(name="pkg/test_x.py::test_b")
-    b.record(outcome="passed", time_seconds=0.5)
+    b.record(outcome="passed")
     per_test = {a.name: a, b.name: b}
     md = _render_markdown(
         per_test=per_test,
@@ -95,12 +95,12 @@ def test_render_markdown_marks_flaky_tests(tmp_path: Path) -> None:
     assert "pkg/test_x.py::test_a" in md
     assert "flaky-recovered" in md
     # The single-attempt passing, non-flaky test should NOT appear in the details table.
-    pre_table, _, table = md.partition("| Test |")
+    _, _, table = md.partition("| Test |")
     assert "pkg/test_x.py::test_b" not in table
 
 
-def test_render_markdown_empty_interesting(tmp_path: Path) -> None:
+def test_render_markdown_empty_interesting() -> None:
     t = AttemptsRecord(name="pkg/test_x.py::test_a")
-    t.record(outcome="passed", time_seconds=0.1)
+    t.record(outcome="passed")
     md = _render_markdown(per_test={t.name: t}, flaky_ids=set(), heading="H")
     assert "No retries, failures, or flaky-marked tests" in md

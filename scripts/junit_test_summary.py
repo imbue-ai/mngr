@@ -38,7 +38,7 @@ _STATUS_ORDER: Final[dict[str, int]] = {
 class AttemptsRecord:
     """Aggregated outcomes for a single test across all of its attempts."""
 
-    __slots__ = ("name", "attempts", "passed", "failed", "errors", "skipped", "total_time")
+    __slots__ = ("name", "attempts", "passed", "failed", "errors", "skipped")
 
     def __init__(self, name: str) -> None:
         self.name: str = name
@@ -47,11 +47,9 @@ class AttemptsRecord:
         self.failed: int = 0
         self.errors: int = 0
         self.skipped: int = 0
-        self.total_time: float = 0.0
 
-    def record(self, outcome: str, time_seconds: float) -> None:
+    def record(self, outcome: str) -> None:
         self.attempts += 1
-        self.total_time += time_seconds
         if outcome == "passed":
             self.passed += 1
         elif outcome == "failed":
@@ -144,17 +142,12 @@ def _parse_junit(path: Path) -> dict[str, AttemptsRecord]:
         name = testcase.get("name")
         if name is None:
             continue
-        time_attr = testcase.get("time")
-        try:
-            time_seconds = float(time_attr) if time_attr is not None else 0.0
-        except ValueError:
-            time_seconds = 0.0
         outcome = _testcase_outcome(testcase)
         entry = per_test.get(name)
         if entry is None:
             entry = AttemptsRecord(name=name)
             per_test[name] = entry
-        entry.record(outcome=outcome, time_seconds=time_seconds)
+        entry.record(outcome=outcome)
     return per_test
 
 
