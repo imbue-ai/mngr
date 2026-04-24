@@ -22,6 +22,8 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
+from imbue.mngr_modal.backend import truncate_modal_name
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -271,9 +273,8 @@ def _setup_test_profile(host_dir: Path) -> str:
     return user_id
 
 
-def _delete_modal_environment(prefix: str, user_id: str, env: dict[str, str], cwd: Path) -> None:
+def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: Path) -> None:
     """Delete the Modal environment for this test."""
-    environment_name = f"{prefix}{user_id}"
     logger.info("Deleting Modal environment: {}", environment_name)
     try:
         result = run_command(
@@ -389,17 +390,24 @@ def e2e(
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
+    # e2e tests create fresh Modal environments, so they must deploy the
+    # snapshot_and_shutdown function rather than looking up an existing one.
+    env.pop("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", None)
 
     # Use a short fixed prefix so that derived names (e.g. Modal environment
     # names, which are {prefix}{user_id}) stay well under provider length
     # limits. Test isolation comes from MNGR_HOST_DIR, not the prefix.
     # The mngr_test- prefix is required by the Modal backend guard.
-    env["MNGR_PREFIX"] = "mngr_test-"
+    test_prefix = "mngr_test-"
+    env["MNGR_PREFIX"] = test_prefix
 
     # Create the mngr profile proactively so that:
     # 1. The user_id follows the timestamp convention for Modal cleanup
     # 2. The tmux onboarding screen is suppressed in test transcripts
     test_user_id = _setup_test_profile(temp_host_dir)
+    # Pre-compute the Modal environment name so create (inside the mngr
+    # subprocess) and delete (below) agree without either side re-deriving it.
+    test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
@@ -467,7 +475,7 @@ def e2e(
     )
 
     # Delete the Modal environment (if one was created)
-    _delete_modal_environment("mngr_test-", test_user_id, env=env, cwd=temp_git_repo)
+    _delete_modal_environment(test_modal_env_name, env=env, cwd=temp_git_repo)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)

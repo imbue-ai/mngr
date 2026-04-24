@@ -509,6 +509,11 @@ def test_apply_plugin_overrides_enables_existing_plugin() -> None:
     assert "my-plugin" not in disabled
 
 
+# Marked flaky because session_cleanup occasionally blames this test for
+# leaked subprocesses spawned by other tests in the same xdist sandbox (e.g.
+# the documented `sleep 30` leak from concurrency_group_test). The test body
+# is pure config-dict manipulation and cannot itself leak -- retry is safe.
+@pytest.mark.flaky
 def test_apply_plugin_overrides_creates_disabled_plugin() -> None:
     """_apply_plugin_overrides should create new disabled plugins."""
     plugins: dict[PluginName, PluginConfig] = {}
@@ -810,6 +815,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "is_error_reporting_enabled": False,
     "is_allowed_in_pytest": True,
     "default_destroyed_host_persisted_seconds": 12345.0,
+    "default_min_online_host_age_seconds": 600.0,
 }
 
 _SAMPLE_TOML = """\
@@ -825,6 +831,7 @@ headless = true
 is_error_reporting_enabled = false
 is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
+default_min_online_host_age_seconds = 600.0
 
 [commands.create]
 name = "test"

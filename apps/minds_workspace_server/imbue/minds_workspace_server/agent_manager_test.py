@@ -2,13 +2,17 @@
 
 import json
 import queue
+import shutil
 import threading
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
 
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
+from imbue.minds_workspace_server.agent_manager import _make_applications_file_handler
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.models import ApplicationEntry
@@ -23,6 +27,7 @@ from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_until
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
@@ -349,6 +354,43 @@ def test_start_app_watcher(agent_manager: AgentManager, tmp_path: Path) -> None:
     agent_manager._stop_app_watcher("watcher-test")
 
 
+def test_applications_file_handler_fires_on_move(tmp_path: Path) -> None:
+    """The applications watcher must react to move/rename events, not just
+    modify events. scripts/forward_port.py writes applications.toml atomically
+    via ``tempfile.mkstemp`` + ``os.replace``, which surfaces as an
+    ``IN_MOVED_TO`` / ``FileMovedEvent`` in watchdog -- if the handler only
+    listened on ``on_modified`` every service registration after startup
+    would be silently dropped.
+    """
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    # Simulate what os.replace(tmp, applications.toml) surfaces as.
+    handler.dispatch(
+        FileMovedEvent(
+            src_path=str(tmp_path / "applications.toml.tmp"),
+            dest_path=str(tmp_path / "applications.toml"),
+        )
+    )
+
+    assert seen == ["agent-x"]
+
+
+def test_applications_file_handler_ignores_unrelated_paths(tmp_path: Path) -> None:
+    """The handler must not fire for writes to forward_port.py's scratch
+    ``applications.toml.*.tmp`` files. Every upsert creates and modifies one
+    of those before the atomic rename, and firing on each would produce a
+    broadcast storm with no useful information (the scratch file is never
+    the source of truth we read).
+    """
+    seen: list[str] = []
+    handler = _make_applications_file_handler("agent-x", lambda aid: seen.append(aid))
+
+    handler.dispatch(FileModifiedEvent(src_path=str(tmp_path / "applications.toml.abc123.tmp")))
+
+    assert seen == []
+
+
 def test_stop_app_watcher_nonexistent(agent_manager: AgentManager) -> None:
     """Stopping a watcher for an agent that isn't watched is safe."""
     agent_manager._stop_app_watcher("nonexistent")
@@ -639,3 +681,161 @@ def test_handle_discovery_event_dispatches_host_destroyed(
     event = _make_host_destroyed_event(host_id, [agent_id])
     agent_manager._handle_discovery_event(event)
     assert len(agent_manager.get_agents()) == 0
+
+
+def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroadcaster) -> None:
+    """The ``mngr_binary`` argument to ``build()`` overrides the default binary path."""
+    manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")
+    try:
+        cmd = manager._build_observe_command()
+        assert cmd[0] == "/path/to/custom-mngr"
+    finally:
+        manager.stop()
+
+
+def test_resolve_observe_cwd_prefers_existing_work_dir(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``MNGR_AGENT_WORK_DIR`` points at a real directory, observe runs there."""
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == tmp_path
+    finally:
+        manager.stop()
+
+
+def test_resolve_observe_cwd_falls_back_when_work_dir_missing(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``MNGR_AGENT_WORK_DIR`` is set but the path does not exist, use ``$HOME``.
+
+    Guards the fallback that keeps observe runnable in tests that stub the env
+    var with a non-existent path (e.g. the shared ``agent_manager`` fixture).
+    """
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(missing))
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == Path.home()
+    finally:
+        manager.stop()
+
+
+def test_resolve_observe_cwd_falls_back_when_work_dir_unset(
+    broadcaster: WebSocketBroadcaster,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``MNGR_AGENT_WORK_DIR`` unset, observe runs from ``$HOME``."""
+    monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
+    manager = AgentManager.build(broadcaster)
+    try:
+        assert manager._resolve_observe_cwd() == Path.home()
+    finally:
+        manager.stop()
+
+
+def test_start_observe_spawns_long_lived_subprocess(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the observe subprocess stays alive after startup.
+
+    A healthy ``mngr observe`` keeps running until it is explicitly stopped;
+    this test asserts that after ``_start_observe`` returns, the child is
+    still running a short window later rather than having exited on its own.
+    """
+    if shutil.which("mngr") is None:
+        pytest.skip("mngr binary not on PATH")
+
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    # Point the subprocess at a clean cwd with no project-local .mngr/settings.toml;
+    # otherwise running pytest from inside a mngr-managed worktree would inherit
+    # a config with ``is_allowed_in_pytest = false`` and the child would abort.
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    try:
+        manager._start_observe()
+        assert manager._observe_process is not None
+        # If the subprocess exits within the window it's a failure (bad command,
+        # crashed on startup, etc.). A healthy observe keeps running.
+        exited = poll_until(
+            lambda: manager._observe_process is not None and manager._observe_process.poll() is not None,
+            timeout=1.5,
+            poll_interval=0.1,
+        )
+        assert not exited, (
+            "mngr observe subprocess exited within 1.5s of startup "
+            f"(returncode={manager._observe_process.returncode}); stderr: "
+            f"{manager._observe_process.read_stderr()!r}"
+        )
+    finally:
+        manager.stop()
+
+
+def test_start_observe_logs_error_when_subprocess_exits_unexpectedly(
+    broadcaster: WebSocketBroadcaster,
+    false_binary: str,
+    loguru_records: list[str],
+) -> None:
+    """If the observe subprocess exits on its own, the watchdog logs an ERROR.
+
+    Uses ``/usr/bin/false`` (or equivalent) as a stand-in mngr binary so the
+    spawned process exits immediately with a non-zero code.
+    """
+    manager = AgentManager.build(broadcaster, mngr_binary=false_binary)
+    try:
+        manager._start_observe()
+        logged_error = poll_until(
+            lambda: any(r.startswith("ERROR") and "mngr observe" in r for r in loguru_records),
+            timeout=5.0,
+            poll_interval=0.05,
+        )
+        assert logged_error, (
+            "Expected an ERROR log from the observe watchdog; got: "
+            f"{[r for r in loguru_records if r.startswith('ERROR')]}"
+        )
+    finally:
+        manager.stop()
+
+
+def test_start_observe_watchdog_stays_quiet_on_clean_shutdown(
+    broadcaster: WebSocketBroadcaster,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    loguru_records: list[str],
+) -> None:
+    """Calling ``stop()`` on a healthy observe subprocess must not produce errors."""
+    if shutil.which("mngr") is None:
+        pytest.skip("mngr binary not on PATH")
+
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    # See test_start_observe_spawns_long_lived_subprocess for why this is needed.
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    manager = AgentManager.build(broadcaster)
+    manager._start_observe()
+    # ``_start_observe`` only returns after ``run_process_in_background``
+    # has spawned the child and its RunningProcess thread has started, so the
+    # subprocess is guaranteed to be running by the time we call stop().
+    assert manager._observe_process is not None
+    manager.stop()
+
+    errors = [r for r in loguru_records if r.startswith("ERROR") and "mngr observe" in r]
+    assert errors == [], f"Watchdog logged errors during clean shutdown: {errors}"
+
+
+def test_handle_observe_output_line_logs_stderr_as_warning(
+    agent_manager: AgentManager,
+    loguru_records: list[str],
+) -> None:
+    """Stderr output from the observe subprocess is surfaced as a warning."""
+    agent_manager._handle_observe_output_line("something bad happened", is_stdout=False)
+
+    warnings = [r for r in loguru_records if r.startswith("WARNING") and "mngr observe stderr" in r]
+    assert warnings, f"Expected a stderr warning; got: {loguru_records}"
+    assert "something bad happened" in warnings[0]

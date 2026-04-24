@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import FileResponse
@@ -43,11 +44,15 @@ from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.request_writer import write_refresh_request
+from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+
+_LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 logger = _loguru_logger
 
@@ -63,15 +68,36 @@ _DEFAULT_TAIL_COUNT = 50
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """FastAPI lifespan.
+
+    Reads ``application.state.preconfigured_agent_manager`` (set up by
+    ``create_application``). When present, the lifespan reuses that
+    manager and does not call ``start()`` / ``stop()`` -- this is the
+    hook tests use to seed the service registry without spawning the
+    real ``mngr observe`` pipeline. When absent, the lifespan builds a
+    fresh manager and owns its lifecycle.
+    """
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
     application.state.watchers = {}
 
-    broadcaster = WebSocketBroadcaster()
-    agent_manager = AgentManager.build(broadcaster)
+    preconfigured_agent_manager: AgentManager | None = application.state.preconfigured_agent_manager
+    if preconfigured_agent_manager is None:
+        broadcaster = WebSocketBroadcaster()
+        agent_manager = AgentManager.build(broadcaster)
+        agent_manager.start()
+    else:
+        agent_manager = preconfigured_agent_manager
+        broadcaster = agent_manager.broadcaster
+
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager
-    agent_manager.start()
+
+    # Single shared httpx client for the /service/<name>/ forwarding layer.
+    application.state.http_client = httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=30.0,
+    )
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.register_event_broadcaster(broadcaster=event_queues.broadcast)
@@ -85,7 +111,8 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         def _graceful_shutdown_handler(signum: int, frame: object) -> None:
             event_queues.shutdown()
             broadcaster.shutdown()
-            agent_manager.stop()
+            if preconfigured_agent_manager is None:
+                agent_manager.stop()
             _stop_all_watchers(application)
             handler = original_sigint_handler
             if callable(handler):
@@ -97,8 +124,10 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     event_queues.shutdown()
     broadcaster.shutdown()
-    agent_manager.stop()
+    if preconfigured_agent_manager is None:
+        agent_manager.stop()
     _stop_all_watchers(application)
+    await application.state.http_client.aclose()
     if is_main_thread and original_sigint_handler is not None:
         signal.signal(signal.SIGINT, original_sigint_handler)
 
@@ -378,22 +407,30 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
     )
 
 
-def _layout_filename(request: Request) -> str:
-    """Return the layout filename based on the access mode query parameter."""
-    mode = request.query_params.get("mode", "")
-    if mode and mode in ("cloudflare", "local", "dev"):
-        return f"layout-{mode}.json"
-    return "layout.json"
+_LAYOUT_FILENAME = "layout.json"
 
 
-def _get_layout(agent_id: str, request: Request) -> Response:
-    """Get the saved workspace layout for an agent."""
-    agent_info = _find_agent(agent_id, request)
-    if agent_info is None:
-        return _agent_not_found_response(agent_id)
+def _primary_agent_layout_dir() -> Path | None:
+    """Return the workspace layout directory for this workspace's primary agent.
 
-    filename = _layout_filename(request)
-    layout_file = agent_info.agent_state_dir / "workspace_layout" / filename
+    The workspace_server always serves a single workspace (its own primary
+    agent); the layout lives at $MNGR_HOST_DIR/agents/<MNGR_AGENT_ID>/workspace_layout/.
+    Returns None if either env var is missing, which should only happen in
+    dev/test setups that don't care about persistence.
+    """
+    agent_id = os.environ.get("MNGR_AGENT_ID", "")
+    if not agent_id:
+        return None
+    return _get_host_dir() / "agents" / agent_id / "workspace_layout"
+
+
+def _get_layout() -> Response:
+    """Get the saved workspace layout for this workspace's primary agent."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        return JSONResponse(content=None, status_code=404)
+
+    layout_file = layout_dir / _LAYOUT_FILENAME
     if not layout_file.exists():
         return JSONResponse(content=None, status_code=404)
 
@@ -404,11 +441,12 @@ def _get_layout(agent_id: str, request: Request) -> Response:
         return JSONResponse(content=None, status_code=404)
 
 
-async def _save_layout(agent_id: str, request: Request) -> Response:
-    """Save the workspace layout for an agent."""
-    agent_info = _find_agent(agent_id, request)
-    if agent_info is None:
-        return _agent_not_found_response(agent_id)
+async def _save_layout(request: Request) -> Response:
+    """Save the workspace layout for this workspace's primary agent."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        error = ErrorResponse(detail="No primary agent configured for this workspace")
+        return JSONResponse(content=error.model_dump(), status_code=500)
 
     try:
         body = await request.body()
@@ -418,10 +456,8 @@ async def _save_layout(agent_id: str, request: Request) -> Response:
         error = ErrorResponse(detail="Invalid JSON in request body")
         return JSONResponse(content=error.model_dump(), status_code=400)
 
-    filename = _layout_filename(request)
-    layout_dir = agent_info.agent_state_dir / "workspace_layout"
     layout_dir.mkdir(parents=True, exist_ok=True)
-    layout_file = layout_dir / filename
+    layout_file = layout_dir / _LAYOUT_FILENAME
     layout_file.write_bytes(body)
 
     return JSONResponse(content={"status": "ok"})
@@ -623,28 +659,62 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 
 
-async def _get_sharing_status_endpoint(server_name: str) -> JSONResponse:
+async def _get_sharing_status_endpoint(service_name: str) -> JSONResponse:
     """Get the Cloudflare forwarding status for a server."""
     try:
-        status = await run_in_threadpool(get_sharing_status, server_name)
+        status = await run_in_threadpool(get_sharing_status, service_name)
         return JSONResponse(content=status.model_dump())
     except SharingProxyError as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
-async def _request_sharing_edit_endpoint(server_name: str) -> JSONResponse:
+async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
     """Create a sharing request event for editing sharing settings.
 
     Writes a request event to requests/events.jsonl so the desktop client
     can handle the actual sharing changes. Returns success immediately.
     """
     try:
-        await run_in_threadpool(request_sharing_edit, server_name, True)
+        await run_in_threadpool(request_sharing_edit, service_name, True)
         return JSONResponse(content={"ok": True, "message": "Sharing request sent"})
     except (SharingProxyError, RuntimeError) as e:
         error = ErrorResponse(detail=str(e))
         return JSONResponse(content=error.model_dump(), status_code=502)
+
+
+async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
+    """Append a refresh-service event to the agent's refresh events file.
+
+    Called by agents inside the container to tell the minds desktop client
+    that an open web-service tab should reload. The desktop client picks the
+    event up via ``mngr events --follow`` and POSTs back to the broadcast
+    endpoint below.
+    """
+    try:
+        await run_in_threadpool(write_refresh_request, service_name)
+        return JSONResponse(content={"ok": True})
+    except (RuntimeError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+
+async def _refresh_service_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
+    """Broadcast a refresh_service WebSocket message for the given service_name.
+
+    Called by the desktop client after it observes a refresh event on the
+    mngr events stream. Locked to loopback clients since no authentication
+    exists between the desktop client and the workspace server inside the
+    container.
+    """
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in _LOOPBACK_CLIENT_HOSTS:
+        error = ErrorResponse(detail="refresh-service broadcast is only callable from loopback")
+        return JSONResponse(content=error.model_dump(), status_code=403)
+
+    broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
+    broadcaster.broadcast_refresh_service(service_name)
+    return JSONResponse(content={"ok": True})
 
 
 def _inject_agent_id_meta_tag(html_content: str) -> str:
@@ -659,8 +729,10 @@ def create_application(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    agent_manager: AgentManager | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
+    application.state.preconfigured_agent_manager = agent_manager
     application.state.config = config or Config()
     application.state.provider_names = provider_names
     application.state.include_filters = include_filters
@@ -678,12 +750,18 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
-    application.add_api_route("/api/agents/{agent_id}/layout", _get_layout, methods=["GET"])
-    application.add_api_route("/api/agents/{agent_id}/layout", _save_layout, methods=["POST"])
+    application.add_api_route("/api/layout", _get_layout, methods=["GET"])
+    application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
-    application.add_api_route("/api/sharing/{server_name}", _get_sharing_status_endpoint, methods=["GET"])
-    application.add_api_route("/api/sharing/{server_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
+    application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route(
+        "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
+    )
+    application.add_api_route(
+        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
+    )
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )
@@ -697,6 +775,11 @@ def create_application(
     assets_directory = STATIC_DIRECTORY / "assets"
     if assets_directory.is_dir():
         application.mount("/assets", StaticFiles(directory=assets_directory), name="assets")
+
+    # Service forwarding routes: /service/<name>/... forwards to the service's
+    # local backend (from runtime/applications.toml) with path rewriting,
+    # cookie scoping, WS shim, and a scoped service worker.
+    register_service_routes(application)
 
     application.add_api_route("/{path:path}", _index, methods=["GET"])
 

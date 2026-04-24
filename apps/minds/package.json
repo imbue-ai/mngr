@@ -8,10 +8,13 @@
   "scripts": {
     "start": "electron .",
     "build": "node scripts/build.js",
-    "dist": "pnpm build && pnpm exec todesktop build"
+    "dist": "pnpm build && pnpm exec todesktop build",
+    "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
+    "postinstall": "bash scripts/fetch_tailwind.sh"
   },
   "dependencies": {
-    "@todesktop/runtime": "^1.6.0"
+    "@todesktop/runtime": "^1.6.0",
+    "latchkey": "^2.7.2"
   },
   "devDependencies": {
     "electron": "35.7.5",
