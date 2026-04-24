@@ -21,6 +21,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 @log_call
@@ -70,9 +71,15 @@ def execute_cleanup(
             agents_by_host[host_id] = []
         agents_by_host[host_id].append(agent)
 
+    # Track which providers actually had agents destroyed so post-destroy GC can
+    # skip providers we never touched. This prevents side effects from eagerly
+    # instantiating unrelated providers (e.g. creating a Modal environment when
+    # the destroyed agents all live on the local provider).
+    destroyed_provider_names: set[ProviderInstanceName] = set()
+
     match action:
         case CleanupAction.DESTROY:
-            _execute_destroy(mngr_ctx, agents_by_host, result, error_behavior)
+            _execute_destroy(mngr_ctx, agents_by_host, result, error_behavior, destroyed_provider_names)
         case CleanupAction.STOP:
             _execute_stop(mngr_ctx, agents_by_host, result, error_behavior)
         case _ as unreachable:
@@ -80,7 +87,11 @@ def execute_cleanup(
 
     # Run post-destroy GC when destroying
     if action == CleanupAction.DESTROY and result.destroyed_agents:
-        _run_post_cleanup_gc(mngr_ctx, result)
+        _run_post_cleanup_gc(
+            mngr_ctx,
+            result,
+            provider_names=tuple(sorted(str(p) for p in destroyed_provider_names)),
+        )
 
     return result
 
@@ -90,6 +101,7 @@ def _execute_destroy(
     agents_by_host: dict[HostId, list[AgentDetails]],
     result: CleanupResult,
     error_behavior: ErrorBehavior,
+    destroyed_provider_names: set[ProviderInstanceName],
 ) -> None:
     """Destroy agents, grouped by host."""
     for host_id, host_agents in agents_by_host.items():
@@ -110,6 +122,7 @@ def _execute_destroy(
                                         online_host.destroy_agent(agent)
                                         mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
                                         result.destroyed_agents.append(agent_details.name)
+                                        destroyed_provider_names.add(provider_name)
                                         logger.debug("Destroyed agent: {}", agent_details.name)
                                         emit_agent_destroyed(mngr_ctx.config, agent_details.id, host_id)
                                         emit_discovery_events_for_host(mngr_ctx.config, online_host)
@@ -121,6 +134,7 @@ def _execute_destroy(
                                         agent_details.name,
                                     )
                                     result.destroyed_agents.append(agent_details.name)
+                                    destroyed_provider_names.add(provider_name)
                             except MngrError as e:
                                 error_msg = f"Error destroying agent {agent_details.name}: {e}"
                                 logger.warning(error_msg)
@@ -136,6 +150,7 @@ def _execute_destroy(
                             for agent_details in host_agents:
                                 result.destroyed_agents.append(agent_details.name)
                                 logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
+                            destroyed_provider_names.add(provider_name)
                             emit_host_destroyed(mngr_ctx.config, host_id, [ad.id for ad in host_agents])
                         except MngrError as e:
                             error_msg = f"Error destroying offline host {host_id}: {e}"
@@ -201,11 +216,17 @@ def _execute_stop(
 def _run_post_cleanup_gc(
     mngr_ctx: MngrContext,
     result: CleanupResult,
+    provider_names: tuple[str, ...],
 ) -> None:
-    """Run garbage collection after destroying agents."""
+    """Run garbage collection after destroying agents.
+
+    provider_names scopes GC to the providers whose agents were actually destroyed,
+    so unrelated providers are not eagerly instantiated (which could create cloud
+    resources as a side effect, e.g. a Modal environment).
+    """
     try:
         with log_span("Running post-cleanup garbage collection"):
-            providers = get_all_provider_instances(mngr_ctx)
+            providers = get_all_provider_instances(mngr_ctx, provider_names=provider_names)
             resource_types = GcResourceTypes(
                 is_machines=True,
                 is_work_dirs=True,
