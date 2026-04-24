@@ -33,8 +33,9 @@ const latestChromeState = {
   authStatus: null, // most recent auth_status payload
   requestCount: 0,  // most recent request_count value
   // Per-agent health, keyed by agent id. Absent = healthy/unknown; values
-  // are 'stuck' or 'restarting'. Drives whether the workspace overlay
-  // should be visible for each bundle's current workspace.
+  // are 'STUCK' or 'RESTARTING' (uppercase, matching the AgentHealth enum
+  // the backend serializes). Drives whether the workspace overlay should
+  // be visible for each bundle's current workspace.
   health: {},
 };
 
@@ -688,7 +689,7 @@ function refreshOverlayForBundle(bundle) {
     return;
   }
   const state = latestChromeState.health[agentId];
-  if (state === 'stuck' || state === 'restarting') {
+  if (state === 'STUCK' || state === 'RESTARTING') {
     openOverlay(bundle, { agent_id: agentId, state });
   } else {
     closeOverlay(bundle);
@@ -934,7 +935,7 @@ function handleChromeSSEEvent(evt) {
       scheduleRequestsPanelReload(b);
     }
   } else if (evt.type === 'workspace_server_status' && evt.health && typeof evt.health === 'object') {
-    // New payload shape: {type: 'workspace_server_status', health: {agent_id: 'stuck'|'restarting'}}.
+    // New payload shape: {type: 'workspace_server_status', health: {agent_id: 'STUCK'|'RESTARTING'}}.
     // Agents absent from the map are healthy (the backend omits healthy
     // agents to keep the payload small). Refresh every bundle's overlay so
     // newly-stuck agents surface immediately and recovered agents dismiss.

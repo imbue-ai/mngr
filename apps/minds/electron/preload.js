@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld('minds', {
   },
 
   // Overlay (workspace-server stuck/restarting). Main.js pushes
-  // {agent_id, state: 'stuck'|'restarting'} via this channel whenever the
+  // {agent_id, state: 'STUCK'|'RESTARTING'} via this channel whenever the
   // workspace view's agent needs to show the overlay; the overlay view is
   // hidden entirely (via setVisible(false)) once the agent becomes healthy
   // again, so there's no explicit "clear" message.
