@@ -38,14 +38,16 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
+from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-from imbue.mngr_kanpan.data_types import BuiltinCommand
-from imbue.mngr_kanpan.data_types import BuiltinRole
 from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
+from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -152,13 +154,17 @@ _BUILTIN_COMMAND_KEY_MUTE = "m"
 _BUILTIN_COMMAND_KEY_UNMARK = "u"
 _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
-_BUILTIN_COMMANDS: dict[str, BuiltinCommand] = {
-    _BUILTIN_COMMAND_KEY_REFRESH: BuiltinCommand(role=BuiltinRole.REFRESH, name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: BuiltinCommand(role=BuiltinRole.PUSH, name="mark push", markable="yellow"),
-    _BUILTIN_COMMAND_KEY_DELETE: BuiltinCommand(role=BuiltinRole.DELETE, name="mark delete", markable="light red"),
-    _BUILTIN_COMMAND_KEY_MUTE: BuiltinCommand(role=BuiltinRole.MUTE, name="mute"),
-    _BUILTIN_COMMAND_KEY_UNMARK: BuiltinCommand(role=BuiltinRole.UNMARK, name="unmark"),
-    _BUILTIN_COMMAND_KEY_EXECUTE: BuiltinCommand(role=BuiltinRole.EXECUTE, name="execute"),
+_BUILTIN_COMMANDS: dict[str, ActionBuiltinCommand | MarkableBuiltinCommand] = {
+    _BUILTIN_COMMAND_KEY_REFRESH: ActionBuiltinCommand(role=ActionBuiltinRole.REFRESH, name="refresh"),
+    _BUILTIN_COMMAND_KEY_PUSH: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.PUSH, name="mark push", markable="yellow"
+    ),
+    _BUILTIN_COMMAND_KEY_DELETE: MarkableBuiltinCommand(
+        role=MarkableBuiltinRole.DELETE, name="mark delete", markable="light red"
+    ),
+    _BUILTIN_COMMAND_KEY_MUTE: ActionBuiltinCommand(role=ActionBuiltinRole.MUTE, name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: ActionBuiltinCommand(role=ActionBuiltinRole.UNMARK, name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute"),
 }
 
 _DEFAULT_MARK_COLOR = "light cyan"
@@ -174,6 +180,22 @@ _AGENT_LINE_ATTRS = (
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
+
+
+def _mark_color(cmd: KanpanCommand) -> str | None:
+    """Return the mark indicator color if ``cmd`` is markable, else ``None``.
+
+    ``ActionBuiltinCommand`` is never markable. ``MarkableBuiltinCommand``
+    always carries a color string. ``CustomCommand.markable`` may be a
+    ``bool`` (use the default color) or a ``str`` (explicit color).
+    """
+    if isinstance(cmd, ActionBuiltinCommand):
+        return None
+    if isinstance(cmd, MarkableBuiltinCommand):
+        return cmd.markable
+    if not cmd.markable:
+        return None
+    return cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
 
 
 def _osc8_wrap_content(inner_content: Any, osc_open: bytes, osc_close: bytes) -> Any:
@@ -571,7 +593,7 @@ def _start_batch_execution(state: _KanpanState) -> None:
         # Only the builtin delete batches all marked agents into one `mngr
         # destroy` call. A user-defined override of "d" (or any other key)
         # runs per-agent via the individual-work path.
-        if mark_key == _BUILTIN_COMMAND_KEY_DELETE and isinstance(cmd, BuiltinCommand):
+        if isinstance(cmd, MarkableBuiltinCommand) and cmd.role == MarkableBuiltinRole.DELETE:
             delete_names.append(name)
         else:
             individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
@@ -598,22 +620,20 @@ def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
-    # Builtin delete / push have dedicated runners; any user override of the
-    # same key lands in the CustomCommand branch below.
-    if isinstance(item.cmd, BuiltinCommand):
+    if isinstance(item.cmd, MarkableBuiltinCommand):
         match item.cmd.role:
-            case BuiltinRole.DELETE:
+            case MarkableBuiltinRole.DELETE:
                 names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
                 return executor.submit(_run_destroy, names)
-            case BuiltinRole.PUSH:
+            case MarkableBuiltinRole.PUSH:
                 if item.entry is None or item.entry.work_dir is None:
                     return None
                 return executor.submit(_run_git_push, str(item.entry.work_dir))
-            case BuiltinRole.REFRESH | BuiltinRole.MUTE | BuiltinRole.UNMARK | BuiltinRole.EXECUTE:
-                # Non-markable builtins never reach batch dispatch.
-                return None
             case _:
                 assert_never(item.cmd.role)
+    if isinstance(item.cmd, ActionBuiltinCommand):
+        # Non-markable builtins never reach batch dispatch.
+        return None
     if item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
@@ -786,33 +806,29 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
 
 def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
     """Dispatch a command by key."""
-    if cmd.markable:
+    if isinstance(cmd, MarkableBuiltinCommand):
         _toggle_mark(state, key)
         return
-    if isinstance(cmd, BuiltinCommand):
-        # Matching on `cmd.role` instead of `key` lets the type checker flag
-        # a missing branch if a new BuiltinRole is added.
-        match cmd.role:
-            case BuiltinRole.REFRESH:
-                if state.loop is not None and state.refresh_future is None:
-                    _start_refresh(state.loop, state)
-            case BuiltinRole.MUTE:
-                _mute_focused_agent(state)
-            case BuiltinRole.UNMARK:
-                _unmark_focused(state)
-            case BuiltinRole.EXECUTE:
-                _execute_marks(state)
-            case BuiltinRole.PUSH | BuiltinRole.DELETE:
-                # Markable builtins are handled by the markable branch above
-                # before this point. Reaching here means a builtin's markable
-                # field was overridden False at construction, which is not a
-                # supported configuration.
-                pass
-            case _:
-                assert_never(cmd.role)
+    if isinstance(cmd, CustomCommand):
+        if _mark_color(cmd) is not None:
+            _toggle_mark(state, key)
+            return
+        if cmd.command:
+            _run_shell_command(state, cmd)
         return
-    if cmd.command:
-        _run_shell_command(state, cmd)
+    # cmd is ActionBuiltinCommand; match on role for exhaustive dispatch.
+    match cmd.role:
+        case ActionBuiltinRole.REFRESH:
+            if state.loop is not None and state.refresh_future is None:
+                _start_refresh(state.loop, state)
+        case ActionBuiltinRole.MUTE:
+            _mute_focused_agent(state)
+        case ActionBuiltinRole.UNMARK:
+            _unmark_focused(state)
+        case ActionBuiltinRole.EXECUTE:
+            _execute_marks(state)
+        case _:
+            assert_never(cmd.role)
 
 
 def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
@@ -1479,9 +1495,9 @@ def _build_mark_palette(
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
     for key, cmd in commands.items():
-        if not cmd.markable:
+        color = _mark_color(cmd)
+        if color is None:
             continue
-        color = cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
         attr = f"mark_{key}"
         entries.append((attr, color, ""))
         entries.append((f"{attr}_focus", f"{color},standout", ""))
@@ -1504,9 +1520,13 @@ def run_kanpan(
 
     # Build footer keybindings
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
+    mark_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    ]
     mark_parts.append("U: unmark all")
-    action_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if not cmd.markable and key not in mark_keys]
+    action_parts = [
+        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    ]
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
