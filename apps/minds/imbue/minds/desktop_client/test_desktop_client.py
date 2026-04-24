@@ -1430,6 +1430,31 @@ def test_agent_health_probe_returns_stuck_on_disconnecting_backend(tmp_path: Pat
     assert tracker.get_health(str(agent_id)) == "STUCK"
 
 
+def test_agent_health_probe_flips_healthy_to_stuck_on_failure(tmp_path: Path) -> None:
+    """A probe failure from a previously-HEALTHY agent must report STUCK.
+
+    Regression test: an earlier version of the handler returned ``current or STUCK``
+    on failure paths, which returned HEALTHY (a truthy StrEnum value) even after
+    ``record_failure`` had flipped the tracker to STUCK. The response body and
+    the tracker would disagree, and the landing page would let the user click
+    into a dead mind.
+    """
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker = _get_health_tracker(client)
+    # Seed the tracker as if a prior probe had seen the agent healthy.
+    tracker.record_success(str(agent_id))
+
+    bare = _client_for_bare_origin(client)
+    response = bare.get(f"/api/agents/{agent_id}/health")
+
+    assert response.status_code == 200
+    # Response status must match the tracker state, not the pre-probe state.
+    assert response.json() == {"agent_id": str(agent_id), "status": "STUCK"}
+    assert tracker.get_health(str(agent_id)) == "STUCK"
+
+
 def test_agent_health_probe_preserves_restarting_on_probe_failure(tmp_path: Path) -> None:
     """During RESTARTING, a failing probe must not flip the tracker to STUCK.
 

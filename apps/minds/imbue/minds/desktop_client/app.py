@@ -1341,6 +1341,13 @@ async def _handle_agent_health_probe(
     current = tracker.get_health(str(parsed_id))
     is_restarting = current == AgentHealth.RESTARTING
 
+    # Health level to report back on a failure path: if we're mid-restart we
+    # leave the tracker alone and report RESTARTING; otherwise we flipped to
+    # STUCK above and must report STUCK (not `current`, which may have been
+    # HEALTHY -- returning HEALTHY while the tracker says STUCK would trick
+    # the landing page into letting the user click into a dead mind).
+    failure_level = AgentHealth.RESTARTING if is_restarting else AgentHealth.STUCK
+
     workspace_url = backend_resolver.get_backend_url(parsed_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         # No URL registered yet -- the user can't reach this mind, so report
@@ -1349,7 +1356,7 @@ async def _handle_agent_health_probe(
         # list entirely, so the landing page never probes it).
         if not is_restarting:
             tracker.record_failure(str(parsed_id))
-        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+        return _probe_response(parsed_id, failure_level)
 
     try:
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
@@ -1358,7 +1365,7 @@ async def _handle_agent_health_probe(
     except (SSHTunnelError, paramiko.SSHException, OSError):
         if not is_restarting:
             tracker.record_failure(str(parsed_id))
-        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+        return _probe_response(parsed_id, failure_level)
 
     active_client = tunnel_client or request.app.state.http_client
     probe_url = workspace_url.rstrip("/") + "/"
@@ -1367,7 +1374,7 @@ async def _handle_agent_health_probe(
     except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException):
         if not is_restarting:
             tracker.record_failure(str(parsed_id))
-        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+        return _probe_response(parsed_id, failure_level)
 
     if probe_response.status_code < 400:
         # A successful probe during RESTARTING means the restart completed;
