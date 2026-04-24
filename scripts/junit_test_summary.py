@@ -209,6 +209,19 @@ def _testcase_outcome(testcase: ET.Element) -> RunStatus:
     return RunStatus.PASSED
 
 
+def _final_status_cell(t: AttemptsRecord) -> str:
+    """Render the `Final` column for a single test.
+
+    For flaky-recovered tests, expand the bare "flaky-recovered" label into
+    `flaked N, passed M` so the reader can see how many attempts failed before
+    one passed. Other statuses render as the plain enum string.
+    """
+    status = t.final_status
+    if status is RunStatus.FLAKY_RECOVERED:
+        return f"flaked {t.failed + t.errors}, passed {t.passed}"
+    return str(status)
+
+
 def _render_markdown(
     per_test: Mapping[str, AttemptsRecord],
     flaky_ids: AbstractSet[str],
@@ -246,7 +259,7 @@ def _render_markdown(
     rows: list[str] = []
     for t in tests:
         marked = "yes" if t.name in flaky_ids else "no"
-        rows.append(f"| `{t.name}` | {t.attempts} | {t.final_status} | {marked} |")
+        rows.append(f"| `{t.name}` | {t.attempts} | {_final_status_cell(t)} | {marked} |")
 
     return _assemble_with_truncation(
         header_lines=header_lines,

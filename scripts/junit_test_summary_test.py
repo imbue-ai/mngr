@@ -103,8 +103,10 @@ def test_render_markdown_shows_every_test_with_runs_and_flaky() -> None:
     assert "pkg/test_x.py::test_c" in table
     # The single-run test is shown with Runs=1 and flaky=no.
     assert "| `pkg/test_x.py::test_b` | 1 | passed | no |" in table
-    # Flaky-marked test is shown with flaky=yes.
-    assert "| `pkg/test_x.py::test_a` | 3 | flaky-recovered | yes |" in table
+    # Flaky-marked test is shown with flaky=yes, and the Final cell expands
+    # "flaky-recovered" into "flaked N, passed M" so the reader can see the
+    # fail/pass breakdown across attempts.
+    assert "| `pkg/test_x.py::test_a` | 3 | flaked 1, passed 2 | yes |" in table
     # Problem rows sort before plain passes so they survive truncation.
     failed_idx = table.index("pkg/test_x.py::test_c")
     passed_idx = table.index("pkg/test_x.py::test_b")
