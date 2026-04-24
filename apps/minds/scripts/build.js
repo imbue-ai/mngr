@@ -88,6 +88,41 @@ function readJson(filePath) {
 }
 
 /**
+ * Recursively replace every symlink under ``root`` with a real copy of its
+ * target. Needed because ``fs.cpSync({ dereference: true })`` does *not*
+ * actually materialize the target's bytes into the destination for nested
+ * symlinks -- it just rewrites them to absolute paths pointing back at the
+ * source. After we delete the scratch staging directory those absolute
+ * symlinks dangle, and electron-builder's macOS code-signing phase ENOENTs
+ * on every dangling entry in ``Contents/Resources/``.
+ *
+ * In practice the only symlinks npm creates are under ``node_modules/.bin/``
+ * (one per package with a ``bin`` entry), but we walk the whole tree for
+ * generality -- if a future install produces a symlink anywhere else we'd
+ * hit the same bug.
+ */
+function dereferenceSymlinksInPlace(root) {
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const entryPath = path.join(root, entry.name);
+    if (entry.isSymbolicLink()) {
+      const realPath = fs.realpathSync(entryPath);
+      const realStats = fs.statSync(realPath);
+      if (!realStats.isFile()) {
+        throw new Error(
+          `Unexpected non-file symlink target while dereferencing bundle: ` +
+          `${entryPath} -> ${realPath} (${realStats.isDirectory() ? 'directory' : 'other'})`
+        );
+      }
+      fs.rmSync(entryPath);
+      fs.copyFileSync(realPath, entryPath);
+      fs.chmodSync(entryPath, realStats.mode);
+    } else if (entry.isDirectory()) {
+      dereferenceSymlinksInPlace(entryPath);
+    }
+  }
+}
+
+/**
  * Resolve the on-disk package.json for a dependency as seen from a given
  * starting directory. Handles pnpm's layout (where transitive deps aren't
  * hoisted to the root node_modules) by threading the right search path.
@@ -215,14 +250,17 @@ function bundleLatchkey() {
     }
 
     // Copy the flat, self-contained node_modules tree into resources/.
-    // dereference: true so any symlinks npm may have created (e.g. .bin/
-    // entries) become real files -- the packaged app is read-only and may
-    // be installed under a different root than the build host.
+    // dereference: true handles most symlinks, but nested symlinks (notably
+    // node_modules/.bin/*) end up pointing back at the source tree rather
+    // than being materialized as real files. dereferenceSymlinksInPlace()
+    // below walks the copied tree and fixes that up, so the bundle is fully
+    // self-contained and safe to package/sign/relocate.
     fs.mkdirSync(destDir, { recursive: true });
     fs.cpSync(stagingNodeModules, destNodeModules, {
       recursive: true,
       dereference: true,
     });
+    dereferenceSymlinksInPlace(destNodeModules);
   } finally {
     fs.rmSync(stagingParent, { recursive: true, force: true });
   }
@@ -255,8 +293,8 @@ function bundleLatchkey() {
   // through the shim because the shim requires Electron; plain Node works
   // because cli.js only uses standard Node APIs and its bundled deps.
   const bundledCli = path.join(destNodeModules, 'latchkey', cliRelative);
-  console.log(`Smoke-testing bundled latchkey: ${bundledCli} --help`);
-  execFileSync(process.execPath, [bundledCli, '--help'], { stdio: 'inherit' });
+  console.log(`Smoke-testing bundled latchkey: ${bundledCli} --version`);
+  execFileSync(process.execPath, [bundledCli, '--version'], { stdio: 'inherit' });
 
   console.log(
     `latchkey@${latchkey.pkg.version} bundled at ${destNodeModules} ` +
