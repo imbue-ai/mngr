@@ -57,7 +57,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
   # Modal cron runner and verification run on Modal and require infrastructure to test
   "*/implementations/modal/cron_runner.py",
   "*/implementations/modal/verification.py",
