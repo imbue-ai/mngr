@@ -135,7 +135,7 @@ class DesktopClientFixture:
 
         backend_resolver = MngrCliBackendResolver()
         self._stream_manager = MngrStreamManager(resolver=backend_resolver)
-        agent_creator = AgentCreator(paths=paths)
+        agent_creator = AgentCreator(paths=paths, backend_resolver=backend_resolver)
 
         app = create_desktop_client(
             auth_store=auth_store,
