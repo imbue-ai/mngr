@@ -20,7 +20,7 @@ def test_snapshot_create_local_agent_rejects_unsupported_provider(
 ) -> None:
     """Test that snapshot create fails for a local agent (unsupported provider)."""
     agent_name = f"test-snap-create-{get_short_random_string()}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300014")
 
     result = cli_runner.invoke(
         snapshot,
@@ -60,7 +60,7 @@ def test_snapshot_create_on_error_continue_reports_failure(
 ) -> None:
     """Test that --on-error continue reports the error and exits 1 (doesn't crash)."""
     agent_name = f"test-snap-onerror-cont-{get_short_random_string()}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300015")
 
     result = cli_runner.invoke(
         snapshot,
@@ -81,7 +81,7 @@ def test_snapshot_create_on_error_abort_reports_failure(
 ) -> None:
     """Test that --on-error abort also fails (with abort message)."""
     agent_name = f"test-snap-onerror-abort-{get_short_random_string()}"
-    create_test_agent(agent_name)
+    create_test_agent(agent_name, "sleep 300016")
 
     result = cli_runner.invoke(
         snapshot,

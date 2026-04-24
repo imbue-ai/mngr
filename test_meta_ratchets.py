@@ -134,8 +134,19 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
 # --- Repo-wide ratchets (run once, not per-project) ---
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_no_import_layer_violations() -> None:
-    """Ensure production code has zero import layer violations."""
+    """Ensure production code has zero import layer violations.
+
+    Runs locally in ~3s but calls grimp's Rust-based import scanner, which
+    under CI load occasionally exceeds the default 10s pytest-timeout. When
+    the timeout fires via SIGALRM while Rust is scanning, pyo3 raises a
+    PanicException that takes down the whole pytest process and drops
+    coverage for the sandbox's other tests (see mngr_claude coverage
+    regressions on retried PRs). ``@pytest.mark.flaky`` makes offload
+    automatically retry if the bump-to-60s still isn't enough.
+    """
     check_no_import_lint_errors(_REPO_ROOT)
 
 
@@ -173,9 +184,16 @@ def test_no_ruff_lint_errors_repo_wide() -> None:
 
 
 def test_prevent_bash_without_strict_mode() -> None:
-    """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling."""
+    """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
+
+    Snapshot is 2 to accommodate the committed secret-file templates at
+    ``.minds/template/*.sh``. Those files are shell-sourceable env declarations
+    (consumed by ``scripts/push_modal_secrets.py`` via ``bash -c 'set -a; . <f>; ...'``),
+    not executable scripts -- adding ``set -euo pipefail`` to them would leak
+    strict mode into whatever shell sources them.
+    """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(0), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(2), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 

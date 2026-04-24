@@ -8,8 +8,10 @@ To run these tests locally:
 
     just test libs/mngr/imbue/mngr/api/test_sync_acceptance.py
 
-Note: These tests use 'bash' as the agent type since claude requires trust
-dialogs and API keys. The sync behavior is identical regardless of agent type.
+Note: These tests use the built-in ``command`` agent type running a long
+``sleep`` so the agent stays alive for the test. The claude agent type is
+avoided because it requires trust dialogs and API keys. The sync behavior
+is identical regardless of agent type.
 """
 
 import subprocess
@@ -58,7 +60,7 @@ def created_agent(
     repo_path: Path,
     agent_name: str,
 ) -> Generator[str, None, None]:
-    """Create a local bash agent from the test repo and yield its name.
+    """Create a local long-running command agent from the test repo and yield its name.
 
     Destroys the agent after the test completes.
     """
@@ -68,10 +70,14 @@ def created_agent(
             "--disable-plugin",
             "modal",
             agent_name,
-            "bash",
+            "--type",
+            "command",
             "--no-connect",
             "--project",
             str(repo_path),
+            "--",
+            "sleep",
+            "100200",
             env=sync_test_env,
             cwd=repo_path,
         )

@@ -26,6 +26,10 @@ from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from imbue.imbue_common.logging import cleanup_old_rotated_files
+from imbue.imbue_common.logging import generate_rotation_timestamp
+from imbue.imbue_common.logging import rotation_lock
+
 
 class MngrNotInstalledError(RuntimeError):
     """Raised when the per-agent mngr binary cannot be found."""
@@ -70,8 +74,8 @@ DEFAULT_CEL_EXCLUDE_FILTERS: Final[tuple[str, ...]] = (
     'source == "mngr/agents"',
     # mngr/agent_states events for non-mind agents
     """source == 'mngr/agent_states' && !(has(agent.labels.mind))""",
-    # server_registered events are infrastructure used by the forwarding server for backend discovery
-    'source == "servers"',
+    # service_registered events are infrastructure used by the forwarding service for backend discovery
+    'source == "services"',
 )
 
 
@@ -113,18 +117,25 @@ def _format_nanosecond_timestamp(dt: Any) -> str:
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc_dt.microsecond * 1000:09d}Z"
 
 
+_DEFAULT_MAX_ROTATED_COUNT: Final[int] = 10
+
+
 def _make_jsonl_file_sink(
     file_path: str,
     event_type: str,
     event_source: str,
     max_size_bytes: int = 10 * 1024 * 1024,
+    max_rotated_count: int = _DEFAULT_MAX_ROTATED_COUNT,
 ) -> Callable[..., None]:
     """Create a loguru sink function that writes flat JSONL to a rotating file."""
-    state: dict[str, Any] = {"file": None, "size": 0}
+    state: dict[str, Any] = {"file": None, "size": 0, "cleaned_up": False}
 
     def _ensure_file() -> Any:
         if state["file"] is None:
             Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+            if not state["cleaned_up"]:
+                cleanup_old_rotated_files(Path(file_path).parent, max_rotated_count)
+                state["cleaned_up"] = True
             state["file"] = open(file_path, "a")
             try:
                 state["size"] = Path(file_path).stat().st_size
@@ -134,13 +145,27 @@ def _make_jsonl_file_sink(
 
     def _rotate_if_needed() -> None:
         if state["size"] >= max_size_bytes:
-            if state["file"] is not None:
-                state["file"].close()
-                state["file"] = None
             path = Path(file_path)
-            rotation_idx = next(idx for idx in range(1, 10000) if not path.with_name(f"{path.name}.{idx}").exists())
-            path.rename(path.with_name(f"{path.name}.{rotation_idx}"))
-            state["size"] = 0
+            with rotation_lock(path.parent):
+                # Re-check actual file size: another process may have already rotated
+                try:
+                    actual_size = path.stat().st_size
+                except OSError:
+                    actual_size = 0
+                if actual_size < max_size_bytes:
+                    if state["file"] is not None:
+                        state["file"].close()
+                        state["file"] = None
+                    state["size"] = actual_size
+                    return
+                if state["file"] is not None:
+                    state["file"].close()
+                    state["file"] = None
+                timestamp = generate_rotation_timestamp()
+                rotated = path.with_name(f"{path.name}.{timestamp}")
+                path.rename(rotated)
+                cleanup_old_rotated_files(path.parent, max_rotated_count)
+                state["size"] = 0
 
     def sink(message: Any) -> None:
         record = message.record

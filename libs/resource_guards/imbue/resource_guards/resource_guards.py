@@ -38,6 +38,7 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
+import pluggy
 import pytest
 
 
@@ -72,6 +73,18 @@ _owns_guard_wrapper_dir: bool = False
 _session_env_patcher: patch.dict | None = None  # ty: ignore[invalid-type-form]
 _binary_guarded_resources: list[str] = []
 _guarded_resources: list[str] = []
+
+# Module-level state for the _ResourceGuardPlugin registration. Mirrors the
+# _owns_guard_wrapper_dir pattern: start_resource_guards() only records a plugin
+# here when it actually registered a new one on the session's pluginmanager, and
+# stop_resource_guards() only unregisters when this ownership flag is set. This
+# keeps start/stop symmetric even when start is called with a pluginmanager that
+# already has a plugin registered (from a parent conftest / outer session), which
+# would otherwise let the stop half of a self-test rip the outer session's hooks
+# out and leave every subsequent test without its runtest_setup/teardown.
+_owns_guard_plugin: bool = False
+_guard_plugin: "_ResourceGuardPlugin | None" = None
+_guard_plugin_manager: pluggy.PluginManager | None = None
 
 # Module-level state for SDK guards. Each entry is (name, install_fn, cleanup_fn).
 # Populated by register_sdk_guard() before create_sdk_resource_guards() runs.
@@ -418,19 +431,42 @@ def start_resource_guards(session: pytest.Session) -> None:
     only binary guards, only SDK guards, or both registered.
 
     Idempotent: if the guard plugin is already registered (e.g., from a
-    parent conftest.py), the call is a no-op for plugin registration.
+    parent conftest.py), the call is a no-op for plugin registration,
+    and the matching stop_resource_guards() will NOT unregister that
+    pre-existing plugin -- ownership is tracked per caller.
     """
+    global _owns_guard_plugin, _guard_plugin, _guard_plugin_manager
+
     create_resource_guard_wrappers()
     create_sdk_resource_guards()
     if session.config.pluginmanager.get_plugin("resource_guards") is None:
-        session.config.pluginmanager.register(_ResourceGuardPlugin(), "resource_guards")
+        plugin = _ResourceGuardPlugin()
+        session.config.pluginmanager.register(plugin, "resource_guards")
+        _owns_guard_plugin = True
+        _guard_plugin = plugin
+        _guard_plugin_manager = session.config.pluginmanager
 
 
 def stop_resource_guards() -> None:
     """Clean up all resource guards (SDK monkeypatches and binary wrappers).
 
-    Call this from pytest_sessionfinish. Reverses start_resource_guards().
+    Call this from pytest_sessionfinish. Reverses start_resource_guards(),
+    including unregistering the _ResourceGuardPlugin iff this call to start
+    was the one that registered it.
     """
+    global _owns_guard_plugin, _guard_plugin, _guard_plugin_manager
+
+    # Only the caller that registered the plugin clears its own bookkeeping.
+    # A non-owner stop must leave _owns_guard_plugin / _guard_plugin /
+    # _guard_plugin_manager untouched so the real owner's later stop still
+    # finds the state it needs to unregister the plugin. Mirrors the
+    # _owns_guard_wrapper_dir handling in cleanup_resource_guard_wrappers().
+    if _owns_guard_plugin and _guard_plugin is not None and _guard_plugin_manager is not None:
+        _guard_plugin_manager.unregister(_guard_plugin)
+        _owns_guard_plugin = False
+        _guard_plugin = None
+        _guard_plugin_manager = None
+
     cleanup_sdk_resource_guards()
     cleanup_resource_guard_wrappers()
 

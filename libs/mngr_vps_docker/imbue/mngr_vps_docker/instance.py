@@ -1472,7 +1472,7 @@ class VpsDockerProvider(BaseProviderInstance):
         start_time = timestamp_to_datetime(agent_raw.get("start_activity_mtime"))
         now = datetime.now(timezone.utc)
         runtime_seconds = (now - start_time).total_seconds() if start_time else None
-        idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
+        idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)

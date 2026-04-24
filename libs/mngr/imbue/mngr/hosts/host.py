@@ -703,22 +703,22 @@ class Host(BaseHost, OnlineHostInterface):
         Note: the underlying _run_shell_command retries on transient SSH errors,
         so commands passed here are assumed to be idempotent.
         """
-        with log_span("Executing command on host {}: {}", self.id, command):
-            logger.trace(
-                "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
-            )
-            success, output = self._run_shell_command(
-                StringCommand(command),
-                _su_user=user,
-                _chdir=str(cwd) if cwd else None,
-                _env=dict(env) if env else None,
-                _timeout=int(timeout_seconds) if timeout_seconds else None,
-            )
-            return CommandResult(
-                stdout=output.stdout,
-                stderr=output.stderr,
-                success=success,
-            )
+        logger.trace("Executing command on host {}: {}", self.id, command)
+        logger.trace(
+            "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
+        )
+        success, output = self._run_shell_command(
+            StringCommand(command),
+            _su_user=user,
+            _chdir=str(cwd) if cwd else None,
+            _env=dict(env) if env else None,
+            _timeout=int(timeout_seconds) if timeout_seconds else None,
+        )
+        return CommandResult(
+            stdout=output.stdout,
+            stderr=output.stderr,
+            success=success,
+        )
 
     def execute_stateful_command(
         self,
@@ -1254,17 +1254,38 @@ class Host(BaseHost, OnlineHostInterface):
         return self.provider_instance.get_host_resources(self)
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
-        """Set tags via the provider."""
+        """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)
+        certified_data = self.get_certified_data()
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, dict(tags)),
+            )
+        )
         logger.trace("Set {} tag(s) on host {}", len(tags), self.id)
 
     def add_tags(self, tags: Mapping[str, str]) -> None:
-        """Add tags via the provider."""
+        """Add tags via the provider and sync to certified data."""
         self.provider_instance.add_tags_to_host(self, tags)
+        certified_data = self.get_certified_data()
+        merged_tags = {**certified_data.user_tags, **tags}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, merged_tags),
+            )
+        )
 
     def remove_tags(self, keys: Sequence[str]) -> None:
-        """Remove tags by key via the provider."""
+        """Remove tags by key via the provider and sync to certified data."""
         self.provider_instance.remove_tags_from_host(self, keys)
+        certified_data = self.get_certified_data()
+        keys_to_remove = set(keys)
+        filtered_tags = {k: v for k, v in certified_data.user_tags.items() if k not in keys_to_remove}
+        self.set_certified_data(
+            certified_data.model_copy_update(
+                to_update(certified_data.field_ref().user_tags, filtered_tags),
+            )
+        )
 
     # =========================================================================
     # Agent Information
@@ -2153,13 +2174,13 @@ class Host(BaseHost, OnlineHostInterface):
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             # _mkdirs uses mkdir -p, which is idempotent for existing directories
             events_dir = state_dir / "events"
-            servers_events_dir = events_dir / "servers"
+            services_events_dir = events_dir / "services"
             requests_events_dir = events_dir / "requests"
             self._mkdirs(
                 [
                     state_dir,
                     events_dir,
-                    servers_events_dir,
+                    services_events_dir,
                     requests_events_dir,
                     state_dir / "activity",
                     state_dir / "commands",
@@ -2169,9 +2190,9 @@ class Host(BaseHost, OnlineHostInterface):
             # Pre-create empty events.jsonl files so that `mngr events --follow`
             # finds the sources immediately on startup, rather than waiting for a
             # 10-second rescan after the agent's services start writing events.
-            servers_events_file = servers_events_dir / "events.jsonl"
+            services_events_file = services_events_dir / "events.jsonl"
             requests_events_file = requests_events_dir / "events.jsonl"
-            self.execute_idempotent_command(f"touch '{servers_events_file}' '{requests_events_file}'")
+            self.execute_idempotent_command(f"touch '{services_events_file}' '{requests_events_file}'")
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:

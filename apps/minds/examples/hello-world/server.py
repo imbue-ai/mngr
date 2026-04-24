@@ -7,7 +7,6 @@ that the desktop client is working correctly.
 Reads the PORT environment variable (default: 9100).
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -16,6 +15,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from urllib.parse import unquote
+from uuid import uuid4
 
 _DEFAULT_PORT = 9100
 
@@ -154,11 +154,11 @@ class _Handler(BaseHTTPRequestHandler):
         """Suppress default access log output."""
 
 
-def _write_server_log(port: int) -> None:
-    """Write a server log record so the desktop client can discover this agent.
+def _write_service_log(port: int) -> None:
+    """Write a service log record so the desktop client can discover this agent.
 
-    Writes to $MNGR_AGENT_STATE_DIR/events/servers/events.jsonl following the convention
-    that agents self-report their running servers. Includes EventEnvelope fields
+    Writes to $MNGR_AGENT_STATE_DIR/events/services/events.jsonl following the convention
+    that agents self-report their running services. Includes EventEnvelope fields
     (timestamp, type, event_id, source) so mngr events can parse the records.
 
     Note: envelope generation is duplicated from web_server.py because this
@@ -167,28 +167,28 @@ def _write_server_log(port: int) -> None:
     agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR")
     if not agent_state_dir:
         return
-    servers_dir = os.path.join(agent_state_dir, "events", "servers")
-    os.makedirs(servers_dir, exist_ok=True)
+    services_dir = os.path.join(agent_state_dir, "events", "services")
+    os.makedirs(services_dir, exist_ok=True)
     url = "http://127.0.0.1:{}".format(port)
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + "{:09d}Z".format(now.microsecond * 1000)
-    event_id = "evt-" + hashlib.sha256("web:{}".format(url).encode()).hexdigest()[:32]
+    event_id = "evt-{}".format(uuid4().hex)
     record = {
         "timestamp": timestamp,
-        "type": "server_registered",
+        "type": "service_registered",
         "event_id": event_id,
-        "source": "servers",
-        "server": "web",
+        "source": "services",
+        "service": "web",
         "url": url,
     }
-    with open(os.path.join(servers_dir, "events.jsonl"), "a") as f:
+    with open(os.path.join(services_dir, "events.jsonl"), "a") as f:
         f.write(json.dumps(record) + "\n")
 
 
 def main() -> None:
     port = int(os.environ.get("PORT", str(_DEFAULT_PORT)))
     http_server = HTTPServer(("0.0.0.0", port), _Handler)
-    _write_server_log(port)
+    _write_service_log(port)
     sys.stderr.write("hello-world mind serving on port {}\n".format(port))
     sys.stderr.flush()
     http_server.serve_forever()

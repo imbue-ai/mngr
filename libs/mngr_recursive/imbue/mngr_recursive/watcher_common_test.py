@@ -527,9 +527,9 @@ def test_jsonl_file_sink_rotates_when_max_size_exceeded(tmp_path: Path) -> None:
 
     # After rotation, the original file should still exist (recreated)
     assert log_file.exists()
-    # And a rotated file should exist
-    rotated = log_file.with_name(f"{log_file.name}.1")
-    assert rotated.exists()
+    # And a rotated file should exist (with timestamp-based naming)
+    rotated_files = [f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl.") and f.name != "events.jsonl"]
+    assert len(rotated_files) >= 1
 
 
 # -- run_watcher_loop tests --

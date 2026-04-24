@@ -1,7 +1,6 @@
 import hashlib
 import json
 import queue
-import re
 import shlex
 import tempfile
 import threading
@@ -21,6 +20,7 @@ from pydantic import model_validator
 from pygtail import Pygtail
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -42,7 +42,6 @@ FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
-_ROTATED_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^events\.jsonl\.(\d+)$")
 
 
 # =============================================================================
@@ -98,7 +97,7 @@ class EventSourceInfo(FrozenModel):
 
     source_path: str = Field(description="Path relative to events dir, e.g. 'messages' or 'logs/mngr'")
     rotated_files: tuple[str, ...] = Field(
-        description="Sorted rotated file names, oldest first (e.g. events.jsonl.3, events.jsonl.2, events.jsonl.1)"
+        description="Sorted rotated file names, oldest first (e.g. events.jsonl.20260301, events.jsonl.20260302)"
     )
     is_current_file_present: bool = Field(default=True, description="Whether events.jsonl exists in this source")
 
@@ -289,15 +288,15 @@ def _read_event_content_via_host(
     display_name: str,
 ) -> str:
     """Read event content by executing cat on the online host."""
-    with log_span("Reading event file '{}' for {} via host", event_file_name, display_name):
-        file_path = events_path / event_file_name
-        result = online_host.execute_idempotent_command(
-            f"cat {shlex.quote(str(file_path))}",
-            timeout_seconds=30.0,
-        )
-        if not result.success:
-            raise MngrError(f"Failed to read event file '{event_file_name}': {result.stderr}")
-        return result.stdout
+    logger.trace("Reading event file '{}' for {} via host", event_file_name, display_name)
+    file_path = events_path / event_file_name
+    result = online_host.execute_idempotent_command(
+        f"cat {shlex.quote(str(file_path))}",
+        timeout_seconds=30.0,
+    )
+    if not result.success:
+        raise MngrError(f"Failed to read event file '{event_file_name}': {result.stderr}")
+    return result.stdout
 
 
 # =============================================================================
@@ -450,19 +449,18 @@ def _event_passes_cel_filters(
 
 @pure
 def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
-    """Sort rotated file names so oldest (highest number) comes first.
+    """Sort rotated file names so oldest (lowest timestamp) comes first.
 
-    Input: ['events.jsonl.1', 'events.jsonl.3', 'events.jsonl.2']
-    Output: ['events.jsonl.3', 'events.jsonl.2', 'events.jsonl.1']
+    Input: ['events.jsonl.20260415130000000000', 'events.jsonl.20260415120000000000']
+    Output: ['events.jsonl.20260415120000000000', 'events.jsonl.20260415130000000000']
     """
-    numbered: list[tuple[int, str]] = []
+    timestamped: list[tuple[str, str]] = []
     for name in filenames:
-        match = _ROTATED_FILE_PATTERN.match(name)
+        match = ROTATED_JSONL_PATTERN.match(name)
         if match:
-            numbered.append((int(match.group(1)), name))
-    # Sort by number descending (highest number = oldest)
-    numbered.sort(key=lambda pair: pair[0], reverse=True)
-    return [name for _, name in numbered]
+            timestamped.append((match.group(1), name))
+    timestamped.sort(key=lambda pair: pair[0])
+    return [name for _, name in timestamped]
 
 
 # =============================================================================
@@ -486,13 +484,13 @@ def _discover_event_sources_via_host(
     events_path: Path,
 ) -> list[EventSourceInfo]:
     """Find all events.jsonl files recursively under events_path via host commands."""
-    with log_span("Discovering event sources via host"):
-        cmd = f"find {shlex.quote(str(events_path))} -name 'events.jsonl*' -type f 2>/dev/null | sort; true"
-        result = online_host.execute_idempotent_command(cmd, timeout_seconds=15.0)
-        if not result.stdout.strip():
-            return []
+    logger.trace("Discovering event sources via host")
+    cmd = f"find {shlex.quote(str(events_path))} -name 'events.jsonl*' -type f 2>/dev/null | sort; true"
+    result = online_host.execute_idempotent_command(cmd, timeout_seconds=15.0)
+    if not result.stdout.strip():
+        return []
 
-        return _parse_discovered_files(result.stdout, str(events_path))
+    return _parse_discovered_files(result.stdout, str(events_path))
 
 
 @pure
@@ -502,7 +500,7 @@ def _build_event_sources_from_grouped_files(
     """Build EventSourceInfo objects from files grouped by directory."""
     sources: list[EventSourceInfo] = []
     for dir_path, filenames in sorted(files_by_dir.items()):
-        rotated = [f for f in filenames if _ROTATED_FILE_PATTERN.match(f)]
+        rotated = [f for f in filenames if ROTATED_JSONL_PATTERN.match(f)]
         is_current_present = _EVENTS_JSONL_FILENAME in filenames
         sources.append(
             EventSourceInfo(
@@ -546,7 +544,7 @@ def _parse_discovered_files(find_output: str, events_path_str: str) -> list[Even
             file_part = relative
 
         # Only include events.jsonl files (current or rotated)
-        if file_part == _EVENTS_JSONL_FILENAME or _ROTATED_FILE_PATTERN.match(file_part):
+        if file_part == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(file_part):
             if dir_part not in files_by_dir:
                 files_by_dir[dir_part] = []
             files_by_dir[dir_part].append(file_part)
@@ -577,7 +575,7 @@ def _recursive_listdir_via_volume(volume: Volume, path: str) -> list[tuple[str, 
         if entry.file_type == VolumeFileType.FILE:
             filename = _extract_filename(entry.path)
             # Only include events.jsonl files
-            if filename == _EVENTS_JSONL_FILENAME or _ROTATED_FILE_PATTERN.match(filename):
+            if filename == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(filename):
                 result.append((path, filename))
         elif entry.file_type == VolumeFileType.DIRECTORY:
             child_path = entry.path if entry.path else path
@@ -967,8 +965,12 @@ def _tail_source_thread_local(
                 save_on_end=True,
                 read_from_end=False,
                 full_lines=True,
-                # files can and do get rotated, and we need to handle that
                 copytruncate=True,
+                # Rotated files are named events.jsonl.<timestamp>. Pygtail's
+                # built-in patterns only check for .1 and dateext with '-', so
+                # we add a custom glob so it can find the rotated file and read
+                # any events written between our last read and the rotation.
+                log_patterns=["%s.[0-9]*"],
             )
             for line in tail:
                 if stop_event.is_set():

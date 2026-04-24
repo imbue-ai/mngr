@@ -1,0 +1,99 @@
+name: Report flaky-aware test results
+description: >-
+  Report junit test results to a GitHub check. If the test step succeeded but
+  junit.xml still records failing attempts (meaning offload retried flaky
+  tests and they ultimately passed), post the check as neutral (yellow)
+  instead of failure (red). Neutral counts as success for branch protection.
+
+inputs:
+  check-name:
+    description: >-
+      Name of the GitHub check to create (e.g. "Unit + Integration Tests").
+    required: true
+  junit-path:
+    description: Path to the junit.xml file.
+    required: false
+    default: test-results/junit.xml
+  tests-outcome:
+    description: >-
+      Outcome of the test-running step (the value of its `outcome` field --
+      callers typically pass the outcome expression of the step with the id
+      that ran tests). The flaky-recovered path only triggers when this is
+      "success".
+    required: true
+  github-token:
+    description: >-
+      Token used to POST the neutral check-run via `gh api`. Needs
+      `checks: write` permission.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Detect flaky-recovered case. The just recipes map offload's exit 2
+    # (flaky tests failed then passed on retry) to exit 0, so GitHub Actions
+    # records the test step as "success" for both offload exit 0 (no
+    # failures at all) and offload exit 2 (flaky recovery). We distinguish
+    # the two by scanning junit.xml for <failure>/<error> elements: their
+    # presence alongside a successful step outcome means flaky recovery,
+    # and we want a neutral (yellow) check rather than a red one.
+    - name: Detect flaky-recovered tests
+      id: flaky
+      if: always()
+      shell: bash
+      env:
+        TESTS_OUTCOME: ${{ inputs.tests-outcome }}
+        JUNIT_PATH: ${{ inputs.junit-path }}
+      run: |
+        if [ "$TESTS_OUTCOME" = "success" ] \
+            && [ -f "$JUNIT_PATH" ] \
+            && grep -qE '<(failure|error)[ >/]' "$JUNIT_PATH"; then
+          echo "is_flaky_recovered=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_flaky_recovered=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Report test results
+      if: always() && steps.flaky.outputs.is_flaky_recovered != 'true'
+      uses: mikepenz/action-junit-report@v5
+      with:
+        report_paths: ${{ inputs.junit-path }}
+        include_passed: false
+        check_name: ${{ inputs.check-name }}
+
+    - name: Report test annotations (flaky recovered)
+      if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+      uses: mikepenz/action-junit-report@v5
+      with:
+        report_paths: ${{ inputs.junit-path }}
+        include_passed: false
+        check_name: ${{ inputs.check-name }}
+        annotate_only: true
+
+    - name: Post neutral check (flaky recovered)
+      if: always() && steps.flaky.outputs.is_flaky_recovered == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CHECK_NAME: ${{ inputs.check-name }}
+        REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Build the JSON body with `jq -n --arg` so that any special characters
+      # in $CHECK_NAME (quotes, backslashes, etc.) are properly escaped rather
+      # than interpolated raw into a JSON string literal. `jq` is preinstalled
+      # on GitHub-hosted runners.
+      run: |
+        jq -n \
+          --arg name "$CHECK_NAME" \
+          --arg head_sha "$HEAD_SHA" \
+          --arg summary "One or more tests failed on first attempt but passed on retry. See the workflow run summary and job logs for the failed-attempt annotations and details." \
+          '{
+            name: $name,
+            head_sha: $head_sha,
+            status: "completed",
+            conclusion: "neutral",
+            output: {
+              title: "Tests passed after flaky retries",
+              summary: $summary
+            }
+          }' | gh api --method POST "repos/$REPO/check-runs" --input -

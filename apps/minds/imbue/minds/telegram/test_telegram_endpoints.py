@@ -10,7 +10,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
-from imbue.minds.desktop_client.conftest import make_server_log
+from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.telegram.credential_store import save_agent_bot_credentials
 from imbue.minds.telegram.data_types import TelegramBotCredentials
@@ -27,10 +27,10 @@ def _create_test_server_with_telegram(
     auth_store = FileAuthStore(data_directory=auth_dir)
 
     agents_json = make_agents_json(agent_id)
-    server_log = make_server_log("web", "http://test-backend")
+    server_log = make_service_log("web", "http://test-backend")
     resolver = make_resolver_with_data(
         agents_json=agents_json,
-        server_logs={str(agent_id): server_log},
+        service_logs={str(agent_id): server_log},
     )
 
     paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
@@ -135,9 +135,9 @@ def _create_test_server_with_two_agents(
     agents_json = make_agents_json(agent_id_1, agent_id_2)
     resolver = make_resolver_with_data(
         agents_json=agents_json,
-        server_logs={
-            str(agent_id_1): make_server_log("web", "http://test-backend-1"),
-            str(agent_id_2): make_server_log("web", "http://test-backend-2"),
+        service_logs={
+            str(agent_id_1): make_service_log("web", "http://test-backend-1"),
+            str(agent_id_2): make_service_log("web", "http://test-backend-2"),
         },
     )
 

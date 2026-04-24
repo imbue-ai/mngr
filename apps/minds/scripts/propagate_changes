@@ -202,16 +202,14 @@ agent_update() {
 # --- Track B: Desktop client stop and restart ---
 
 electron_stop() {
-    echo "[electron] Stopping desktop client..."
     local electron_pid
     electron_pid=$(pgrep -if "electron/dist/.*electron \\.$" 2>/dev/null | head -1 || true)
     if [[ -z "${electron_pid}" ]]; then
-        echo "[electron] ERROR: No running electron app found. If this is unexpected, check for orphaned processes:" >&2
-        echo "[electron]   pgrep -af 'electron|uv run.*minds'" >&2
-        return 1
+        echo "[electron] No running desktop client; will start a fresh one at the end."
+        return 0
     fi
 
-    echo "[electron] Sending SIGTERM to electron PID ${electron_pid}"
+    echo "[electron] Stopping desktop client (PID ${electron_pid})..."
     if ! kill -TERM "${electron_pid}"; then
         echo "[electron] ERROR: Failed to send SIGTERM to PID ${electron_pid}" >&2
         return 1

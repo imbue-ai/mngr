@@ -11,6 +11,7 @@ from imbue.concurrency_group.concurrency_group import AncestorConcurrentFailure
 from imbue.concurrency_group.concurrency_group import ChildConcurrencyGroupDidNotExitError
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.concurrency_group.concurrency_group import ConcurrentShutdownError
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.concurrency_group import StrandTimedOutError
@@ -225,6 +226,14 @@ def test_do_not_allow_starting_new_strands_if_the_previous_failed(tmp_path: Path
     assert process2 is None
 
 
+# Flaky on offload CI under load: the LONG_RUNNING_COMMAND (`sleep 30`) can
+# occasionally survive past the session-cleanup check because the CG's
+# timeout-path invokes `process.terminate(force_kill_seconds=0.0)` on the
+# lingering process (fire-and-forget), so the child process is not guaranteed
+# to be reaped before pytest's leak detector runs. Retry is safe because the
+# assertion contents (StrandTimedOutError + ProcessError +
+# _IntentionalTestError) are deterministic; only the teardown check races.
+@pytest.mark.flaky
 def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
@@ -364,6 +373,44 @@ def test_parent_failures_propagate_recursively() -> None:
     assert outer_thread is not None
     outer_thread.join()
     assert closure["i"] == 2
+
+
+def _enter_child_group_on_thread(
+    parent: ConcurrencyGroup,
+    child_entered: Event,
+    release: Event,
+) -> None:
+    with parent.make_concurrency_group(name="sibling_child") as child_cg:
+        child_cg.start_new_thread(target=lambda: release.wait(timeout=5.0))
+        child_entered.set()
+        release.wait(timeout=5.0)
+
+
+def test_parent_exit_waits_for_child_group_on_other_thread_to_exit() -> None:
+    # When a child CG is created on a worker thread (sibling-hierarchy pattern),
+    # parent.__exit__ on the main thread must wait for the child to finish its own
+    # __exit__ before checking the child's state, otherwise a spurious
+    # ChildConcurrencyGroupDidNotExitError can be raised.
+    release = Event()
+    child_entered = Event()
+    top = ConcurrencyGroup(name="top", exit_timeout_seconds=5.0)
+    top.__enter__()
+    thread = ObservableThread(target=_enter_child_group_on_thread, args=(top, child_entered, release), daemon=True)
+    thread.start()
+    try:
+        child_entered.wait(timeout=5.0)
+        # Release the worker on a separate thread so the main thread reaches __exit__ first
+        # and has to wait for the child to settle.
+        releaser = ObservableThread(target=release.set, daemon=True)
+        releaser.start()
+        try:
+            top.__exit__(None, None, None)
+            assert top._children[0].state == ConcurrencyGroupState.EXITED
+        finally:
+            releaser.join(timeout=5.0)
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
 
 
 def test_exhausted_concurrency_group_cannot_be_entered_again() -> None:
