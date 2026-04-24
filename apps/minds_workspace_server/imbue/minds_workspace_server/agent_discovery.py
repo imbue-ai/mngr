@@ -9,6 +9,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.interrupt import interrupt_agents
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -128,3 +129,21 @@ def send_message(agent_name: str, message: str) -> bool:
     finally:
         cg.__exit__(None, None, None)
     return len(result.successful_agents) > 0
+
+
+def interrupt_agent(agent_name: str) -> tuple[bool, str | None]:
+    """Interrupt an agent's current turn. Returns (success, error_detail_or_None)."""
+    mngr_ctx, cg = _get_mngr_context()
+    try:
+        result = interrupt_agents(
+            mngr_ctx=mngr_ctx,
+            include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+    finally:
+        cg.__exit__(None, None, None)
+    if len(result.successful_agents) > 0:
+        return True, None
+    if len(result.failed_agents) > 0:
+        return False, result.failed_agents[0][1]
+    return False, "No matching agent found"

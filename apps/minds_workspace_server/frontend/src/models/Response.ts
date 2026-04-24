@@ -174,6 +174,14 @@ export async function sendMessage(agentId: string, message: string): Promise<voi
   });
 }
 
+export async function interruptAgent(agentId: string): Promise<void> {
+  await m.request({
+    method: "POST",
+    url: apiUrl("/api/agents/:agentId/interrupt"),
+    params: { agentId },
+  });
+}
+
 // Compatibility shims
 export class ConversationNotFoundError extends Error {
   constructor(agentId: string) {
