@@ -142,7 +142,7 @@ def start_desktop_client(
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
         paths=paths,
-        server_port=port,
+        backend_resolver=backend_resolver,
         latchkey_gateway_manager=latchkey_gateway_manager,
     )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
