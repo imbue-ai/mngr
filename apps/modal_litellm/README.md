@@ -34,7 +34,7 @@ This runs `modal deploy apps/modal_litellm/app.py` with `MNGR_DEPLOY_ENV=product
 
 On the first cold start, LiteLLM runs ~118 Prisma migrations against the database. This takes ~14 minutes. Subsequent container starts take ~6 seconds.
 
-The `keep_warm=1` setting keeps one container alive to avoid cold starts.
+The `min_containers=1` setting keeps one container alive to avoid cold starts.
 
 ### 4. Create a virtual key
 
