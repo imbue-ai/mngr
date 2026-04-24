@@ -223,6 +223,105 @@ def test_rewrite_subagent_result_hook_substitutes_output(tmp_path: Path) -> None
 
 
 @pytest.mark.release
+def test_reaper_fast_path_empty_state(tmp_path: Path) -> None:
+    """Reaper exits 0 immediately when subagent_map/ is missing or empty, without invoking uv."""
+    script = _script_path("reap_orphan_subagents.sh")
+    invocations_file = tmp_path / "uv_invocations.txt"
+
+    bin_dir = tmp_path / "fake_bin"
+    bin_dir.mkdir()
+    uv_script = bin_dir / "uv"
+    uv_script.write_text(f'#!/usr/bin/env bash\necho "$@" >> {invocations_file}\nexit 0\n')
+    uv_script.chmod(0o755)
+    path_override = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+    # Case 1: no state dir at all.
+    state_dir = tmp_path / "no-state"
+    result = subprocess.run(
+        ["bash", str(script)],
+        input="",
+        env={
+            "MNGR_AGENT_STATE_DIR": str(state_dir),
+            "MAIN_CLAUDE_SESSION_ID": "fake-session",
+            "PATH": path_override,
+            "HOME": os.environ["HOME"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert not invocations_file.exists() or invocations_file.read_text().strip() == ""
+
+    # Case 2: state dir with empty subagent_map/.
+    state_dir2 = tmp_path / "empty-state"
+    (state_dir2 / "subagent_map").mkdir(parents=True)
+    result2 = subprocess.run(
+        ["bash", str(script)],
+        input="",
+        env={
+            "MNGR_AGENT_STATE_DIR": str(state_dir2),
+            "MAIN_CLAUDE_SESSION_ID": "fake-session",
+            "PATH": path_override,
+            "HOME": os.environ["HOME"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result2.returncode == 0, f"stderr={result2.stderr!r}"
+    assert not invocations_file.exists() or invocations_file.read_text().strip() == ""
+
+
+@pytest.mark.release
+def test_reaper_returns_promptly_with_work(tmp_path: Path) -> None:
+    """Reaper with a dummy map entry exits quickly because the heavy work is backgrounded."""
+    script = _script_path("reap_orphan_subagents.sh")
+
+    state_dir = tmp_path / "state"
+    (state_dir / "subagent_map").mkdir(parents=True)
+    (state_dir / "subagent_map" / "toolu_tid1234.json").write_text(
+        json.dumps(
+            {
+                "target_name": "fake-agent",
+                "subagent_type": "general-purpose",
+                "parent_cwd": "/tmp",
+                "run_in_background": False,
+            }
+        )
+    )
+
+    bin_dir = tmp_path / "fake_bin"
+    bin_dir.mkdir()
+    uv_script = bin_dir / "uv"
+    uv_script.write_text("#!/usr/bin/env bash\nsleep 60\n")
+    uv_script.chmod(0o755)
+    path_override = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(script)],
+        input="",
+        env={
+            "MNGR_AGENT_STATE_DIR": str(state_dir),
+            "MAIN_CLAUDE_SESSION_ID": "fake-session",
+            "PATH": path_override,
+            "HOME": os.environ["HOME"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert elapsed < 2.0, f"reaper took {elapsed:.2f}s; expected <2s with backgrounded work"
+
+
+@pytest.mark.release
 def test_rewrite_hook_missing_result_emits_error(tmp_path: Path) -> None:
     """When the result file is missing, the hook emits an ERROR sentinel."""
     state_dir = tmp_path / "state"
