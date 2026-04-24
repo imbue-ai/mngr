@@ -404,6 +404,32 @@ def test_schedule_remove_local_prompts_without_force(
     assert "Removed schedule" not in result.output
 
 
+def test_schedule_remove_local_force_skips_prompt_and_dispatches(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With --force and a deployed trigger, remove should skip the prompt
+    and reach the provider dispatch branch.
+
+    Mirror of `test_schedule_remove_local_prompts_without_force`. Covers
+    the CLI wiring of the found-trigger `--force` path only: the crontab
+    text manipulation is covered by the unit tests in `cli/remove_test.py`
+    and the full add+remove lifecycle against the real `crontab` binary is
+    covered by the release test in `test_schedule_local_lifecycle.py`.
+    """
+    _deploy_local_trigger(temp_mngr_ctx, "test-force-trigger")
+
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "test-force-trigger", "--provider", "local", "--force"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0, f"remove failed: {result.output}"
+    assert "Are you sure" not in result.output
+    assert "Removed schedule" in result.output
+
+
 # =============================================================================
 # schedule run CLI tests
 # =============================================================================
