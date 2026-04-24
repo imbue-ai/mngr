@@ -32,6 +32,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
+REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
 
 class AgentDisplayInfo(FrozenModel):
@@ -284,6 +285,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
+    _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or service data changes.
@@ -415,6 +417,33 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 callback(agent_id_str, raw_line)
             except (OSError, RuntimeError) as e:
                 logger.warning("Request event callback failed: {}", e)
+
+    def add_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a refresh event arrives.
+
+        The callback receives (agent_id_str, raw_json_line). Refresh events
+        tell the desktop client to reload open web-service tabs for a service.
+        """
+        with self._lock:
+            self._on_refresh_callbacks.append(callback)
+
+    def remove_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Unregister a refresh event callback."""
+        with self._lock:
+            try:
+                self._on_refresh_callbacks.remove(callback)
+            except ValueError:
+                pass
+
+    def _fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
+        """Invoke all registered refresh event callbacks."""
+        with self._lock:
+            callbacks = list(self._on_refresh_callbacks)
+        for callback in callbacks:
+            try:
+                callback(agent_id_str, raw_line)
+            except (OSError, RuntimeError) as e:
+                logger.warning("Refresh event callback failed: {}", e)
 
 
 # -- MngrStreamManager --
@@ -746,10 +775,10 @@ class MngrStreamManager(MutableModel):
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
         """Handle a line of output from mngr events --follow for a specific agent.
 
-        Differentiates between service events and request events by checking
-        the ``source`` field in the event envelope. Service events are handled
-        by updating the resolver's service map. Request events are forwarded
-        to registered request callbacks.
+        Dispatches based on the ``source`` field in the event envelope:
+        service events update the resolver's service map, request events are
+        forwarded to registered request callbacks, and refresh events are
+        forwarded to registered refresh callbacks.
         """
         if not is_stdout:
             stripped = line.strip()
@@ -766,6 +795,9 @@ class MngrStreamManager(MutableModel):
             if source == REQUESTS_EVENT_SOURCE_NAME:
                 self.resolver._fire_on_request(aid_str, stripped)
                 return
+            if source == REFRESH_EVENT_SOURCE_NAME:
+                self.resolver._fire_on_refresh(aid_str, stripped)
+                return
             record = parse_service_log_record(raw)
             services = self._events_services.get(aid_str)
             if services is None:
@@ -779,7 +811,7 @@ class MngrStreamManager(MutableModel):
             logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> services requests --follow for a workspace agent."""
+        """Start mngr events <agent-id> services requests refresh --follow for a workspace agent."""
         if self._cg.is_shutting_down():
             logger.debug("Skipping events stream for {} -- shutting down", agent_id)
             return
@@ -796,6 +828,7 @@ class MngrStreamManager(MutableModel):
                     aid_str,
                     SERVICES_EVENT_SOURCE_NAME,
                     REQUESTS_EVENT_SOURCE_NAME,
+                    REFRESH_EVENT_SOURCE_NAME,
                     "--follow",
                     "--quiet",
                 ],
