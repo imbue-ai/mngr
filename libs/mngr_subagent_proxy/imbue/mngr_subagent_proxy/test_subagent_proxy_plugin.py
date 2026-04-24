@@ -1,11 +1,9 @@
-"""Release tests for the mngr_subagent_proxy plugin provisioning hooks."""
+"""Integration tests for the mngr_subagent_proxy plugin provisioning hooks."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
@@ -15,7 +13,6 @@ from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
 
 
-@pytest.mark.release
 def test_build_hooks_config_shape() -> None:
     """build_subagent_proxy_hooks_config returns a well-formed hooks dict."""
     config = build_subagent_proxy_hooks_config()
@@ -26,13 +23,13 @@ def test_build_hooks_config_shape() -> None:
     assert set(hooks.keys()) == {"PreToolUse", "PostToolUse", "SessionStart"}
 
     guard_prefix = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0'
-    commands_prefix = "$MNGR_AGENT_STATE_DIR/commands/"
+    python_prefix = "uv run python -m imbue.mngr_subagent_proxy.hooks."
 
     pre = hooks["PreToolUse"]
     assert len(pre) >= 1
     assert pre[0]["matcher"] == "Agent"
     pre_hook = pre[0]["hooks"][0]
-    assert commands_prefix in pre_hook["command"]
+    assert python_prefix + "spawn" in pre_hook["command"]
     assert guard_prefix in pre_hook["command"]
     assert pre_hook["timeout"] == 15
 
@@ -40,20 +37,19 @@ def test_build_hooks_config_shape() -> None:
     assert len(post) >= 1
     assert post[0]["matcher"] == "Agent"
     post_hook = post[0]["hooks"][0]
-    assert commands_prefix in post_hook["command"]
+    assert python_prefix + "rewrite" in post_hook["command"]
     assert guard_prefix in post_hook["command"]
     assert post_hook["timeout"] == 15
 
     session = hooks["SessionStart"]
     assert len(session) >= 1
     session_hook = session[0]["hooks"][0]
-    assert commands_prefix in session_hook["command"]
+    assert python_prefix + "reap" in session_hook["command"]
     assert guard_prefix in session_hook["command"]
 
 
-@pytest.mark.release
-def test_on_after_provisioning_writes_hooks_and_scripts(tmp_path: Path) -> None:
-    """Provisioning writes hooks, scripts, and the proxy agent definition."""
+def test_on_after_provisioning_writes_hooks_and_agent_definition(tmp_path: Path) -> None:
+    """Provisioning writes hooks config and the proxy agent definition."""
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     work_dir = tmp_path / "work"
@@ -79,14 +75,7 @@ def test_on_after_provisioning_writes_hooks_and_scripts(tmp_path: Path) -> None:
     assert "model: haiku" in proxy_content
     assert "tools: Bash" in proxy_content
 
-    commands_dir = host_dir / "agents" / str(agent_id) / "commands"
-    for script_name in ("spawn_proxy_subagent.sh", "rewrite_subagent_result.sh", "reap_orphan_subagents.sh"):
-        script_path = commands_dir / script_name
-        assert script_path.exists(), f"missing {script_name}"
-        assert script_path.read_text().startswith("#!/usr/bin/env bash")
 
-
-@pytest.mark.release
 def test_on_after_provisioning_skips_non_claude_agents(tmp_path: Path) -> None:
     """Provisioning is a no-op for agents whose config is not ClaudeAgentConfig."""
     host_dir = tmp_path / "host"

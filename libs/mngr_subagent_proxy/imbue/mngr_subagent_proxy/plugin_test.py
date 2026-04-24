@@ -16,11 +16,11 @@ from imbue.mngr_subagent_proxy.testing import FakeHost
 
 @pytest.mark.acceptance
 def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
-    """The plugin's provisioning hook wires up hooks, scripts, and the proxy agent.
+    """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
-    for a Claude agent writes the subagent-proxy hook scripts, the mngr-proxy
-    agent definition, and merges hooks into .claude/settings.local.json.
+    for a Claude agent writes the mngr-proxy agent definition and merges the
+    python-module hooks into .claude/settings.local.json.
     """
     host_dir = tmp_path / "host"
     host_dir.mkdir()
@@ -45,7 +45,10 @@ def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
     proxy_content = proxy_md.read_text()
     assert "model: haiku" in proxy_content
 
-    commands_dir = host_dir / "agents" / str(agent_id) / "commands"
-    for script_name in ("spawn_proxy_subagent.sh", "rewrite_subagent_result.sh", "reap_orphan_subagents.sh"):
-        script_path = commands_dir / script_name
-        assert script_path.exists(), f"missing {script_name}"
+    python_prefix = "uv run python -m imbue.mngr_subagent_proxy.hooks."
+    pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
+    post_cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
+    session_cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
+    assert python_prefix + "spawn" in pre_cmd
+    assert python_prefix + "rewrite" in post_cmd
+    assert python_prefix + "reap" in session_cmd

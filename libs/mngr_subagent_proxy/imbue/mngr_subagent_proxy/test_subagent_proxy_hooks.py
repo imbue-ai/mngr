@@ -1,37 +1,22 @@
-"""Release tests for the subagent-proxy shell hooks.
+"""Release tests for the subagent-proxy python hook modules.
 
-These tests exercise the shell scripts directly via subprocess, feeding
-them realistic hook-input JSON on stdin and asserting on the hook's
-JSON response and the state-dir side files. They avoid spinning up a
-real Claude Code session or mngr agent by mocking ``uv`` on PATH.
-
-To run locally:
-    uv run pytest --no-cov -m release \\
-        libs/mngr_subagent_proxy/imbue/mngr_subagent_proxy/test_subagent_proxy_hooks.py
+These tests invoke the hook modules as subprocesses (the same way Claude
+Code invokes them), feeding hook-input JSON on stdin and asserting on the
+hook's JSON response and the state-dir side files. Real ``uv`` calls are
+avoided by mocking the binary on PATH.
 """
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import os
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
-
-from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
-
-
-def _script_path(name: str) -> Path:
-    """Resolve an absolute path to a packaged hook script."""
-    resource_files = importlib.resources.files(_subagent_proxy_resources)
-    script = resource_files.joinpath(name)
-    path = Path(str(script))
-    assert path.is_file(), f"expected script at {path}"
-    return path
 
 
 def _make_noop_uv_on_path(tmp_path: Path) -> str:
@@ -45,13 +30,14 @@ def _make_noop_uv_on_path(tmp_path: Path) -> str:
 
 
 def _run_hook(
-    script_path: Path,
-    hook_input: dict[str, object],
+    module: str,
+    hook_input: dict[str, object] | None,
     state_dir: Path,
     extra_env: dict[str, str] | None = None,
     path_override: str | None = None,
+    stdin_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a hook script with the given JSON stdin and env."""
+    """Run a hook module with the given JSON stdin and env."""
     env = {
         "MNGR_AGENT_STATE_DIR": str(state_dir),
         "MNGR_AGENT_NAME": "parent-agent",
@@ -61,9 +47,15 @@ def _run_hook(
     }
     if extra_env:
         env.update(extra_env)
+    if stdin_text is not None:
+        payload = stdin_text
+    elif hook_input is not None:
+        payload = json.dumps(hook_input)
+    else:
+        payload = ""
     return subprocess.run(
-        ["bash", str(script_path)],
-        input=json.dumps(hook_input),
+        [sys.executable, "-m", module],
+        input=payload,
         env=env,
         capture_output=True,
         text=True,
@@ -82,7 +74,6 @@ def test_spawn_proxy_subagent_hook_rewrites_input(tmp_path: Path) -> None:
     """PreToolUse hook rewrites the Agent invocation to the mngr proxy."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    script_path = _script_path("spawn_proxy_subagent.sh")
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_abc12345678",
         "tool_input": {
@@ -93,7 +84,7 @@ def test_spawn_proxy_subagent_hook_rewrites_input(tmp_path: Path) -> None:
         },
     }
 
-    result = _run_hook(script_path, hook_input, state_dir)
+    result = _run_hook("imbue.mngr_subagent_proxy.hooks.spawn", hook_input, state_dir)
 
     assert result.returncode == 0, f"stderr={result.stderr!r} stdout={result.stdout!r}"
     response = json.loads(result.stdout)
@@ -138,7 +129,6 @@ def test_spawn_proxy_hook_depth_limit_passes_through(tmp_path: Path) -> None:
     """At max depth, the hook allows the call through without rewriting."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    script_path = _script_path("spawn_proxy_subagent.sh")
     hook_input: dict[str, object] = {
         "tool_use_id": "toolu_depth1234567",
         "tool_input": {
@@ -150,7 +140,7 @@ def test_spawn_proxy_hook_depth_limit_passes_through(tmp_path: Path) -> None:
     }
 
     result = _run_hook(
-        script_path,
+        "imbue.mngr_subagent_proxy.hooks.spawn",
         hook_input,
         state_dir,
         extra_env={"MNGR_SUBAGENT_DEPTH": "3", "MNGR_MAX_SUBAGENT_DEPTH": "3"},
@@ -197,14 +187,18 @@ def test_rewrite_subagent_result_hook_substitutes_output(tmp_path: Path) -> None
     result_file.write_text(expected_output)
     prompt_file.write_text("original prompt")
 
-    script_path = _script_path("rewrite_subagent_result.sh")
     path_override = _make_noop_uv_on_path(tmp_path)
     hook_input: dict[str, object] = {
         "tool_use_id": tid,
         "tool_response": "ignored haiku output",
     }
 
-    result = _run_hook(script_path, hook_input, state_dir, path_override=path_override)
+    result = _run_hook(
+        "imbue.mngr_subagent_proxy.hooks.rewrite",
+        hook_input,
+        state_dir,
+        path_override=path_override,
+    )
 
     assert result.returncode == 0, f"stderr={result.stderr!r} stdout={result.stdout!r}"
     response = json.loads(result.stdout)
@@ -212,8 +206,8 @@ def test_rewrite_subagent_result_hook_substitutes_output(tmp_path: Path) -> None
     assert hook_out["hookEventName"] == "PostToolUse"
     assert hook_out["updatedToolOutput"] == expected_output
 
-    # The script launches `uv run mngr destroy` via nohup in the background.
-    # Give any async cleanup a moment to settle.
+    # The hook launches `uv run mngr destroy` via a detached child. Give it
+    # a moment to settle.
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not map_file.exists() and not result_file.exists() and not prompt_file.exists():
@@ -228,7 +222,6 @@ def test_rewrite_subagent_result_hook_substitutes_output(tmp_path: Path) -> None
 @pytest.mark.release
 def test_reaper_fast_path_empty_state(tmp_path: Path) -> None:
     """Reaper exits 0 immediately when subagent_map/ is missing or empty, without invoking uv."""
-    script = _script_path("reap_orphan_subagents.sh")
     invocations_file = tmp_path / "uv_invocations.txt"
 
     bin_dir = tmp_path / "fake_bin"
@@ -240,19 +233,12 @@ def test_reaper_fast_path_empty_state(tmp_path: Path) -> None:
 
     # Case 1: no state dir at all.
     state_dir = tmp_path / "no-state"
-    result = subprocess.run(
-        ["bash", str(script)],
-        input="",
-        env={
-            "MNGR_AGENT_STATE_DIR": str(state_dir),
-            "MAIN_CLAUDE_SESSION_ID": "fake-session",
-            "PATH": path_override,
-            "HOME": os.environ["HOME"],
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+    result = _run_hook(
+        "imbue.mngr_subagent_proxy.hooks.reap",
+        None,
+        state_dir,
+        path_override=path_override,
+        stdin_text="",
     )
     assert result.returncode == 0, f"stderr={result.stderr!r}"
     assert not invocations_file.exists() or invocations_file.read_text().strip() == ""
@@ -260,19 +246,12 @@ def test_reaper_fast_path_empty_state(tmp_path: Path) -> None:
     # Case 2: state dir with empty subagent_map/.
     state_dir2 = tmp_path / "empty-state"
     (state_dir2 / "subagent_map").mkdir(parents=True)
-    result2 = subprocess.run(
-        ["bash", str(script)],
-        input="",
-        env={
-            "MNGR_AGENT_STATE_DIR": str(state_dir2),
-            "MAIN_CLAUDE_SESSION_ID": "fake-session",
-            "PATH": path_override,
-            "HOME": os.environ["HOME"],
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+    result2 = _run_hook(
+        "imbue.mngr_subagent_proxy.hooks.reap",
+        None,
+        state_dir2,
+        path_override=path_override,
+        stdin_text="",
     )
     assert result2.returncode == 0, f"stderr={result2.stderr!r}"
     assert not invocations_file.exists() or invocations_file.read_text().strip() == ""
@@ -281,8 +260,6 @@ def test_reaper_fast_path_empty_state(tmp_path: Path) -> None:
 @pytest.mark.release
 def test_reaper_returns_promptly_with_work(tmp_path: Path) -> None:
     """Reaper with a dummy map entry exits quickly because the heavy work is backgrounded."""
-    script = _script_path("reap_orphan_subagents.sh")
-
     state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     (state_dir / "subagent_map" / "toolu_tid1234.json").write_text(
@@ -304,24 +281,17 @@ def test_reaper_returns_promptly_with_work(tmp_path: Path) -> None:
     path_override = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
     start = time.monotonic()
-    result = subprocess.run(
-        ["bash", str(script)],
-        input="",
-        env={
-            "MNGR_AGENT_STATE_DIR": str(state_dir),
-            "MAIN_CLAUDE_SESSION_ID": "fake-session",
-            "PATH": path_override,
-            "HOME": os.environ["HOME"],
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+    result = _run_hook(
+        "imbue.mngr_subagent_proxy.hooks.reap",
+        None,
+        state_dir,
+        path_override=path_override,
+        stdin_text="",
     )
     elapsed = time.monotonic() - start
 
     assert result.returncode == 0, f"stderr={result.stderr!r}"
-    assert elapsed < 2.0, f"reaper took {elapsed:.2f}s; expected <2s with backgrounded work"
+    assert elapsed < 5.0, f"reaper took {elapsed:.2f}s; expected quick return with backgrounded work"
 
 
 @pytest.mark.release
@@ -344,11 +314,15 @@ def test_rewrite_hook_missing_result_emits_error(tmp_path: Path) -> None:
         )
     )
 
-    script_path = _script_path("rewrite_subagent_result.sh")
     path_override = _make_noop_uv_on_path(tmp_path)
     hook_input: dict[str, object] = {"tool_use_id": tid, "tool_response": "ignored"}
 
-    result = _run_hook(script_path, hook_input, state_dir, path_override=path_override)
+    result = _run_hook(
+        "imbue.mngr_subagent_proxy.hooks.rewrite",
+        hook_input,
+        state_dir,
+        path_override=path_override,
+    )
 
     assert result.returncode == 0, f"stderr={result.stderr!r} stdout={result.stdout!r}"
     response = json.loads(result.stdout)

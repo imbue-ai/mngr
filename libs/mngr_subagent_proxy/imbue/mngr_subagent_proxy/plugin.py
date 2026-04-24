@@ -10,7 +10,6 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude.claude_config import SESSION_GUARD
@@ -19,18 +18,22 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
 
-_SPAWN_SCRIPT: Final[str] = "spawn_proxy_subagent.sh"
-_REWRITE_SCRIPT: Final[str] = "rewrite_subagent_result.sh"
-_REAP_SCRIPT: Final[str] = "reap_orphan_subagents.sh"
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
-_SUBAGENT_SCRIPTS: Final[tuple[str, ...]] = (_SPAWN_SCRIPT, _REWRITE_SCRIPT, _REAP_SCRIPT)
+_SPAWN_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.spawn"
+_REWRITE_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.rewrite"
+_REAP_MODULE: Final[str] = "imbue.mngr_subagent_proxy.hooks.reap"
 
 
 def _load_resource(filename: str) -> str:
     """Load a text resource from the subagent-proxy resources package."""
     resource_files = importlib.resources.files(_subagent_proxy_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+def _python_hook_command(module: str) -> str:
+    """Build the shell-command form Claude Code expects, delegating to a Python module."""
+    return SESSION_GUARD + f"exec uv run python -m {module}"
 
 
 def build_subagent_proxy_hooks_config() -> dict[str, Any]:
@@ -41,9 +44,9 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     - PostToolUse (Agent): rewrite the proxy's result before Claude sees it.
     - SessionStart: reap orphaned proxy subagents from prior sessions.
     """
-    spawn_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_SPAWN_SCRIPT}"'
-    rewrite_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REWRITE_SCRIPT}"'
-    reap_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REAP_SCRIPT}"'
+    spawn_cmd = _python_hook_command(_SPAWN_MODULE)
+    rewrite_cmd = _python_hook_command(_REWRITE_MODULE)
+    reap_cmd = _python_hook_command(_REAP_MODULE)
     return {
         "hooks": {
             "PreToolUse": [
@@ -84,15 +87,6 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     }
 
 
-def _provision_subagent_proxy_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
-    """Write the subagent-proxy hook scripts to $MNGR_AGENT_STATE_DIR/commands/."""
-    commands_dir = agent_state_dir / "commands"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
-    for script_name in _SUBAGENT_SCRIPTS:
-        script_content = _load_resource(script_name)
-        host.write_file(commands_dir / script_name, script_content.encode(), "0755")
-
-
 def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
     """Write the mngr-proxy subagent definition under the agent's .claude/agents/."""
     agents_dir = work_dir / ".claude" / "agents"
@@ -121,16 +115,14 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
 
 @hookimpl(trylast=True)
 def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-    """Install subagent-proxy hooks and helper scripts on Claude agents.
+    """Install subagent-proxy hooks on Claude agents.
 
     Runs trylast so mngr_claude's provisioning (which writes the base
-    settings.local.json and command scripts) has already completed.
+    settings.local.json) has already completed.
     """
     del mngr_ctx  # unused
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return
 
-    agent_state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    _provision_subagent_proxy_scripts(host, agent_state_dir)
     _write_proxy_agent_definition(host, agent.work_dir)
     _merge_subagent_proxy_hooks(host, agent.work_dir)
