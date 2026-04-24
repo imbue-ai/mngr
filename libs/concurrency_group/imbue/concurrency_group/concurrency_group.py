@@ -18,7 +18,6 @@ from typing import ParamSpec
 from typing import Sequence
 from typing import TypeVar
 
-from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -240,11 +239,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                         try:
                             os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
-                            # Expected race: subprocess exited between the
-                            # TimeoutExpired above and this SIGKILL. The
-                            # outcome (process gone) is what we wanted, but
-                            # log at trace level for observability.
-                            logger.trace("Subprocess {} already exited before SIGKILL", pid)
+                            pass
                     try:
                         process.terminate(force_kill_seconds=0.0)
                     except TimeoutExpired:
