@@ -9,6 +9,7 @@ from typing import Final
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
@@ -16,6 +17,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -24,6 +26,33 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
+
+
+@pytest.fixture
+def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
+    """Root ``ConcurrencyGroup`` for tests that construct an ``AgentCreator``.
+
+    ``AgentCreator.root_concurrency_group`` is required (in production it is
+    owned by ``start_desktop_client`` and brackets the FastAPI lifespan); this
+    fixture enters an equivalent group for the test's duration and exits it
+    cleanly afterwards so any strand tracking / shutdown semantics match.
+    """
+    cg = ConcurrencyGroup(name="test-root")
+    with cg:
+        yield cg
+
+
+@pytest.fixture
+def notification_dispatcher() -> NotificationDispatcher:
+    """``NotificationDispatcher`` wired to the tkinter channel in tests.
+
+    Tests generally do not exercise the dispatch path; this fixture just
+    satisfies the required ``AgentCreator.notification_dispatcher`` field.
+    Pass ``is_electron=False`` so no ``emit_event`` JSONL lines leak into the
+    test's stdout. ``NotificationDispatcher.create`` skips tkinter setup when
+    ``tkinter_module`` is ``None``, which is what we want for unit tests.
+    """
+    return NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False)
 
 
 @pytest.fixture

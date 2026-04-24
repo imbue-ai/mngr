@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -140,6 +141,13 @@ def start_desktop_client(
     latchkey_gateway_manager = _build_latchkey_gateway_manager(data_directory=data_directory)
     latchkey_gateway_manager.start(data_dir=data_directory)
 
+    # Top-level ConcurrencyGroup that brackets the FastAPI lifespan. Every
+    # subprocess/thread spawned by the desktop client (agent setup subprocesses,
+    # background tunnel work, etc.) is tracked as a descendant so shutdown can
+    # wait on or cancel in-flight strands via the default ``__exit__`` path.
+    root_concurrency_group = ConcurrencyGroup(name="desktop-client")
+    root_concurrency_group.__enter__()
+
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
@@ -149,6 +157,8 @@ def start_desktop_client(
         server_port=port,
         latchkey_gateway_manager=latchkey_gateway_manager,
         host_pool_client=host_pool_client,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
 
@@ -239,6 +249,7 @@ def start_desktop_client(
         request_inbox=request_inbox,
         server_port=port,
         output_format=output_format,
+        root_concurrency_group=root_concurrency_group,
     )
 
     if not is_no_browser:

@@ -32,6 +32,8 @@ from loguru import logger
 from pydantic import Field
 from websockets import ClientConnection
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
@@ -56,6 +58,8 @@ from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
@@ -239,6 +243,19 @@ async def _managed_lifespan(
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
+        # Exit the root ConcurrencyGroup last, after every other manager has
+        # stopped its strands. ``__exit__`` waits up to
+        # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
+        # a detached tunnel-setup task) to finish.
+        root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
+        if root_concurrency_group is not None:
+            logger.info("Exiting root concurrency group...")
+            try:
+                root_concurrency_group.__exit__(None, None, None)
+            except ConcurrencyExceptionGroup as exc:
+                # Strands reported failures or timed out during shutdown;
+                # log but don't propagate so other cleanup below can run.
+                logger.warning("Root concurrency group exit reported errors: {}", exc)
 
 
 # -- Route handlers (module-level, using Depends for dependency injection) --
@@ -759,12 +776,82 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
 # -- Agent creation route handlers --
 
 
+def _run_tunnel_setup(
+    agent_id: AgentId,
+    enriched_client: CloudflareClient,
+    paths: WorkspacePaths,
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+) -> None:
+    """Create a Cloudflare tunnel and inject its token into the agent.
+
+    Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
+    the desktop client's root ``ConcurrencyGroup``. Failures are logged via
+    loguru and surfaced to the user via ``notification_dispatcher`` -- every
+    failure dispatches one notification, no rate limit.
+
+    ``create_tunnel`` returns ``(None, error_message)`` for every failure mode
+    (HTTP, bad response, etc.) rather than raising, so no defensive wrapper is
+    needed here; we just inspect the return value.
+    """
+    tunnel_token, message = enriched_client.create_tunnel(agent_id)
+    if tunnel_token is None:
+        logger.warning("Failed to create tunnel for {}: {}", agent_id, message)
+        _notify_tunnel_failure(
+            notification_dispatcher=notification_dispatcher,
+            agent_display_name=agent_display_name,
+            error_message=message,
+        )
+        return
+    _save_tunnel_token(paths.data_dir, agent_id, tunnel_token)
+    inject_tunnel_token_into_agent(agent_id, tunnel_token)
+    logger.debug("Injected tunnel token into agent {}", agent_id)
+
+
+def _notify_tunnel_failure(
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+    error_message: str,
+) -> None:
+    """Dispatch an OS notification for a tunnel-setup failure (no rate limit).
+
+    ``NotificationDispatcher.dispatch`` spawns its own background thread or
+    subprocess per channel and swallows channel-specific errors internally,
+    so a top-level ``except`` wrapper here would only mask genuine bugs.
+    """
+    notification_dispatcher.dispatch(
+        NotificationRequest(
+            title="Tunnel setup failed",
+            message=(
+                f"Couldn't set up the Cloudflare tunnel for '{agent_display_name}'. "
+                f"Sharing may be unavailable. Error: {error_message}"
+            ),
+            urgency=NotificationUrgency.NORMAL,
+        ),
+        agent_display_name=agent_display_name,
+    )
+
+
 class _OnCreatedCallbackFactory(MutableModel):
-    """Callable that injects a tunnel token into a newly created agent."""
+    """Callable that schedules Cloudflare tunnel setup as a detached background task.
+
+    ``__call__`` returns immediately after spawning a thread on the root
+    ``ConcurrencyGroup``; the actual ``create_tunnel`` + token inject work runs
+    asynchronously. This keeps ``_setup_and_start_leased_agent`` and
+    ``_create_agent_background`` off the critical path for the user redirect.
+    """
 
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
     cf_client: CloudflareClient = Field(frozen=True, description="Cloudflare client for tunnel creation")
     paths: WorkspacePaths = Field(frozen=True, description="Workspace paths for tunnel token storage")
+    root_concurrency_group: ConcurrencyGroup = Field(
+        frozen=True,
+        description="Root group on which the detached tunnel task is scheduled.",
+    )
+    notification_dispatcher: NotificationDispatcher = Field(
+        frozen=True,
+        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
+    )
 
     def __call__(self, agent_id: AgentId) -> None:
         account = self.session_store.get_account_for_workspace(str(agent_id))
@@ -779,13 +866,25 @@ class _OnCreatedCallbackFactory(MutableModel):
             supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
             supertokens_email=account.email,
         )
-        tunnel_token, message = enriched_client.create_tunnel(agent_id)
-        if tunnel_token is None:
-            logger.warning("Failed to create tunnel for {}: {}", agent_id, message)
-            return
-        _save_tunnel_token(self.paths.data_dir, agent_id, tunnel_token)
-        inject_tunnel_token_into_agent(agent_id, tunnel_token)
-        logger.debug("Injected tunnel token into agent {}", agent_id)
+        # ``_build_on_created_callback`` doesn't have easy access to the
+        # user-chosen name at this point (see ``backend_resolver``), so fall
+        # back to the short form of the agent id for the notification copy.
+        agent_display_name = str(agent_id)[:8]
+        self.root_concurrency_group.start_new_thread(
+            target=_run_tunnel_setup,
+            kwargs={
+                "agent_id": agent_id,
+                "enriched_client": enriched_client,
+                "paths": self.paths,
+                "notification_dispatcher": self.notification_dispatcher,
+                "agent_display_name": agent_display_name,
+            },
+            name=f"tunnel-setup-{agent_id}",
+            # is_checked=False so that a failing tunnel task does not poison
+            # the root CG for unrelated strands; failures are surfaced via
+            # notifications + loguru from within ``_run_tunnel_setup``.
+            is_checked=False,
+        )
 
 
 def _build_on_created_callback(
@@ -806,13 +905,24 @@ def _build_on_created_callback(
     except AttributeError:
         paths = None
 
-    if session_store is None or cf_client is None or paths is None:
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+
+    if (
+        session_store is None
+        or cf_client is None
+        or paths is None
+        or root_concurrency_group is None
+        or notification_dispatcher is None
+    ):
         return None
 
     return _OnCreatedCallbackFactory(
         session_store=session_store,
         cf_client=cf_client,
         paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
 
 
@@ -859,7 +969,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         if session_store_for_token and account_id:
             token = session_store_for_token.get_access_token(account_id)
             access_token = str(token) if token else ""
-        version = resolve_template_version(git_url, branch)
+        version = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Build a post-creation callback that injects the tunnel token
     on_created = _build_on_created_callback(request, account_id)
@@ -2003,6 +2113,7 @@ def create_desktop_client(
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
+    root_concurrency_group: ConcurrencyGroup | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -2065,6 +2176,7 @@ def create_desktop_client(
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    app.state.root_concurrency_group = root_concurrency_group
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
     # events produced between stream_manager.start() and uvicorn.run()) see a
