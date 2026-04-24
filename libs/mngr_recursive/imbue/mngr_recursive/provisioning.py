@@ -248,9 +248,13 @@ def _install_mngr_editable_local(
     """Install mngr in editable mode on a local host by pointing directly at the source tree."""
     quoted_root = shlex.quote(str(repo_root))
 
-    # Discover which mngr plugin libs exist in the repo
+    # Discover which mngr plugin libs exist in the repo (must have pyproject.toml)
     libs_dir = repo_root / "libs"
-    lib_names = [d.name for d in libs_dir.iterdir() if d.is_dir()] if libs_dir.is_dir() else []
+    lib_names = [
+        d.name
+        for d in libs_dir.iterdir()
+        if d.is_dir() and (d / "pyproject.toml").exists()
+    ] if libs_dir.is_dir() else []
 
     install_parts = [f"{_UV_PATH_PREFIX}{uv_env}cd {quoted_root} && uv tool install -e libs/mngr"]
     for lib_name in lib_names:
@@ -302,8 +306,11 @@ def _install_mngr_editable_remote(
                 raise MngrError(f"Failed to extract mngr tarball: {result.stderr.strip()}")
 
             # Build the install command with editable installs for all workspace packages
-            # First, discover which libs exist in the tarball
-            ls_result = host.execute_idempotent_command(f"ls {remote_repo_dir}/libs/")
+            # First, discover which libs exist in the tarball (must have pyproject.toml)
+            ls_result = host.execute_idempotent_command(
+                f"for d in {remote_repo_dir}/libs/mngr_*/; do "
+                f'[ -f "$d/pyproject.toml" ] && basename "$d"; done'
+            )
             if not ls_result.success:
                 raise MngrError(f"Failed to list mngr libs: {ls_result.stderr.strip()}")
 
