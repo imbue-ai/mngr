@@ -10,13 +10,21 @@ umask 077
 
 PASS_THROUGH='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
+log_err() {
+    printf 'spawn_proxy_subagent: %s\n' "$*" >&2
+}
+
 emit_pass_through() {
     printf '%s\n' "$PASS_THROUGH"
     exit 0
 }
 
-log_err() {
-    printf 'spawn_proxy_subagent: %s\n' "$*" >&2
+emit_depth_limit_pass_through() {
+    local depth="$1"
+    local max_depth="$2"
+    log_err "depth ${depth}/${max_depth} reached, passing through to native Task"
+    printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"systemMessage\":\"mngr_subagent_proxy: depth limit (${depth}/${max_depth}) reached; running native Claude Task instead of mngr-owned subagent.\"}}"
+    exit 0
 }
 
 trap 'log_err "unexpected failure at line $LINENO"; emit_pass_through' ERR
@@ -50,7 +58,7 @@ MAX_DEPTH="${MNGR_MAX_SUBAGENT_DEPTH:-3}"
 case "$DEPTH" in ''|*[!0-9]*) DEPTH=0 ;; esac
 case "$MAX_DEPTH" in ''|*[!0-9]*) MAX_DEPTH=3 ;; esac
 if [ "$DEPTH" -ge "$MAX_DEPTH" ]; then
-    emit_pass_through
+    emit_depth_limit_pass_through "$DEPTH" "$MAX_DEPTH"
 fi
 
 TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // empty')
