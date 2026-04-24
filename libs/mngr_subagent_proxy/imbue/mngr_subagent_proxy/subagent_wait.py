@@ -39,7 +39,7 @@ class TargetNotFoundError(SubagentWaitError):
 
 
 @dataclass
-class _AgentLocation:
+class AgentLocation:
     """Paths for a located mngr agent, rooted in the local host dir."""
 
     host_dir: Path
@@ -69,7 +69,7 @@ class _AgentLocation:
 
 
 @dataclass
-class _TailState:
+class TailState:
     """Mutable state tracking a single JSONL transcript tail."""
 
     session_id: str | None = None
@@ -112,7 +112,7 @@ def _find_agent_by_name(agents: list[dict], target_name: str) -> dict | None:
     return None
 
 
-def _locate_target(target_name: str) -> _AgentLocation | None:
+def _locate_target(target_name: str) -> AgentLocation | None:
     """Look up the target agent via `mngr list` and return its paths, or None if missing."""
     agents = _run_mngr_list()
     agent = _find_agent_by_name(agents, target_name)
@@ -123,14 +123,14 @@ def _locate_target(target_name: str) -> _AgentLocation | None:
     work_dir_str = agent.get("work_dir")
     if not isinstance(agent_id, str) or not isinstance(work_dir_str, str):
         raise SubagentWaitError(f"mngr list entry for {target_name} missing id or work_dir")
-    return _AgentLocation(
+    return AgentLocation(
         host_dir=read_default_host_dir(),
         agent_id=agent_id,
         work_dir=Path(work_dir_str),
     )
 
 
-def _wait_for_target(target_name: str, deadline: float) -> _AgentLocation:
+def _wait_for_target(target_name: str, deadline: float) -> AgentLocation:
     """Poll `mngr list` until the target appears or the deadline passes."""
     last_error: SubagentWaitError | None = None
     while time.monotonic() < deadline:
@@ -149,7 +149,7 @@ def _wait_for_target(target_name: str, deadline: float) -> _AgentLocation:
     raise TargetNotFoundError(f"Target agent {target_name} never appeared in mngr list")
 
 
-def _read_session_id(location: _AgentLocation) -> str | None:
+def _read_session_id(location: AgentLocation) -> str | None:
     """Read the current Claude session id from the atomic session file."""
     try:
         content = location.session_id_file.read_text()
@@ -162,7 +162,7 @@ def _read_session_id(location: _AgentLocation) -> str | None:
     return session_id or None
 
 
-def _read_new_jsonl_lines(state: _TailState) -> list[dict]:
+def read_new_jsonl_lines(state: TailState) -> list[dict]:
     """Read any new lines appended to the tracked JSONL path since the last offset."""
     path = state.path
     if path is None:
@@ -212,7 +212,7 @@ def _read_new_jsonl_lines(state: _TailState) -> list[dict]:
     return parsed
 
 
-def _refresh_tail_path(state: _TailState, location: _AgentLocation) -> None:
+def _refresh_tail_path(state: TailState, location: AgentLocation) -> None:
     """Re-resolve the transcript path from the current session id, resetting offsets on change."""
     new_session_id = _read_session_id(location)
     if new_session_id is None:
@@ -228,7 +228,7 @@ def _refresh_tail_path(state: _TailState, location: _AgentLocation) -> None:
     state.pending_buffer = ""
 
 
-def _is_end_turn_event(event: dict) -> bool:
+def is_end_turn_event(event: dict) -> bool:
     """Return True for an assistant stop_reason=end_turn message with no tool_use blocks."""
     if event.get("type") != "assistant":
         return False
@@ -246,7 +246,7 @@ def _is_end_turn_event(event: dict) -> bool:
     return True
 
 
-def _extract_assistant_text(event: dict) -> str:
+def extract_assistant_text(event: dict) -> str:
     """Concatenate text blocks from an assistant message event."""
     message = event.get("message")
     if not isinstance(message, dict):
@@ -270,7 +270,7 @@ def _is_user_event(event: dict) -> bool:
     return event.get("type") == "user"
 
 
-def _truncate_result_text(text: str, max_chars: int) -> str:
+def truncate_result_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     budget = max(max_chars - len(_RESULT_TRUNCATION_SUFFIX), 0)
@@ -291,7 +291,7 @@ def _get_result_max_chars() -> int:
     return value
 
 
-def _write_heartbeat(location: _AgentLocation, now: float) -> None:
+def _write_heartbeat(location: AgentLocation, now: float) -> None:
     try:
         location.heartbeat_log.parent.mkdir(parents=True, exist_ok=True)
         with location.heartbeat_log.open("a") as handle:
@@ -305,9 +305,9 @@ class _WaitRuntime:
     """Mutable loop state for the polling wait."""
 
     target_name: str
-    location: _AgentLocation
+    location: AgentLocation
     permissions_previously_waiting: bool
-    tail_state: _TailState = field(default_factory=_TailState)
+    tail_state: TailState = field(default_factory=TailState)
     pending_end_turn_text: str | None = None
     pending_end_turn_deadline: float | None = None
     last_heartbeat_at: float = 0.0
@@ -322,8 +322,8 @@ def _process_new_events(
 ) -> None:
     """Update pending end-turn state based on newly observed transcript events."""
     for event in events:
-        if _is_end_turn_event(event):
-            runtime.pending_end_turn_text = _extract_assistant_text(event)
+        if is_end_turn_event(event):
+            runtime.pending_end_turn_text = extract_assistant_text(event)
             runtime.pending_end_turn_deadline = now + _END_TURN_SETTLE_SECONDS
         elif _is_user_event(event) and runtime.pending_end_turn_text is not None:
             logger.info("New user event during settle window; discarding pending end_turn")
@@ -358,7 +358,7 @@ def _check_target_still_present(runtime: _WaitRuntime, now: float) -> bool:
     return False
 
 
-def _resolve_destroyed_result(target_name: str, location: _AgentLocation) -> str:
+def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     """Build the END_TURN payload for an agent that was destroyed before completing."""
     preserved_dir = get_preserved_sessions_dir_for_host(
         location.host_dir, AgentName(target_name), AgentId(location.agent_id)
@@ -411,7 +411,7 @@ def wait_for_subagent(target_name: str) -> str:
             _refresh_tail_path(runtime.tail_state, location)
             runtime.last_session_id_check_at = now
 
-        new_events = _read_new_jsonl_lines(runtime.tail_state)
+        new_events = read_new_jsonl_lines(runtime.tail_state)
         if new_events:
             _process_new_events(runtime, new_events, now)
 
@@ -423,12 +423,12 @@ def wait_for_subagent(target_name: str) -> str:
             and runtime.pending_end_turn_deadline is not None
             and now >= runtime.pending_end_turn_deadline
         ):
-            truncated = _truncate_result_text(runtime.pending_end_turn_text, max_chars)
+            truncated = truncate_result_text(runtime.pending_end_turn_text, max_chars)
             return f"END_TURN:{truncated}"
 
         if _check_target_still_present(runtime, now):
-            destroyed_text = _resolve_destroyed_result(target_name, location)
-            truncated = _truncate_result_text(destroyed_text, max_chars)
+            destroyed_text = resolve_destroyed_result(target_name, location)
+            truncated = truncate_result_text(destroyed_text, max_chars)
             return f"END_TURN:{truncated}"
 
         time.sleep(_POLL_INTERVAL_SECONDS)
