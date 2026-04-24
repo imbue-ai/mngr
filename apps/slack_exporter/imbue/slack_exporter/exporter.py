@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Any
@@ -349,7 +350,7 @@ def _resolve_recently_active_channels(
 def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     """Run the full export process: load state, resolve channels, fetch new messages, save."""
     existing_channel_by_id = load_existing_channels(settings.output_dir)
-    state_by_channel_id, known_message_keys = load_existing_message_state(settings.output_dir)
+    state_by_channel_id, known_message_keys, existing_message_by_key = load_existing_message_state(settings.output_dir)
     existing_user_by_id = load_existing_users(settings.output_dir)
     known_reply_keys = load_existing_reply_keys(settings.output_dir)
     existing_reactions = load_existing_reactions(settings.output_dir)
@@ -488,11 +489,13 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
                 known_message_keys=known_message_keys,
                 known_reply_keys=known_reply_keys,
                 known_relevant_reply_keys=known_relevant_reply_keys,
+                existing_message_by_key=existing_message_by_key,
                 latest_reply_by_thread=latest_reply_by_thread,
                 channel_export_metadata=channel_export_metadata,
                 existing_reactions=existing_reactions,
                 existing_relevant_threads=existing_relevant_threads,
                 user_id=self_identity.user_id,
+                now=now,
                 settings=settings,
                 api_caller=api_caller,
             )
@@ -516,11 +519,13 @@ def _export_single_channel(
     known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]],
     known_reply_keys: set[tuple[SlackChannelId, SlackMessageTimestamp, SlackMessageTimestamp]],
     known_relevant_reply_keys: set[tuple[SlackChannelId, SlackMessageTimestamp, SlackMessageTimestamp]],
+    existing_message_by_key: dict[tuple[SlackChannelId, SlackMessageTimestamp], MessageEvent],
     latest_reply_by_thread: dict[tuple[SlackChannelId, SlackMessageTimestamp], SlackMessageTimestamp],
     channel_export_metadata: dict[SlackChannelId, SlackMessageTimestamp],
     existing_reactions: dict[str, ReactionEvent],
     existing_relevant_threads: dict[str, RelevantThreadEvent],
     user_id: SlackUserId,
+    now: datetime,
     settings: ExporterSettings,
     api_caller: SlackApiCaller,
 ) -> list[RelevantThreadEvent]:
@@ -581,8 +586,31 @@ def _export_single_channel(
     else:
         logger.info("  No new messages in channel %s", channel_config.name)
 
-    # Extract reactions from fetched messages (no extra API calls needed)
-    message_reactions = _extract_reactions_from_messages(all_fetched)
+    # Refresh pass: re-fetch recent history up to (but not past) the forward cursor so that
+    # new replies / edits to already-exported parent messages are noticed. Without this,
+    # messages whose key is already stored never get re-examined and their reply_count /
+    # latest_reply fields stay frozen at whatever we saw on first export.
+    refresh_fetched = _refresh_window_fetch(
+        channel_id=channel_id,
+        channel_name=channel_config.name,
+        existing_state=existing_state,
+        requested_oldest_ts=requested_oldest_ts,
+        now=now,
+        refresh_window_days=settings.refresh_window_days,
+        api_caller=api_caller,
+    )
+    if refresh_fetched:
+        _save_refreshed_messages(
+            refresh_fetched=refresh_fetched,
+            known_message_keys=known_message_keys,
+            existing_message_by_key=existing_message_by_key,
+            output_dir=settings.output_dir,
+            channel_name=channel_config.name,
+        )
+
+    # Extract reactions from fetched messages (no extra API calls needed). The refreshed
+    # set may include updated reaction data on older parents, so include it here too.
+    message_reactions = _extract_reactions_from_messages(all_fetched + refresh_fetched)
     if message_reactions:
         _diff_and_save(
             fresh_items=message_reactions,
@@ -594,11 +622,12 @@ def _export_single_channel(
             entity_name="reactions",
         )
 
-    # Export replies and detect relevant threads (reply reactions deferred to end of export)
+    # Export replies and detect relevant threads (reply reactions deferred to end of export).
+    # Include refresh_fetched so threads newly created on older parents are picked up.
     relevant_threads, thread_replies = _export_replies_for_channel(
         channel_id=channel_id,
         channel_name=channel_config.name,
-        all_message_events=all_fetched,
+        all_message_events=all_fetched + refresh_fetched,
         known_reply_keys=known_reply_keys,
         latest_reply_by_thread=latest_reply_by_thread,
         user_id=user_id,
@@ -749,6 +778,85 @@ def _fetch_all_replies_for_thread(
         for raw in raw_replies
         if raw.get("ts")
     ]
+
+
+def _refresh_window_fetch(
+    channel_id: SlackChannelId,
+    channel_name: SlackChannelName,
+    existing_state: ChannelExportState | None,
+    requested_oldest_ts: SlackMessageTimestamp,
+    now: datetime,
+    refresh_window_days: int | None,
+    api_caller: SlackApiCaller,
+) -> list[MessageEvent]:
+    """Re-fetch recent history up to (and including) the forward-fetch cursor.
+
+    Returns messages from the window [max(requested_oldest, now - window), cursor], which
+    is precisely the slice where the forward fetch did not run and where parent metadata
+    may have changed since last export.
+
+    Returns an empty list when disabled, on first runs for a channel (where the forward
+    fetch already covered everything), or when the window doesn't reach back past the
+    cursor.
+    """
+    if refresh_window_days is None or existing_state is None or existing_state.latest_message_timestamp is None:
+        return []
+    window_oldest_dt = now - timedelta(days=refresh_window_days)
+    window_oldest_ts = _datetime_to_slack_timestamp(window_oldest_dt)
+    # If the window starts after our cursor, there's nothing to refresh -- the forward fetch
+    # already covered that range.
+    if window_oldest_ts >= existing_state.latest_message_timestamp:
+        return []
+    effective_oldest_ts = max(window_oldest_ts, requested_oldest_ts)
+    logger.info(
+        "  Refreshing history window [%s, %s] for channel %s",
+        effective_oldest_ts,
+        existing_state.latest_message_timestamp,
+        channel_name,
+    )
+    return _fetch_all_messages_for_channel(
+        channel_id=channel_id,
+        channel_name=channel_name,
+        oldest_ts=effective_oldest_ts,
+        is_inclusive=True,
+        api_caller=api_caller,
+        latest_ts=existing_state.latest_message_timestamp,
+    )
+
+
+def _save_refreshed_messages(
+    refresh_fetched: list[MessageEvent],
+    known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]],
+    existing_message_by_key: dict[tuple[SlackChannelId, SlackMessageTimestamp], MessageEvent],
+    output_dir: Path,
+    channel_name: SlackChannelName,
+) -> None:
+    """Persist refreshed parent messages: new keys go to created+updated, changed raws go
+    to updated only, unchanged are skipped so the store stays honest."""
+    new_messages: list[MessageEvent] = []
+    updated_messages: list[MessageEvent] = []
+    for msg in refresh_fetched:
+        key = (msg.channel_id, msg.message_ts)
+        if key not in known_message_keys:
+            new_messages.append(msg)
+            continue
+        existing = existing_message_by_key.get(key)
+        if existing is None or existing.raw != msg.raw:
+            updated_messages.append(msg)
+
+    if new_messages:
+        save_message_events(output_dir, StreamType.CREATED, new_messages)
+    all_to_update = new_messages + updated_messages
+    if all_to_update:
+        save_message_events(output_dir, StreamType.UPDATED, all_to_update)
+    if new_messages:
+        logger.info("  Refresh: saved %d newly-discovered messages in channel %s", len(new_messages), channel_name)
+    if updated_messages:
+        logger.info(
+            "  Refresh: saved %d updated messages in channel %s (e.g. new reply_count)",
+            len(updated_messages),
+            channel_name,
+        )
 
 
 def _fetch_all_messages_for_channel(
