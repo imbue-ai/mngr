@@ -28,7 +28,7 @@ This reads from `.minds/production/litellm.sh` and creates a `litellm-production
 scripts/deploy_litellm.sh production
 ```
 
-This runs `modal deploy apps/modal_litellm/app.py` with `MNGR_DEPLOY_ENV=production`.
+This runs `uv run modal deploy apps/modal_litellm/app.py` with `MNGR_DEPLOY_ENV=production`.
 
 ### 3. First-time DB migration
 
