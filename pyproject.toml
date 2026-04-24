@@ -170,6 +170,8 @@ omit = [
     # Schedule plugin cron runner and verification run on Modal and require infrastructure to test
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/cron_runner.py",
     "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",
+    # Test utilities shared by release tests
+    "libs/mngr_schedule/imbue/mngr_schedule/testing.py",
     # don't bother with anything in scripts
     "scripts/*",
 ]
