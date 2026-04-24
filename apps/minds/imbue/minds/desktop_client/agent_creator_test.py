@@ -1,11 +1,9 @@
 import queue as queue_mod
-import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler
-from http.server import HTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -545,34 +543,14 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(tmp_path: Path
 # -- workspace_ready HTTP probe tests --
 
 
-def _start_local_http_server() -> tuple[HTTPServer, str]:
-    """Start a minimal HTTP server on a free local port.
-
-    Returns the server (for shutdown) and its base URL. Any GET returns 200,
-    which is what the probe needs to classify the server as "serving HTTP".
-    """
-
-    class _Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-
-        def log_message(self, format: str, *args: object) -> None:
-            # Silence access logs in test output.
-            pass
-
-    server = HTTPServer(("127.0.0.1", 0), _Handler)
-    port = server.server_port
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, f"http://127.0.0.1:{port}"
+def _mock_transport_always_connect_error(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server whose URL is registered but the port isn't up yet."""
+    raise httpx.ConnectError("connection refused")
 
 
-def _find_unused_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _mock_transport_always_ok(request: httpx.Request) -> httpx.Response:
+    """Simulate a workspace server that's answering HTTP."""
+    return httpx.Response(200, text="ok")
 
 
 def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(tmp_path: Path) -> None:
@@ -586,9 +564,8 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(tmp_path:
     responds.
     """
     agent_id = AgentId()
-    unused_port = _find_unused_local_port()
     resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"system_interface": f"http://127.0.0.1:{unused_port}"}},
+        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
     )
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
@@ -597,6 +574,7 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(tmp_path:
         workspace_ready_poll_interval_seconds=0.01,
         workspace_ready_probe_timeout_seconds=0.05,
     )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_connect_error))
 
     start = time.monotonic()
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
@@ -609,19 +587,15 @@ def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(tmp_path:
 def test_wait_for_workspace_ready_returns_true_once_server_answers(tmp_path: Path) -> None:
     """Once the HTTP probe gets a response, readiness is satisfied."""
     agent_id = AgentId()
-    server, url = _start_local_http_server()
-    try:
-        resolver = StaticBackendResolver(
-            url_by_agent_and_service={str(agent_id): {"system_interface": url}},
-        )
-        creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-            backend_resolver=resolver,
-            workspace_ready_timeout_seconds=2.0,
-            workspace_ready_poll_interval_seconds=0.01,
-            workspace_ready_probe_timeout_seconds=0.5,
-        )
-        assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
-    finally:
-        server.shutdown()
-        server.server_close()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"system_interface": "http://workspace-backend"}},
+    )
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
+        workspace_ready_timeout_seconds=2.0,
+        workspace_ready_poll_interval_seconds=0.01,
+    )
+    creator._probe_http_client = httpx.Client(transport=httpx.MockTransport(_mock_transport_always_ok))
+
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True

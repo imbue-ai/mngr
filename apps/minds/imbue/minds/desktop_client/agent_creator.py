@@ -438,6 +438,11 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # HTTP client used by _probe_workspace_http. Reused across polls so we
+    # don't pay the connection-pool setup cost on every tick. Tests may
+    # replace it with an ``httpx.Client(transport=httpx.MockTransport(...))``
+    # to inject a programmed response without binding a real port.
+    _probe_http_client: httpx.Client = PrivateAttr(default_factory=httpx.Client)
 
     def start_creation(
         self,
@@ -518,11 +523,19 @@ class AgentCreator(MutableModel):
         handles those cases.
         """
         try:
-            with httpx.Client(timeout=self.workspace_ready_probe_timeout_seconds) as client:
-                client.get(url)
+            self._probe_http_client.get(url, timeout=self.workspace_ready_probe_timeout_seconds)
         except httpx.TransportError:
             return False
         return True
+
+    def _is_workspace_ready_once(self, agent_id: AgentId) -> bool:
+        """One-shot check used by ``_wait_for_workspace_ready``'s poll loop."""
+        url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+        if url is None:
+            return False
+        if not self.workspace_ready_probe_enabled:
+            return True
+        return self._probe_workspace_http(url)
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
         """Block until the agent's workspace server is serving HTTP.
@@ -547,17 +560,8 @@ class AgentCreator(MutableModel):
         background thread) so that status stays in CREATING and the
         creating-progress page keeps streaming logs until the server is up.
         """
-
-        def _is_ready() -> bool:
-            url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
-            if url is None:
-                return False
-            if not self.workspace_ready_probe_enabled:
-                return True
-            return self._probe_workspace_http(url)
-
         if poll_until(
-            _is_ready,
+            lambda: self._is_workspace_ready_once(agent_id),
             timeout=self.workspace_ready_timeout_seconds,
             poll_interval=self.workspace_ready_poll_interval_seconds,
         ):
