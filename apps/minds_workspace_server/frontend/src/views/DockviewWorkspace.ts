@@ -147,8 +147,8 @@ function createCustomTab(options: { id: string; name: string }): {
     api: {
       close: () => void;
       onDidTitleChange: (cb: (e: { title: string }) => void) => { dispose: () => void };
-      isActive: boolean;
-      onDidActiveChange: (cb: (e: { isActive: boolean }) => void) => { dispose: () => void };
+      isVisible: boolean;
+      onDidVisibilityChange: (cb: (e: { isVisible: boolean }) => void) => { dispose: () => void };
     };
   }) => void;
   dispose: () => void;
@@ -238,14 +238,16 @@ function createCustomTab(options: { id: string; name: string }): {
         }),
       );
 
-      // Show/hide actions based on active state
-      function updateActionsVisibility(isActive: boolean): void {
-        actions.style.display = isActive ? "flex" : "none";
+      // Show/hide actions based on visibility -- any panel whose content is
+      // currently displayed (including non-focused panes in a split layout)
+      // shows its action buttons.
+      function updateActionsVisibility(isVisible: boolean): void {
+        actions.style.display = isVisible ? "flex" : "none";
       }
-      updateActionsVisibility(params.api.isActive);
+      updateActionsVisibility(params.api.isVisible);
       disposables.push(
-        params.api.onDidActiveChange((event) => {
-          updateActionsVisibility(event.isActive);
+        params.api.onDidVisibilityChange((event) => {
+          updateActionsVisibility(event.isVisible);
         }),
       );
     },
