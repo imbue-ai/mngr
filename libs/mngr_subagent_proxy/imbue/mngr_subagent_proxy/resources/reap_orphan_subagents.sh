@@ -86,8 +86,12 @@ for map_file in "${MAP_FILES[@]}"; do
 
     case "$state_upper" in
         DONE|STOPPED|FAILED|DESTROYED|TERMINATED)
-            uv run mngr destroy "$target" --yes \
-                >/dev/null 2>>"$STATE_DIR/subagent_destroy.log" || true
+            # Detach so the SessionStart hook does not block on mngr destroy
+            # latency; mirrors the pattern in rewrite_subagent_result.sh.
+            (
+                nohup uv run mngr destroy "$target" --yes \
+                    >/dev/null 2>>"$STATE_DIR/subagent_destroy.log" &
+            ) </dev/null >/dev/null 2>&1
             cleanup_tid "$tid"
             ;;
         *)
