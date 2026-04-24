@@ -909,18 +909,21 @@ def test_dispatch_command_unmark_key_removes_mark() -> None:
 
 
 def test_dispatch_command_execute_key_with_marks() -> None:
-    # Register a real "d" command so _start_batch_execution has work to submit.
-    # With loop=None, the future is submitted but never polled, so executing stays True.
-    mark_cmd = CustomCommand(name="do-thing", command="echo hi")
-    state = _make_state(commands={"d": mark_cmd})
-    state.marks = {AgentName("a"): "d"}
+    # Use a non-builtin key ("z") so the batch goes through the individual-work
+    # path, not _start_batch_execution's hardcoded delete branch (which would
+    # submit a real `mngr destroy` subprocess). Use `command="true"` so the
+    # submitted subprocess exits immediately, and wait for the executor on
+    # cleanup so nothing outlives the test.
+    mark_cmd = CustomCommand(name="do-thing", command="true")
+    state = _make_state(commands={"z": mark_cmd})
+    state.marks = {AgentName("a"): "z"}
     execute_cmd = CustomCommand(name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
-    # Should start batch execution (sets executing=True)
+    # Should start batch execution (sets executing=True; with loop=None the
+    # future is submitted but never polled, so executing stays True).
     assert state.executing is True
-    # Clean up the executor to avoid resource warnings
     if state.executor is not None:
-        state.executor.shutdown(wait=False)
+        state.executor.shutdown(wait=True)
 
 
 # =============================================================================
