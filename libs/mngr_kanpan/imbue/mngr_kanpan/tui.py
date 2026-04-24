@@ -1434,16 +1434,7 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     must not be settable from TOML.
     """
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-    result: dict[str, CustomCommand] = {}
-    for key, value in config.commands.items():
-        if isinstance(value, CustomCommand):
-            cmd = value
-        elif isinstance(value, dict):
-            cmd = CustomCommand(**value)
-        else:
-            continue
-        result[key] = cmd.model_copy(update={"is_builtin": False})
-    return result
+    return {key: cmd.model_copy(update={"is_builtin": False}) for key, cmd in config.commands.items()}
 
 
 def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
