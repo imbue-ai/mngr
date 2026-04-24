@@ -75,7 +75,7 @@ _BIFROST_BINARY = "bifrost-http"
 _BIFROST_NPM_VERSION = "1.6.2"
 
 _BIFROST_ADMIN_BASE = f"http://{_BIFROST_HOST}:{_BIFROST_PORT}"
-_BIFROST_STARTUP_TIMEOUT_SECONDS = 60.0
+_BIFROST_STARTUP_TIMEOUT_SECONDS = 300.0
 _BIFROST_STARTUP_POLL_INTERVAL_SECONDS = 0.25
 
 # Max virtual keys returned per list-keys call. The handler further filters
