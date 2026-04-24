@@ -1,12 +1,16 @@
 import json
 import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 from typing import cast
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventType
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
@@ -21,6 +25,8 @@ from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
 from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import _rotate_discovery_events_if_needed
+from imbue.mngr.api.discovery_events import _run_periodic_snapshot_loop
+from imbue.mngr.api.discovery_events import _write_unfiltered_full_snapshot_logged
 from imbue.mngr.api.discovery_events import append_discovery_event
 from imbue.mngr.api.discovery_events import discovered_agent_from_agent_details
 from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
@@ -40,16 +46,26 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -768,6 +784,173 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
 
     # The tail should have picked up the new event
     assert len(captured_lines) == 1
+
+
+# =============================================================================
+# Provider-error tolerance tests
+#
+# Regression tests for a production bug: a Modal gRPC DNS failure (wrapped in
+# ModalProxyError(Exception) -- neither BaseMngrError nor OSError) escaped the
+# narrow except clauses in the discovery stream, killed the observe subprocess,
+# and left every downstream client frozen on a stale snapshot. The fix requires
+# that any exception from a provider be caught, logged with traceback, and the
+# polling loop continue.
+# =============================================================================
+
+
+def test_run_periodic_snapshot_loop_survives_generic_exception() -> None:
+    """A plain Exception from snapshot_fn must not stop the loop."""
+    calls: list[int] = []
+    stop_event = threading.Event()
+
+    def snapshot_fn() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("simulated transient provider failure")
+        if len(calls) >= 2:
+            stop_event.set()
+
+    _run_periodic_snapshot_loop(snapshot_fn, stop_event, poll_interval_seconds=0.01)
+
+    # Both the failing and the subsequent successful call happened
+    assert len(calls) >= 2
+
+
+def test_run_periodic_snapshot_loop_logs_traceback_on_generic_exception() -> None:
+    """Provider failures must be logged at ERROR with a traceback."""
+    stop_event = threading.Event()
+    call_count = 0
+
+    def snapshot_fn() -> None:
+        nonlocal call_count
+        call_count += 1
+        stop_event.set()
+        raise ValueError("simulated transient provider failure")
+
+    with capture_loguru(level="ERROR") as log_output:
+        _run_periodic_snapshot_loop(snapshot_fn, stop_event, poll_interval_seconds=0.01)
+
+    assert call_count == 1
+    output = log_output.getvalue()
+    assert "Discovery stream poll failed" in output
+    assert "simulated transient provider failure" in output
+    # Traceback should include both the exception class and the raising frame.
+    assert "ValueError" in output
+    assert "snapshot_fn" in output
+
+
+def test_run_periodic_snapshot_loop_exits_when_stop_event_set_before_work() -> None:
+    """If stop_event is already set, the loop must exit without calling snapshot_fn."""
+    stop_event = threading.Event()
+    stop_event.set()
+    call_count = 0
+
+    def snapshot_fn() -> None:
+        nonlocal call_count
+        call_count += 1
+
+    _run_periodic_snapshot_loop(snapshot_fn, stop_event, poll_interval_seconds=0.01)
+
+    assert call_count == 0
+
+
+# --- Broken-provider backend plumbing for the initial-sync regression test ---
+
+
+class _RaisingGenericProviderInstance(MockProviderInstance):
+    """Provider whose discovery raises a plain Exception.
+
+    Neither a ``BaseMngrError`` nor an ``OSError`` -- chosen specifically to
+    escape the pre-fix narrow excepts and reproduce the Modal gRPC failure
+    mode that motivated this regression test.
+    """
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ValueError("simulated transient provider failure")
+
+
+_RAISING_GENERIC_BACKEND_NAME = ProviderBackendName("test-raising-generic-backend")
+
+
+class _RaisingGenericProviderBackend(ProviderBackendInterface):
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _RAISING_GENERIC_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that raises a plain Exception during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _RaisingGenericProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+@contextmanager
+def _raising_generic_backend(mngr_ctx: MngrContext) -> Generator[MngrContext, None, None]:
+    """Register a backend that always raises, wire it into a fresh MngrContext."""
+    _backend_registry[_RAISING_GENERIC_BACKEND_NAME] = _RaisingGenericProviderBackend
+    _provider_config_registry[_RAISING_GENERIC_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        failing_config = ProviderInstanceConfig(backend=_RAISING_GENERIC_BACKEND_NAME)
+        updated_config = mngr_ctx.config.model_copy_update(
+            to_update(
+                mngr_ctx.config.field_ref().providers,
+                {ProviderInstanceName("raising-generic"): failing_config},
+            ),
+        )
+        failing_ctx = mngr_ctx.model_copy_update(
+            to_update(mngr_ctx.field_ref().config, updated_config),
+        )
+        yield failing_ctx
+    finally:
+        del _backend_registry[_RAISING_GENERIC_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_GENERIC_BACKEND_NAME]
+
+
+def test_write_unfiltered_full_snapshot_logged_swallows_generic_exception(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Initial-sync path must tolerate arbitrary provider exceptions and log them loudly.
+
+    This is the same code path that runs both synchronously (on first run, no
+    cached snapshot) and in a background thread (when a cached snapshot
+    exists). If it propagates, the observe subprocess dies before Phase 4
+    even starts.
+    """
+    with _raising_generic_backend(temp_mngr_ctx) as failing_ctx:
+        with capture_loguru(level="ERROR") as log_output:
+            _write_unfiltered_full_snapshot_logged(failing_ctx, ErrorBehavior.ABORT)
+
+    output = log_output.getvalue()
+    assert "Initial discovery snapshot failed" in output
+    assert "simulated transient provider failure" in output
+    # Traceback must include the exception type for operator debugging.
+    assert "ValueError" in output
 
 
 # === Discovery Event Rotation Tests ===

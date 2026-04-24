@@ -664,11 +664,41 @@ def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: Error
 
 
 def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
-    """Run an unfiltered full snapshot, logging any errors instead of raising."""
+    """Run an unfiltered full snapshot, logging any errors instead of raising.
+
+    Any provider failure here -- including exceptions outside the BaseMngrError/
+    OSError taxonomies (e.g. ModalProxyError wrapping a gRPC DNS failure) -- is
+    caught and logged with a traceback. Otherwise a transient provider outage
+    at startup would crash the observe subprocess and leave every downstream
+    consumer frozen on a stale snapshot.
+    """
     try:
         _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-    except (BaseMngrError, OSError) as e:
-        logger.warning("Failed to write discovery snapshot: {}", e)
+    except Exception as e:
+        logger.opt(exception=e).error("Initial discovery snapshot failed (continuing): {}", e)
+
+
+def _run_periodic_snapshot_loop(
+    snapshot_fn: Callable[[], None],
+    stop_event: threading.Event,
+    poll_interval_seconds: float,
+) -> None:
+    """Repeatedly invoke snapshot_fn until stop_event is set.
+
+    Any exception from snapshot_fn is logged with its traceback at ERROR and
+    the loop continues. A single provider's transient failure (Modal gRPC DNS
+    outage, Docker daemon restart, etc.) must never take down the discovery
+    stream -- long-lived clients like the minds desktop app consume this
+    subprocess and freeze if it exits.
+    """
+    while not stop_event.is_set():
+        stop_event.wait(timeout=poll_interval_seconds)
+        if stop_event.is_set():
+            break
+        try:
+            snapshot_fn()
+        except Exception as e:
+            logger.opt(exception=e).error("Discovery stream poll failed (continuing): {}", e)
 
 
 def run_discovery_stream(
@@ -735,17 +765,14 @@ def run_discovery_stream(
                 for line in f:
                     _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
 
-    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
+    # Phase 4: periodically re-poll (unfiltered) and write full snapshots.
+    # The tail thread will pick up each new snapshot and emit it.
     try:
-        while not stop_event.is_set():
-            stop_event.wait(timeout=_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
-            if stop_event.is_set():
-                break
-            try:
-                _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-                # The tail thread will pick up the new snapshot and emit it
-            except (BaseMngrError, OSError) as e:
-                logger.warning("Discovery stream poll failed (continuing): {}", e)
+        _run_periodic_snapshot_loop(
+            lambda: _write_unfiltered_full_snapshot(mngr_ctx, error_behavior),
+            stop_event,
+            _DISCOVERY_STREAM_POLL_INTERVAL_SECONDS,
+        )
     except KeyboardInterrupt:
         pass
     finally:
