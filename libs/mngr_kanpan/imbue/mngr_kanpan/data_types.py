@@ -92,6 +92,21 @@ class CustomCommand(FrozenModel):
     )
 
 
+class BuiltinRole(UpperCaseStrEnum):
+    """Discriminator for which builtin a ``BuiltinCommand`` is.
+
+    Dispatch sites in ``tui`` use ``match`` on this; the type checker will
+    flag any missing branch when a new role is added.
+    """
+
+    REFRESH = auto()
+    PUSH = auto()
+    DELETE = auto()
+    MUTE = auto()
+    UNMARK = auto()
+    EXECUTE = auto()
+
+
 class BuiltinCommand(FrozenModel):
     """A kanpan builtin command (delete, push, refresh, mute, unmark, execute).
 
@@ -99,9 +114,14 @@ class BuiltinCommand(FrozenModel):
     ``KanpanCommand`` tagged union routes dispatch by ``isinstance`` so a
     user can never cause their command to reach the builtin-specific runners
     (``_run_destroy``, ``_run_git_push``).
+
+    The ``role`` field identifies which builtin this is; dispatch sites use
+    a ``match`` on ``role`` so the type checker flags any missing branch if
+    a new role is added.
     """
 
     kind: Literal["builtin"] = "builtin"
+    role: BuiltinRole = Field(description="Which builtin this is; drives dispatch in tui._dispatch_command etc.")
     name: str = Field(description="Display name shown in the status bar")
     enabled: bool = Field(default=True, description="Whether this builtin is active")
     markable: bool | str = Field(

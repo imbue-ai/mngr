@@ -31,6 +31,7 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import BuiltinCommand
+from imbue.mngr_kanpan.data_types import BuiltinRole
 from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
@@ -905,7 +906,7 @@ def test_dispatch_command_unmark_key_removes_mark() -> None:
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
-    unmark_cmd = BuiltinCommand(name="unmark")
+    unmark_cmd = BuiltinCommand(role=BuiltinRole.UNMARK, name="unmark")
     state.commands = {_BUILTIN_COMMAND_KEY_UNMARK: unmark_cmd}
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_UNMARK, unmark_cmd)
     assert AgentName("agent-a") not in state.marks
@@ -921,7 +922,7 @@ def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
     mark_cmd = CustomCommand(name="do-thing", command=f"touch {marker}")
     state = _make_state(commands={"z": mark_cmd})
     state.marks = {AgentName("a"): "z"}
-    execute_cmd = BuiltinCommand(name="execute")
+    execute_cmd = BuiltinCommand(role=BuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     # Should start batch execution (sets executing=True; with loop=None the
     # future is submitted but never polled, so executing stays True).
@@ -939,7 +940,7 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
     override = CustomCommand(name="my-delete", command=f"touch {marker}", markable="light red")
     state = _make_state(commands={_BUILTIN_COMMAND_KEY_DELETE: override})
     state.marks = {AgentName("a"): _BUILTIN_COMMAND_KEY_DELETE}
-    execute_cmd = BuiltinCommand(name="execute")
+    execute_cmd = BuiltinCommand(role=BuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     assert state.executing is True
     assert state.executor is not None
@@ -1360,7 +1361,7 @@ def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=BuiltinCommand(name="push", markable="yellow"),
+        cmd=BuiltinCommand(role=BuiltinRole.PUSH, name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1374,7 +1375,7 @@ def test_submit_batch_item_push_no_work_dir() -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=BuiltinCommand(name="push", markable="yellow"),
+        cmd=BuiltinCommand(role=BuiltinRole.PUSH, name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:

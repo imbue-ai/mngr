@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -41,6 +42,7 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import BuiltinCommand
+from imbue.mngr_kanpan.data_types import BuiltinRole
 from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
@@ -151,12 +153,12 @@ _BUILTIN_COMMAND_KEY_UNMARK = "u"
 _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
 _BUILTIN_COMMANDS: dict[str, BuiltinCommand] = {
-    _BUILTIN_COMMAND_KEY_REFRESH: BuiltinCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: BuiltinCommand(name="mark push", markable="yellow"),
-    _BUILTIN_COMMAND_KEY_DELETE: BuiltinCommand(name="mark delete", markable="light red"),
-    _BUILTIN_COMMAND_KEY_MUTE: BuiltinCommand(name="mute"),
-    _BUILTIN_COMMAND_KEY_UNMARK: BuiltinCommand(name="unmark"),
-    _BUILTIN_COMMAND_KEY_EXECUTE: BuiltinCommand(name="execute"),
+    _BUILTIN_COMMAND_KEY_REFRESH: BuiltinCommand(role=BuiltinRole.REFRESH, name="refresh"),
+    _BUILTIN_COMMAND_KEY_PUSH: BuiltinCommand(role=BuiltinRole.PUSH, name="mark push", markable="yellow"),
+    _BUILTIN_COMMAND_KEY_DELETE: BuiltinCommand(role=BuiltinRole.DELETE, name="mark delete", markable="light red"),
+    _BUILTIN_COMMAND_KEY_MUTE: BuiltinCommand(role=BuiltinRole.MUTE, name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: BuiltinCommand(role=BuiltinRole.UNMARK, name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: BuiltinCommand(role=BuiltinRole.EXECUTE, name="execute"),
 }
 
 _DEFAULT_MARK_COLOR = "light cyan"
@@ -597,15 +599,22 @@ def _submit_batch_item(
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
     # Builtin delete / push have dedicated runners; any user override of the
-    # same key falls through to the generic shell-command branch below.
-    if item.key == _BUILTIN_COMMAND_KEY_DELETE and isinstance(item.cmd, BuiltinCommand):
-        names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-        return executor.submit(_run_destroy, names)
-    if item.key == _BUILTIN_COMMAND_KEY_PUSH and isinstance(item.cmd, BuiltinCommand):
-        if item.entry is None or item.entry.work_dir is None:
-            return None
-        return executor.submit(_run_git_push, str(item.entry.work_dir))
-    if isinstance(item.cmd, CustomCommand) and item.cmd.command:
+    # same key lands in the CustomCommand branch below.
+    if isinstance(item.cmd, BuiltinCommand):
+        match item.cmd.role:
+            case BuiltinRole.DELETE:
+                names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+                return executor.submit(_run_destroy, names)
+            case BuiltinRole.PUSH:
+                if item.entry is None or item.entry.work_dir is None:
+                    return None
+                return executor.submit(_run_git_push, str(item.entry.work_dir))
+            case BuiltinRole.REFRESH | BuiltinRole.MUTE | BuiltinRole.UNMARK | BuiltinRole.EXECUTE:
+                # Non-markable builtins never reach batch dispatch.
+                return None
+            case _:
+                assert_never(item.cmd.role)
+    if item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
 
@@ -781,15 +790,26 @@ def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None
         _toggle_mark(state, key)
         return
     if isinstance(cmd, BuiltinCommand):
-        if key == _BUILTIN_COMMAND_KEY_REFRESH:
-            if state.loop is not None and state.refresh_future is None:
-                _start_refresh(state.loop, state)
-        elif key == _BUILTIN_COMMAND_KEY_MUTE:
-            _mute_focused_agent(state)
-        elif key == _BUILTIN_COMMAND_KEY_UNMARK:
-            _unmark_focused(state)
-        elif key == _BUILTIN_COMMAND_KEY_EXECUTE:
-            _execute_marks(state)
+        # Matching on `cmd.role` instead of `key` lets the type checker flag
+        # a missing branch if a new BuiltinRole is added.
+        match cmd.role:
+            case BuiltinRole.REFRESH:
+                if state.loop is not None and state.refresh_future is None:
+                    _start_refresh(state.loop, state)
+            case BuiltinRole.MUTE:
+                _mute_focused_agent(state)
+            case BuiltinRole.UNMARK:
+                _unmark_focused(state)
+            case BuiltinRole.EXECUTE:
+                _execute_marks(state)
+            case BuiltinRole.PUSH | BuiltinRole.DELETE:
+                # Markable builtins are handled by the markable branch above
+                # before this point. Reaching here means a builtin's markable
+                # field was overridden False at construction, which is not a
+                # supported configuration.
+                pass
+            case _:
+                assert_never(cmd.role)
         return
     if cmd.command:
         _run_shell_command(state, cmd)
