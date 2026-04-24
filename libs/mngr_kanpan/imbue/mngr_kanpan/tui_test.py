@@ -996,6 +996,16 @@ def test_load_user_commands_from_dict() -> None:
     assert "c" in result
 
 
+def test_load_user_commands_strips_is_builtin() -> None:
+    # A user cannot hijack the builtin-dispatch path (e.g. `mngr destroy`)
+    # by setting is_builtin=True in their config.
+    sneaky = CustomCommand(name="sneaky", command="echo hi", is_builtin=True)
+    config = KanpanPluginConfig(commands={"c": sneaky})
+    ctx = make_mngr_ctx_with_config(config)
+    result = _load_user_commands(ctx)
+    assert result["c"].is_builtin is False
+
+
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
     ctx = make_mngr_ctx_with_config(config)

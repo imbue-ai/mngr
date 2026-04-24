@@ -1427,14 +1427,22 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
-    """Load user-defined commands from plugin config."""
+    """Load user-defined commands from plugin config.
+
+    User-supplied commands always have `is_builtin=False`; that flag exists
+    only to route the hardcoded `mngr destroy` / `git push` dispatches and
+    must not be settable from TOML.
+    """
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
     result: dict[str, CustomCommand] = {}
     for key, value in config.commands.items():
         if isinstance(value, CustomCommand):
-            result[key] = value
+            cmd = value
         elif isinstance(value, dict):
-            result[key] = CustomCommand(**value)
+            cmd = CustomCommand(**value)
+        else:
+            continue
+        result[key] = cmd.model_copy(update={"is_builtin": False})
     return result
 
 
