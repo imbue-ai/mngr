@@ -44,8 +44,8 @@ _FAKE_LEASE_RESPONSE: Final[dict[str, object]] = {
     "ssh_port": 22,
     "ssh_user": "root",
     "container_ssh_port": 2222,
-    "agent_id": "agent-abc123",
-    "host_id": "host-def456",
+    "agent_id": "agent-abc12300000000000000000000000000",
+    "host_id": "host-def45600000000000000000000000000",
     "version": "v0.1.0",
 }
 

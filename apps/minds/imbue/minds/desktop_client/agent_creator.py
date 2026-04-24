@@ -612,8 +612,9 @@ class AgentCreator(MutableModel):
         via ``--host-env-file`` so local secrets reach the new agent's host.
         The flag is ignored for git URLs (since ``.env`` is gitignored).
 
-        For ``LaunchMode.LEASED``, ``access_token`` and ``version`` are required
-        to lease a pre-provisioned host from the pool.
+        For ``LaunchMode.LEASED``, the host is leased synchronously (fast HTTP
+        call) so that the real agent ID from the pool host is used as the
+        canonical ID. The remaining setup (rename, start) runs in the background.
 
         When ``on_created`` is provided, it is called with the agent ID after the
         agent has been successfully created (but before the status is set to DONE).
@@ -621,14 +622,23 @@ class AgentCreator(MutableModel):
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
         """
-        agent_id = AgentId()
         log_queue: queue.Queue[str] = queue.Queue()
+        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
+        effective_branch = branch.strip()
+
+        lease_result: LeaseHostResult | None = None
+        if launch_mode is LaunchMode.LEASED:
+            agent_id, lease_result = self._lease_host_synchronously(
+                access_token=access_token,
+                version=version,
+                log_queue=log_queue,
+            )
+        else:
+            agent_id = AgentId()
+
         with self._lock:
             self._statuses[str(agent_id)] = AgentCreationStatus.CLONING
             self._log_queues[str(agent_id)] = log_queue
-
-        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
-        effective_branch = branch.strip()
 
         thread = threading.Thread(
             target=self._create_agent_background,
@@ -643,6 +653,7 @@ class AgentCreator(MutableModel):
                 access_token,
                 version,
                 on_created,
+                lease_result,
             ),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
@@ -651,6 +662,37 @@ class AgentCreator(MutableModel):
         with self._lock:
             self._threads.append(thread)
         return agent_id
+
+    def _lease_host_synchronously(
+        self,
+        access_token: str,
+        version: str,
+        log_queue: queue.Queue[str],
+    ) -> tuple[AgentId, LeaseHostResult]:
+        """Lease a host from the pool and return (agent_id, lease_result).
+
+        Runs synchronously so the caller gets the real agent ID from the
+        pool host before setting up status tracking.
+        """
+        if self.host_pool_client is None:
+            raise MngrCommandError("LEASED mode requires a host_pool_client but none is configured")
+        if not access_token:
+            raise MngrCommandError("LEASED mode requires an access_token for authentication")
+        if not version:
+            raise MngrCommandError("LEASED mode requires a version string")
+
+        private_key_path, public_key = _load_or_create_leased_host_keypair(self.paths.data_dir)
+        log_queue.put("[minds] Requesting a leased host (version: {})...".format(version))
+        lease_result = self.host_pool_client.lease_host(access_token, public_key, version)
+        logger.debug(
+            "Leased host: db_id={}, vps_ip={}, agent_id={}, host_id={}",
+            lease_result.host_db_id,
+            lease_result.vps_ip,
+            lease_result.agent_id,
+            lease_result.host_id,
+        )
+        agent_id = AgentId(lease_result.agent_id)
+        return agent_id, lease_result
 
     def wait_for_all(self, timeout: float = 10.0) -> None:
         """Wait for all background creation threads to finish."""
@@ -852,6 +894,7 @@ class AgentCreator(MutableModel):
         access_token: str = "",
         version: str = "",
         on_created: Callable[[AgentId], None] | None = None,
+        lease_result: LeaseHostResult | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
@@ -859,13 +902,15 @@ class AgentCreator(MutableModel):
         host_env_file: Path | None = None
         try:
             if launch_mode is LaunchMode.LEASED:
-                self._create_leased_agent(
+                if lease_result is None:
+                    raise MngrCommandError("LEASED mode requires a lease_result from _lease_host_synchronously")
+                self._setup_leased_agent(
                     agent_id=agent_id,
                     agent_name=agent_name,
                     log_queue=log_queue,
                     emit_log=emit_log,
                     access_token=access_token,
-                    version=version,
+                    lease_result=lease_result,
                     on_created=on_created,
                 )
                 return
@@ -963,62 +1008,35 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
-    def _create_leased_agent(
+    def _setup_leased_agent(
         self,
         agent_id: AgentId,
         agent_name: str,
         log_queue: queue.Queue[str],
         emit_log: OutputCallback,
         access_token: str,
-        version: str,
+        lease_result: LeaseHostResult,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
-        """Lease a pre-provisioned host and start the agent on it."""
+        """Set up a leased host (write dynamic host entry, rename, start)."""
         aid = str(agent_id)
+        private_key_path = _load_or_create_leased_host_keypair(self.paths.data_dir)[0]
 
-        with log_span("Leasing host for agent {} (version: {})", agent_id, version):
-            if self.host_pool_client is None:
-                raise MngrCommandError("LEASED mode requires a host_pool_client but none is configured")
-
-            if not access_token:
-                raise MngrCommandError("LEASED mode requires an access_token for authentication")
-
-            if not version:
-                raise MngrCommandError("LEASED mode requires a version string")
-
-            # Load or generate the SSH keypair
-            log_queue.put("[minds] Loading SSH keypair for leased host...")
-            private_key_path, public_key = _load_or_create_leased_host_keypair(self.paths.data_dir)
-            log_queue.put("[minds] SSH keypair ready at {}".format(private_key_path))
-
-            # Lease a host from the pool
+        with log_span("Setting up leased agent {} on {}", agent_id, lease_result.vps_ip):
             with self._lock:
                 self._statuses[aid] = AgentCreationStatus.CREATING
-            log_queue.put("[minds] Requesting a leased host (version: {})...".format(version))
-            lease_result = self.host_pool_client.lease_host(access_token, public_key, version)
-            logger.debug(
-                "Leased host: db_id={}, vps_ip={}, agent_id={}, host_id={}",
-                lease_result.host_db_id,
-                lease_result.vps_ip,
-                lease_result.agent_id,
-                lease_result.host_id,
-            )
+
             log_queue.put(
                 "[minds] Leased host {} (agent: {}, host: {})".format(
                     lease_result.vps_ip, lease_result.agent_id, lease_result.host_id
                 )
             )
 
-            # All post-lease operations are wrapped in try/except so that any
-            # failure (disk write, mngr rename/start, etc.) triggers cleanup
-            # and releases the host back to the pool.
             dynamic_hosts_file = self.paths.data_dir / "ssh" / "dynamic_hosts.toml"
             host_entry_name = "leased-{}".format(agent_id)
             try:
-                # Persist lease info for later release
                 _save_lease_info(self.paths.data_dir, agent_id, lease_result.host_db_id)
 
-                # Write the dynamic host entry so mngr's SSH provider can discover it
                 _write_dynamic_host_entry(
                     dynamic_hosts_file=dynamic_hosts_file,
                     host_name=host_entry_name,

@@ -73,7 +73,7 @@ def test_lease_host_happy_path(fake_pool_server: HostPoolClient) -> None:
     assert result.host_db_id == UUID("a1b2c3d4-e5f6-7890-1234-567890abcdef")
     assert result.vps_ip == "203.0.113.10"
     assert result.container_ssh_port == 2222
-    assert result.agent_id == "agent-abc123"
+    assert result.agent_id == "agent-abc12300000000000000000000000000"
     assert result.version == "v0.1.0"
 
 

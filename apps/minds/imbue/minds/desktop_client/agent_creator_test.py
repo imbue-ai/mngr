@@ -674,69 +674,52 @@ def test_agent_creator_has_host_pool_client_field(tmp_path: Path) -> None:
     assert creator_with.host_pool_client is not None
 
 
-def test_start_creation_accepts_access_token_and_version(tmp_path: Path) -> None:
-    """start_creation accepts access_token and version kwargs without error."""
+def test_start_creation_leased_raises_without_pool_client(tmp_path: Path) -> None:
+    """start_creation with LEASED mode raises immediately if no host_pool_client."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths)
-    # LEASED mode will fail in the background thread (no host_pool_client),
-    # but start_creation itself should return immediately with an agent ID.
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="test-token",
-        version="v0.1.0",
-    )
-    assert agent_id is not None
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    # Should fail because host_pool_client is None
-    assert info.status == AgentCreationStatus.FAILED
+    with pytest.raises(MngrCommandError, match="host_pool_client"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="v0.1.0",
+        )
 
 
 def test_create_leased_agent_fails_without_access_token(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
 ) -> None:
-    """_create_leased_agent raises when access_token is empty."""
+    """start_creation raises synchronously when access_token is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="",
-        version="v0.1.0",
-    )
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-    assert info.error is not None
-    assert "access_token" in info.error
+    with pytest.raises(MngrCommandError, match="access_token"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="",
+            version="v0.1.0",
+        )
 
 
 def test_create_leased_agent_fails_without_version(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
 ) -> None:
-    """_create_leased_agent raises when version is empty."""
+    """start_creation raises synchronously when version is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
     creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
-    agent_id = creator.start_creation(
-        repo_source="https://example.com/repo.git",
-        agent_name="test",
-        launch_mode=LaunchMode.LEASED,
-        access_token="test-token",
-        version="",
-    )
-    creator.wait_for_all(timeout=5.0)
-    info = creator.get_creation_info(agent_id)
-    assert info is not None
-    assert info.status == AgentCreationStatus.FAILED
-    assert info.error is not None
-    assert "version" in info.error
+    with pytest.raises(MngrCommandError, match="version"):
+        creator.start_creation(
+            repo_source="https://example.com/repo.git",
+            agent_name="test",
+            launch_mode=LaunchMode.LEASED,
+            access_token="test-token",
+            version="",
+        )
 
 
 def test_create_leased_agent_leases_and_writes_dynamic_host(
