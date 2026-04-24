@@ -1444,3 +1444,100 @@ def test_subdomain_forward_pending_workspace_non_html_is_503(tmp_path: Path) -> 
     response = client.get("/api/layout", headers={"accept": "application/json"})
 
     assert response.status_code == 503
+
+
+def _create_subdomain_test_client_with_failing_backend(
+    tmp_path: Path, agent_id: AgentId, backend_error: Exception
+) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client where the workspace backend URL is registered but
+    every forwarded request raises *backend_error*.
+
+    Simulates the window where the agent has written its service URL to
+    events.jsonl but the workspace server itself hasn't finished coming up --
+    either because nothing is listening on the port yet (``httpx.ConnectError``)
+    or because the TCP layer is up but the ASGI app isn't serving HTTP yet
+    (``httpx.RemoteProtocolError``).
+    """
+
+    class _FailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise backend_error
+
+    routing_client = httpx.AsyncClient(transport=_FailingTransport(), follow_redirects=False, timeout=5.0)
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(agent_id),
+        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=routing_client,
+    )
+    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
+    return client, auth_store
+
+
+def test_subdomain_forward_connect_error_html_auto_refreshes(tmp_path: Path) -> None:
+    # The workspace URL is registered but the server isn't listening on the
+    # port yet. HTML navigations must see the auto-refresh placeholder so the
+    # browser keeps reloading until the server is up -- the previous behavior
+    # (502 "connection refused") left the user looking at a dead page.
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.ConnectError("connection refused")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert 'http-equiv="refresh"' in response.text
+    assert "Workspace server not yet available" in response.text
+
+
+def test_subdomain_forward_connect_error_non_html_is_502(tmp_path: Path) -> None:
+    # API clients still get the actionable 502 so they can distinguish
+    # "the workspace endpoint was reached but could not be proxied" from
+    # "the agent has no URL registered yet" (which returns 503).
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.ConnectError("connection refused")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert response.status_code == 502
+
+
+def test_subdomain_forward_remote_protocol_error_html_auto_refreshes(tmp_path: Path) -> None:
+    # The TCP socket accepted the connection but the workspace server closed
+    # it before sending an HTTP response. This is what actually showed up in
+    # practice during creation: the agent-side port was bound but the ASGI
+    # app wasn't serving yet. HTML navigations must auto-refresh rather than
+    # leaving the user on a "disconnected without response" black page.
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert 'http-equiv="refresh"' in response.text
+    assert "Workspace server not yet available" in response.text
+
+
+def test_subdomain_forward_remote_protocol_error_non_html_is_502(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client_with_failing_backend(
+        tmp_path, agent_id, httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert response.status_code == 502

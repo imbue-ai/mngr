@@ -457,6 +457,34 @@ _WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 
+def _workspace_pending_html_response() -> HTMLResponse:
+    """HTML page shown when the workspace server is not yet answering.
+
+    Used for both "resolver has no URL yet" and "URL exists but the server
+    behind it is not serving HTTP yet" (the latter happens during the
+    workspace server's own boot window, where the TCP socket may be
+    accept()ing before the FastAPI app is fully initialized and the
+    forwarder sees ``ConnectError`` / ``RemoteProtocolError``).
+
+    The ``<meta http-equiv="refresh">`` makes the browser reload every
+    second until the forwarder can actually proxy. No JS needed, and no
+    loop runs once forwarding succeeds.
+    """
+    return HTMLResponse(
+        content=(
+            "<!doctype html><html><head>"
+            '<meta http-equiv="refresh" content="1">'
+            "</head><body>"
+            "<p>Workspace server not yet available. Retrying...</p>"
+            "</body></html>"
+        )
+    )
+
+
+def _request_accepts_html(request: Request) -> bool:
+    return "text/html" in request.headers.get("accept", "")
+
+
 def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
     """Return the agent ID if ``host_header`` is ``<agent-id>.localhost(:port)``.
 
@@ -561,10 +589,21 @@ async def _forward_workspace_http(
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except httpx.ConnectError:
+        # TCP-level failure ("nothing listening yet") -- indistinguishable from a
+        # still-booting server at the HTTP layer, so treat it the same as the
+        # "no URL yet" branch: let HTML navigations auto-refresh.
+        if _request_accepts_html(request):
+            return _workspace_pending_html_response()
         return Response(status_code=502, content="Workspace server connection refused")
     except httpx.ReadError:
         return Response(status_code=502, content="Workspace server connection lost")
     except httpx.RemoteProtocolError:
+        # The TCP socket accepted the connection but the server closed it
+        # before sending an HTTP response. This is exactly what uvicorn/ASGI
+        # does during startup between ``bind()`` and the app being ready to
+        # serve. Treat it as transient and auto-refresh for HTML navigations.
+        if _request_accepts_html(request):
+            return _workspace_pending_html_response()
         return Response(status_code=502, content="Workspace server disconnected without response")
     except httpx.TimeoutException:
         return Response(status_code=504, content="Workspace server timed out")
@@ -638,16 +677,8 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
 
     workspace_url = backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
-        if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(
-                content=(
-                    "<!doctype html><html><head>"
-                    '<meta http-equiv="refresh" content="1">'
-                    "</head><body>"
-                    "<p>Workspace server not yet available. Retrying...</p>"
-                    "</body></html>"
-                )
-            )
+        if _request_accepts_html(request):
+            return _workspace_pending_html_response()
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:
