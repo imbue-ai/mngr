@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
 
 
 def _emit(response: dict[str, Any]) -> None:
@@ -37,33 +38,6 @@ def _read_stdin_json() -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
     return parsed
-
-
-def _shell_destroy_detached(target_name: str, log_path: Path) -> None:
-    """Fire-and-forget `uv run mngr destroy <target> --yes`, detached from this process.
-
-    Uses subprocess.Popen with start_new_session=True so the child survives
-    the hook returning. Stderr is appended to log_path for debugging.
-    """
-    try:
-        log_handle = log_path.open("ab")
-    except OSError as e:
-        logger.warning("rewrite: failed to open destroy log {}: {}", log_path, e)
-        log_handle = None
-    # noqa: the ratchet allows subprocess.Popen under check_direct_subprocess
-    try:
-        subprocess.Popen(  # noqa: S603
-            ["uv", "run", "mngr", "destroy", target_name, "--yes"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as e:
-        logger.warning("rewrite: failed to launch mngr destroy: {}", e)
-    finally:
-        if log_handle is not None:
-            log_handle.close()
 
 
 def _best_effort_unlink(path: Path) -> None:
@@ -140,10 +114,10 @@ def main() -> None:
     }
     _emit(response)
 
-    # Best-effort teardown of the mngr subagent, detached.
+    # Best-effort detached teardown of the mngr subagent.
     if target_name:
         destroy_log = state_dir / "subagent_destroy.log"
-        _shell_destroy_detached(target_name, destroy_log)
+        destroy_agent_detached(target_name, destroy_log)
 
     for path in (env_file, prompt_file, map_file, result_file, script_file, init_flag):
         _best_effort_unlink(path)

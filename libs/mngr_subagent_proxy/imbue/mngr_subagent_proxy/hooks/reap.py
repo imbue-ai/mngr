@@ -14,7 +14,12 @@ from pathlib import Path
 
 from loguru import logger
 
-_TERMINAL_STATES: frozenset[str] = frozenset({"DONE", "STOPPED", "FAILED", "DESTROYED", "TERMINATED"})
+from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
+
+_TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})
 
 
 def _map_files(state_dir: Path) -> list[Path]:
@@ -23,54 +28,6 @@ def _map_files(state_dir: Path) -> list[Path]:
     if not map_dir.is_dir():
         return []
     return sorted(p for p in map_dir.glob("*.json") if p.is_file())
-
-
-def _list_agents_via_subprocess() -> list[dict[str, object]]:
-    """Invoke `uv run mngr list --format json` and return the agents list.
-
-    Returns [] on any failure.
-    """
-    try:
-        completed = subprocess.run(  # noqa: S603
-            ["uv", "run", "mngr", "list", "--format", "json"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        logger.warning("reap: mngr list failed: {}", e)
-        return []
-    if completed.returncode != 0:
-        logger.warning("reap: mngr list exited {}: {}", completed.returncode, completed.stderr)
-        return []
-    try:
-        payload = json.loads(completed.stdout or "[]")
-    except json.JSONDecodeError as e:
-        logger.warning("reap: mngr list returned invalid JSON: {}", e)
-        return []
-    if isinstance(payload, list):
-        return [entry for entry in payload if isinstance(entry, dict)]
-    if isinstance(payload, dict):
-        agents = payload.get("agents")
-        if isinstance(agents, list):
-            return [entry for entry in agents if isinstance(entry, dict)]
-    return []
-
-
-def _lookup_lifecycle_state(agents: list[dict[str, object]], target_name: str) -> str | None:
-    """Return the upper-cased lifecycle_state/state/status for target_name, or None if absent."""
-    for agent in agents:
-        name = agent.get("name")
-        if name != target_name:
-            continue
-        for key in ("lifecycle_state", "state", "status"):
-            value = agent.get(key)
-            if isinstance(value, str) and value:
-                return value.upper()
-        return ""
-    return None
 
 
 def _cleanup_tid(state_dir: Path, tid: str) -> None:
@@ -92,29 +49,7 @@ def _cleanup_tid(state_dir: Path, tid: str) -> None:
             logger.warning("reap: failed to remove {}: {}", path, e)
 
 
-def _shell_destroy_detached(target_name: str, destroy_log: Path) -> None:
-    """Fire-and-forget `uv run mngr destroy <target> --yes`."""
-    try:
-        log_handle = destroy_log.open("ab")
-    except OSError as e:
-        logger.warning("reap: failed to open destroy log {}: {}", destroy_log, e)
-        log_handle = None
-    try:
-        subprocess.Popen(  # noqa: S603
-            ["uv", "run", "mngr", "destroy", target_name, "--yes"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as e:
-        logger.warning("reap: failed to launch mngr destroy: {}", e)
-    finally:
-        if log_handle is not None:
-            log_handle.close()
-
-
-def _process_map_file(state_dir: Path, map_file: Path, agents: list[dict[str, object]]) -> None:
+def _process_map_file(state_dir: Path, map_file: Path, agents_by_name: dict[str, AgentDetails]) -> None:
     """Inspect a single subagent_map entry and reap if its target is gone or terminal."""
     tid = map_file.stem
     if not tid:
@@ -137,31 +72,33 @@ def _process_map_file(state_dir: Path, map_file: Path, agents: list[dict[str, ob
         _cleanup_tid(state_dir, tid)
         return
 
-    lifecycle = _lookup_lifecycle_state(agents, target_name)
-    if lifecycle is None:
+    agent_details = agents_by_name.get(target_name)
+    if agent_details is None:
         # Agent no longer exists; drop the side files.
         _cleanup_tid(state_dir, tid)
         return
 
-    if lifecycle in _TERMINAL_STATES:
+    if agent_details.state in _TERMINAL_STATES:
         destroy_log = state_dir / "subagent_destroy.log"
-        _shell_destroy_detached(target_name, destroy_log)
+        destroy_agent_detached(target_name, destroy_log)
         _cleanup_tid(state_dir, tid)
 
 
 def _do_reap(state_dir: Path) -> None:
     """Synchronous reaper body; intended to run detached from the hook invocation."""
-    agents = _list_agents_via_subprocess()
+    agents_map = list_agents_by_name()
+    if agents_map is None:
+        return
     for map_file in _map_files(state_dir):
-        _process_map_file(state_dir, map_file, agents)
+        _process_map_file(state_dir, map_file, agents_map)
 
 
-def _background_reap(state_dir: Path) -> None:
+def _background_reap() -> None:
     """Re-invoke this module with MNGR_SUBAGENT_REAP_BACKGROUND=1 in a detached session."""
     env = os.environ.copy()
     env["MNGR_SUBAGENT_REAP_BACKGROUND"] = "1"
     try:
-        subprocess.Popen(  # noqa: S603
+        subprocess.Popen(
             [sys.executable, "-m", "imbue.mngr_subagent_proxy.hooks.reap"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -197,7 +134,7 @@ def main() -> None:
 
     # There is work to do; do it in a detached child so the SessionStart hook
     # returns immediately.
-    _background_reap(state_dir)
+    _background_reap()
 
 
 if __name__ == "__main__":

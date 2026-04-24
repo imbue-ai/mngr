@@ -236,7 +236,12 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(2), TEST_FILE_PATTERNS)
+    # Two additional violations live in hooks/mngr_api.py and hooks/reap.py
+    # where we intentionally use subprocess.Popen(start_new_session=True) to
+    # spawn a detached child that outlives this process (fire-and-forget
+    # mngr destroy / background reap). ConcurrencyGroup.run_process_* tracks
+    # and cleans up children, which defeats the detached lifetime we need.
+    rc.check_direct_subprocess(_DIR, snapshot(4), TEST_FILE_PATTERNS)
 
 
 # --- AST-based ratchets ---
