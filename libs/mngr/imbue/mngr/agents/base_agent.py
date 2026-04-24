@@ -96,6 +96,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Assemble the agent command from an optional base plus ``cli_args`` and ``agent_args``.
 
@@ -104,6 +105,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         ``cli_args`` and then ``agent_args`` are appended (joined with spaces).
         Raises ``UserInputError`` if the final command would be empty -- i.e.
         no base, no ``cli_args``, and no ``agent_args``.
+
+        ``initial_message`` is accepted for interface compatibility; the base
+        implementation does not use it (interactive agents deliver the message
+        via ``send_message`` after the agent is up).
         """
         if command_override is not None:
             base = str(command_override)

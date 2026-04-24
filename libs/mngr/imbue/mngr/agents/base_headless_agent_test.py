@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -262,3 +263,34 @@ def test_raise_no_output_error_surfaces_pane_content_when_files_exist_but_empty(
     (agent_dir / "stderr.log").write_text("")
     with pytest.raises(MngrError, match="startup-crash-output"):
         agent._raise_no_output_error()
+
+
+# =============================================================================
+# Tests for default stage_initial_message (inherited from StreamingHeadlessAgentMixin)
+# =============================================================================
+
+
+def test_default_stage_initial_message_logs_warning(
+    local_host: Host,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """The default stage_initial_message must not silently drop the message.
+
+    When a StreamingHeadlessAgentMixin subclass does not override
+    stage_initial_message (so the agent type has no prompt-file
+    protocol), the default implementation cannot deliver the user's
+    --message content. It must log a warning that names the agent class
+    so the drop is audible, rather than silently discarding the prompt.
+    """
+    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        agent.stage_initial_message("user prompt content")
+    finally:
+        logger.remove(handler_id)
+
+    assert any("Ignoring initial_message" in m for m in messages), messages
+    assert any("_ConcreteHeadlessAgent" in m for m in messages), messages

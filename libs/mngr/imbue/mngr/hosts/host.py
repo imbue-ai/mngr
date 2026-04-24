@@ -2216,6 +2216,7 @@ class Host(BaseHost, OnlineHostInterface):
                 host=self,
                 agent_args=options.agent_args,
                 command_override=options.command,
+                initial_message=options.initial_message,
             )
             command_str = str(command)
 

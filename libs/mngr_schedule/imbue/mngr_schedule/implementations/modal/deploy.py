@@ -415,16 +415,16 @@ def stage_deploy_files(
         include_project_settings=include_project_settings,
     )
 
-    # Create both staging subdirectories unconditionally. Each gets a
-    # placeholder file because modal's add_local_dir(copy=True) does not
-    # include empty directories in the image, and the Dockerfile commands
-    # expect both /staging/home/ and /staging/project/ to exist.
+    # Create both staging subdirectories unconditionally. We no longer need
+    # placeholder files: cron_runner's dockerfile commands guard the cp with
+    # `if [ -d /staging/{home,project} ]`, so it's fine if Modal's
+    # add_local_dir(copy=True) omits the dir when it's empty. Touching a
+    # placeholder previously polluted /code/project with a .keep file and
+    # tripped headless agents' ensure-clean check.
     home_dir = staging_dir / "home"
     home_dir.mkdir(exist_ok=True)
-    (home_dir / ".keep").touch()
     project_dir = staging_dir / "project"
     project_dir.mkdir(exist_ok=True)
-    (project_dir / ".keep").touch()
 
     def resolve_staged_path(dest_str: str) -> Path:
         """Resolve a destination string to a staged path under home/ or project/."""
