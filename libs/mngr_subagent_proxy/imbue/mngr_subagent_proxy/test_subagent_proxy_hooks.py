@@ -125,8 +125,8 @@ def test_spawn_proxy_subagent_hook_rewrites_input(tmp_path: Path) -> None:
 
 
 @pytest.mark.release
-def test_spawn_proxy_hook_depth_limit_passes_through(tmp_path: Path) -> None:
-    """At max depth, the hook allows the call through without rewriting."""
+def test_spawn_proxy_hook_depth_limit_denies_with_reason(tmp_path: Path) -> None:
+    """At max depth, the hook denies the Task tool with an explanatory reason."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     hook_input: dict[str, object] = {
@@ -149,11 +149,12 @@ def test_spawn_proxy_hook_depth_limit_passes_through(tmp_path: Path) -> None:
     assert result.returncode == 0, f"stderr={result.stderr!r}"
     response = json.loads(result.stdout)
     hook_out = response["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "allow"
+    assert hook_out["permissionDecision"] == "deny"
     assert "updatedInput" not in hook_out
-    system_message = hook_out.get("systemMessage", "")
-    assert "depth limit" in system_message
-    assert "3/3" in system_message
+    reason = hook_out.get("permissionDecisionReason", "")
+    assert "depth limit" in reason
+    assert "3/3" in reason
+    assert "Cannot spawn nested Task tools" in reason
 
     assert not (state_dir / "subagent_prompts").exists() or not any((state_dir / "subagent_prompts").iterdir())
     assert not (state_dir / "subagent_map").exists() or not any((state_dir / "subagent_map").iterdir())

@@ -4,8 +4,9 @@ mngr-managed proxy subagent instead of Claude's native nested Agent loop.
 Reads the hook JSON from stdin, writes per-tool_use_id side files (prompt,
 map, wait-script) under $MNGR_AGENT_STATE_DIR, and emits a PreToolUse
 decision JSON on stdout. On failure modes (missing env, malformed input,
-etc.) passes through so the native Task tool runs unchanged. At depth
-limit, denies the Task tool with a reason.
+etc.) passes through so the native Task tool runs unchanged. At or beyond
+the configured depth limit, denies the Task tool with an explanatory
+reason so Claude does not spawn nested subagents beyond that depth.
 """
 
 from __future__ import annotations
@@ -40,18 +41,18 @@ def _emit_pass_through() -> None:
     _emit(_PASS_THROUGH_RESPONSE)
 
 
-def _emit_depth_limit_pass_through(depth: int, max_depth: int) -> None:
-    """Emit a pass-through allow with a systemMessage explaining the depth limit."""
-    message = (
-        f"mngr_subagent_proxy: depth limit ({depth}/{max_depth}) reached; "
-        "running native Claude Task instead of mngr-owned subagent."
+def _emit_depth_limit_deny(depth: int, max_depth: int) -> None:
+    """Emit a deny decision with an explanatory reason (depth limit reached)."""
+    reason = (
+        f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
+        "Cannot spawn nested Task tools beyond this depth."
     )
     _emit(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "systemMessage": message,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
             }
         }
     )
@@ -201,8 +202,8 @@ def main() -> None:
     depth = _parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
     max_depth = _parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
     if depth >= max_depth:
-        logger.warning("spawn: depth {}/{} reached; passing through to native Task", depth, max_depth)
-        _emit_depth_limit_pass_through(depth, max_depth)
+        logger.warning("spawn: depth {}/{} reached; denying Task", depth, max_depth)
+        _emit_depth_limit_deny(depth, max_depth)
         return
 
     payload = _read_stdin_json()
