@@ -790,26 +790,26 @@ class AgentCreator(MutableModel):
         aid = str(agent_id)
         try:
             with log_span("Destroying workspace {}", agent_id):
-                # Remove the dynamic host entry first so mngr observe stops
-                # trying to connect to the host while we tear it down.
+                # Find the host ID and destroy agents BEFORE removing the
+                # dynamic host entry -- mngr needs the SSH provider config
+                # to discover and destroy agents on the remote host.
+                host_id = self._get_host_id_for_agent(agent_id)
+
+                if host_id is not None:
+                    self._destroy_all_agents_on_host(host_id)
+                else:
+                    logger.warning("Could not determine host for agent {}, destroying single agent", agent_id)
+                    self._destroy_single_agent(agent_id)
+
+                # Remove the dynamic host entry AFTER destroy so mngr observe
+                # stops trying to connect to the now-dead host.
                 dynamic_hosts_file = self.paths.data_dir / "ssh" / "dynamic_hosts.toml"
                 host_entry_name = "leased-{}".format(agent_id)
                 _remove_dynamic_host_entry(dynamic_hosts_file, host_entry_name)
 
-                # Release leased host (no-op if not a leased agent)
+                # Release leased host back to the pool (no-op if not leased)
                 if access_token:
                     self.release_leased_host(agent_id, access_token)
-
-                # Find the host ID for this agent
-                host_id = self._get_host_id_for_agent(agent_id)
-
-                if host_id is not None:
-                    # Destroy all agents on the same host
-                    self._destroy_all_agents_on_host(host_id)
-                else:
-                    # Fallback: destroy just this agent
-                    logger.warning("Could not determine host for agent {}, destroying single agent", agent_id)
-                    self._destroy_single_agent(agent_id)
 
                 with self._lock:
                     self._destroy_statuses[aid] = AgentDestructionStatus.DONE
