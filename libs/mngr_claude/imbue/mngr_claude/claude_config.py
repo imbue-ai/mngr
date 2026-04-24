@@ -487,7 +487,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     - PostToolUseFailure: removes 'permissions_waiting' file (tool failed/denied, permission resolved)
     - Notification (idle_prompt): removes 'active' and 'permissions_waiting' files
     - Stop: runs wait_for_stop_hook.sh which waits for all other stop hooks to
-      finish, then removes 'active' and 'permissions_waiting' and emits an activity event
+      finish, then runs post-completion actions (uploads the current commit's
+      autofix issue file to the Modal code-review-json volume when the
+      code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success,
+      and invokes notify_user best-effort), and finally removes 'active' and
+      'permissions_waiting' and emits an activity event
 
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)

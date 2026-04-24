@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Create a Project{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <div class="flex items-center justify-between mb-6 gap-4">
+      <a href="/" class="text-zinc-600 text-sm hover:text-zinc-900 hover:no-underline">&larr; Back to projects</a>
+      {{ ui.btn_submit('Create', form='create-form') }}
+    </div>
+    <form id="create-form" action="/create" method="post">
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="agent_name" class="text-sm text-zinc-900 font-medium block">Name</label>
+        </div>
+        <div class="flex-1">
+          {{ ui.text_input('agent_name', value=agent_name, placeholder='selene', id='agent_name', required=true) }}
+        </div>
+      </div>
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="git_url" class="text-sm text-zinc-900 font-medium block">Repository</label>
+          <p class="mt-0.5 text-xs text-zinc-400">Git URL or local path</p>
+        </div>
+        <div class="flex-1">
+          {{ ui.text_input('git_url', value=git_url, placeholder='https://github.com/user/repo.git', id='git_url', required=true) }}
+        </div>
+      </div>
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="branch" class="text-sm text-zinc-900 font-medium block">Branch</label>
+          <p class="mt-0.5 text-xs text-zinc-400">Leave empty for default</p>
+        </div>
+        <div class="flex-1">
+          {{ ui.text_input('branch', value=branch, placeholder='main', id='branch') }}
+        </div>
+      </div>
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="launch_mode" class="text-sm text-zinc-900 font-medium block">Launch mode</label>
+          <p class="mt-0.5 text-xs text-zinc-400">Local: Docker. Dev: this host.</p>
+        </div>
+        <div class="flex-1">
+          <select id="launch_mode" name="launch_mode"
+                  class="w-full px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15">
+            {% for mode in launch_modes %}
+              <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="flex gap-6 mb-4 items-start">
+        <div class="basis-[200px] shrink-0 pt-2.5">
+          <label for="include_env_file" class="text-sm text-zinc-900 font-medium block">Include .env file</label>
+          <p class="mt-0.5 text-xs text-zinc-400">Ships a local ".env" to the agent host. Ignored for git URLs.</p>
+        </div>
+        <div class="flex-1 pt-2">
+          <input type="checkbox" id="include_env_file" name="include_env_file" value="1" checked>
+        </div>
+      </div>
+    </form>
+  {% endcall %}
+{% endblock %}

@@ -15,10 +15,12 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import _DISCOVERY_MAX_FILE_SIZE_BYTES
 from imbue.mngr.api.discovery_events import _build_ssh_info_from_host
 from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
 from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import _make_envelope_fields
+from imbue.mngr.api.discovery_events import _rotate_discovery_events_if_needed
 from imbue.mngr.api.discovery_events import append_discovery_event
 from imbue.mngr.api.discovery_events import discovered_agent_from_agent_details
 from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
@@ -766,3 +768,65 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
 
     # The tail should have picked up the new event
     assert len(captured_lines) == 1
+
+
+# === Discovery Event Rotation Tests ===
+
+
+def test_rotate_discovery_events_does_nothing_when_file_is_small(tmp_path: Path) -> None:
+    """Rotation should not trigger when the file is below the size threshold."""
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text('{"type":"test"}\n')
+
+    _rotate_discovery_events_if_needed(events_path)
+
+    # File should still exist and no rotated files should be created
+    assert events_path.exists()
+    rotated = [f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl.")]
+    assert len(rotated) == 0
+
+
+def test_rotate_discovery_events_does_nothing_when_file_missing(tmp_path: Path) -> None:
+    """Rotation should do nothing when the events file does not exist."""
+    events_path = tmp_path / "events.jsonl"
+    _rotate_discovery_events_if_needed(events_path)
+    assert not events_path.exists()
+
+
+def test_rotate_discovery_events_rotates_when_threshold_exceeded(tmp_path: Path) -> None:
+    """Rotation should rename the file when it exceeds the size threshold."""
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text("")
+    # Use truncate to set file size to exactly the threshold without writing real data
+    with open(events_path, "ab") as f:
+        f.truncate(_DISCOVERY_MAX_FILE_SIZE_BYTES)
+
+    _rotate_discovery_events_if_needed(events_path)
+
+    # The original file should have been renamed
+    assert not events_path.exists()
+    rotated = [f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl.")]
+    assert len(rotated) == 1
+
+
+def test_rotate_discovery_events_cleans_up_old_rotated_files(tmp_path: Path) -> None:
+    """Rotation should remove old rotated files beyond the max count."""
+    events_path = tmp_path / "events.jsonl"
+
+    # Create several pre-existing rotated files (more than the max of 1)
+    (tmp_path / "events.jsonl.20250101000000000000").write_text("old1\n")
+    (tmp_path / "events.jsonl.20250201000000000000").write_text("old2\n")
+    (tmp_path / "events.jsonl.20250301000000000000").write_text("old3\n")
+
+    # Create the current file at the threshold size
+    events_path.write_text("")
+    with open(events_path, "ab") as f:
+        f.truncate(_DISCOVERY_MAX_FILE_SIZE_BYTES)
+
+    _rotate_discovery_events_if_needed(events_path)
+
+    # After rotation, there should be at most _DISCOVERY_MAX_ROTATED_COUNT (1) rotated files
+    # plus the newly rotated file = the newest rotated file should survive
+    rotated = sorted(f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl."))
+    # With max_rotated_count=1, only the newest file should remain
+    assert len(rotated) == 1

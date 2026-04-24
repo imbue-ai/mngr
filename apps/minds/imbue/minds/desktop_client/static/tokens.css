@@ -1,0 +1,79 @@
+/*
+ * Design tokens + a handful of custom CSS that Tailwind doesn't cover
+ * (chrome colors, per-workspace accent stripe, spinner keyframes).
+ *
+ * This file is committed and loaded alongside the Tailwind Play CDN JS
+ * (which generates utility classes at runtime -- see static/tailwind.js).
+ */
+
+:root {
+  --bg-chrome: #18181b;
+  --bg-chrome-elev: #27272a;
+  --bg-chrome-hover: rgba(255, 255, 255, 0.06);
+  --bg-chrome-active: rgba(255, 255, 255, 0.10);
+  --border-chrome: rgba(255, 255, 255, 0.08);
+  --text-chrome: #e4e4e7;
+  --text-chrome-muted: #a1a1aa;
+
+  --link: #2563eb;
+  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.18);
+
+  --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
+}
+
+.page-workspace::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+  z-index: 1000;
+}
+
+.accent-spine::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+}
+
+.sidebar-item {
+  position: relative;
+}
+.sidebar-item::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+  opacity: 0.55;
+  transition: opacity 100ms;
+}
+.sidebar-item:hover::before,
+.sidebar-item.is-current::before {
+  opacity: 1;
+}
+
+.accent-swatch {
+  background: var(--workspace-accent, oklch(65% 0.15 230));
+}
+
+.spinner {
+  border: 2px solid #e4e4e7;
+  border-top-color: #18181b;
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

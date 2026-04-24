@@ -1,0 +1,21 @@
+{# Partial rendered inside workspace settings / sharing editor when the
+   workspace has no associated account yet. Needs: agent_id, accounts,
+   redirect_url (optional). #}
+<div class="bg-white border border-zinc-200 rounded-xl shadow-sm p-4 my-3">
+  <p class="font-medium mb-2">This workspace needs to be associated with an account before sharing can be configured.</p>
+  {% if accounts %}
+    <form method="POST" action="/workspace/{{ agent_id }}/associate" class="flex gap-2 items-center mt-2">
+      <select name="user_id"
+              class="px-3 py-2 rounded-md border border-zinc-300 bg-white text-zinc-900 text-sm">
+        {% for acct in accounts %}
+          <option value="{{ acct.user_id }}">{{ acct.email }}</option>
+        {% endfor %}
+      </select>
+      {% if redirect_url %}<input type="hidden" name="redirect" value="{{ redirect_url }}">{% endif %}
+      <button type="submit"
+              class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-900 text-zinc-50 hover:bg-zinc-800 cursor-pointer">Associate</button>
+    </form>
+  {% else %}
+    <p class="mt-2"><a href="/auth/login" class="text-blue-600 hover:underline">Sign in or create an account</a> to enable sharing.</p>
+  {% endif %}
+</div>
