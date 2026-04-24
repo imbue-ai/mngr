@@ -9,6 +9,7 @@ from typing import Iterator
 import pytest
 from loguru import logger
 
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_subagent_proxy.subagent_wait import _AgentLocation
 from imbue.mngr_subagent_proxy.subagent_wait import _TailState
 from imbue.mngr_subagent_proxy.subagent_wait import _extract_assistant_text
@@ -156,7 +157,7 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
     host_dir.mkdir()
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    agent_id = "agent123"
+    agent_id = AgentId.generate()
     target_name = "reviewer"
     location = _AgentLocation(host_dir=host_dir, agent_id=agent_id, work_dir=work_dir)
 
@@ -176,6 +177,6 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
     assert _resolve_destroyed_result(target_name, location) == "[mngr agent destroyed before completion] last answer"
 
     # Missing preserved-events file returns the prefix with an empty last_text.
-    missing_agent_id = "missing456"
+    missing_agent_id = AgentId.generate()
     missing_location = _AgentLocation(host_dir=host_dir, agent_id=missing_agent_id, work_dir=work_dir)
     assert _resolve_destroyed_result(target_name, missing_location) == "[mngr agent destroyed before completion] "

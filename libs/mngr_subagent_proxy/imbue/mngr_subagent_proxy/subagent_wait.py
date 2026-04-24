@@ -13,7 +13,10 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.plugin import get_preserved_sessions_dir_for_host
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.2
 _SESSION_ID_RECHECK_SECONDS: Final[float] = 2.0
@@ -357,8 +360,10 @@ def _check_target_still_present(runtime: _WaitRuntime, now: float) -> bool:
 
 def _resolve_destroyed_result(target_name: str, location: _AgentLocation) -> str:
     """Build the END_TURN payload for an agent that was destroyed before completing."""
-    preserved_root = location.host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    events_path = preserved_root / f"{target_name}--{location.agent_id}" / "common_transcript" / "events.jsonl"
+    preserved_dir = get_preserved_sessions_dir_for_host(
+        location.host_dir, AgentName(target_name), AgentId(location.agent_id)
+    )
+    events_path = preserved_dir / "common_transcript" / "events.jsonl"
     last_text = ""
     if events_path.exists():
         try:
