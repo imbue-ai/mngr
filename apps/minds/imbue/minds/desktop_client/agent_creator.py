@@ -14,7 +14,6 @@ import queue
 import shutil
 import tempfile
 import threading
-import time
 from collections.abc import Callable
 from enum import auto
 from pathlib import Path
@@ -45,6 +44,7 @@ from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.polling import poll_until
 
 OutputCallback = Callable[[str, bool], None]
 
@@ -502,20 +502,17 @@ class AgentCreator(MutableModel):
         background thread) so that status stays in CREATING and the
         creating-progress page keeps streaming logs until the server is up.
         """
-        deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        while True:
-            url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
-            if url is not None:
-                return True
-            if time.monotonic() >= deadline:
-                log_queue.put(
-                    "[minds] Workspace server did not register within {:.0f}s; "
-                    "loading the workspace anyway (page will auto-retry).".format(
-                        self.workspace_ready_timeout_seconds
-                    )
-                )
-                return False
-            time.sleep(self.workspace_ready_poll_interval_seconds)
+        if poll_until(
+            lambda: self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME) is not None,
+            timeout=self.workspace_ready_timeout_seconds,
+            poll_interval=self.workspace_ready_poll_interval_seconds,
+        ):
+            return True
+        log_queue.put(
+            "[minds] Workspace server did not register within {:.0f}s; "
+            "loading the workspace anyway (page will auto-retry).".format(self.workspace_ready_timeout_seconds)
+        )
+        return False
 
     def _create_agent_background(
         self,
