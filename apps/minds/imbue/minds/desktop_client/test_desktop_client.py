@@ -562,6 +562,7 @@ def _create_test_server_with_agent_creator(
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     agent_creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=backend_resolver,
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,

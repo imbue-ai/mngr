@@ -133,7 +133,7 @@ def start_desktop_client(
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
-    agent_creator = AgentCreator(paths=paths)
+    agent_creator = AgentCreator(paths=paths, backend_resolver=backend_resolver)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)

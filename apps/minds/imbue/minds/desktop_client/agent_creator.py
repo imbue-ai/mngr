@@ -14,6 +14,7 @@ import queue
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from enum import auto
 from pathlib import Path
@@ -34,6 +35,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -41,11 +43,16 @@ from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
 OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
+
+# Name of the agent-side service that serves the per-workspace UI. Shared with
+# app.py (subdomain forwarder) so that one place owns the contract.
+WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
 
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
@@ -396,6 +403,21 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description=(
+            "Resolver used to poll for workspace-server readiness after ``mngr create`` returns. "
+            "The creating-progress page stays on its log-streaming view until the workspace "
+            "server registers its URL, giving the user visible progress instead of the bare "
+            "auto-refresh retry page on the target subdomain."
+        ),
+    )
+    # Upper bound on how long to wait for the workspace server to register after
+    # mngr create returns. On timeout, creation still completes and the user is
+    # redirected -- the subdomain forwarder's auto-refresh retry page covers the
+    # remaining gap. Configurable so tests can lower it.
+    workspace_ready_timeout_seconds: float = Field(default=60.0, frozen=True)
+    workspace_ready_poll_interval_seconds: float = Field(default=0.2, frozen=True)
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -466,6 +488,34 @@ class AgentCreator(MutableModel):
         """Get the log queue for an agent creation, or None if not tracked."""
         with self._lock:
             return self._log_queues.get(str(agent_id))
+
+    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
+        """Block until the agent's workspace server registers its backend URL.
+
+        Returns True once ``backend_resolver.get_backend_url`` for the workspace
+        server returns a non-None URL. Returns False if the timeout elapses
+        first -- callers should still mark creation complete in that case,
+        since the subdomain forwarder's auto-refresh retry page covers the
+        remaining window.
+
+        Polls synchronously from the caller's thread (typically the creation
+        background thread) so that status stays in CREATING and the
+        creating-progress page keeps streaming logs until the server is up.
+        """
+        deadline = time.monotonic() + self.workspace_ready_timeout_seconds
+        while True:
+            url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+            if url is not None:
+                return True
+            if time.monotonic() >= deadline:
+                log_queue.put(
+                    "[minds] Workspace server did not register within {:.0f}s; "
+                    "loading the workspace anyway (page will auto-retry).".format(
+                        self.workspace_ready_timeout_seconds
+                    )
+                )
+                return False
+            time.sleep(self.workspace_ready_poll_interval_seconds)
 
     def _create_agent_background(
         self,
@@ -548,6 +598,15 @@ class AgentCreator(MutableModel):
                 key_hash = hash_api_key(api_key)
                 save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
+
+                # mngr create returning doesn't mean the in-agent workspace
+                # server is answering yet (container still booting, services
+                # still registering). Wait synchronously so the user stays on
+                # the log-streaming progress page until the workspace is
+                # actually reachable.
+                log_queue.put("[minds] Waiting for workspace server to come online...")
+                if self._wait_for_workspace_ready(agent_id, log_queue):
+                    log_queue.put("[minds] Workspace server is ready.")
 
                 log_queue.put("[minds] Agent created successfully.")
 
