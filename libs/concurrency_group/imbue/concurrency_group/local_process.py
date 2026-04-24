@@ -38,7 +38,6 @@ class RunningProcess:
         self._thread: ObservableThread | None = None
         self._stdout_lines: list[str] = []
         self._stderr_lines: list[str] = []
-        self._pid: int | None = None
 
     def read_stdout(self) -> str:
         return "".join(self._stdout_lines)
@@ -137,14 +136,6 @@ class RunningProcess:
             stderr = self.read_stderr()
             raise TimeoutExpired(self._command, force_kill_seconds, stdout, stderr)
 
-    @property
-    def pid(self) -> int | None:
-        """OS PID of the running subprocess, or None before Popen completes."""
-        return self._pid
-
-    def _set_pid(self, pid: int) -> None:
-        self._pid = pid
-
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
         queue: Queue[BaseException | None] = Queue(maxsize=1)
@@ -153,10 +144,7 @@ class RunningProcess:
             return queue.put_nowait(maybe_exception)
 
         self._thread = ObservableThread(
-            target=lambda: context.run(
-                self.run,
-                {**kwargs, "on_initialization_complete": on_initialized, "on_popen_created": self._set_pid},
-            ),
+            target=lambda: context.run(self.run, {**kwargs, "on_initialization_complete": on_initialized}),
             name=self._get_name(),
             silenced_exceptions=(ProcessError, EnvironmentStoppedError),
         )

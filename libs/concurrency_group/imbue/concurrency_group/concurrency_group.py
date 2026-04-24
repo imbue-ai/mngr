@@ -1,5 +1,3 @@
-import os
-import signal
 import time
 from collections import defaultdict
 from contextlib import AbstractContextManager
@@ -226,22 +224,15 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                         raise StrandTimedOutError(message) from error
                     except StrandTimedOutError as e:
                         timeout_errors.append(e)
-                    # SIGKILL the subprocess directly by PID before signalling
-                    # the background thread. The thread's own _shutdown_popen
-                    # path is subject to Python scheduler delays, and a fire-
-                    # and-forget `terminate(force_kill_seconds=0.0)` races
-                    # with the session-level leak detector (subprocess may
-                    # still be in flight when psutil scans, producing
-                    # "leaked process" failures attributed to whichever test
-                    # ran last in the shard). SIGKILL is instant.
-                    pid = process.pid
-                    if pid is not None:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
                     try:
-                        process.terminate(force_kill_seconds=0.0)
+                        # Wait long enough for the background thread's
+                        # _shutdown_popen path (SIGTERM, reap) to complete.
+                        # Fire-and-forget (force_kill_seconds=0.0) races with
+                        # the session-level leak detector: the subprocess may
+                        # still be in flight when psutil scans at session end,
+                        # producing "leaked process" failures attributed to
+                        # whatever test ran last in the shard.
+                        process.terminate(force_kill_seconds=2.0)
                     except TimeoutExpired:
                         pass
         for tracked_thread in self._threads:

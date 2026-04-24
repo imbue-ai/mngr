@@ -195,7 +195,6 @@ def run_local_command_modern_version(
     poll_time: float = 0.01,
     env: Mapping[str, str] | None = None,
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
-    on_popen_created: Callable[[int], None] = lambda pid: None,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
@@ -225,7 +224,6 @@ def run_local_command_modern_version(
                 is_output_already_logged=False,
             ) from e
 
-        on_popen_created(process.pid)
         on_initialization_complete(None)
     except BaseException as e:
         on_initialization_complete(e)
