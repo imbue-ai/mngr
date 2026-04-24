@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import html
 import json
 import os
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_toke
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -198,9 +200,17 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
+    # Captured here so background callbacks (e.g. the mngr events refresh
+    # dispatch) can schedule async work on the server's running loop via
+    # asyncio.run_coroutine_threadsafe.
+    inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
+        # Clear the captured loop reference first so background callbacks that
+        # race with shutdown see None and drop their events instead of trying
+        # to schedule on a loop that is about to close.
+        inner_app.state.event_loop = None
         for client in inner_app.state.ssh_http_clients.values():
             await client.aclose()
         inner_app.state.ssh_http_clients.clear()
@@ -216,6 +226,11 @@ async def _managed_lifespan(
             logger.info("Stopping stream manager subprocesses...")
             stream_manager.stop()
             logger.info("Stream manager stopped.")
+        latchkey_gateway_manager: LatchkeyGatewayManager | None = inner_app.state.latchkey_gateway_manager
+        if latchkey_gateway_manager is not None:
+            logger.info("Stopping latchkey gateway manager...")
+            latchkey_gateway_manager.stop()
+            logger.info("Latchkey gateway manager stopped.")
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
@@ -1650,6 +1665,7 @@ async def _handle_request_deny(
 
 
 _request_event_apps: dict[int, FastAPI] = {}
+_refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -1664,6 +1680,112 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
 
 
+def _parse_refresh_service_name(raw_line: str) -> str | None:
+    """Extract service_name from a refresh event line, or None if unparseable."""
+    try:
+        data = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return None
+    service_name = data.get("service_name")
+    if not isinstance(service_name, str) or not service_name:
+        return None
+    return service_name
+
+
+async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
+    """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
+
+    Resolves the ``system_interface`` backend URL for the agent (going through
+    an SSH tunnel automatically for remote agents) and calls
+    ``/api/refresh-service/{service_name}/broadcast``. Errors are logged but
+    swallowed -- a missed refresh is never worth crashing on.
+    """
+    backend_resolver: BackendResolverInterface = app.state.backend_resolver
+    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    if backend_url is None:
+        logger.debug(
+            "No system_interface backend for agent {}; dropping refresh for service {}",
+            agent_id,
+            service_name,
+        )
+        return
+
+    url = f"{backend_url.rstrip('/')}/api/refresh-service/{service_name}/broadcast"
+    # Tunnel setup performs a blocking SSH handshake for remote agents, so
+    # run it in a thread pool to avoid stalling the desktop client's event
+    # loop (mirrors the approach used by the HTTP proxy path).
+    try:
+        tunnel_client = await asyncio.get_running_loop().run_in_executor(
+            None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
+        )
+    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
+        return
+    http_client = tunnel_client or app.state.http_client
+    try:
+        response = await http_client.post(url)
+        response.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
+    finally:
+        if tunnel_client is not None:
+            await tunnel_client.aclose()
+
+
+def _log_refresh_dispatch_result(
+    future: concurrent.futures.Future[None], agent_id_str: str, service_name: str
+) -> None:
+    """Surface any exception stashed on a scheduled refresh-dispatch future.
+
+    ``run_coroutine_threadsafe`` stores exceptions on the returned
+    ``concurrent.futures.Future``; if nothing calls ``.exception()`` they are
+    never logged. This callback runs when the coroutine finishes and logs
+    anything other than cancellation.
+    """
+    try:
+        exc = future.exception()
+    except asyncio.CancelledError:
+        logger.debug("Refresh dispatch cancelled for agent {} service {}", agent_id_str, service_name)
+        return
+    if exc is not None:
+        logger.warning("Refresh dispatch failed for agent {} service {}: {}", agent_id_str, service_name, exc)
+
+
+def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
+    """Fan a refresh event out to every registered app's workspace server.
+
+    Runs on the mngr-events reader thread, so the async POST is scheduled
+    on each app's captured event loop via run_coroutine_threadsafe.
+    """
+    service_name = _parse_refresh_service_name(raw_line)
+    if service_name is None:
+        logger.debug("Ignoring malformed refresh event from {}: {}", agent_id_str, raw_line[:200])
+        return
+    agent_id = AgentId(agent_id_str)
+    for app in _refresh_event_apps.values():
+        # event_loop is set to None in create_desktop_client and populated by
+        # _managed_lifespan on startup. In production, stream_manager.start()
+        # (which feeds this callback) runs before uvicorn.run(app) starts the
+        # lifespan, so there is a brief window during which refresh events
+        # can arrive before the loop is captured. Drop such events rather
+        # than crashing the reader thread with AttributeError. The same guard
+        # also covers loops that have already been closed (e.g. the app was
+        # torn down but its entry in _refresh_event_apps has not yet been
+        # removed) -- scheduling on a closed loop would raise RuntimeError
+        # and leak an unawaited coroutine.
+        loop: asyncio.AbstractEventLoop | None = app.state.event_loop
+        if loop is None or loop.is_closed():
+            logger.debug(
+                "Dropping refresh for agent {} service {}: app event loop unavailable",
+                agent_id_str,
+                service_name,
+            )
+            continue
+        future = asyncio.run_coroutine_threadsafe(_dispatch_refresh_broadcast(app, agent_id, service_name), loop)
+        future.add_done_callback(lambda f, aid=agent_id_str, sn=service_name: _log_refresh_dispatch_result(f, aid, sn))
+        logger.info("Scheduled refresh broadcast for agent {} service {}", agent_id_str, service_name)
+
+
 # -- App factory --
 
 
@@ -1672,6 +1794,7 @@ def create_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
+    latchkey_gateway_manager: LatchkeyGatewayManager | None = None,
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
@@ -1734,6 +1857,7 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
+    app.state.latchkey_gateway_manager = latchkey_gateway_manager
     app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
@@ -1745,6 +1869,11 @@ def create_desktop_client(
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    # Populated with the running loop by _managed_lifespan on startup. Defined
+    # up-front as None so background callbacks fired before startup (e.g. mngr
+    # events produced between stream_manager.start() and uvicorn.run()) see a
+    # valid attribute and can choose to drop the event instead of crashing.
+    app.state.event_loop = None
     if paths is not None:
         app.state.api_v1_paths = paths
     if http_client is not None:
@@ -1754,6 +1883,8 @@ def create_desktop_client(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         _request_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_request_callback(_handle_request_event_callback)
+        _refresh_event_apps[id(backend_resolver)] = app
+        backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
     # Mount the auth routes (proxy to the remote_service_connector auth backend)
     if session_store is not None and auth_backend_client is not None:

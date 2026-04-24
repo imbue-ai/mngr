@@ -102,6 +102,16 @@ def test_broadcast_proto_agent_completed() -> None:
     assert msg["error"] is None
 
 
+def test_broadcast_refresh_service() -> None:
+    broadcaster = WebSocketBroadcaster()
+    q = broadcaster.register()
+
+    broadcaster.broadcast_refresh_service("web")
+
+    msg = json.loads(_get_message(q))
+    assert msg == {"type": "refresh_service", "service_name": "web"}
+
+
 def test_shutdown_sends_none_sentinel() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
