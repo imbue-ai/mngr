@@ -780,15 +780,15 @@ def _run_tunnel_setup(
     agent_id: AgentId,
     enriched_client: CloudflareClient,
     paths: WorkspacePaths,
-    notification_dispatcher: NotificationDispatcher | None,
+    notification_dispatcher: NotificationDispatcher,
     agent_display_name: str,
 ) -> None:
     """Create a Cloudflare tunnel and inject its token into the agent.
 
     Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
     the desktop client's root ``ConcurrencyGroup``. Failures are logged via
-    loguru and (when ``notification_dispatcher`` is provided) surfaced to the
-    user as an OS notification -- every failure dispatches one, no rate limit.
+    loguru and surfaced to the user via ``notification_dispatcher`` -- every
+    failure dispatches one notification, no rate limit.
 
     ``create_tunnel`` returns ``(None, error_message)`` for every failure mode
     (HTTP, bad response, etc.) rather than raising, so no defensive wrapper is
@@ -809,7 +809,7 @@ def _run_tunnel_setup(
 
 
 def _notify_tunnel_failure(
-    notification_dispatcher: NotificationDispatcher | None,
+    notification_dispatcher: NotificationDispatcher,
     agent_display_name: str,
     error_message: str,
 ) -> None:
@@ -819,8 +819,6 @@ def _notify_tunnel_failure(
     subprocess per channel and swallows channel-specific errors internally,
     so a top-level ``except`` wrapper here would only mask genuine bugs.
     """
-    if notification_dispatcher is None:
-        return
     notification_dispatcher.dispatch(
         NotificationRequest(
             title="Tunnel setup failed",
@@ -846,18 +844,13 @@ class _OnCreatedCallbackFactory(MutableModel):
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
     cf_client: CloudflareClient = Field(frozen=True, description="Cloudflare client for tunnel creation")
     paths: WorkspacePaths = Field(frozen=True, description="Workspace paths for tunnel token storage")
-    root_concurrency_group: ConcurrencyGroup | None = Field(
-        default=None,
+    root_concurrency_group: ConcurrencyGroup = Field(
         frozen=True,
-        description=(
-            "Root group on which the detached tunnel task is scheduled. When ``None``, "
-            "falls back to running synchronously (used in tests that don't supply a root CG)."
-        ),
+        description="Root group on which the detached tunnel task is scheduled.",
     )
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None,
+    notification_dispatcher: NotificationDispatcher = Field(
         frozen=True,
-        description="Dispatcher for surfacing tunnel-setup failures as OS notifications",
+        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
     )
 
     def __call__(self, agent_id: AgentId) -> None:
@@ -877,17 +870,6 @@ class _OnCreatedCallbackFactory(MutableModel):
         # user-chosen name at this point (see ``backend_resolver``), so fall
         # back to the short form of the agent id for the notification copy.
         agent_display_name = str(agent_id)[:8]
-        if self.root_concurrency_group is None:
-            # Test / standalone path: run synchronously. Production always
-            # supplies a root CG, so this fallback is not on the critical path.
-            _run_tunnel_setup(
-                agent_id=agent_id,
-                enriched_client=enriched_client,
-                paths=self.paths,
-                notification_dispatcher=self.notification_dispatcher,
-                agent_display_name=agent_display_name,
-            )
-            return
         self.root_concurrency_group.start_new_thread(
             target=_run_tunnel_setup,
             kwargs={
@@ -923,11 +905,17 @@ def _build_on_created_callback(
     except AttributeError:
         paths = None
 
-    if session_store is None or cf_client is None or paths is None:
-        return None
-
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+
+    if (
+        session_store is None
+        or cf_client is None
+        or paths is None
+        or root_concurrency_group is None
+        or notification_dispatcher is None
+    ):
+        return None
 
     return _OnCreatedCallbackFactory(
         session_store=session_store,

@@ -61,11 +61,11 @@ from imbue.mngr.primitives import AgentId
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
     """Create a ``ConcurrencyGroup`` named ``name`` that is a child of ``parent``.
 
-    When ``parent`` is ``None`` (tests or other callers that don't supply a
-    root), falls back to a free-standing group so the current per-operation
-    behavior is preserved. In production the desktop client supplies its root
-    CG via ``start_desktop_client`` so every strand is tracked by a single
-    ancestor and cleaned up together on shutdown.
+    ``AgentCreator`` always supplies its ``root_concurrency_group`` (required
+    field), so the ``parent is None`` branch only fires when a module-level
+    helper (``clone_git_repo``, ``checkout_branch``, ``resolve_template_version``)
+    is called standalone by a test that doesn't thread a root CG in. Those
+    helpers still accept ``parent_cg=None`` for test ergonomics.
     """
     if parent is None:
         return ConcurrencyGroup(name=name)
@@ -291,15 +291,15 @@ def _build_latchkey_gateway_url(launch_mode: LaunchMode, info: LatchkeyGatewayIn
     """Return the ``LATCHKEY_GATEWAY`` URL the agent should see in its environment.
 
     DEV agents run on the bare host and reach the gateway on its dynamic host
-    port directly. Every other mode runs inside a container/VM/VPS whose own
-    loopback is bridged to the host-side gateway via an SSH reverse tunnel
-    bound to a fixed remote port, so the URL is the same constant for every
-    such agent.
+    port directly. Every other mode (container / VM / VPS / leased pool host)
+    runs inside an isolated runtime whose own loopback is bridged to the
+    host-side gateway via an SSH reverse tunnel bound to a fixed remote port,
+    so the URL is the same constant for every such agent.
     """
     match launch_mode:
         case LaunchMode.DEV:
             return f"http://{info.host}:{info.port}"
-        case LaunchMode.LOCAL | LaunchMode.LIMA | LaunchMode.CLOUD:
+        case LaunchMode.LOCAL | LaunchMode.LIMA | LaunchMode.CLOUD | LaunchMode.LEASED:
             return f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
         case _ as unreachable:
             assert_never(unreachable)
@@ -677,22 +677,20 @@ class AgentCreator(MutableModel):
             "bridges back via an SSH reverse tunnel once the agent is discovered."
         ),
     )
-    root_concurrency_group: ConcurrencyGroup | None = Field(
-        default=None,
+    root_concurrency_group: ConcurrencyGroup = Field(
         frozen=True,
         description=(
-            "Top-level ``ConcurrencyGroup`` owned by ``start_desktop_client``. When provided, "
-            "every subprocess and thread spawned by this creator is tracked under it so the "
-            "desktop-client shutdown can cleanly wait on (or cancel) in-flight work. When "
-            "``None`` (tests), each operation falls back to an ad-hoc free-standing group."
+            "Top-level ``ConcurrencyGroup`` owned by ``start_desktop_client`` and entered for "
+            "the duration of the FastAPI lifespan. Every subprocess and thread spawned by this "
+            "creator is tracked under it so the desktop-client shutdown can cleanly wait on "
+            "(or cancel) in-flight work."
         ),
     )
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None,
+    notification_dispatcher: NotificationDispatcher = Field(
         frozen=True,
         description=(
-            "Optional dispatcher for surfacing failures from background tasks (e.g. the "
-            "detached Cloudflare tunnel setup task). When ``None``, failures are only logged."
+            "Dispatcher for surfacing failures from background tasks (e.g. the detached "
+            "Cloudflare tunnel setup task) to the user as OS notifications."
         ),
     )
 

@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -319,14 +320,23 @@ def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
 # -- AgentCreator tests --
 
 
-def test_agent_creator_get_creation_info_returns_none_for_unknown() -> None:
+def test_agent_creator_get_creation_info_returns_none_for_unknown(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.get_creation_info(AgentId()) is None
 
 
-def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation returns an agent ID and sets initial CLONING status.
 
     The actual background thread will fail (since the git URL is invalid),
@@ -334,6 +344,8 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     """
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
 
     agent_id = creator.start_creation("file:///nonexistent-repo")
@@ -345,10 +357,16 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     creator.wait_for_all()
 
 
-def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_with_custom_name(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation accepts a custom agent name."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("file:///nonexistent-repo", agent_name="my-agent")
     info = creator.get_creation_info(agent_id)
@@ -356,16 +374,26 @@ def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
     creator.wait_for_all()
 
 
-def test_agent_creator_get_log_queue_returns_none_for_unknown() -> None:
+def test_agent_creator_get_log_queue_returns_none_for_unknown(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.get_log_queue(AgentId()) is None
 
 
-def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
+def test_agent_creator_get_log_queue_returns_queue_for_tracked(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("file:///nonexistent-repo")
     q = creator.get_log_queue(agent_id)
@@ -373,10 +401,16 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
     creator.wait_for_all()
 
 
-def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
+def test_agent_creator_start_creation_with_local_path(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """Verify start_creation with a nonexistent local path eventually reaches FAILED status."""
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     agent_id = creator.start_creation("/nonexistent/local/path", agent_name="local-test")
     # The background thread runs immediately and fails because the path doesn't exist.
@@ -412,7 +446,11 @@ def test_make_log_callback_puts_lines_into_queue() -> None:
     assert log_queue.get_nowait() == "world"
 
 
-def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
+def test_agent_creator_accepts_server_port(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """AgentCreator exposes its configured server_port for redirect-URL construction.
 
     Regression guard: the happy-path redirect URL for a newly-created agent is
@@ -423,11 +461,16 @@ def test_agent_creator_accepts_server_port(tmp_path: Path) -> None:
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         server_port=12345,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.server_port == 12345
 
 
-def test_agent_creator_server_port_defaults_to_zero() -> None:
+def test_agent_creator_server_port_defaults_to_zero(
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """AgentCreator.server_port defaults to 0 for legacy test callers.
 
     Tests that don't exercise the happy-path redirect can construct an
@@ -435,6 +478,8 @@ def test_agent_creator_server_port_defaults_to_zero() -> None:
     """
     creator = AgentCreator(
         paths=WorkspacePaths(data_dir=Path("/tmp/test")),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
     assert creator.server_port == 0
 
@@ -627,6 +672,8 @@ def test_remove_lease_info_noop_for_missing(tmp_path: Path) -> None:
 def test_release_leased_host_with_pool_client(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """release_leased_host removes the dynamic host entry, calls release, and removes lease info."""
     paths = WorkspacePaths(data_dir=tmp_path)
@@ -634,6 +681,8 @@ def test_release_leased_host_with_pool_client(
     creator = AgentCreator(
         paths=paths,
         host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
     )
 
     # Set up state: lease info and a dynamic host entry
@@ -658,18 +707,34 @@ def test_release_leased_host_with_pool_client(
     assert host_name not in content
 
 
-def test_release_leased_host_noop_when_no_lease_info(tmp_path: Path) -> None:
+def test_release_leased_host_noop_when_no_lease_info(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """release_leased_host is a no-op when there is no lease info for the agent."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths)
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     creator.release_leased_host(AgentId(), access_token="test-token")
 
 
-def test_release_leased_host_without_pool_client(tmp_path: Path) -> None:
+def test_release_leased_host_without_pool_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """release_leased_host logs a warning but does not crash when host_pool_client is None."""
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId()
-    creator = AgentCreator(paths=paths)
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
 
     test_uuid = UUID("00000000-0000-0000-0000-000000000007")
     _save_lease_info(tmp_path, agent_id, test_uuid)
@@ -679,21 +744,42 @@ def test_release_leased_host_without_pool_client(tmp_path: Path) -> None:
     assert _load_lease_info(tmp_path, agent_id) == test_uuid
 
 
-def test_agent_creator_has_host_pool_client_field(tmp_path: Path) -> None:
+def test_agent_creator_has_host_pool_client_field(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """AgentCreator accepts an optional host_pool_client field."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator_without = AgentCreator(paths=paths)
+    creator_without = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     assert creator_without.host_pool_client is None
 
     client = HostPoolClient(connector_url=RemoteServiceConnectorUrl("http://example.com"))
-    creator_with = AgentCreator(paths=paths, host_pool_client=client)
+    creator_with = AgentCreator(
+        paths=paths,
+        host_pool_client=client,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     assert creator_with.host_pool_client is not None
 
 
-def test_start_creation_leased_raises_without_pool_client(tmp_path: Path) -> None:
+def test_start_creation_leased_raises_without_pool_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """start_creation with LEASED mode raises immediately if no host_pool_client."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths)
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     with pytest.raises(MngrCommandError, match="host_pool_client"):
         creator.start_creation(
             repo_source="https://example.com/repo.git",
@@ -707,10 +793,17 @@ def test_start_creation_leased_raises_without_pool_client(tmp_path: Path) -> Non
 def test_create_leased_agent_fails_without_access_token(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """start_creation raises synchronously when access_token is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     with pytest.raises(MngrCommandError, match="access_token"):
         creator.start_creation(
             repo_source="https://example.com/repo.git",
@@ -724,10 +817,17 @@ def test_create_leased_agent_fails_without_access_token(
 def test_create_leased_agent_fails_without_version(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """start_creation raises synchronously when version is empty for LEASED mode."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     with pytest.raises(MngrCommandError, match="version"):
         creator.start_creation(
             repo_source="https://example.com/repo.git",
@@ -741,6 +841,8 @@ def test_create_leased_agent_fails_without_version(
 def test_create_leased_agent_leases_and_writes_dynamic_host(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """_create_leased_agent leases a host, writes dynamic host entry and lease info.
 
@@ -748,7 +850,12 @@ def test_create_leased_agent_leases_and_writes_dynamic_host(
     setup steps should complete, and cleanup should release the host.
     """
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     agent_id = creator.start_creation(
         repo_source="https://example.com/repo.git",
         agent_name="test-workspace",
@@ -767,10 +874,17 @@ def test_create_leased_agent_leases_and_writes_dynamic_host(
 def test_cleanup_failed_lease(
     tmp_path: Path,
     fake_pool_server: HostPoolClient,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """_cleanup_failed_lease removes dynamic host entry, releases host, and removes lease info."""
     paths = WorkspacePaths(data_dir=tmp_path)
-    creator = AgentCreator(paths=paths, host_pool_client=fake_pool_server)
+    creator = AgentCreator(
+        paths=paths,
+        host_pool_client=fake_pool_server,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
     agent_id = AgentId()
     dynamic_hosts_file = tmp_path / "ssh" / "dynamic_hosts.toml"
     host_entry_name = "leased-{}".format(agent_id)
@@ -853,7 +967,11 @@ def test_build_mngr_create_command_omits_latchkey_gateway_env_by_default() -> No
 
 
 @pytest.mark.timeout(30)
-def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_path: Path) -> None:
+def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
     """When mngr create fails, any latchkey gateway pre-spawned for the agent must be torn down.
 
     Uses a fake ``latchkey`` binary so this test does not require a real
@@ -882,6 +1000,8 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(tmp_pat
         creator = AgentCreator(
             paths=WorkspacePaths(data_dir=tmp_path / "minds"),
             latchkey_gateway_manager=gateway_manager,
+            root_concurrency_group=root_concurrency_group,
+            notification_dispatcher=notification_dispatcher,
         )
         # "Local path" that does not exist -- mngr create will not even get
         # the chance to fail; _create_agent_background aborts with MngrCommandError.
