@@ -62,6 +62,7 @@ addopts = [
   "--cov=imbue.resource_guards",
   "--cov=imbue.mngr_claude",
   "--cov=imbue.mngr_opencode",
+  "--cov=imbue.mngr_hermes",
   "--cov=imbue.mngr_pi_coding",
   "--cov=imbue.mngr_pair",
   "--cov=imbue.mngr_schedule",
