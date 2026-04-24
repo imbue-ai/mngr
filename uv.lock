@@ -25,6 +25,7 @@ members = [
     "imbue-mngr-pi-coding",
     "imbue-mngr-recursive",
     "imbue-mngr-schedule",
+    "imbue-mngr-subagent-proxy",
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
@@ -1676,6 +1677,29 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-subagent-proxy"
+version = "0.1.0"
+source = { editable = "libs/mngr_subagent_proxy" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "imbue-mngr-modal" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
 
 [[package]]
 name = "imbue-mngr-tmr"
