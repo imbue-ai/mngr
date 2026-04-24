@@ -528,15 +528,11 @@ def _is_main_frame_html_get(request: Request) -> bool:
     return "text/html" in accept
 
 
-def _proxy_failure_response(
-    request: Request, agent_id: AgentId, status_code: int, fallback_text: str
-) -> Response:
+def _proxy_failure_response(request: Request, agent_id: AgentId, status_code: int, fallback_text: str) -> Response:
     """Return either an HTML recovery page (for main-frame navigations) or a
     plain-text failure body."""
     if _is_main_frame_html_get(request):
-        return HTMLResponse(
-            content=render_recovery_page(agent_id=str(agent_id)), status_code=status_code
-        )
+        return HTMLResponse(content=render_recovery_page(agent_id=str(agent_id)), status_code=status_code)
     return Response(status_code=status_code, content=fallback_text)
 
 
