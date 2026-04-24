@@ -470,3 +470,27 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
     def stream_output(self) -> Iterator[str]:
         """Yield output chunks as they become available."""
         ...
+
+
+class InterruptibleAgentMixin(ABC):
+    """Mixin for agent types that support interrupting the current turn.
+
+    An interruptible agent can be asked to abort whatever it is currently
+    processing while staying alive and able to accept subsequent messages.
+    This mixin serves as a marker interface so callers can check for
+    interrupt capability without depending on a specific agent
+    implementation.
+    """
+
+    @abstractmethod
+    def interrupt_current_turn(self) -> None:
+        """Signal the agent to abort its current turn, if any.
+
+        When a turn is in progress, the agent should stop what it is doing
+        and return to a state where it can accept a new message. When
+        called while the agent is idle (not processing a turn), this must
+        be a no-op.
+
+        The agent process stays alive regardless; this is not a terminate.
+        """
+        ...
