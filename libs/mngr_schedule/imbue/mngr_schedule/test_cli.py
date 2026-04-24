@@ -2,8 +2,10 @@
 
 import click
 import pluggy
+import pytest
 from click.testing import CliRunner
 
+import imbue.mngr_schedule.cli.remove as remove_module
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.cli.commands import schedule
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
@@ -428,6 +430,40 @@ def test_schedule_remove_local_force_skips_prompt_and_dispatches(
     assert result.exit_code == 0, f"remove failed: {result.output}"
     assert "Are you sure" not in result.output
     assert "Removed schedule" in result.output
+
+
+def test_schedule_remove_local_force_dispatches_to_provider_remove(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove with --force dispatches to the provider's remove function
+    with the resolved trigger name.
+
+    Complements `test_schedule_remove_local_force_skips_prompt_and_dispatches`
+    by asserting directly on the dispatch call rather than on its
+    downstream side effects. The real `remove_local_schedule` is
+    monkey-patched with a recorder so the claim is about the CLI wiring
+    only: the real implementation is exercised by `cli/remove_test.py`
+    unit tests and the `test_schedule_local_lifecycle.py` release test.
+    """
+    _deploy_local_trigger(temp_mngr_ctx, "dispatch-target")
+
+    dispatched: list[str] = []
+
+    def fake_remove(name: str, _mngr_ctx: MngrContext) -> None:
+        dispatched.append(name)
+
+    monkeypatch.setattr(remove_module, "remove_local_schedule", fake_remove)
+
+    result = cli_runner.invoke(
+        schedule,
+        ["remove", "dispatch-target", "--provider", "local", "--force"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0, f"remove failed: {result.output}"
+    assert dispatched == ["dispatch-target"]
 
 
 # =============================================================================
