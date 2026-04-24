@@ -9,8 +9,10 @@ Callers can poll creation status via get_creation_info() or stream logs
 via get_log_queue().
 """
 
+import json
 import os
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -19,7 +21,9 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from uuid import UUID
 
+import tomlkit
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -34,6 +38,9 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.host_pool_client import HostPoolError
+from imbue.minds.desktop_client.host_pool_client import LeaseHostResult
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
@@ -66,12 +73,28 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
+class AgentDestructionStatus(UpperCaseStrEnum):
+    """Status of a background agent destruction."""
+
+    DESTROYING = auto()
+    DONE = auto()
+    FAILED = auto()
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling."""
 
     agent_id: AgentId = Field(description="ID of the agent being created")
     status: AgentCreationStatus = Field(description="Current creation status")
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
+    error: str | None = Field(default=None, description="Error message, set when status is FAILED")
+
+
+class AgentDestructionInfo(FrozenModel):
+    """Snapshot of agent destruction state."""
+
+    agent_id: AgentId = Field(description="ID of the agent being destroyed")
+    status: AgentDestructionStatus = Field(description="Current destruction status")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
 
@@ -286,6 +309,8 @@ def _build_mngr_create_command(
             address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
         case LaunchMode.CLOUD:
             address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
+        case LaunchMode.LEASED:
+            raise MngrCommandError("LEASED mode does not use mngr create -- use the host pool lease flow instead")
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -330,6 +355,9 @@ def _build_mngr_create_command(
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.LEASED:
+            # Unreachable: the first match statement raises for LEASED mode.
+            raise MngrCommandError("LEASED mode does not use mngr create -- use the host pool lease flow instead")
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -357,6 +385,166 @@ def _remote_host_env_flags() -> list[str]:
         "--pass-host-env",
         "MNGR_PREFIX",
     ]
+
+
+def _load_or_create_leased_host_keypair(data_dir: Path) -> tuple[Path, str]:
+    """Load or generate an SSH keypair for connecting to leased hosts.
+
+    The keypair lives at ``<data_dir>/ssh/keys/leased_host/id_ed25519``. If
+    the private key does not exist, ``ssh-keygen`` is invoked to create it.
+    Returns ``(private_key_path, public_key_string)``.
+    """
+    key_dir = data_dir / "ssh" / "keys" / "leased_host"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    private_key_path = key_dir / "id_ed25519"
+    public_key_path = key_dir / "id_ed25519.pub"
+
+    if not private_key_path.exists():
+        with log_span("Generating SSH keypair for leased hosts"):
+            cg = ConcurrencyGroup(name="ssh-keygen")
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[
+                        "ssh-keygen",
+                        "-t",
+                        "ed25519",
+                        "-f",
+                        str(private_key_path),
+                        "-N",
+                        "",
+                        "-q",
+                    ],
+                    is_checked_after=False,
+                )
+            if result.returncode != 0:
+                raise MngrCommandError(
+                    "ssh-keygen failed (exit code {}): {}".format(
+                        result.returncode,
+                        result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                    )
+                )
+
+    public_key_content = public_key_path.read_text().strip()
+    return private_key_path, public_key_content
+
+
+def _write_dynamic_host_entry(
+    dynamic_hosts_file: Path,
+    host_name: str,
+    address: str,
+    port: int,
+    user: str,
+    key_file: Path,
+) -> None:
+    """Write or update a host entry in a dynamic hosts TOML file.
+
+    Creates the file and parent directories if they do not exist. Writes
+    atomically via a temporary file and rename.
+    """
+    dynamic_hosts_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if dynamic_hosts_file.exists():
+        doc = tomlkit.loads(dynamic_hosts_file.read_text())
+    else:
+        doc = tomlkit.document()
+
+    # Build the host section
+    host_table = tomlkit.table()
+    host_table.add("address", address)
+    host_table.add("port", port)
+    host_table.add("user", user)
+    host_table.add("key_file", str(key_file))
+    doc[host_name] = host_table
+
+    tmp_path = dynamic_hosts_file.with_suffix(".tmp")
+    tmp_path.write_text(tomlkit.dumps(doc))
+    tmp_path.rename(dynamic_hosts_file)
+
+
+def _remove_dynamic_host_entry(dynamic_hosts_file: Path, host_name: str) -> None:
+    """Remove a host entry from a dynamic hosts TOML file.
+
+    No-op if the file does not exist or the host name is not present.
+    """
+    if not dynamic_hosts_file.exists():
+        return
+
+    doc = tomlkit.loads(dynamic_hosts_file.read_text())
+    if host_name not in doc:
+        return
+
+    del doc[host_name]
+    tmp_path = dynamic_hosts_file.with_suffix(".tmp")
+    tmp_path.write_text(tomlkit.dumps(doc))
+    tmp_path.rename(dynamic_hosts_file)
+
+
+def _save_lease_info(data_dir: Path, agent_id: AgentId, host_db_id: UUID) -> None:
+    """Persist the lease's host_db_id so release can retrieve it later."""
+    lease_dir = data_dir / "leases"
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    (lease_dir / str(agent_id)).write_text(str(host_db_id))
+
+
+def _load_lease_info(data_dir: Path, agent_id: AgentId) -> UUID | None:
+    """Load the host_db_id for a leased agent, or None if not found."""
+    lease_file = data_dir / "leases" / str(agent_id)
+    if not lease_file.exists():
+        return None
+    return UUID(lease_file.read_text().strip())
+
+
+def _remove_lease_info(data_dir: Path, agent_id: AgentId) -> None:
+    """Remove the persisted lease info for an agent."""
+    lease_file = data_dir / "leases" / str(agent_id)
+    if lease_file.exists():
+        lease_file.unlink()
+
+
+_SEMVER_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(r"^refs/tags/(v\d+\.\d+\.\d+)$")
+
+
+def resolve_template_version(git_url: str, branch: str) -> str:
+    """Resolve the template version to use when leasing a host.
+
+    If branch is non-empty, the branch name is the version (dev workflow).
+    If branch is empty, uses ``git ls-remote --tags`` to find the latest
+    semver tag (e.g. ``v1.2.3``). Falls back to ``"main"`` if no tags found.
+    """
+    if branch:
+        return branch
+
+    cg = ConcurrencyGroup(name="git-ls-remote-tags")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "ls-remote", "--tags", git_url],
+            is_checked_after=False,
+        )
+
+    if result.returncode != 0:
+        logger.warning("git ls-remote --tags failed for {}, falling back to 'main'", git_url)
+        return "main"
+
+    tags: list[tuple[int, int, int, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) < 2:
+            continue
+        ref = parts[1].strip()
+        match = _SEMVER_TAG_PATTERN.match(ref)
+        if match:
+            tag = match.group(1)
+            version_parts = tag[1:].split(".")
+            tags.append((int(version_parts[0]), int(version_parts[1]), int(version_parts[2]), tag))
+
+    if not tags:
+        logger.debug("No semver tags found for {}, falling back to 'main'", git_url)
+        return "main"
+
+    tags.sort(reverse=True)
+    latest = tags[0][3]
+    logger.debug("Resolved latest semver tag for {}: {}", git_url, latest)
+    return latest
 
 
 def run_mngr_create(
@@ -426,6 +614,11 @@ class AgentCreator(MutableModel):
             "happy-path redirect."
         ),
     )
+    host_pool_client: HostPoolClient | None = Field(
+        default=None,
+        frozen=True,
+        description="Client for leasing pre-provisioned hosts from the Vultr host pool",
+    )
     latchkey_gateway_manager: LatchkeyGatewayManager | None = Field(
         default=None,
         frozen=True,
@@ -445,6 +638,8 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _destroy_statuses: dict[str, AgentDestructionStatus] = PrivateAttr(default_factory=dict)
+    _destroy_errors: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def start_creation(
         self,
@@ -453,6 +648,9 @@ class AgentCreator(MutableModel):
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
         include_env_file: bool = False,
+        access_token: str = "",
+        version: str = "",
+        on_created: Callable[[AgentId], None] | None = None,
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -461,21 +659,49 @@ class AgentCreator(MutableModel):
         via ``--host-env-file`` so local secrets reach the new agent's host.
         The flag is ignored for git URLs (since ``.env`` is gitignored).
 
+        For ``LaunchMode.LEASED``, the host is leased synchronously (fast HTTP
+        call) so that the real agent ID from the pool host is used as the
+        canonical ID. The remaining setup (rename, start) runs in the background.
+
+        When ``on_created`` is provided, it is called with the agent ID after the
+        agent has been successfully created (but before the status is set to DONE).
+
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
         """
-        agent_id = AgentId()
         log_queue: queue.Queue[str] = queue.Queue()
+        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
+        effective_branch = branch.strip()
+
+        lease_result: LeaseHostResult | None = None
+        if launch_mode is LaunchMode.LEASED:
+            agent_id, lease_result = self._lease_host_synchronously(
+                access_token=access_token,
+                version=version,
+                log_queue=log_queue,
+            )
+        else:
+            agent_id = AgentId()
+
         with self._lock:
             self._statuses[str(agent_id)] = AgentCreationStatus.CLONING
             self._log_queues[str(agent_id)] = log_queue
 
-        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
-        effective_branch = branch.strip()
-
         thread = threading.Thread(
             target=self._create_agent_background,
-            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode, include_env_file),
+            args=(
+                agent_id,
+                repo_source,
+                effective_name,
+                effective_branch,
+                log_queue,
+                launch_mode,
+                include_env_file,
+                access_token,
+                version,
+                on_created,
+                lease_result,
+            ),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
         )
@@ -483,6 +709,37 @@ class AgentCreator(MutableModel):
         with self._lock:
             self._threads.append(thread)
         return agent_id
+
+    def _lease_host_synchronously(
+        self,
+        access_token: str,
+        version: str,
+        log_queue: queue.Queue[str],
+    ) -> tuple[AgentId, LeaseHostResult]:
+        """Lease a host from the pool and return (agent_id, lease_result).
+
+        Runs synchronously so the caller gets the real agent ID from the
+        pool host before setting up status tracking.
+        """
+        if self.host_pool_client is None:
+            raise MngrCommandError("LEASED mode requires a host_pool_client but none is configured")
+        if not access_token:
+            raise MngrCommandError("LEASED mode requires an access_token for authentication")
+        if not version:
+            raise MngrCommandError("LEASED mode requires a version string")
+
+        private_key_path, public_key = _load_or_create_leased_host_keypair(self.paths.data_dir)
+        log_queue.put("[minds] Requesting a leased host (version: {})...".format(version))
+        lease_result = self.host_pool_client.lease_host(access_token, public_key, version)
+        logger.debug(
+            "Leased host: db_id={}, vps_ip={}, agent_id={}, host_id={}",
+            lease_result.host_db_id,
+            lease_result.vps_ip,
+            lease_result.agent_id,
+            lease_result.host_id,
+        )
+        agent_id = AgentId(lease_result.agent_id)
+        return agent_id, lease_result
 
     def wait_for_all(self, timeout: float = 10.0) -> None:
         """Wait for all background creation threads to finish."""
@@ -509,6 +766,175 @@ class AgentCreator(MutableModel):
         with self._lock:
             return self._log_queues.get(str(agent_id))
 
+    def release_leased_host(self, agent_id: AgentId, access_token: str) -> None:
+        """Release a leased host and clean up local state.
+
+        Removes the dynamic host entry and calls the host pool release endpoint.
+        No-op if no lease info is found for the agent.
+        """
+        host_db_id = _load_lease_info(self.paths.data_dir, agent_id)
+        if host_db_id is None:
+            logger.debug("No lease info found for agent {}, skipping release", agent_id)
+            return
+
+        # Remove the dynamic host entry
+        dynamic_hosts_file = self.paths.data_dir / "ssh" / "dynamic_hosts.toml"
+        host_name = "leased-{}".format(agent_id)
+        _remove_dynamic_host_entry(dynamic_hosts_file, host_name)
+
+        # Call the release endpoint
+        if self.host_pool_client is not None:
+            is_released = self.host_pool_client.release_host(access_token, host_db_id)
+            if is_released:
+                _remove_lease_info(self.paths.data_dir, agent_id)
+                logger.debug("Released leased host {} for agent {}", host_db_id, agent_id)
+            else:
+                logger.warning("Failed to release leased host {} for agent {}", host_db_id, agent_id)
+        else:
+            logger.warning("No host_pool_client configured, cannot release host {}", host_db_id)
+
+    def start_destruction(
+        self,
+        agent_id: AgentId,
+        access_token: str = "",
+    ) -> None:
+        """Start destroying an agent in a background thread.
+
+        Runs ``mngr destroy``, releases the leased host if applicable,
+        and updates the destruction status.
+        """
+        with self._lock:
+            self._destroy_statuses[str(agent_id)] = AgentDestructionStatus.DESTROYING
+
+        thread = threading.Thread(
+            target=self._destroy_agent_background,
+            args=(agent_id, access_token),
+            daemon=True,
+            name="agent-destroyer-{}".format(agent_id),
+        )
+        thread.start()
+        with self._lock:
+            self._threads.append(thread)
+
+    def get_destruction_info(self, agent_id: AgentId) -> AgentDestructionInfo | None:
+        """Get the current destruction status for an agent, or None if not tracked."""
+        with self._lock:
+            status = self._destroy_statuses.get(str(agent_id))
+            if status is None:
+                return None
+            return AgentDestructionInfo(
+                agent_id=agent_id,
+                status=status,
+                error=self._destroy_errors.get(str(agent_id)),
+            )
+
+    def _destroy_agent_background(
+        self,
+        agent_id: AgentId,
+        access_token: str,
+    ) -> None:
+        """Background thread that destroys all agents on the same host and releases leased resources."""
+        aid = str(agent_id)
+        try:
+            with log_span("Destroying workspace {}", agent_id):
+                # Find the host ID and destroy agents BEFORE removing the
+                # dynamic host entry -- mngr needs the SSH provider config
+                # to discover and destroy agents on the remote host.
+                host_id = self._get_host_id_for_agent(agent_id)
+
+                if host_id is not None:
+                    self._destroy_all_agents_on_host(host_id)
+                else:
+                    logger.warning("Could not determine host for agent {}, destroying single agent", agent_id)
+                    self._destroy_single_agent(agent_id)
+
+                # Remove the dynamic host entry AFTER destroy so mngr observe
+                # stops trying to connect to the now-dead host.
+                dynamic_hosts_file = self.paths.data_dir / "ssh" / "dynamic_hosts.toml"
+                host_entry_name = "leased-{}".format(agent_id)
+                _remove_dynamic_host_entry(dynamic_hosts_file, host_entry_name)
+
+                # Release leased host back to the pool (no-op if not leased)
+                if access_token:
+                    self.release_leased_host(agent_id, access_token)
+
+                with self._lock:
+                    self._destroy_statuses[aid] = AgentDestructionStatus.DONE
+
+        except (MngrCommandError, HostPoolError, ValueError, OSError) as e:
+            logger.error("Failed to destroy agent {}: {}", agent_id, e)
+            with self._lock:
+                self._destroy_statuses[aid] = AgentDestructionStatus.FAILED
+                self._destroy_errors[aid] = str(e)
+
+    def _get_host_id_for_agent(self, agent_id: AgentId) -> str | None:
+        """Look up the host ID for an agent via ``mngr list``."""
+        cg = ConcurrencyGroup(name="mngr-list-host")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    MNGR_BINARY,
+                    "list",
+                    "--include",
+                    'id == "{}"'.format(agent_id),
+                    "--format",
+                    "json",
+                ],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout)
+            agents = data.get("agents", [])
+            if agents:
+                host = agents[0].get("host", {})
+                return host.get("id")
+        except (json.JSONDecodeError, KeyError, IndexError):
+            pass
+        return None
+
+    def _destroy_all_agents_on_host(self, host_id: str) -> None:
+        """Destroy all agents on the given host via ``mngr destroy -f``."""
+        cg = ConcurrencyGroup(name="mngr-destroy-host")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "bash",
+                    "-c",
+                    "{mngr} list --include 'host.id == \"{host_id}\"' --ids | {mngr} destroy -f -".format(
+                        mngr=MNGR_BINARY,
+                        host_id=host_id,
+                    ),
+                ],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            raise MngrCommandError(
+                "mngr destroy for host {} failed (exit code {}):\n{}".format(
+                    host_id,
+                    result.returncode,
+                    result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                )
+            )
+
+    def _destroy_single_agent(self, agent_id: AgentId) -> None:
+        """Destroy a single agent via ``mngr destroy``."""
+        cg = ConcurrencyGroup(name="mngr-destroy")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[MNGR_BINARY, "destroy", str(agent_id), "-f"],
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            raise MngrCommandError(
+                "mngr destroy failed for {} (exit code {}):\n{}".format(
+                    agent_id,
+                    result.returncode,
+                    result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+                )
+            )
+
     def _create_agent_background(
         self,
         agent_id: AgentId,
@@ -518,24 +944,44 @@ class AgentCreator(MutableModel):
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
         include_env_file: bool,
+        access_token: str = "",
+        version: str = "",
+        on_created: Callable[[AgentId], None] | None = None,
+        lease_result: LeaseHostResult | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
         emit_log = make_log_callback(log_queue)
         host_env_file: Path | None = None
         try:
+            if launch_mode is LaunchMode.LEASED:
+                if lease_result is None:
+                    raise MngrCommandError("LEASED mode requires a lease_result from _lease_host_synchronously")
+                self._setup_leased_agent(
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                    log_queue=log_queue,
+                    emit_log=emit_log,
+                    access_token=access_token,
+                    lease_result=lease_result,
+                    on_created=on_created,
+                )
+                return
+
             with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
-                        raise MngrCommandError(f"Local path does not exist: {resolved_path}")
+                        raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
                     if include_env_file:
                         candidate = resolved_path / ".env"
                         if candidate.is_file():
                             host_env_file = candidate
-                            log_queue.put(f"[minds] Including .env file: {candidate}")
+                            log_queue.put("[minds] Including .env file: {}".format(candidate))
                         else:
-                            log_queue.put(f"[minds] No .env file found at {candidate}; skipping --host-env-file")
+                            log_queue.put(
+                                "[minds] No .env file found at {}; skipping --host-env-file".format(candidate)
+                            )
 
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
@@ -545,7 +991,7 @@ class AgentCreator(MutableModel):
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
-                        clone_target = Path(tempfile.gettempdir()) / f"minds-clone-{repo_name}"
+                        clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                         if clone_target.exists():
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
@@ -558,10 +1004,10 @@ class AgentCreator(MutableModel):
                         workspace_dir = clone_target
                     else:
                         workspace_dir = resolved_path
-                        log_queue.put(f"[minds] Using local directory: {workspace_dir}")
+                        log_queue.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
-                    clone_target = Path(tempfile.gettempdir()) / f"minds-clone-{repo_name}"
+                    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
@@ -601,11 +1047,12 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # After phase 6 deleted the legacy /forwarding/ routes the new
-                # workspace entry point is http://<agent-id>.localhost:<port>/,
-                # which the desktop client's subdomain middleware forwards to the
-                # per-agent minds_workspace_server. Construct the absolute URL
-                # here because the browser uses it verbatim in window.location.
+                if on_created is not None:
+                    try:
+                        on_created(agent_id)
+                    except (ValueError, OSError) as callback_exc:
+                        logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
+
                 port_suffix = ":{}".format(self.server_port) if self.server_port else ""
                 redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
 
@@ -613,7 +1060,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = redirect_url
 
-        except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
+        except (GitCloneError, GitOperationError, MngrCommandError, HostPoolError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
@@ -655,3 +1102,205 @@ class AgentCreator(MutableModel):
         url = _build_latchkey_gateway_url(launch_mode, info)
         log_queue.put(f"[minds] Latchkey gateway for this agent: {url}")
         return url
+
+    def _setup_leased_agent(
+        self,
+        agent_id: AgentId,
+        agent_name: str,
+        log_queue: queue.Queue[str],
+        emit_log: OutputCallback,
+        access_token: str,
+        lease_result: LeaseHostResult,
+        on_created: Callable[[AgentId], None] | None = None,
+    ) -> None:
+        """Set up a leased host (write dynamic host entry, rename, start)."""
+        aid = str(agent_id)
+        private_key_path = _load_or_create_leased_host_keypair(self.paths.data_dir)[0]
+
+        with log_span("Setting up leased agent {} on {}", agent_id, lease_result.vps_ip):
+            with self._lock:
+                self._statuses[aid] = AgentCreationStatus.CREATING
+
+            log_queue.put(
+                "[minds] Leased host {} (agent: {}, host: {})".format(
+                    lease_result.vps_ip, lease_result.agent_id, lease_result.host_id
+                )
+            )
+
+            dynamic_hosts_file = self.paths.data_dir / "ssh" / "dynamic_hosts.toml"
+            host_entry_name = "leased-{}".format(agent_id)
+            try:
+                _save_lease_info(self.paths.data_dir, agent_id, lease_result.host_db_id)
+
+                _write_dynamic_host_entry(
+                    dynamic_hosts_file=dynamic_hosts_file,
+                    host_name=host_entry_name,
+                    address=lease_result.vps_ip,
+                    port=lease_result.container_ssh_port,
+                    user=lease_result.ssh_user,
+                    key_file=private_key_path,
+                )
+                log_queue.put("[minds] Dynamic host entry written for {}".format(host_entry_name))
+
+                self._setup_and_start_leased_agent(
+                    agent_id=agent_id,
+                    aid=aid,
+                    agent_name=agent_name,
+                    log_queue=log_queue,
+                    emit_log=emit_log,
+                    lease_result=lease_result,
+                    on_created=on_created,
+                )
+            except (MngrCommandError, HostPoolError, ValueError, OSError):
+                self._cleanup_failed_lease(
+                    agent_id=agent_id,
+                    access_token=access_token,
+                    host_db_id=lease_result.host_db_id,
+                    dynamic_hosts_file=dynamic_hosts_file,
+                    host_entry_name=host_entry_name,
+                    log_queue=log_queue,
+                )
+                raise
+
+    def _setup_and_start_leased_agent(
+        self,
+        agent_id: AgentId,
+        aid: str,
+        agent_name: str,
+        log_queue: queue.Queue[str],
+        emit_log: OutputCallback,
+        lease_result: LeaseHostResult,
+        on_created: Callable[[AgentId], None] | None = None,
+    ) -> None:
+        """Label, rename, and start the leased agent. Raises on failure."""
+        parsed_name = AgentName(agent_name)
+
+        log_queue.put("[minds] Setting workspace labels...")
+        cg_label = ConcurrencyGroup(name="mngr-label")
+        with cg_label:
+            label_result = cg_label.run_process_to_completion(
+                command=[
+                    MNGR_BINARY,
+                    "label",
+                    lease_result.agent_id,
+                    "-l",
+                    "workspace={}".format(parsed_name),
+                    "-l",
+                    "user_created=true",
+                    "-l",
+                    "is_primary=true",
+                ],
+                is_checked_after=False,
+                on_output=emit_log,
+            )
+        if label_result.returncode != 0:
+            raise MngrCommandError(
+                "mngr label failed (exit code {}): {}".format(
+                    label_result.returncode,
+                    label_result.stderr.strip() if label_result.stderr.strip() else label_result.stdout.strip(),
+                )
+            )
+
+        log_queue.put("[minds] Renaming agent to '{}'...".format(parsed_name))
+        cg_rename = ConcurrencyGroup(name="mngr-rename")
+        with cg_rename:
+            rename_result = cg_rename.run_process_to_completion(
+                command=[MNGR_BINARY, "rename", lease_result.agent_id, str(parsed_name)],
+                is_checked_after=False,
+                on_output=emit_log,
+            )
+        if rename_result.returncode != 0:
+            raise MngrCommandError(
+                "mngr rename failed (exit code {}): {}".format(
+                    rename_result.returncode,
+                    rename_result.stderr.strip() if rename_result.stderr.strip() else rename_result.stdout.strip(),
+                )
+            )
+
+        log_queue.put("[minds] Starting agent '{}'...".format(parsed_name))
+        cg_start = ConcurrencyGroup(name="mngr-start")
+        with cg_start:
+            start_result = cg_start.run_process_to_completion(
+                command=[MNGR_BINARY, "start", str(parsed_name)],
+                is_checked_after=False,
+                on_output=emit_log,
+            )
+        if start_result.returncode != 0:
+            raise MngrCommandError(
+                "mngr start failed (exit code {}): {}".format(
+                    start_result.returncode,
+                    start_result.stderr.strip() if start_result.stderr.strip() else start_result.stdout.strip(),
+                )
+            )
+
+        # Generate a new API key, inject it into the agent's env, and persist the hash
+        api_key = generate_api_key()
+        log_queue.put("[minds] Injecting MINDS_API_KEY...")
+        env_path = "/mngr/agents/{}/env".format(agent_id)
+        inject_command = ("sed -i '/^MINDS_API_KEY=/d' {path} && echo 'MINDS_API_KEY={key}' >> {path}").format(
+            path=env_path, key=api_key
+        )
+        cg_exec = ConcurrencyGroup(name="mngr-exec-apikey")
+        with cg_exec:
+            exec_result = cg_exec.run_process_to_completion(
+                command=[MNGR_BINARY, "exec", str(agent_id), inject_command],
+                is_checked_after=False,
+                on_output=emit_log,
+            )
+        if exec_result.returncode != 0:
+            logger.warning("Failed to inject MINDS_API_KEY: {}", exec_result.stderr.strip())
+        key_hash = hash_api_key(api_key)
+        save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
+        log_queue.put("[minds] API key generated and hash stored.")
+
+        log_queue.put("[minds] Leased agent started successfully.")
+
+        if on_created is not None:
+            try:
+                on_created(agent_id)
+            except (ValueError, OSError) as callback_exc:
+                logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
+
+        port_suffix = ":{}".format(self.server_port) if self.server_port else ""
+        redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+
+        with self._lock:
+            self._statuses[aid] = AgentCreationStatus.DONE
+            self._redirect_urls[aid] = redirect_url
+
+    def _cleanup_failed_lease(
+        self,
+        agent_id: AgentId,
+        access_token: str,
+        host_db_id: UUID,
+        dynamic_hosts_file: Path,
+        host_entry_name: str,
+        log_queue: queue.Queue[str],
+    ) -> None:
+        """Best-effort cleanup after a failed leased agent setup.
+
+        Removes the dynamic host entry, releases the host back to the pool,
+        and removes the persisted lease info. Logs warnings on cleanup failures
+        rather than masking the original error.
+        """
+        log_queue.put("[minds] Cleaning up after failed lease setup...")
+
+        try:
+            _remove_dynamic_host_entry(dynamic_hosts_file, host_entry_name)
+        except OSError as cleanup_exc:
+            logger.warning("Failed to remove dynamic host entry during cleanup: {}", cleanup_exc)
+
+        if self.host_pool_client is not None and access_token:
+            try:
+                is_released = self.host_pool_client.release_host(access_token, host_db_id)
+                if is_released:
+                    logger.debug("Released leased host {} during cleanup", host_db_id)
+                else:
+                    logger.warning("Failed to release leased host {} during cleanup", host_db_id)
+            except (HostPoolError, OSError) as cleanup_exc:
+                logger.warning("Error releasing leased host {} during cleanup: {}", host_db_id, cleanup_exc)
+
+        try:
+            _remove_lease_info(self.paths.data_dir, agent_id)
+        except OSError as cleanup_exc:
+            logger.warning("Failed to remove lease info during cleanup: {}", cleanup_exc)

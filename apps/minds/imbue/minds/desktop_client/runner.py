@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructionHandler
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
@@ -131,8 +132,10 @@ def start_desktop_client(
     """
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
+    is_electron = os.getenv("MINDS_ELECTRON") == "1"
+    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver()
-    stream_manager = MngrStreamManager(resolver=backend_resolver)
+    stream_manager = MngrStreamManager(resolver=backend_resolver, notification_dispatcher=notification_dispatcher)
     tunnel_manager = SSHTunnelManager()
     latchkey_gateway_manager = _build_latchkey_gateway_manager(data_directory=data_directory)
     latchkey_gateway_manager.start(data_dir=data_directory)
@@ -140,14 +143,14 @@ def start_desktop_client(
     minds_config = MindsConfig(data_dir=data_directory)
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
+    host_pool_client = _build_host_pool_client(minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
         latchkey_gateway_manager=latchkey_gateway_manager,
+        host_pool_client=host_pool_client,
     )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
-    is_electron = os.getenv("MINDS_ELECTRON") == "1"
-    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
     # Initialize multi-account session store
     session_store = MultiAccountSessionStore(
@@ -253,6 +256,13 @@ def start_desktop_client(
     # quickly, giving the lifespan shutdown hook time to run within
     # electron's 5-second SIGKILL window.
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+
+
+def _build_host_pool_client(connector_url: AnyUrl) -> HostPoolClient:
+    """Build a HostPoolClient from the remote service connector URL."""
+    return HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
+    )
 
 
 def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
