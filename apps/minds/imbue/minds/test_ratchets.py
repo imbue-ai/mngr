@@ -228,7 +228,13 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    excluded = TEST_FILE_PATTERNS + ("testing.py", "scripts/*.py")
+    # ``latchkey/_spawn.py`` intentionally uses ``subprocess.Popen`` with
+    # ``start_new_session=True`` so that the spawned ``latchkey gateway``
+    # outlives the minds desktop client. That is the opposite of what the
+    # ratchet is designed to enforce (managed cleanup via ConcurrencyGroup),
+    # so we exclude that tiny helper specifically; see its module docstring
+    # for the full justification.
+    excluded = TEST_FILE_PATTERNS + ("testing.py", "scripts/*.py", "*/latchkey/_spawn.py")
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 
