@@ -1,4 +1,5 @@
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -214,8 +215,6 @@ def test_prevent_old_mng_name_in_file_contents() -> None:
 
 def test_prevent_old_mng_name_in_file_paths() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file paths."""
-    import re
-
     mng_not_mngr = re.compile(r"mng(?!r)")
     all_paths = _get_all_files_with_extension(_REPO_ROOT, None)
     mng_paths = [
@@ -381,3 +380,59 @@ def test_every_project_with_tests_has_coverage_config() -> None:
     assert len(errors) == 0, "Projects with tests are missing coverage configuration:\n" + "\n".join(
         f"  - {e}" for e in errors
     )
+
+
+# Regex matching top-level omit patterns that fully exclude a subproject's package,
+# e.g. "libs/mngr_modal/imbue/mngr_modal/*" -> package "mngr_modal".
+_FULLY_OMITTED_PACKAGE_PATTERN = re.compile(r"^(?:libs|apps)/([^/]+)/imbue/\1/\*$")
+
+
+def _get_cov_packages(addopts: object) -> frozenset[str]:
+    """Extract the X in every `--cov=X` entry from a pytest addopts list."""
+    if not isinstance(addopts, list):
+        return frozenset()
+    return frozenset(str(opt).removeprefix("--cov=") for opt in addopts if str(opt).startswith("--cov="))
+
+
+def _get_addopts(pyproject: dict) -> object:
+    return pyproject.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", [])
+
+
+def test_top_level_cov_flags_are_union_of_subproject_cov_flags() -> None:
+    """Ensure the top-level pyproject.toml `--cov=` flags are exactly the union of the
+    subprojects' `--cov=` flags, except for packages whose source is fully omitted in the
+    top-level `[tool.coverage.run].omit` (e.g. `libs/mngr_modal/imbue/mngr_modal/*`).
+
+    Keeps the root coverage scope in sync with the per-project scopes so a new subproject
+    cannot silently drop out of combined coverage collection.
+    """
+    top_pyproject = tomlkit.parse((_REPO_ROOT / "pyproject.toml").read_text())
+    top_cov = _get_cov_packages(_get_addopts(top_pyproject))
+    top_omit = top_pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])
+    fully_omitted = frozenset(
+        f"imbue.{m.group(1)}" for pat in top_omit if (m := _FULLY_OMITTED_PACKAGE_PATTERN.match(str(pat))) is not None
+    )
+
+    subproject_cov: set[str] = set()
+    for project_dir in _get_all_project_dirs():
+        pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+        subproject_cov.update(_get_cov_packages(_get_addopts(pyproject)))
+
+    expected_top_cov = subproject_cov - fully_omitted
+    missing = expected_top_cov - top_cov
+    extra = top_cov - expected_top_cov
+
+    errors: list[str] = []
+    if missing:
+        errors.append(
+            "Subprojects declare --cov= flags that are missing from the top-level pyproject.toml "
+            "(add them to [tool.pytest.ini_options].addopts, or fully omit the package in "
+            "[tool.coverage.run].omit):\n" + "\n".join(f"    --cov={m}" for m in sorted(missing))
+        )
+    if extra:
+        errors.append(
+            "Top-level pyproject.toml has --cov= flags that no subproject declares:\n"
+            + "\n".join(f"    --cov={e}" for e in sorted(extra))
+        )
+
+    assert not errors, "Top-level --cov= flags out of sync with subprojects:\n" + "\n".join(errors)
