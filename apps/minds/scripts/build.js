@@ -6,10 +6,11 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const https = require('https');
 const http = require('http');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -80,39 +81,159 @@ async function downloadUv({ platform, arch }) {
 }
 
 /**
- * Bundle the latchkey npm package into ``resources/latchkey/``.
+ * Read and parse a JSON file.
+ */
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+}
+
+/**
+ * Resolve the on-disk package.json for a dependency as seen from a given
+ * starting directory. Handles pnpm's layout (where transitive deps aren't
+ * hoisted to the root node_modules) by threading the right search path.
+ */
+function resolveInstalledPackage(name, fromDir) {
+  const packageJsonPath = require.resolve(`${name}/package.json`, {
+    paths: [fromDir],
+  });
+  return { packageJsonPath, pkg: readJson(packageJsonPath) };
+}
+
+/**
+ * Bundle the latchkey npm CLI (plus all its runtime dependencies) into
+ * ``resources/latchkey/``.
  *
- * The dev-mode path uses ``node_modules/.bin/latchkey`` directly, but that
- * wrapper depends on Node being on PATH, which is not guaranteed for
- * end-users of a packaged build. So in packaged mode we copy the resolved
- * latchkey package tree and emit a small shell shim that runs it under
- * the bundled Electron binary with ``ELECTRON_RUN_AS_NODE=1``. The Python
- * backend reads ``MINDS_ELECTRON_EXEC_PATH`` from the shim at invocation
- * time, so the shim itself is portable across install locations.
+ * Context:
+ *   apps/minds is managed by pnpm, which installs each package into its own
+ *   ``node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/`` directory and
+ *   wires up sibling symlinks for deps. Naively copying just the latchkey
+ *   package directory leaves Node unable to resolve ``commander``, ``zod``,
+ *   etc., because those live as siblings in the pnpm virtual store rather
+ *   than as nested directories inside the package.
+ *
+ *   To get a self-contained, portable bundle we do a fresh, flat
+ *   ``npm install`` into a scratch staging directory and copy the resulting
+ *   hoisted ``node_modules/`` tree wholesale into ``resources/latchkey/``.
+ *
+ * Platform-fanout (native prebuilds):
+ *   Some deps use ``optionalDependencies`` to ship one platform-specific
+ *   prebuilt native addon per target. Specifically:
+ *     - ``@napi-rs/keyring`` fans out to ``@napi-rs/keyring-<os>-<arch>[-libc]``.
+ *     - ``playwright`` has an optional ``fsevents`` for macOS.
+ *   npm's default installer skips any optional dep whose ``os``/``cpu``
+ *   doesn't match the build host, which breaks cross-platform packaging
+ *   (todesktop builds multiple targets from one host). We sidestep that by
+ *   listing every such fanout dep explicitly as a top-level dependency in
+ *   the staging ``package.json`` (with ``--force`` so npm doesn't refuse
+ *   them). The fanout set is read from each parent package's own
+ *   ``optionalDependencies``, so it tracks upstream version bumps without
+ *   manual intervention.
+ *
+ *   ``--ignore-scripts`` prevents playwright's postinstall from downloading
+ *   ~500MB of browser binaries into the staging tree -- latchkey only uses
+ *   playwright lazily, and any needed browsers are fetched at runtime.
+ *
+ * Runtime:
+ *   A small shell shim at ``resources/latchkey/bin/latchkey`` invokes the
+ *   CLI under the packaged Electron binary as Node (``ELECTRON_RUN_AS_NODE=1``),
+ *   so we don't need to ship a separate Node runtime. The Python backend
+ *   sets ``MINDS_ELECTRON_EXEC_PATH`` in the env before spawning the shim.
  */
 function bundleLatchkey() {
   const destDir = path.join(RESOURCES_DIR, 'latchkey');
-  const destPackageDir = path.join(destDir, 'package');
+  const destNodeModules = path.join(destDir, 'node_modules');
   const destBinDir = path.join(destDir, 'bin');
-  fs.mkdirSync(destPackageDir, { recursive: true });
-  fs.mkdirSync(destBinDir, { recursive: true });
 
-  // Resolve the installed package so we get its actual on-disk location,
-  // which might be hoisted (npm) or nested (pnpm) under node_modules.
-  const packageJsonPath = require.resolve('latchkey/package.json', { paths: [ROOT] });
-  const sourcePackageDir = path.dirname(packageJsonPath);
+  // Discover versions and fanout sets from the already-pnpm-installed deps
+  // under apps/minds/node_modules/. This keeps the bundled versions in lock
+  // step with what dev mode and pnpm-lock.yaml pin. keyring and playwright
+  // are transitive deps of latchkey, so under pnpm they aren't hoisted to
+  // apps/minds/node_modules -- we resolve them starting from latchkey's own
+  // install directory.
+  const latchkey = resolveInstalledPackage('latchkey', ROOT);
+  const latchkeyDir = path.dirname(latchkey.packageJsonPath);
+  const keyring = resolveInstalledPackage('@napi-rs/keyring', latchkeyDir);
+  const playwright = resolveInstalledPackage('playwright', latchkeyDir);
 
-  fs.cpSync(sourcePackageDir, destPackageDir, { recursive: true, dereference: true });
-
-  const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-  const cliRelative = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin && pkg.bin.latchkey;
+  const cliRelative =
+    typeof latchkey.pkg.bin === 'string'
+      ? latchkey.pkg.bin
+      : latchkey.pkg.bin && latchkey.pkg.bin.latchkey;
   if (!cliRelative) {
-    throw new Error(`latchkey package at ${sourcePackageDir} is missing a "bin" entry`);
+    throw new Error(`latchkey@${latchkey.pkg.version} is missing a "bin" entry`);
   }
-  // Inside the shim the CLI is resolved relative to the shim's own directory
-  // so the packaged app can be installed anywhere.
+
+  // Union of every platform-specific optional prebuild we want to guarantee
+  // is in the bundle, regardless of the build host's OS/arch/libc.
+  const fanoutDeps = {
+    ...(keyring.pkg.optionalDependencies || {}),
+    ...(playwright.pkg.optionalDependencies || {}),
+  };
+
+  const stagingParent = fs.mkdtempSync(path.join(os.tmpdir(), 'minds-latchkey-'));
+  try {
+    const stagingDir = path.join(stagingParent, 'staging');
+    fs.mkdirSync(stagingDir, { recursive: true });
+
+    const stagingPackage = {
+      name: 'minds-latchkey-bundle',
+      version: '0.0.0',
+      private: true,
+      dependencies: {
+        latchkey: latchkey.pkg.version,
+        ...fanoutDeps,
+      },
+    };
+    fs.writeFileSync(
+      path.join(stagingDir, 'package.json'),
+      JSON.stringify(stagingPackage, null, 2) + '\n'
+    );
+
+    console.log(
+      `Installing latchkey@${latchkey.pkg.version} into staging with ` +
+      `${Object.keys(fanoutDeps).length} platform-fanout deps...`
+    );
+    execFileSync(
+      'npm',
+      [
+        'install',
+        '--omit=dev',
+        '--ignore-scripts',
+        '--force',
+        '--no-audit',
+        '--no-fund',
+        '--no-package-lock',
+      ],
+      { cwd: stagingDir, stdio: 'inherit' }
+    );
+
+    const stagingNodeModules = path.join(stagingDir, 'node_modules');
+    if (!fs.existsSync(path.join(stagingNodeModules, 'latchkey', 'package.json'))) {
+      throw new Error(
+        `npm install did not produce latchkey under ${stagingNodeModules}`
+      );
+    }
+
+    // Copy the flat, self-contained node_modules tree into resources/.
+    // dereference: true so any symlinks npm may have created (e.g. .bin/
+    // entries) become real files -- the packaged app is read-only and may
+    // be installed under a different root than the build host.
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.cpSync(stagingNodeModules, destNodeModules, {
+      recursive: true,
+      dereference: true,
+    });
+  } finally {
+    fs.rmSync(stagingParent, { recursive: true, force: true });
+  }
+
+  // Emit the shim. It resolves the CLI relative to its own location so the
+  // bundle is relocatable.
+  fs.mkdirSync(destBinDir, { recursive: true });
   const shimPath = path.join(destBinDir, 'latchkey');
-  const cliRelativeFromShim = path.join('..', 'package', cliRelative).replace(/\\/g, '/');
+  const cliRelativeFromShim = path
+    .join('..', 'node_modules', 'latchkey', cliRelative)
+    .replace(/\\/g, '/');
   const shimContent =
     '#!/usr/bin/env bash\n' +
     '# Auto-generated by scripts/build.js. Runs the bundled latchkey CLI under\n' +
@@ -127,7 +248,20 @@ function bundleLatchkey() {
     'exec env ELECTRON_RUN_AS_NODE=1 "$MINDS_ELECTRON_EXEC_PATH" "$CLI_JS" "$@"\n';
   fs.writeFileSync(shimPath, shimContent);
   fs.chmodSync(shimPath, 0o755);
-  console.log(`latchkey bundled at ${destPackageDir} (shim: ${shimPath})`);
+
+  // Smoke-test the bundle by running the CLI under the build host's Node.
+  // This catches missing dependencies (ERR_MODULE_NOT_FOUND) at build time
+  // rather than at user launch. We invoke cli.js directly rather than going
+  // through the shim because the shim requires Electron; plain Node works
+  // because cli.js only uses standard Node APIs and its bundled deps.
+  const bundledCli = path.join(destNodeModules, 'latchkey', cliRelative);
+  console.log(`Smoke-testing bundled latchkey: ${bundledCli} --help`);
+  execFileSync(process.execPath, [bundledCli, '--help'], { stdio: 'inherit' });
+
+  console.log(
+    `latchkey@${latchkey.pkg.version} bundled at ${destNodeModules} ` +
+    `(shim: ${shimPath})`
+  );
 }
 
 async function downloadGit() {

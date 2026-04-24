@@ -42,10 +42,12 @@ function getGitBinDir() {
  * invoke that directly, so any developer who already has Node on PATH (a
  * prerequisite for running Electron itself) gets Latchkey for free.
  *
- * Packaged mode: build.js copies the resolved latchkey package and a small
- * shim script into ``resources/latchkey/``. The shim uses the packaged
- * Electron binary as Node (``ELECTRON_RUN_AS_NODE=1``) so we do not have
- * to bundle a second Node runtime.
+ * Packaged mode: build.js stages a fresh, flat ``npm install`` of latchkey
+ * (including every platform-specific native prebuild) into
+ * ``resources/latchkey/node_modules/`` and emits a small shim at
+ * ``resources/latchkey/bin/latchkey``. The shim uses the packaged Electron
+ * binary as Node (``ELECTRON_RUN_AS_NODE=1``) so we do not have to bundle a
+ * second Node runtime. See ``scripts/build.js::bundleLatchkey`` for details.
  */
 function getLatchkeyPath() {
   if (isDev()) {
