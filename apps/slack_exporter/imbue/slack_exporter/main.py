@@ -86,6 +86,16 @@ Examples:
         help="Number of most recent relevant threads to check for reaction changes (default: 50)",
     )
     parser.add_argument(
+        "--refresh-window-days",
+        type=int,
+        default=30,
+        help=(
+            "On incremental runs, re-fetch the last N days of history to notice new replies "
+            "on already-exported parent messages. Pass a non-positive number to disable. "
+            "Default: 30"
+        ),
+    )
+    parser.add_argument(
         "--refresh",
         action="store_true",
         help="Force re-fetch of all cached data (channels, users, self identity)",
@@ -115,6 +125,8 @@ Examples:
     default_oldest = _parse_iso_datetime_as_utc(args.since)
     cache_ttl_seconds = int(os.environ.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
 
+    refresh_window_days: int | None = args.refresh_window_days if args.refresh_window_days > 0 else None
+
     settings = ExporterSettings(
         channels=channel_configs,
         recently_active_channels=args.recently_active_channels,
@@ -122,6 +134,7 @@ Examples:
         output_dir=args.output_dir,
         members_only=not args.all_channels,
         max_recent_threads_for_reactions=args.max_recent_threads_for_reactions,
+        refresh_window_days=refresh_window_days,
         refresh=args.refresh,
         cache_ttl_seconds=cache_ttl_seconds,
     )
