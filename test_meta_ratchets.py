@@ -440,7 +440,7 @@ def test_top_level_cov_flags_are_union_of_subproject_cov_flags() -> None:
             + "\n".join(f"    --cov={e}" for e in sorted(extra))
         )
 
-    assert not errors, "Top-level --cov= flags out of sync with subprojects:\n" + "\n".join(errors)
+    assert len(errors) == 0, "Top-level --cov= flags out of sync with subprojects:\n" + "\n".join(errors)
 
 
 def test_top_level_coverage_omit_covers_subproject_omits() -> None:
@@ -483,6 +483,6 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     errors = [
         f"  {proj}:\n" + "\n".join(f"    - {p}" for p in sorted(files)) for proj, files in sorted(missing.items())
     ]
-    assert not errors, (
+    assert len(errors) == 0, (
         "Top-level [tool.coverage.run].omit is missing entries for files that subprojects omit:\n" + "\n".join(errors)
     )
