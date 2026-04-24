@@ -24,16 +24,33 @@ import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
-_STATUS_ORDER: Final[dict[str, int]] = {
-    "failed": 0,
-    "error": 1,
-    "flaky-recovered": 2,
-    "passed": 3,
-    "skipped": 4,
-    "unknown": 5,
+
+class TestStatus(StrEnum):
+    """The status of a single test attempt or the final aggregated status of a test.
+
+    String values are the tokens that appear in the rendered markdown output, so
+    they double as the public contract of this script.
+    """
+
+    PASSED = "passed"
+    FAILED = "failed"
+    ERROR = "error"
+    SKIPPED = "skipped"
+    FLAKY_RECOVERED = "flaky-recovered"
+    UNKNOWN = "unknown"
+
+
+_STATUS_ORDER: Final[dict[TestStatus, int]] = {
+    TestStatus.FAILED: 0,
+    TestStatus.ERROR: 1,
+    TestStatus.FLAKY_RECOVERED: 2,
+    TestStatus.PASSED: 3,
+    TestStatus.SKIPPED: 4,
+    TestStatus.UNKNOWN: 5,
 }
 
 
@@ -50,15 +67,16 @@ class AttemptsRecord:
         self.errors: int = 0
         self.skipped: int = 0
 
-    def record(self, outcome: str) -> None:
+    def record(self, outcome: TestStatus | str) -> None:
+        status = TestStatus(outcome)
         self.attempts += 1
-        if outcome == "passed":
+        if status is TestStatus.PASSED:
             self.passed += 1
-        elif outcome == "failed":
+        elif status is TestStatus.FAILED:
             self.failed += 1
-        elif outcome == "error":
+        elif status is TestStatus.ERROR:
             self.errors += 1
-        elif outcome == "skipped":
+        elif status is TestStatus.SKIPPED:
             self.skipped += 1
 
     @property
@@ -66,21 +84,21 @@ class AttemptsRecord:
         return max(0, self.attempts - 1)
 
     @property
-    def final_status(self) -> str:
+    def final_status(self) -> TestStatus:
         # A test counts as passed overall if any attempt passed. If it also had
         # failures, highlight that it was flaky-recovered. A test with only
         # skips is reported as skipped (never counted as passed).
         if self.passed > 0:
             if self.failed > 0 or self.errors > 0:
-                return "flaky-recovered"
-            return "passed"
+                return TestStatus.FLAKY_RECOVERED
+            return TestStatus.PASSED
         if self.failed > 0:
-            return "failed"
+            return TestStatus.FAILED
         if self.errors > 0:
-            return "error"
+            return TestStatus.ERROR
         if self.skipped > 0:
-            return "skipped"
-        return "unknown"
+            return TestStatus.SKIPPED
+        return TestStatus.UNKNOWN
 
 
 def main() -> int:
@@ -153,7 +171,7 @@ def _parse_junit(path: Path) -> dict[str, AttemptsRecord]:
     return per_test
 
 
-def _testcase_outcome(testcase: ET.Element) -> str:
+def _testcase_outcome(testcase: ET.Element) -> TestStatus:
     has_failure = False
     has_error = False
     has_skipped = False
@@ -166,12 +184,12 @@ def _testcase_outcome(testcase: ET.Element) -> str:
         elif tag == "skipped":
             has_skipped = True
     if has_failure:
-        return "failed"
+        return TestStatus.FAILED
     if has_error:
-        return "error"
+        return TestStatus.ERROR
     if has_skipped:
-        return "skipped"
-    return "passed"
+        return TestStatus.SKIPPED
+    return TestStatus.PASSED
 
 
 def _render_markdown(
@@ -183,8 +201,8 @@ def _render_markdown(
     total_attempts = sum(t.attempts for t in per_test.values())
     retried = sum(1 for t in per_test.values() if t.attempts > 1)
     marked_flaky = sum(1 for name in per_test if name in flaky_ids)
-    failed = sum(1 for t in per_test.values() if t.final_status in ("failed", "error"))
-    flaky_recovered = sum(1 for t in per_test.values() if t.final_status == "flaky-recovered")
+    failed = sum(1 for t in per_test.values() if t.final_status in (TestStatus.FAILED, TestStatus.ERROR))
+    flaky_recovered = sum(1 for t in per_test.values() if t.final_status is TestStatus.FLAKY_RECOVERED)
 
     lines: list[str] = []
     lines.append(f"## {heading}")
@@ -197,17 +215,18 @@ def _render_markdown(
     lines.append(f"- Failing (final): **{failed}**")
     lines.append("")
 
+    notable_final_statuses = (TestStatus.FAILED, TestStatus.ERROR, TestStatus.FLAKY_RECOVERED)
     interesting = [
         t
         for t in per_test.values()
-        if t.attempts > 1 or t.name in flaky_ids or t.final_status in ("failed", "error", "flaky-recovered")
+        if t.attempts > 1 or t.name in flaky_ids or t.final_status in notable_final_statuses
     ]
     if not interesting:
         lines.append("_No retries, failures, or flaky-marked tests in this run._")
         lines.append("")
         return "\n".join(lines)
 
-    interesting.sort(key=lambda t: (_STATUS_ORDER.get(t.final_status, 99), -t.attempts, t.name))
+    interesting.sort(key=lambda t: (_STATUS_ORDER[t.final_status], -t.attempts, t.name))
 
     lines.append("| Test | Final | Attempts | Retries | Pass | Fail+Err | Skip | `@flaky` |")
     lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | :---: |")
