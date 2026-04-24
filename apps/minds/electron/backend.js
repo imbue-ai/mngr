@@ -3,6 +3,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const logger = require('./logger');
 
 let backendProcess = null;
 
@@ -228,7 +229,7 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
 function shutdown() {
   return new Promise((resolve) => {
     if (!backendProcess) {
-      console.log('[shutdown] No backend process to shut down');
+      logger.logMain('info', '[shutdown] No backend process to shut down');
       resolve();
       return;
     }
@@ -239,19 +240,19 @@ function shutdown() {
 
     child.on('exit', (code, signal) => {
       const elapsed = Date.now() - startTime;
-      console.log(`[shutdown] Backend exited after ${elapsed}ms (code=${code}, signal=${signal})`);
+      logger.logMain('info', `[shutdown] Backend exited after ${elapsed}ms (code=${code}, signal=${signal})`);
       isExited = true;
       backendProcess = null;
       resolve();
     });
 
-    console.log(`[shutdown] Sending SIGTERM to backend (PID ${child.pid})`);
+    logger.logMain('info', `[shutdown] Sending SIGTERM to backend (PID ${child.pid})`);
     child.kill('SIGTERM');
 
     setTimeout(() => {
       if (!isExited) {
         const elapsed = Date.now() - startTime;
-        console.log(`[shutdown] Backend still alive after ${elapsed}ms, sending SIGKILL`);
+        logger.logMain('warning', `[shutdown] Backend still alive after ${elapsed}ms, sending SIGKILL`);
         try {
           child.kill('SIGKILL');
         } catch {
@@ -262,7 +263,7 @@ function shutdown() {
       setTimeout(() => {
         if (!isExited) {
           const elapsed = Date.now() - startTime;
-          console.log(`[shutdown] Backend did not exit after SIGKILL (${elapsed}ms), giving up`);
+          logger.logMain('error', `[shutdown] Backend did not exit after SIGKILL (${elapsed}ms), giving up`);
           backendProcess = null;
           resolve();
         }

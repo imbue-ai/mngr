@@ -5,6 +5,7 @@ const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const logger = require('./logger');
 
 todesktop.init();
 
@@ -224,6 +225,8 @@ function createBundleWebContentsViews(win) {
   });
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+  logger.attachConsoleListener(chromeView.webContents, 'chrome');
+  logger.attachConsoleListener(contentView.webContents, 'content');
   return { chromeView, contentView };
 }
 
@@ -452,6 +455,7 @@ function openSidebar(bundle) {
     bundle.sidebarView = sidebarView;
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
+    logger.attachConsoleListener(sidebarView.webContents, 'sidebar');
     sidebarView.webContents.on('did-finish-load', () => {
       sendCurrentWorkspaceToBundleSidebar(bundle);
       primeViewWithCachedChromeState(sidebarView.webContents);
@@ -495,6 +499,7 @@ function openRequestsPanel(bundle) {
     bundle.requestsPanelView = panel;
     bundle.window.contentView.addChildView(panel);
     registerShortcutsFor(bundle, panel.webContents);
+    logger.attachConsoleListener(panel.webContents, 'requests-panel');
     if (backendBaseUrl) {
       panel.webContents.loadURL(backendBaseUrl + '/_chrome/requests-panel');
     }
@@ -661,6 +666,7 @@ function prepareAllWindowsForRetry() {
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
+      logger.attachConsoleListener(contentView.webContents, 'content');
       wireContentViewEvents(bundle, contentView);
     }
 
@@ -740,7 +746,7 @@ function saveSessionState() {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(state, null, 2));
   } catch (err) {
-    console.log('[session] Failed to save state:', err.message);
+    logger.logMain('warning', '[session] Failed to save state: ' + err.message);
   }
 }
 
@@ -1049,6 +1055,7 @@ async function syncContentCookiesToDefaultSession() {
 }
 
 async function onReady() {
+  logger.init();
   installApplicationMenu();
   installDockMenu();
   setupContentPartitionCookieSync();
@@ -1119,11 +1126,11 @@ function installDockMenu() {
 }
 
 async function runStartupSequence(bundle) {
-  console.log('[startup] Loading shell.html in chrome view...');
+  logger.logMain('info', '[startup] Loading shell.html in chrome view...');
   bundle.isLoadingState = true;
   updateBundleBounds(bundle);
   await bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
-  console.log('[startup] shell.html loaded');
+  logger.logMain('info', '[startup] shell.html loaded');
 
   try {
     await runEnvSetup((status) => {
@@ -1166,8 +1173,9 @@ async function startBackendWithRetry() {
     // `Domain=localhost`, is valid both here and on every `<agent-id>.localhost`
     // subdomain the desktop client forwards to.
     backendBaseUrl = `http://localhost:${port}`;
+    logger.setBackendPort(port);
 
-    console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
+    logger.logMain('info', `[startup] Backend ready. Loading chrome from ${backendBaseUrl}/_chrome`);
 
     // Kick off the shared chrome-events SSE consumer (idempotent: only starts once).
     if (!runChromeSSELoop._started) {
@@ -1458,7 +1466,7 @@ function initiateFullQuit() {
 }
 
 app.on('window-all-closed', async () => {
-  console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
+  logger.logMain('info', '[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
   if (isShuttingDown) return;
   isShuttingDown = true;
   await shutdown();
@@ -1466,7 +1474,7 @@ app.on('window-all-closed', async () => {
 });
 
 app.on('before-quit', async (event) => {
-  console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
+  logger.logMain('info', '[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   // Capture session state for every open window before teardown. Only save
   // when bundles is non-empty: on the `window-all-closed` -> `app.quit()`
   // path, every bundle has already been removed from the Set by its `closed`
