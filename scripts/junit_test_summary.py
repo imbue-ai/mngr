@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Generate a markdown summary of an offload junit.xml with per-test retry counts.
+"""Generate a markdown summary of an offload junit.xml with per-test run counts.
 
 Each unique testcase in junit.xml may appear multiple times (one `<testcase>`
 element per attempt) because offload runs tests multiple times -- either as
 explicit retries of flaky-marked tests or because of its retry_count settings.
 This script aggregates those attempts per test and emits a GitHub-flavored
-markdown summary showing, for each test:
+markdown table listing EVERY test with:
 
-  - total number of attempts
-  - retry count (attempts - 1)
-  - pass/fail/skip breakdown
+  - its run count (how many times the test executed)
+  - its final status across all runs
   - whether the test is marked `@pytest.mark.flaky`
 
 Flaky-mark detection reads per-sandbox manifest files written by the
@@ -29,7 +28,7 @@ from pathlib import Path
 from typing import Final
 
 
-class TestStatus(StrEnum):
+class RunStatus(StrEnum):
     """The status of a single test attempt or the final aggregated status of a test.
 
     String values are the tokens that appear in the rendered markdown output, so
@@ -44,14 +43,22 @@ class TestStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-_STATUS_ORDER: Final[dict[TestStatus, int]] = {
-    TestStatus.FAILED: 0,
-    TestStatus.ERROR: 1,
-    TestStatus.FLAKY_RECOVERED: 2,
-    TestStatus.PASSED: 3,
-    TestStatus.SKIPPED: 4,
-    TestStatus.UNKNOWN: 5,
+# Sort order for the rendered table: surface problem tests first so that if the
+# output is truncated by --max-chars, the most important rows remain visible.
+_STATUS_ORDER: Final[dict[RunStatus, int]] = {
+    RunStatus.FAILED: 0,
+    RunStatus.ERROR: 1,
+    RunStatus.FLAKY_RECOVERED: 2,
+    RunStatus.PASSED: 3,
+    RunStatus.SKIPPED: 4,
+    RunStatus.UNKNOWN: 5,
 }
+
+# Default cap for the rendered output (in characters). GitHub's check_runs
+# output.summary field accepts up to 65_535 characters, so we stay safely
+# under that limit. Callers that target $GITHUB_STEP_SUMMARY (1 MiB limit)
+# can pass a larger cap.
+_DEFAULT_MAX_CHARS: Final[int] = 60_000
 
 
 class AttemptsRecord:
@@ -67,38 +74,33 @@ class AttemptsRecord:
         self.errors: int = 0
         self.skipped: int = 0
 
-    def record(self, outcome: TestStatus | str) -> None:
-        status = TestStatus(outcome)
+    def record(self, outcome: RunStatus) -> None:
         self.attempts += 1
-        if status is TestStatus.PASSED:
+        if outcome is RunStatus.PASSED:
             self.passed += 1
-        elif status is TestStatus.FAILED:
+        elif outcome is RunStatus.FAILED:
             self.failed += 1
-        elif status is TestStatus.ERROR:
+        elif outcome is RunStatus.ERROR:
             self.errors += 1
-        elif status is TestStatus.SKIPPED:
+        elif outcome is RunStatus.SKIPPED:
             self.skipped += 1
 
     @property
-    def retries(self) -> int:
-        return max(0, self.attempts - 1)
-
-    @property
-    def final_status(self) -> TestStatus:
+    def final_status(self) -> RunStatus:
         # A test counts as passed overall if any attempt passed. If it also had
         # failures, highlight that it was flaky-recovered. A test with only
         # skips is reported as skipped (never counted as passed).
         if self.passed > 0:
             if self.failed > 0 or self.errors > 0:
-                return TestStatus.FLAKY_RECOVERED
-            return TestStatus.PASSED
+                return RunStatus.FLAKY_RECOVERED
+            return RunStatus.PASSED
         if self.failed > 0:
-            return TestStatus.FAILED
+            return RunStatus.FAILED
         if self.errors > 0:
-            return TestStatus.ERROR
+            return RunStatus.ERROR
         if self.skipped > 0:
-            return TestStatus.SKIPPED
-        return TestStatus.UNKNOWN
+            return RunStatus.SKIPPED
+        return RunStatus.UNKNOWN
 
 
 def main() -> int:
@@ -122,6 +124,15 @@ def main() -> int:
         default="Test retry + flaky summary",
         help="Heading to use at the top of the markdown output.",
     )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=_DEFAULT_MAX_CHARS,
+        help=(
+            "Maximum characters in the rendered markdown. If the full table "
+            f"exceeds this, trailing rows are omitted (default: {_DEFAULT_MAX_CHARS})."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.junit.is_file():
@@ -130,7 +141,12 @@ def main() -> int:
 
     flaky_ids = _load_flaky_manifest(args.flaky_manifest_glob)
     per_test = _parse_junit(args.junit)
-    markdown = _render_markdown(per_test=per_test, flaky_ids=flaky_ids, heading=args.heading)
+    markdown = _render_markdown(
+        per_test=per_test,
+        flaky_ids=flaky_ids,
+        heading=args.heading,
+        max_chars=args.max_chars,
+    )
 
     if args.output is not None:
         args.output.write_text(markdown)
@@ -171,7 +187,7 @@ def _parse_junit(path: Path) -> dict[str, AttemptsRecord]:
     return per_test
 
 
-def _testcase_outcome(testcase: ET.Element) -> TestStatus:
+def _testcase_outcome(testcase: ET.Element) -> RunStatus:
     has_failure = False
     has_error = False
     has_skipped = False
@@ -184,69 +200,96 @@ def _testcase_outcome(testcase: ET.Element) -> TestStatus:
         elif tag == "skipped":
             has_skipped = True
     if has_failure:
-        return TestStatus.FAILED
+        return RunStatus.FAILED
     if has_error:
-        return TestStatus.ERROR
+        return RunStatus.ERROR
     if has_skipped:
-        return TestStatus.SKIPPED
-    return TestStatus.PASSED
+        return RunStatus.SKIPPED
+    return RunStatus.PASSED
 
 
 def _render_markdown(
     per_test: Mapping[str, AttemptsRecord],
     flaky_ids: AbstractSet[str],
     heading: str,
+    max_chars: int,
 ) -> str:
     total_tests = len(per_test)
     total_attempts = sum(t.attempts for t in per_test.values())
     retried = sum(1 for t in per_test.values() if t.attempts > 1)
     marked_flaky = sum(1 for name in per_test if name in flaky_ids)
-    failed = sum(1 for t in per_test.values() if t.final_status in (TestStatus.FAILED, TestStatus.ERROR))
-    flaky_recovered = sum(1 for t in per_test.values() if t.final_status is TestStatus.FLAKY_RECOVERED)
+    failed = sum(1 for t in per_test.values() if t.final_status in (RunStatus.FAILED, RunStatus.ERROR))
+    flaky_recovered = sum(1 for t in per_test.values() if t.final_status is RunStatus.FLAKY_RECOVERED)
 
-    lines: list[str] = []
-    lines.append(f"## {heading}")
-    lines.append("")
-    lines.append(f"- Unique tests: **{total_tests}**")
-    lines.append(f"- Total attempts: **{total_attempts}**")
-    lines.append(f"- Tests with >1 attempt: **{retried}**")
-    lines.append(f"- Tests marked `@pytest.mark.flaky`: **{marked_flaky}**")
-    lines.append(f"- Flaky-recovered (failed then passed): **{flaky_recovered}**")
-    lines.append(f"- Failing (final): **{failed}**")
-    lines.append("")
-
-    notable_final_statuses = (TestStatus.FAILED, TestStatus.ERROR, TestStatus.FLAKY_RECOVERED)
-    interesting = [
-        t
-        for t in per_test.values()
-        if t.attempts > 1 or t.name in flaky_ids or t.final_status in notable_final_statuses
+    header_lines: list[str] = [
+        f"## {heading}",
+        "",
+        f"- Unique tests: **{total_tests}**",
+        f"- Total runs (attempts across retries): **{total_attempts}**",
+        f"- Tests that ran more than once: **{retried}**",
+        f"- Tests marked `@pytest.mark.flaky`: **{marked_flaky}**",
+        f"- Flaky-recovered (failed then passed): **{flaky_recovered}**",
+        f"- Failing (final): **{failed}**",
+        "",
     ]
-    if not interesting:
-        lines.append("_No retries, failures, or flaky-marked tests in this run._")
-        lines.append("")
-        return "\n".join(lines)
 
-    interesting.sort(key=lambda t: (_STATUS_ORDER[t.final_status], -t.attempts, t.name))
+    if total_tests == 0:
+        return "\n".join(header_lines + ["_No tests recorded in junit.xml._", ""])
 
-    lines.append("| Test | Final | Attempts | Retries | Pass | Fail+Err | Skip | `@flaky` |")
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | :---: |")
-    for t in interesting:
+    table_header = [
+        "| Test | Runs | Final | `@flaky` |",
+        "| --- | ---: | --- | :---: |",
+    ]
+
+    tests = sorted(per_test.values(), key=lambda t: (_STATUS_ORDER[t.final_status], -t.attempts, t.name))
+    rows: list[str] = []
+    for t in tests:
         marked = "yes" if t.name in flaky_ids else "no"
-        fail_err = t.failed + t.errors
-        lines.append(
-            "| `{name}` | {status} | {attempts} | {retries} | {passed} | {fail_err} | {skipped} | {marked} |".format(
-                name=t.name,
-                status=t.final_status,
-                attempts=t.attempts,
-                retries=t.retries,
-                passed=t.passed,
-                fail_err=fail_err,
-                skipped=t.skipped,
-                marked=marked,
-            )
+        rows.append(f"| `{t.name}` | {t.attempts} | {t.final_status} | {marked} |")
+
+    return _assemble_with_truncation(
+        header_lines=header_lines,
+        table_header=table_header,
+        rows=rows,
+        max_chars=max_chars,
+    )
+
+
+def _assemble_with_truncation(
+    header_lines: list[str],
+    table_header: list[str],
+    rows: list[str],
+    max_chars: int,
+) -> str:
+    """Join header + table, dropping trailing rows if the total exceeds max_chars.
+
+    When truncation kicks in, appends a footer disclosing how many rows were
+    omitted so the reader knows the table is not complete.
+    """
+    fixed = "\n".join(header_lines + table_header) + "\n"
+    # Reserve headroom for the truncation footer so we do not emit rows we will
+    # later have to drop again after appending the footer.
+    footer_headroom = 160
+    budget = max_chars - len(fixed) - footer_headroom
+    kept_rows: list[str] = []
+    used = 0
+    for row in rows:
+        row_len = len(row) + 1  # +1 for newline
+        if used + row_len > budget:
+            break
+        kept_rows.append(row)
+        used += row_len
+
+    body = "\n".join(kept_rows) + ("\n" if kept_rows else "")
+    assembled = fixed + body
+
+    omitted = len(rows) - len(kept_rows)
+    if omitted > 0:
+        assembled += (
+            f"\n_... {omitted} additional test row(s) omitted to keep the summary under "
+            f"{max_chars} characters. See the workflow run page for the full list._\n"
         )
-    lines.append("")
-    return "\n".join(lines)
+    return assembled
 
 
 if __name__ == "__main__":

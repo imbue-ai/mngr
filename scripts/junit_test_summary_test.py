@@ -3,6 +3,7 @@ from pathlib import Path
 from textwrap import dedent
 
 from scripts.junit_test_summary import AttemptsRecord
+from scripts.junit_test_summary import RunStatus
 from scripts.junit_test_summary import _load_flaky_manifest
 from scripts.junit_test_summary import _parse_junit
 from scripts.junit_test_summary import _render_markdown
@@ -32,26 +33,26 @@ def test_parse_junit_counts_attempts(tmp_path: Path) -> None:
     per_test = _parse_junit(junit)
     assert per_test["pkg/test_x.py::test_a"].attempts == 2
     assert per_test["pkg/test_x.py::test_a"].passed == 2
-    assert per_test["pkg/test_x.py::test_a"].final_status == "passed"
+    assert per_test["pkg/test_x.py::test_a"].final_status is RunStatus.PASSED
     assert per_test["pkg/test_x.py::test_b"].attempts == 2
     assert per_test["pkg/test_x.py::test_b"].failed == 1
     assert per_test["pkg/test_x.py::test_b"].passed == 1
-    assert per_test["pkg/test_x.py::test_b"].final_status == "flaky-recovered"
+    assert per_test["pkg/test_x.py::test_b"].final_status is RunStatus.FLAKY_RECOVERED
 
 
 def test_testcase_outcome_prefers_failure_over_skip() -> None:
     tc = ET.fromstring('<testcase name="x" time="0.1"><failure message="m"/><skipped/></testcase>')
-    assert _testcase_outcome(tc) == "failed"
+    assert _testcase_outcome(tc) is RunStatus.FAILED
 
 
 def test_testcase_outcome_skipped() -> None:
     tc = ET.fromstring('<testcase name="x" time="0.1"><skipped/></testcase>')
-    assert _testcase_outcome(tc) == "skipped"
+    assert _testcase_outcome(tc) is RunStatus.SKIPPED
 
 
 def test_testcase_outcome_passed() -> None:
     tc = ET.fromstring('<testcase name="x" time="0.1"/>')
-    assert _testcase_outcome(tc) == "passed"
+    assert _testcase_outcome(tc) is RunStatus.PASSED
 
 
 def test_load_flaky_manifest_unions_files(tmp_path: Path) -> None:
@@ -69,33 +70,62 @@ def test_load_flaky_manifest_unions_files(tmp_path: Path) -> None:
     }
 
 
-def test_render_markdown_marks_flaky_tests() -> None:
+def test_render_markdown_shows_every_test_with_runs_and_flaky() -> None:
+    # test_a: flaky-recovered (passed, failed, passed), marked @flaky
     a = AttemptsRecord(name="pkg/test_x.py::test_a")
-    a.record(outcome="passed")
-    a.record(outcome="failed")
-    a.record(outcome="passed")
+    a.record(outcome=RunStatus.PASSED)
+    a.record(outcome=RunStatus.FAILED)
+    a.record(outcome=RunStatus.PASSED)
+    # test_b: passed once, not flaky-marked -- MUST still appear in the table
     b = AttemptsRecord(name="pkg/test_x.py::test_b")
-    b.record(outcome="passed")
-    per_test = {a.name: a, b.name: b}
+    b.record(outcome=RunStatus.PASSED)
+    # test_c: failed every time
+    c = AttemptsRecord(name="pkg/test_x.py::test_c")
+    c.record(outcome=RunStatus.FAILED)
+    c.record(outcome=RunStatus.FAILED)
+    per_test = {a.name: a, b.name: b, c.name: c}
+
     md = _render_markdown(
         per_test=per_test,
         flaky_ids={"pkg/test_x.py::test_a"},
         heading="H",
+        max_chars=10_000,
     )
     assert "## H" in md
-    assert "Unique tests: **2**" in md
-    assert "Total attempts: **4**" in md
+    assert "Unique tests: **3**" in md
+    assert "Total runs (attempts across retries): **6**" in md
     assert "Tests marked `@pytest.mark.flaky`: **1**" in md
-    # The flaky-recovered test should appear in the table and be marked yes.
-    assert "pkg/test_x.py::test_a" in md
-    assert "flaky-recovered" in md
-    # The single-attempt passing, non-flaky test should NOT appear in the details table.
+
     _, _, table = md.partition("| Test |")
-    assert "pkg/test_x.py::test_b" not in table
+    # Every test -- including the single-run non-flaky one -- must be in the table.
+    assert "pkg/test_x.py::test_a" in table
+    assert "pkg/test_x.py::test_b" in table
+    assert "pkg/test_x.py::test_c" in table
+    # The single-run test is shown with Runs=1 and flaky=no.
+    assert "| `pkg/test_x.py::test_b` | 1 | passed | no |" in table
+    # Flaky-marked test is shown with flaky=yes.
+    assert "| `pkg/test_x.py::test_a` | 3 | flaky-recovered | yes |" in table
+    # Problem rows sort before plain passes so they survive truncation.
+    failed_idx = table.index("pkg/test_x.py::test_c")
+    passed_idx = table.index("pkg/test_x.py::test_b")
+    assert failed_idx < passed_idx
 
 
-def test_render_markdown_empty_interesting() -> None:
-    t = AttemptsRecord(name="pkg/test_x.py::test_a")
-    t.record(outcome="passed")
-    md = _render_markdown(per_test={t.name: t}, flaky_ids=set(), heading="H")
-    assert "No retries, failures, or flaky-marked tests" in md
+def test_render_markdown_truncates_over_max_chars() -> None:
+    per_test: dict[str, AttemptsRecord] = {}
+    for i in range(100):
+        name = f"pkg/test_big.py::test_{i:03d}"
+        r = AttemptsRecord(name=name)
+        r.record(outcome=RunStatus.PASSED)
+        per_test[name] = r
+
+    md = _render_markdown(per_test=per_test, flaky_ids=set(), heading="H", max_chars=1000)
+    assert len(md) <= 1000
+    assert "additional test row(s) omitted" in md
+    # Still surfaces the stats section even when the table is truncated.
+    assert "Unique tests: **100**" in md
+
+
+def test_render_markdown_empty_run() -> None:
+    md = _render_markdown(per_test={}, flaky_ids=set(), heading="H", max_chars=10_000)
+    assert "No tests recorded" in md
