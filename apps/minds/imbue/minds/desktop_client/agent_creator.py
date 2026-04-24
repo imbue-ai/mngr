@@ -1077,8 +1077,35 @@ class AgentCreator(MutableModel):
         lease_result: LeaseHostResult,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
-        """Rename and start the leased agent. Raises on failure."""
+        """Label, rename, and start the leased agent. Raises on failure."""
         parsed_name = AgentName(agent_name)
+
+        log_queue.put("[minds] Setting workspace labels...")
+        cg_label = ConcurrencyGroup(name="mngr-label")
+        with cg_label:
+            label_result = cg_label.run_process_to_completion(
+                command=[
+                    MNGR_BINARY,
+                    "label",
+                    lease_result.agent_id,
+                    "-l",
+                    "workspace={}".format(parsed_name),
+                    "-l",
+                    "user_created=true",
+                    "-l",
+                    "is_primary=true",
+                ],
+                is_checked_after=False,
+                on_output=emit_log,
+            )
+        if label_result.returncode != 0:
+            raise MngrCommandError(
+                "mngr label failed (exit code {}): {}".format(
+                    label_result.returncode,
+                    label_result.stderr.strip() if label_result.stderr.strip() else label_result.stdout.strip(),
+                )
+            )
+
         log_queue.put("[minds] Renaming agent to '{}'...".format(parsed_name))
         cg_rename = ConcurrencyGroup(name="mngr-rename")
         with cg_rename:
