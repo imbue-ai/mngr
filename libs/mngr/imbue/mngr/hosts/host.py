@@ -94,6 +94,7 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import get_current_git_branch
 from imbue.mngr.utils.git_utils import get_git_author_info
 from imbue.mngr.utils.git_utils import get_git_remote_url
+from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -2081,7 +2082,7 @@ class Host(BaseHost, OnlineHostInterface):
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            agent_name = options.name or AgentName("agent")
+            agent_name = options.name or AgentName(GENERIC_AGENT_NAME_HINT)
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
             work_dir_path = worktree_base / work_dir_dir_name
