@@ -233,12 +233,13 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
             process2 = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=True)
             assert poll_until(lambda: process2.poll() is not None, timeout=5.0)
             raise _IntentionalTestError("intentional test failure")
-    # Four exceptions: StrandTimedOutError (sleep 30 did not exit in time),
-    # _IntentionalTestError (raised in-block), ProcessError for the terminated
-    # sleep (nonzero exit from SIGTERM; surfaced because is_checked_by_group),
-    # and ProcessError for `bash -c "exit 1"`.
-    assert len(exception_info.value.exceptions) == 4
-    assert sum(1 for e in exception_info.value.exceptions if isinstance(e, ProcessError)) == 2
+    # Three exceptions: StrandTimedOutError (sleep 30 did not exit in time),
+    # _IntentionalTestError (raised in-block), and ProcessError for `bash -c
+    # "exit 1"`. The sleep is SIGKILLed by PID at __exit__ for fast reap but
+    # the background thread cleanup stays fire-and-forget, so its
+    # check()-driven ProcessError does not surface in this group.
+    assert len(exception_info.value.exceptions) == 3
+    assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, _IntentionalTestError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, StrandTimedOutError) for e in exception_info.value.exceptions)
 
