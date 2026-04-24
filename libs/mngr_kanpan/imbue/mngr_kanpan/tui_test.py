@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.filler import Filler
@@ -29,7 +30,9 @@ from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import BuiltinCommand
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
@@ -335,14 +338,14 @@ def test_assemble_column_defs_default_order_includes_default_columns() -> None:
 
 
 def test_build_mark_palette_no_markable() -> None:
-    commands = {"r": CustomCommand(name="refresh")}
+    commands: dict[str, KanpanCommand] = {"r": CustomCommand(name="refresh")}
     entries, names = _build_mark_palette(commands)
     assert entries == []
     assert names == ()
 
 
 def test_build_mark_palette_markable() -> None:
-    commands = {"d": CustomCommand(name="delete", markable="light red")}
+    commands: dict[str, KanpanCommand] = {"d": CustomCommand(name="delete", markable="light red")}
     entries, names = _build_mark_palette(commands)
     assert len(entries) == 2
     assert "mark_d" in names
@@ -886,7 +889,7 @@ def test_prune_orphaned_marks_with_orphans() -> None:
 
 def test_dispatch_command_markable_key_toggles_mark() -> None:
     entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    commands = {"d": CustomCommand(name="delete", markable="light red")}
+    commands: dict[str, KanpanCommand] = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state_with_walker((entry,))
     state.commands = commands
     state.mark_attr_names = ("mark_d",)
@@ -902,7 +905,7 @@ def test_dispatch_command_unmark_key_removes_mark() -> None:
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
-    unmark_cmd = CustomCommand(name="unmark")
+    unmark_cmd = BuiltinCommand(name="unmark")
     state.commands = {_BUILTIN_COMMAND_KEY_UNMARK: unmark_cmd}
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_UNMARK, unmark_cmd)
     assert AgentName("agent-a") not in state.marks
@@ -918,7 +921,7 @@ def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
     mark_cmd = CustomCommand(name="do-thing", command=f"touch {marker}")
     state = _make_state(commands={"z": mark_cmd})
     state.marks = {AgentName("a"): "z"}
-    execute_cmd = CustomCommand(name="execute")
+    execute_cmd = BuiltinCommand(name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     # Should start batch execution (sets executing=True; with loop=None the
     # future is submitted but never polled, so executing stays True).
@@ -936,7 +939,7 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
     override = CustomCommand(name="my-delete", command=f"touch {marker}", markable="light red")
     state = _make_state(commands={_BUILTIN_COMMAND_KEY_DELETE: override})
     state.marks = {AgentName("a"): _BUILTIN_COMMAND_KEY_DELETE}
-    execute_cmd = CustomCommand(name="execute")
+    execute_cmd = BuiltinCommand(name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     assert state.executing is True
     assert state.executor is not None
@@ -996,16 +999,6 @@ def test_load_user_commands_from_dict() -> None:
     assert "c" in result
 
 
-def test_load_user_commands_strips_is_builtin() -> None:
-    # A user cannot hijack the builtin-dispatch path (e.g. `mngr destroy`)
-    # by setting is_builtin=True in their config.
-    sneaky = CustomCommand(name="sneaky", command="echo hi", is_builtin=True)
-    config = KanpanPluginConfig(commands={"c": sneaky})
-    ctx = make_mngr_ctx_with_config(config)
-    result = _load_user_commands(ctx)
-    assert result["c"].is_builtin is False
-
-
 def test_load_user_commands_from_raw_dict_via_model_construct() -> None:
     # Regression: the mngr config loader uses `model_construct` which bypasses
     # Pydantic's recursive validation, leaving `commands` entries as raw dicts
@@ -1019,19 +1012,19 @@ def test_load_user_commands_from_raw_dict_via_model_construct() -> None:
     assert "c" in result
     assert isinstance(result["c"], CustomCommand)
     assert result["c"].name == "dict-cmd"
-    assert result["c"].is_builtin is False
 
 
-def test_load_user_commands_from_raw_dict_strips_is_builtin() -> None:
-    # A raw dict with `is_builtin: true` (e.g. a malicious/confused user TOML
-    # entry) must still be forced to `is_builtin=False` on load, matching the
-    # CustomCommand-branch behavior.
+def test_load_user_commands_rejects_builtin_kind_in_raw_dict() -> None:
+    # A user cannot hijack the builtin-dispatch path (e.g. `mngr destroy`) by
+    # setting `kind = "builtin"` in their TOML config. `CustomCommand.kind` is
+    # `Literal["user"]`, so Pydantic validation rejects the raw dict when
+    # `_load_user_commands` constructs a `CustomCommand` from it.
     config = KanpanPluginConfig.model_construct(
-        commands={"c": {"name": "dict-cmd", "command": "echo hi", "is_builtin": True}},
+        commands={"c": {"kind": "builtin", "name": "sneaky"}},
     )
     ctx = make_mngr_ctx_with_config(config)
-    result = _load_user_commands(ctx)
-    assert result["c"].is_builtin is False
+    with pytest.raises(ValidationError):
+        _load_user_commands(ctx)
 
 
 def test_build_command_map_includes_builtins() -> None:
@@ -1367,7 +1360,7 @@ def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=CustomCommand(name="push", is_builtin=True),
+        cmd=BuiltinCommand(name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1381,7 +1374,7 @@ def test_submit_batch_item_push_no_work_dir() -> None:
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
-        cmd=CustomCommand(name="push", is_builtin=True),
+        cmd=BuiltinCommand(name="push", markable="yellow"),
         entry=entry,
     )
     with ThreadPoolExecutor(max_workers=1) as pool:

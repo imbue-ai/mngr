@@ -40,7 +40,9 @@ from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import BuiltinCommand
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
@@ -148,13 +150,13 @@ _BUILTIN_COMMAND_KEY_MUTE = "m"
 _BUILTIN_COMMAND_KEY_UNMARK = "u"
 _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
-_BUILTIN_COMMANDS: dict[str, CustomCommand] = {
-    _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh", is_builtin=True),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow", is_builtin=True),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable="light red", is_builtin=True),
-    _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute", is_builtin=True),
-    _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark", is_builtin=True),
-    _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute", is_builtin=True),
+_BUILTIN_COMMANDS: dict[str, BuiltinCommand] = {
+    _BUILTIN_COMMAND_KEY_REFRESH: BuiltinCommand(name="refresh"),
+    _BUILTIN_COMMAND_KEY_PUSH: BuiltinCommand(name="mark push", markable="yellow"),
+    _BUILTIN_COMMAND_KEY_DELETE: BuiltinCommand(name="mark delete", markable="light red"),
+    _BUILTIN_COMMAND_KEY_MUTE: BuiltinCommand(name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: BuiltinCommand(name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: BuiltinCommand(name="execute"),
 }
 
 _DEFAULT_MARK_COLOR = "light cyan"
@@ -305,7 +307,7 @@ class _KanpanState(MutableModel):
     # Steady-state footer left text (restored after transient messages)
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
-    commands: dict[str, CustomCommand] = {}
+    commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
     # Whether the current in-flight refresh is local-only (no GitHub API)
@@ -520,7 +522,7 @@ def _execute_marks(state: _KanpanState) -> None:
 class _BatchWorkItem(FrozenModel):
     name: AgentName
     key: str
-    cmd: CustomCommand
+    cmd: KanpanCommand
     entry: AgentBoardEntry | None
     batch_names: tuple[AgentName, ...] = ()
 
@@ -567,7 +569,7 @@ def _start_batch_execution(state: _KanpanState) -> None:
         # Only the builtin delete batches all marked agents into one `mngr
         # destroy` call. A user-defined override of "d" (or any other key)
         # runs per-agent via the individual-work path.
-        if mark_key == _BUILTIN_COMMAND_KEY_DELETE and cmd.is_builtin:
+        if mark_key == _BUILTIN_COMMAND_KEY_DELETE and isinstance(cmd, BuiltinCommand):
             delete_names.append(name)
         else:
             individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
@@ -596,14 +598,14 @@ def _submit_batch_item(
     """Submit a single batch work item to the executor."""
     # Builtin delete / push have dedicated runners; any user override of the
     # same key falls through to the generic shell-command branch below.
-    if item.key == _BUILTIN_COMMAND_KEY_DELETE and item.cmd.is_builtin:
+    if item.key == _BUILTIN_COMMAND_KEY_DELETE and isinstance(item.cmd, BuiltinCommand):
         names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
         return executor.submit(_run_destroy, names)
-    if item.key == _BUILTIN_COMMAND_KEY_PUSH and item.cmd.is_builtin:
+    if item.key == _BUILTIN_COMMAND_KEY_PUSH and isinstance(item.cmd, BuiltinCommand):
         if item.entry is None or item.entry.work_dir is None:
             return None
         return executor.submit(_run_git_push, str(item.entry.work_dir))
-    if item.cmd.command:
+    if isinstance(item.cmd, CustomCommand) and item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
 
@@ -773,25 +775,22 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
-def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
+def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
     """Dispatch a command by key."""
-    if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
-        if state.loop is not None and state.refresh_future is None:
-            _start_refresh(state.loop, state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
-        _mute_focused_agent(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_UNMARK and not cmd.command:
-        _unmark_focused(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_EXECUTE and not cmd.command:
-        _execute_marks(state)
-        return
     if cmd.markable:
         _toggle_mark(state, key)
         return
-    # Immediate shell command
+    if isinstance(cmd, BuiltinCommand):
+        if key == _BUILTIN_COMMAND_KEY_REFRESH:
+            if state.loop is not None and state.refresh_future is None:
+                _start_refresh(state.loop, state)
+        elif key == _BUILTIN_COMMAND_KEY_MUTE:
+            _mute_focused_agent(state)
+        elif key == _BUILTIN_COMMAND_KEY_UNMARK:
+            _unmark_focused(state)
+        elif key == _BUILTIN_COMMAND_KEY_EXECUTE:
+            _execute_marks(state)
+        return
     if cmd.command:
         _run_shell_command(state, cmd)
 
@@ -1429,10 +1428,6 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     """Load user-defined commands from plugin config.
 
-    User-supplied commands always have `is_builtin=False`; that flag exists
-    only to route the hardcoded `mngr destroy` / `git push` dispatches and
-    must not be settable from TOML.
-
     Values may arrive as either `CustomCommand` instances (when the caller
     constructed the config directly) or raw dicts (when the TOML loader used
     `model_construct`, which bypasses Pydantic's recursive validation and
@@ -1442,15 +1437,15 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     result: dict[str, CustomCommand] = {}
     for key, value in config.commands.items():
         if isinstance(value, CustomCommand):
-            result[key] = value.model_copy(update={"is_builtin": False})
+            result[key] = value
         elif isinstance(value, dict):
-            result[key] = CustomCommand(**{**value, "is_builtin": False})
+            result[key] = CustomCommand(**value)
     return result
 
 
-def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
+def _build_command_map(mngr_ctx: MngrContext) -> dict[str, KanpanCommand]:
     """Build the unified command map: builtins merged with user config."""
-    commands = dict(_BUILTIN_COMMANDS)
+    commands: dict[str, KanpanCommand] = dict(_BUILTIN_COMMANDS)
     user_commands = _load_user_commands(mngr_ctx)
     commands.update(user_commands)
     return {key: cmd for key, cmd in commands.items() if cmd.enabled}
@@ -1458,7 +1453,7 @@ def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
 
 @pure
 def _build_mark_palette(
-    commands: dict[str, CustomCommand],
+    commands: dict[str, KanpanCommand],
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
     """Build palette entries and attr names for markable commands."""
     entries: list[tuple[str, str, str]] = []

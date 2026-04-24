@@ -1,6 +1,8 @@
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
+from typing import Literal
 
 from pydantic import Field
 
@@ -67,8 +69,15 @@ class DataSourceConfig(FrozenModel):
 
 
 class CustomCommand(FrozenModel):
-    """A command definition for the kanpan board (builtin or user-defined)."""
+    """A user-defined command for the kanpan board.
 
+    The ``kind`` discriminator distinguishes this from ``BuiltinCommand`` in
+    ``KanpanCommand``; user TOML configs always parse as this shape and so
+    cannot reach the builtin-specific dispatch paths (``mngr destroy`` for
+    delete, ``git push`` for push).
+    """
+
+    kind: Literal["user"] = "user"
     name: str = Field(description="Display name shown in the status bar")
     command: str = Field(
         default="",
@@ -81,12 +90,28 @@ class CustomCommand(FrozenModel):
         description="If truthy, pressing the key marks agents for batch execution with x instead of running immediately."
         " Set to a color name (e.g. 'light red') to customize the mark indicator color.",
     )
-    is_builtin: bool = Field(
+
+
+class BuiltinCommand(FrozenModel):
+    """A kanpan builtin command (delete, push, refresh, mute, unmark, execute).
+
+    Constructed only internally in ``tui._BUILTIN_COMMANDS``; the
+    ``KanpanCommand`` tagged union routes dispatch by ``isinstance`` so a
+    user can never cause their command to reach the builtin-specific runners
+    (``_run_destroy``, ``_run_git_push``).
+    """
+
+    kind: Literal["builtin"] = "builtin"
+    name: str = Field(description="Display name shown in the status bar")
+    enabled: bool = Field(default=True, description="Whether this builtin is active")
+    markable: bool | str = Field(
         default=False,
-        description="True only for entries in tui._BUILTIN_COMMANDS; controls whether a builtin-specific dispatch"
-        " path (e.g. `mngr destroy` for delete, `git push` for push) applies. User config always produces False"
-        " so user overrides of a builtin key route through the generic shell-command dispatch.",
+        description="If truthy, pressing the key marks agents for batch execution with x. Builtins that mark"
+        " (delete, push) use this; action builtins (refresh, mute, unmark, execute) leave it False.",
     )
+
+
+KanpanCommand = Annotated[CustomCommand | BuiltinCommand, Field(discriminator="kind")]
 
 
 class KanpanPluginConfig(PluginConfig):
