@@ -278,9 +278,14 @@ def _assemble_with_truncation(
         return fixed + body
 
     # Truncation path: reserve headroom for the footer so we do not emit rows
-    # we will later have to drop again once the footer is appended.
+    # we will later have to drop again once the footer is appended. `max(0, ...)`
+    # keeps the bound non-negative so the loop is well-defined when `max_chars`
+    # is smaller than the fixed header + footer overhead. In that degenerate
+    # case no rows are kept; the caller still gets the stats header + footer,
+    # which may slightly exceed `max_chars` -- but there is nothing further we
+    # can drop without losing the stats themselves.
     footer_headroom = 160
-    budget = max_chars - len(fixed) - footer_headroom
+    budget = max(0, max_chars - len(fixed) - footer_headroom)
     kept_rows: list[str] = []
     used = 0
     for row in rows:
