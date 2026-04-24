@@ -1,13 +1,16 @@
-"""Private helper: spawn a detached ``latchkey gateway`` subprocess.
+"""Private helpers: spawn detached ``latchkey`` subprocesses.
 
 Why this file uses raw ``subprocess.Popen`` (triggering a narrow exclusion
-from ``check_direct_subprocess``): we need the spawned process to *outlive*
-the minds desktop client so agents running in containers/VMs can keep
-making authenticated API calls across desktop-client restarts. That is the
-exact opposite of what ``ConcurrencyGroup`` is built for -- it guarantees
-that every spawned process is cleaned up when the group exits.
+from ``check_direct_subprocess``): we need the spawned processes to *outlive*
+the minds desktop client. ``latchkey gateway`` must survive desktop-client
+restarts so agents running in containers/VMs keep working. ``latchkey
+ensure-browser`` may download Chromium via Playwright, which can take a
+while; detaching means we do not block desktop-client shutdown on it and
+the next minds session will simply re-check. Either way, the behaviour is
+the exact opposite of what ``ConcurrencyGroup`` is built for -- it
+guarantees that every spawned process is cleaned up when the group exits.
 
-Confining the ``Popen`` call to this tiny helper keeps the ratchet
+Confining the ``Popen`` calls to this tiny helper keeps the ratchet
 exception obvious and well-scoped. The rest of the latchkey package still
 goes through ``ConcurrencyGroup`` for any managed subprocess work.
 """
@@ -65,5 +68,47 @@ def spawn_detached_latchkey_gateway(
     finally:
         # Our copy of the log file descriptor can be closed; the child
         # inherited its own dup via Popen's stdio setup.
+        log_file.close()
+    return process.pid
+
+
+def spawn_detached_latchkey_ensure_browser(
+    latchkey_binary: str,
+    log_path: Path,
+    latchkey_directory: Path | None = None,
+) -> int:
+    """Start a detached ``latchkey ensure-browser`` and return its PID.
+
+    The command discovers and configures a browser for Latchkey to use,
+    downloading Chromium via Playwright if no system browser is found.
+    This can take a while on first run, so we fire it off detached and let
+    it complete (or not) in the background; if minds exits first, the next
+    session will re-check.
+
+    Child is placed in its own session via ``start_new_session=True`` so it
+    survives the caller's death. Stdout/stderr are appended to ``log_path``
+    (the parent directory is created if needed). When ``latchkey_directory``
+    is supplied, ``LATCHKEY_DIRECTORY`` is set in the child's environment so
+    the browser configuration lands in the shared minds-managed directory
+    instead of falling back to ``~/.latchkey``.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if latchkey_directory is not None:
+        latchkey_directory.mkdir(parents=True, exist_ok=True)
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            [latchkey_binary, "ensure-browser"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
         log_file.close()
     return process.pid

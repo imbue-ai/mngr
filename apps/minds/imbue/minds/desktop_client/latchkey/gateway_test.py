@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManagerNotStartedError
 from imbue.minds.desktop_client.latchkey.gateway import _cmdline_looks_like_latchkey_gateway
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
 from imbue.minds.desktop_client.latchkey.store import load_gateway_info
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
@@ -381,6 +382,83 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
         handler(AgentId(), None, "local")
         assert manager.list_gateways() == ()
         assert tunnel_manager._calls == []
+    finally:
+        manager.stop()
+
+
+def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
+    """Build a fake ``latchkey`` that handles both ``gateway`` (blocking, like the
+    real gateway) and ``ensure-browser`` (increments ``counter_path`` and exits).
+
+    Lets us verify that the manager calls ``ensure-browser`` exactly once per
+    session regardless of how many gateways get spawned.
+    """
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, socket, signal, sys\n"
+        'if sys.argv[1] == "ensure-browser":\n'
+        "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"
+        "    open(counter_path, 'a').write('1\\n')\n"
+        "    sys.exit(0)\n"
+        'assert sys.argv[1] == "gateway"\n'
+        "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
+        "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "sock.bind((host, port))\n"
+        "sock.listen(128)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _wait_for_counter(counter_path: Path, expected: int, timeout: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout
+    last = 0
+    while time.monotonic() < deadline:
+        if counter_path.is_file():
+            last = len(counter_path.read_text().splitlines())
+            if last >= expected:
+                return last
+        threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
+    return last
+
+
+def test_ensure_browser_runs_once_on_first_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter_path = tmp_path / "ensure_browser_counter"
+    monkeypatch.setenv("FAKE_LATCHKEY_COUNTER", str(counter_path))
+    fake_binary = _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path, counter_path)
+    manager = LatchkeyGatewayManager(latchkey_binary=str(fake_binary))
+    manager.start(data_dir=tmp_path)
+    agent_ids = [AgentId() for _ in range(3)]
+    try:
+        for agent_id in agent_ids:
+            manager.ensure_gateway_started(agent_id)
+
+        # ensure-browser must have run exactly once across all three spawns.
+        assert _wait_for_counter(counter_path, expected=1) == 1
+        # And a log file for ensure-browser got written in the minds data dir.
+        assert ensure_browser_log_path(tmp_path).is_file()
+    finally:
+        for agent_id in agent_ids:
+            manager.stop_gateway_for_agent(agent_id)
+        manager.stop()
+
+
+def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
+    """If the binary is missing, the manager must raise without trying to
+    spawn ``ensure-browser`` (there's nothing to run)."""
+    manager = LatchkeyGatewayManager(latchkey_binary=str(tmp_path / "missing"))
+    manager.start(data_dir=tmp_path)
+    try:
+        with pytest.raises(LatchkeyBinaryNotFoundError):
+            manager.ensure_gateway_started(AgentId())
+        assert not ensure_browser_log_path(tmp_path).exists()
     finally:
         manager.stop()
 

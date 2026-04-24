@@ -105,3 +105,13 @@ def list_gateway_infos(data_dir: Path) -> list[LatchkeyGatewayInfo]:
 def gateway_log_path(data_dir: Path, agent_id: AgentId) -> Path:
     """Return the log file path for an agent's gateway subprocess."""
     return data_dir / _AGENTS_DIR_NAME / str(agent_id) / "latchkey_gateway.log"
+
+
+def ensure_browser_log_path(data_dir: Path) -> Path:
+    """Return the log file path for the one-shot ``latchkey ensure-browser`` subprocess.
+
+    Not agent-scoped: ``ensure-browser`` is a minds-wide one-time setup
+    step that configures a shared Playwright/Chromium browser for the
+    latchkey credential directory, run at most once per minds session.
+    """
+    return data_dir / "latchkey_ensure_browser.log"

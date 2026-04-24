@@ -8,9 +8,83 @@ from pathlib import Path
 import psutil
 import pytest
 
+from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
 
 _POLL_INTERVAL_SECONDS = 0.05
+
+
+def _wait_for_file(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return True
+        threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
+    return False
+
+
+def _make_ensure_browser_reporter_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` that records ``ensure-browser`` invocations and exits."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        'assert sys.argv[1] == "ensure-browser"\n'
+        "report_path = os.environ['FAKE_LATCHKEY_REPORT']\n"
+        "directory = os.environ.get('LATCHKEY_DIRECTORY', '')\n"
+        "open(report_path, 'a').write(directory + '\\n')\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_ensure_browser_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    monkeypatch.delenv("LATCHKEY_DIRECTORY", raising=False)
+    log_path = tmp_path / "logs" / "ensure_browser.log"
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=log_path,
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    assert report_path.read_text() == "\n"
+    # Log parent directory was created and the log file exists (child redirected stdio there).
+    assert log_path.is_file()
+
+
+def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_ensure_browser_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "shared_latchkey"
+    assert not latchkey_directory.exists()
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=tmp_path / "log",
+        latchkey_directory=latchkey_directory,
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    assert latchkey_directory.is_dir()
+    assert report_path.read_text() == f"{latchkey_directory}\n"
+
+
+def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "definitely-not-here"
+    with pytest.raises(FileNotFoundError):
+        spawn_detached_latchkey_ensure_browser(
+            latchkey_binary=str(missing),
+            log_path=tmp_path / "log",
+        )
 
 
 def _make_fake_latchkey_binary(tmp_path: Path) -> Path:

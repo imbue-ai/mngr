@@ -34,9 +34,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
+from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
 from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
@@ -209,6 +211,7 @@ class LatchkeyGatewayManager(MutableModel):
     _infos: dict[str, LatchkeyGatewayInfo] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_started: bool = PrivateAttr(default=False)
+    _has_ensured_browser: bool = PrivateAttr(default=False)
 
     def start(self, data_dir: Path) -> None:
         """Load persisted infos from ``data_dir``, adopting still-alive gateways.
@@ -349,6 +352,11 @@ class LatchkeyGatewayManager(MutableModel):
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
+        # Fire off ``latchkey ensure-browser`` in parallel the first time we
+        # actually spawn something in this minds session. It runs detached
+        # alongside the gateway spawn below and we don't wait for it.
+        self._ensure_browser_once(data_dir)
+
         port = _allocate_free_port(self.listen_host)
         log_path = gateway_log_path(data_dir, agent_id)
 
@@ -376,6 +384,32 @@ class LatchkeyGatewayManager(MutableModel):
             pid=pid,
             started_at=datetime.now(timezone.utc),
         )
+
+    def _ensure_browser_once(self, data_dir: Path) -> None:
+        """Spawn ``latchkey ensure-browser`` the first time we're asked to, per manager lifetime.
+
+        ``ensure-browser`` discovers or downloads a Playwright-compatible
+        browser into the shared latchkey directory. It only needs to succeed
+        once per machine, but re-running it is a cheap no-op. We call it
+        once per minds session at the point we know latchkey is actually
+        being used (i.e. right before spawning our first gateway), fire and
+        forget. Failures here are logged but must not prevent gateway spawn.
+        """
+        with self._lock:
+            if self._has_ensured_browser:
+                return
+            self._has_ensured_browser = True
+        log_path = ensure_browser_log_path(data_dir)
+        try:
+            pid = spawn_detached_latchkey_ensure_browser(
+                latchkey_binary=self.latchkey_binary,
+                log_path=log_path,
+                latchkey_directory=self.latchkey_directory,
+            )
+        except OSError as e:
+            logger.warning("Failed to spawn ``latchkey ensure-browser``: {}", e)
+            return
+        logger.info("Spawned ``latchkey ensure-browser`` (pid={}, log={})", pid, log_path)
 
 
 class LatchkeyGatewayDiscoveryHandler(FrozenModel):
