@@ -14,7 +14,7 @@ A serverless [LiteLLM](https://github.com/BerriAI/litellm) proxy deployed as a M
 ### 1. Push secrets to Modal
 
 ```bash
-uv run python scripts/push_modal_secrets.py litellm production
+uv run python scripts/push_modal_secrets.py production
 ```
 
 This reads from `.minds/production/litellm.sh` and creates a `litellm-production` Modal secret with:
