@@ -9,13 +9,28 @@
         {{ ui.btn_link('Create', '/create', variant='primary') }}
       </div>
 
-      <div class="flex flex-col gap-1.5">
+      <div class="flex flex-col gap-1.5" id="landing-rows">
         {% for agent_id in agent_ids %}
-          <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 cursor-pointer overflow-hidden transition hover:border-zinc-300 hover:shadow-sm"
+          <div class="landing-row accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 cursor-pointer overflow-hidden transition hover:border-zinc-300 hover:shadow-sm"
                style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
                data-agent-id="{{ agent_id }}"
-               onclick="window.location='/goto/{{ agent_id }}/'">
-            <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+               data-health="unknown">
+            <span class="flex-1 font-medium pl-1 flex items-baseline gap-2">
+              <span class="text-zinc-900">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="landing-status-stuck hidden text-xs text-amber-600">Workspace server not responding &mdash; click to restart</span>
+              <span class="landing-status-restarting hidden text-xs text-zinc-500 inline-flex items-center gap-1.5">
+                <span class="landing-spinner inline-block w-3 h-3 border-2 border-zinc-400 border-t-transparent rounded-full animate-spin"></span>
+                Restarting&hellip;
+              </span>
+            </span>
+            <button class="landing-restart-btn bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                    title="Restart workspace server"
+                    aria-label="Restart workspace server">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+              </svg>
+            </button>
             <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                     onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                     title="Settings"
@@ -23,7 +38,7 @@
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"/>
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
+                </svg>
             </button>
           </div>
         {% endfor %}
@@ -42,4 +57,9 @@
       {% endif %}
     {% endif %}
   {% endcall %}
+{% endblock %}
+{% block scripts %}
+  {% if agent_ids %}
+    <script src="/_static/landing.js" defer></script>
+  {% endif %}
 {% endblock %}

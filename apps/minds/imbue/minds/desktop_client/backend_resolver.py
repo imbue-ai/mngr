@@ -110,6 +110,15 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_work_dir(self, agent_id: AgentId) -> Path | None:
+        """Return the agent's working directory on its host, or None if unknown.
+
+        Used (for example) by the restart-workspace-server handler to locate the
+        agent's services.toml when restarting a local mind. Default implementation
+        returns None; subclasses with access to agent data should override.
+        """
+        return None
+
     def has_completed_initial_discovery(self) -> bool:
         """Whether any agent discovery data has been received.
 
@@ -376,6 +385,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
+
+    def get_work_dir(self, agent_id: AgentId) -> Path | None:
+        """Return the agent's working directory (from its DiscoveredAgent data)."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return agent.work_dir
+            return None
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         """Return display info from discovered agent data."""

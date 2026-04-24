@@ -1,10 +1,20 @@
 // Electron sidebar WebContentsView: renders the workspace list and wires
 // clicks + context menus through window.minds IPC. In browser mode the
 // chrome.js embedded sidebar handles the same job instead.
+//
+// Per-agent health state (driven by the /_chrome/events workspace_server_status
+// SSE stream) dims stuck / restarting rows and annotates them inline. The
+// per-agent overlay (shown on top of the workspace view) is the primary
+// recovery affordance; the sidebar just mirrors the state so the user can
+// see at a glance which minds are healthy from the workspace list.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
   var lastWorkspaces = [];
+  // Per-agent health map, mirrored from the SSE workspace_server_status
+  // payload. Absent keys imply "healthy" -- the backend omits healthy agents
+  // to keep the payload small.
+  var healthByAgentId = Object.create(null);
 
   // Per-agent accent color comes from the shared
   // `window.mindsAccent.get(agentId, cb)` helper in
@@ -34,6 +44,25 @@
       '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>' +
       '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>';
     return btn;
+  }
+
+  function applyHealthToRow(row, health) {
+    // health: undefined | 'STUCK' | 'RESTARTING' (healthy rows get no
+    // indicator, just the default styling).
+    var statusEl = row.querySelector('.sidebar-health-status');
+    row.classList.toggle('opacity-60', health === 'STUCK' || health === 'RESTARTING');
+    if (!statusEl) return;
+    if (health === 'STUCK') {
+      statusEl.textContent = 'not responding';
+      statusEl.className = 'sidebar-health-status text-[11px] text-amber-400 ml-2';
+      statusEl.hidden = false;
+    } else if (health === 'RESTARTING') {
+      statusEl.textContent = 'restarting...';
+      statusEl.className = 'sidebar-health-status text-[11px] text-zinc-400 ml-2';
+      statusEl.hidden = false;
+    } else {
+      statusEl.hidden = true;
+    }
   }
 
   function renderWorkspaces(workspaces) {
@@ -69,8 +98,15 @@
           + (isCurrent ? ' is-current bg-white/5' : '');
         row.setAttribute('data-agent-id', w.id);
         var label = document.createElement('span');
-        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
-        label.textContent = w.name || w.id;
+        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis flex items-center';
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'truncate';
+        nameSpan.textContent = w.name || w.id;
+        label.appendChild(nameSpan);
+        var statusSpan = document.createElement('span');
+        statusSpan.className = 'sidebar-health-status text-[11px] text-amber-400 ml-2';
+        statusSpan.hidden = true;
+        label.appendChild(statusSpan);
         row.appendChild(label);
         var btn = buildOpenNewBtn(w.id);
         // Show the "open in new window" icon on hover (or focus-within).
@@ -83,9 +119,19 @@
         } else {
           getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
         }
+        applyHealthToRow(row, healthByAgentId[w.id]);
         container.appendChild(row);
       });
     });
+  }
+
+  function applyHealthToAllRows() {
+    var rows = document.querySelectorAll('.sidebar-item[data-agent-id]');
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i];
+      var agentId = row.getAttribute('data-agent-id');
+      applyHealthToRow(row, healthByAgentId[agentId]);
+    }
   }
 
   function handleRowClick(target) {
@@ -136,9 +182,13 @@
   }
 
   function handleChromeEvent(data) {
-    if (data.type !== 'workspaces') return;
-    lastWorkspaces = data.workspaces || [];
-    renderWorkspaces(lastWorkspaces);
+    if (data.type === 'workspaces') {
+      lastWorkspaces = data.workspaces || [];
+      renderWorkspaces(lastWorkspaces);
+    } else if (data.type === 'workspace_server_status') {
+      healthByAgentId = (data && data.health) ? data.health : Object.create(null);
+      applyHealthToAllRows();
+    }
   }
 
   if (isElectron && window.minds.onChromeEvent) {

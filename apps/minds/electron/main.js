@@ -32,6 +32,11 @@ const latestChromeState = {
   workspaces: null, // most recent workspaces payload
   authStatus: null, // most recent auth_status payload
   requestCount: 0,  // most recent request_count value
+  // Per-agent health, keyed by agent id. Absent = healthy/unknown; values
+  // are 'STUCK' or 'RESTARTING' (uppercase, matching the AgentHealth enum
+  // the backend serializes). Drives whether the workspace overlay should
+  // be visible for each bundle's current workspace.
+  health: {},
 };
 
 const chromeSseAbortRef = { current: null };
@@ -184,6 +189,18 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
+  // Overlay covers the same rectangle as the content view. Its z-order is
+  // managed by addChildView ordering in openOverlay; we just match the
+  // bounds here so resize-while-visible works.
+  if (bundle.overlayView && !bundle.overlayView.webContents.isDestroyed()) {
+    const rightOffset = bundle.requestsPanelVisible ? REQUESTS_PANEL_WIDTH : 0;
+    bundle.overlayView.setBounds({
+      x: 0,
+      y: TITLEBAR_HEIGHT,
+      width: width - rightOffset,
+      height: height - TITLEBAR_HEIGHT,
+    });
+  }
 }
 
 // -- Bundle lifecycle --
@@ -257,7 +274,13 @@ function wireBundleWindowEvents(bundle) {
       clearTimeout(bundle.requestsPanelReloadTimer);
       bundle.requestsPanelReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
+    const views = [
+      bundle.chromeView,
+      bundle.contentView,
+      bundle.sidebarView,
+      bundle.requestsPanelView,
+      bundle.overlayView,
+    ];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -304,6 +327,9 @@ function createBundle() {
     requestsPanelView: null,
     requestsPanelVisible: false,
     requestsPanelReloadTimer: null,
+    overlayView: null,
+    overlayVisible: false,
+    overlayState: null, // {agent_id, state} last pushed; used for prime-on-load
     currentContentUrl: null,
     currentWorkspaceId: null,
     preErrorUrl: null,
@@ -352,6 +378,9 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
       sendCurrentWorkspaceToBundleSidebar(bundle);
+      // Different agent -> different health state -> may need to show or
+      // hide the overlay. Evaluate against cached SSE health.
+      refreshOverlayForBundle(bundle);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -550,6 +579,125 @@ function toggleRequestsPanel(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.requestsPanelVisible) closeRequestsPanel(bundle);
   else openRequestsPanel(bundle);
+}
+
+// Overlay WebContentsView: sits on top of contentView and shows the
+// "Workspace server not responding" / "Restarting..." card when the
+// current workspace's backend is stuck or restarting. State is pushed via
+// IPC from main.js (driven by the /_chrome/events workspace_server_status
+// SSE payload) so there's no SSE connection or polling from the overlay
+// itself -- it's a pure render target.
+
+// Probe poller: fires /api/agents/{id}/health at 2s intervals for any
+// agent whose overlay is currently visible. The probe is how a wedged
+// server gets re-observed after a restart, since the content view may be
+// silent (e.g. its own SSE stream stuck on the failed connection) and
+// wouldn't otherwise drive the tracker back to healthy.
+const OVERLAY_PROBE_INTERVAL_MS = 2000;
+let overlayProbeTimer = null;
+
+function ensureOverlayProbePolling() {
+  if (overlayProbeTimer !== null) return;
+  overlayProbeTimer = setInterval(() => {
+    const activeAgents = new Set();
+    for (const b of bundles) {
+      if (b.window.isDestroyed()) continue;
+      if (b.overlayVisible && b.overlayState && b.overlayState.agent_id) {
+        activeAgents.add(b.overlayState.agent_id);
+      }
+    }
+    if (activeAgents.size === 0) {
+      clearInterval(overlayProbeTimer);
+      overlayProbeTimer = null;
+      return;
+    }
+    for (const agentId of activeAgents) probeAgentHealth(agentId);
+  }, OVERLAY_PROBE_INTERVAL_MS);
+}
+
+function probeAgentHealth(agentId) {
+  if (!backendBaseUrl) return;
+  let req;
+  try {
+    req = net.request({
+      url: backendBaseUrl + '/api/agents/' + encodeURIComponent(agentId) + '/health',
+      method: 'GET',
+      useSessionCookies: true,
+    });
+  } catch { return; }
+  req.on('response', (resp) => {
+    resp.on('data', () => {});
+    resp.on('end', () => {});
+    resp.on('error', () => {});
+  });
+  req.on('error', () => {});
+  req.end();
+}
+
+function openOverlay(bundle, state) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!state || !state.agent_id) return;
+  if (!bundle.overlayView) {
+    const overlayView = new WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    bundle.overlayView = overlayView;
+    bundle.window.contentView.addChildView(overlayView);
+    registerShortcutsFor(bundle, overlayView.webContents);
+    overlayView.webContents.on('did-finish-load', () => {
+      if (bundle.overlayState) {
+        overlayView.webContents.send('overlay-state-changed', bundle.overlayState);
+      }
+    });
+    if (backendBaseUrl) {
+      overlayView.webContents.loadURL(backendBaseUrl + '/_chrome/overlay');
+    }
+  } else {
+    // Re-add to raise the overlay to the top of the z-order so clicks on the
+    // restart button aren't eaten by the sidebar/requests-panel reaching up
+    // from below (each of those addChildView calls pushes them to the top).
+    bundle.window.contentView.removeChildView(bundle.overlayView);
+    bundle.window.contentView.addChildView(bundle.overlayView);
+    bundle.overlayView.setVisible(true);
+  }
+  bundle.overlayVisible = true;
+  bundle.overlayState = state;
+  if (!bundle.overlayView.webContents.isDestroyed()) {
+    bundle.overlayView.webContents.send('overlay-state-changed', state);
+  }
+  updateBundleBounds(bundle);
+  ensureOverlayProbePolling();
+}
+
+function closeOverlay(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.overlayView || !bundle.overlayVisible) return;
+  bundle.overlayView.setVisible(false);
+  bundle.overlayVisible = false;
+  bundle.overlayState = null;
+}
+
+function refreshOverlayForBundle(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const agentId = bundle.currentWorkspaceId;
+  if (!agentId) {
+    closeOverlay(bundle);
+    return;
+  }
+  const state = latestChromeState.health[agentId];
+  if (state === 'STUCK' || state === 'RESTARTING') {
+    openOverlay(bundle, { agent_id: agentId, state });
+  } else {
+    closeOverlay(bundle);
+  }
+}
+
+function refreshOverlayForAllBundles() {
+  for (const b of bundles) refreshOverlayForBundle(b);
 }
 
 function sendCurrentWorkspaceToBundleSidebar(bundle) {
@@ -786,6 +934,13 @@ function handleChromeSSEEvent(evt) {
     for (const b of bundles) {
       scheduleRequestsPanelReload(b);
     }
+  } else if (evt.type === 'workspace_server_status' && evt.health && typeof evt.health === 'object') {
+    // New payload shape: {type: 'workspace_server_status', health: {agent_id: 'STUCK'|'RESTARTING'}}.
+    // Agents absent from the map are healthy (the backend omits healthy
+    // agents to keep the payload small). Refresh every bundle's overlay so
+    // newly-stuck agents surface immediately and recovered agents dismiss.
+    latestChromeState.health = evt.health;
+    refreshOverlayForAllBundles();
   }
   broadcastChromeEvent(evt);
 }
@@ -812,6 +967,7 @@ function primeViewWithCachedChromeState(wc) {
     wc.send('chrome-event', latestChromeState.authStatus);
   }
   wc.send('chrome-event', { type: 'request_count', count: latestChromeState.requestCount });
+  wc.send('chrome-event', { type: 'workspace_server_status', health: latestChromeState.health });
 }
 
 function kickChromeSSEReconnect() {
@@ -1389,20 +1545,55 @@ ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
   }
 });
 
+function postRestartWorkspaceServer(agentId) {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      resolve({ ok: false, status: 0, body: 'backend not ready' });
+      return;
+    }
+    const req = net.request({
+      url: backendBaseUrl + '/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server',
+      method: 'POST',
+      useSessionCookies: true,
+    });
+    let body = '';
+    req.on('response', (response) => {
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => resolve({ ok: response.statusCode === 200, status: response.statusCode, body }));
+      response.on('error', () => resolve({ ok: false, status: 0, body: 'response error' }));
+    });
+    req.on('error', (err) => resolve({ ok: false, status: 0, body: String(err) }));
+    req.end();
+  });
+}
+
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  // "Open in new window" only makes sense for workspaces the sender is NOT already on.
+  const items = [];
+  if (bundle.currentWorkspaceId !== agentId) {
+    items.push({
       label: 'Open in new window',
       click: () => {
         openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
         closeSidebar(bundle);
       },
+    });
+    items.push({ type: 'separator' });
+  }
+  items.push({
+    label: 'Restart workspace server',
+    click: async () => {
+      // Fire the restart and trust the SSE health stream to reflect the
+      // outcome -- success flips the overlay/sidebar indicator off on
+      // recovery, failure flips the tracker back to stuck on the backend
+      // so the sidebar row re-dims. No modal dialog on failure: the
+      // sidebar's own annotation is the authoritative surface.
+      await postRestartWorkspaceServer(agentId);
     },
-  ]);
+  });
+  const menu = Menu.buildFromTemplate(items);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);

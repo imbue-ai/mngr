@@ -1,6 +1,7 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.desktop_client.templates import TEMPLATE_DIR
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -16,11 +17,14 @@ _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 
 
-def test_render_landing_page_with_agents_lists_them_as_links() -> None:
+def test_render_landing_page_with_agents_lists_them_as_rows() -> None:
+    """Each known agent gets a clickable row wired to its agent id. The row
+    click handler (in landing.js) builds /goto/{id}/ at click time based on
+    the agent's current health state, so the URL isn't baked into the HTML."""
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/goto/{_AGENT_A}/" in html
-    assert f"/goto/{_AGENT_B}/" in html
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert f'data-agent-id="{_AGENT_B}"' in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
@@ -36,6 +40,36 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "reload" in html
     assert "No projects yet" not in html
     assert "/goto/" not in html
+
+
+def test_render_landing_page_rows_wire_to_health_driven_js() -> None:
+    """Each agent row carries data-agent-id and data-health so the per-agent
+    probe + click-on-dead restart flow in /_static/landing.js can wire up.
+
+    The JS itself is responsible for the interactivity (POST to restart, poll
+    /health, auto-navigate on recovery); we just verify the HTML provides the
+    hooks and the script reference.
+    """
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert 'data-health="unknown"' in html
+    assert "/_static/landing.js" in html
+    # The restart icon button stays for force-restart of seemingly-healthy
+    # minds; its click handler lives in landing.js (delegated from the row).
+    assert 'aria-label="Restart workspace server"' in html
+
+
+def test_render_landing_js_posts_to_restart_and_polls_health() -> None:
+    """The landing page JS implements the click-on-dead restart flow and the
+    per-agent health polling. Verify the critical integration points with the
+    backend endpoints: POST the restart, GET the probe."""
+    landing_js = (TEMPLATE_DIR.parent / "static" / "landing.js").read_text()
+    assert "/restart-workspace-server" in landing_js
+    assert "/health" in landing_js
+    # Auto-navigate on recovery is what makes click-on-dead feel responsive;
+    # the user crosses over to the mind's workspace as soon as the backend
+    # comes back.
+    assert "navigateOnRecovery" in landing_js
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
