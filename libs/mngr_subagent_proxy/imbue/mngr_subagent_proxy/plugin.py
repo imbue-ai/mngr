@@ -13,15 +13,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
-
-# Guard prefix for hook commands: exit gracefully if this is not the main Claude
-# session (e.g. a reviewer sub-agent that resumed a session). Mirrors the guard
-# used by mngr_claude so the hooks stay inert in nested sessions.
-_SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
 
 _SPAWN_SCRIPT: Final[str] = "spawn_proxy_subagent.sh"
 _REWRITE_SCRIPT: Final[str] = "rewrite_subagent_result.sh"
@@ -45,9 +41,9 @@ def build_subagent_proxy_hooks_config() -> dict[str, Any]:
     - PostToolUse (Agent): rewrite the proxy's result before Claude sees it.
     - SessionStart: reap orphaned proxy subagents from prior sessions.
     """
-    spawn_cmd = _SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_SPAWN_SCRIPT}"'
-    rewrite_cmd = _SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REWRITE_SCRIPT}"'
-    reap_cmd = _SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REAP_SCRIPT}"'
+    spawn_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_SPAWN_SCRIPT}"'
+    rewrite_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REWRITE_SCRIPT}"'
+    reap_cmd = SESSION_GUARD + f'bash "$MNGR_AGENT_STATE_DIR/commands/{_REAP_SCRIPT}"'
     return {
         "hooks": {
             "PreToolUse": [
