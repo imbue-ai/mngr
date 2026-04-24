@@ -58,7 +58,7 @@ test-offload args="":
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
-    # offload 0.7.1 manages build context + image caching via git notes; no
+    # offload 0.8.1 manages build context + image caching via git notes; no
     # tarballs, patches, or local cache-key files needed.
     offload -c offload-modal.toml {{args}} run || [[ $? -eq 2 ]]
 
