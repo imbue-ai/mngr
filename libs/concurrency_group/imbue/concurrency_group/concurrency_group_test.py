@@ -227,20 +227,10 @@ def test_do_not_allow_starting_new_strands_if_the_previous_failed(tmp_path: Path
 
 
 def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
+    sleep_process: RunningProcess | None = None
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
-            # Sleep long enough to outlive `exit_timeout_seconds` (so the
-            # StrandTimedOutError fires) but short enough to self-exit before
-            # pytest's session-level leak detector scans. The CG's timeout
-            # path is fire-and-forget -- `process.terminate(force_kill_seconds=0.0)`
-            # does not guarantee the subprocess is reaped before __exit__
-            # returns -- so under CI load a long-running sleep would race
-            # the leak detector and blame whatever test ran last in the shard.
-            # The other LONG_RUNNING_COMMAND users (test_shutdown_* below)
-            # need `sleep 30` because they exercise the kill path via
-            # `cg.shutdown()` and must not self-exit before shutdown fires;
-            # this test is about exception aggregation, not kill timing.
-            cg.run_process_in_background(("sleep", "0.5"), is_checked_by_group=True)
+            sleep_process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
             process2 = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=True)
             assert poll_until(lambda: process2.poll() is not None, timeout=5.0)
             raise _IntentionalTestError("intentional test failure")
@@ -248,6 +238,13 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
     assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, _IntentionalTestError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, StrandTimedOutError) for e in exception_info.value.exceptions)
+    # CG's timeout path is fire-and-forget: `process.terminate(force_kill_seconds=0.0)`
+    # signals the background thread but does not wait for it to reap the
+    # subprocess. Without this explicit wait, pytest's session-level leak
+    # detector can scan before the SIGTERM+reap completes and blame whichever
+    # test ran last in the shard.
+    assert sleep_process is not None
+    assert poll_until(sleep_process.is_finished, timeout=10.0)
 
 
 def test_nesting_in_the_same_thread_just_works() -> None:
