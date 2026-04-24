@@ -22,6 +22,7 @@ import glob
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from enum import StrEnum
 from pathlib import Path
@@ -256,9 +257,9 @@ def _render_markdown(
 
 
 def _assemble_with_truncation(
-    header_lines: list[str],
-    table_header: list[str],
-    rows: list[str],
+    header_lines: Sequence[str],
+    table_header: Sequence[str],
+    rows: Sequence[str],
     max_chars: int,
 ) -> str:
     """Join header + table, dropping trailing rows if the total exceeds max_chars.
@@ -267,7 +268,7 @@ def _assemble_with_truncation(
     omitted so the reader knows the table is not complete. If every row fits
     within max_chars without a footer, all rows are kept and no footer is added.
     """
-    fixed = "\n".join(header_lines + table_header) + "\n"
+    fixed = "\n".join([*header_lines, *table_header]) + "\n"
     # +1 per row for the newline that separates/terminates it in the body.
     full_body_size = sum(len(row) + 1 for row in rows)
 
