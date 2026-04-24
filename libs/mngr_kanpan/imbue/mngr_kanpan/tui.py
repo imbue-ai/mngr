@@ -1432,9 +1432,20 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
     User-supplied commands always have `is_builtin=False`; that flag exists
     only to route the hardcoded `mngr destroy` / `git push` dispatches and
     must not be settable from TOML.
+
+    Values may arrive as either `CustomCommand` instances (when the caller
+    constructed the config directly) or raw dicts (when the TOML loader used
+    `model_construct`, which bypasses Pydantic's recursive validation and
+    leaves nested dict-typed fields in their raw form).
     """
     config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
-    return {key: cmd.model_copy(update={"is_builtin": False}) for key, cmd in config.commands.items()}
+    result: dict[str, CustomCommand] = {}
+    for key, value in config.commands.items():
+        if isinstance(value, CustomCommand):
+            result[key] = value.model_copy(update={"is_builtin": False})
+        elif isinstance(value, dict):
+            result[key] = CustomCommand(**{**value, "is_builtin": False})
+    return result
 
 
 def _build_command_map(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:

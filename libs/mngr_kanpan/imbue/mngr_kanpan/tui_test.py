@@ -1006,6 +1006,34 @@ def test_load_user_commands_strips_is_builtin() -> None:
     assert result["c"].is_builtin is False
 
 
+def test_load_user_commands_from_raw_dict_via_model_construct() -> None:
+    # Regression: the mngr config loader uses `model_construct` which bypasses
+    # Pydantic's recursive validation, leaving `commands` entries as raw dicts
+    # rather than `CustomCommand` instances. `_load_user_commands` must handle
+    # both shapes.
+    config = KanpanPluginConfig.model_construct(
+        commands={"c": {"name": "dict-cmd", "command": "echo hi"}},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    result = _load_user_commands(ctx)
+    assert "c" in result
+    assert isinstance(result["c"], CustomCommand)
+    assert result["c"].name == "dict-cmd"
+    assert result["c"].is_builtin is False
+
+
+def test_load_user_commands_from_raw_dict_strips_is_builtin() -> None:
+    # A raw dict with `is_builtin: true` (e.g. a malicious/confused user TOML
+    # entry) must still be forced to `is_builtin=False` on load, matching the
+    # CustomCommand-branch behavior.
+    config = KanpanPluginConfig.model_construct(
+        commands={"c": {"name": "dict-cmd", "command": "echo hi", "is_builtin": True}},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    result = _load_user_commands(ctx)
+    assert result["c"].is_builtin is False
+
+
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
     ctx = make_mngr_ctx_with_config(config)
