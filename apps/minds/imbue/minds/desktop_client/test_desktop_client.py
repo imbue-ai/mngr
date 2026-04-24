@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_workspace_list
-from imbue.minds.desktop_client.app import _snapshot_stuck_for_chrome
+from imbue.minds.desktop_client.app import _snapshot_non_healthy_for_chrome
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -1265,7 +1265,7 @@ def test_restart_workspace_server_local_happy_path_touches_services_toml(tmp_pat
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "restarting"
+    assert response.json()["status"] == "RESTARTING"
     # The touch command creates services.toml if it doesn't already exist.
     # The tmux kill-window is gated by `|| true` so it's fine that no such
     # session exists in the test environment.
@@ -1292,7 +1292,7 @@ def test_restart_workspace_server_happy_path_returns_200_and_issues_command(tmp_
     assert response.status_code == 200
     body = response.json()
     assert body["agent_id"] == str(agent_id)
-    assert body["status"] == "restarting"
+    assert body["status"] == "RESTARTING"
     assert len(tunnel_manager._exec_calls) == 1
     ssh_info_used, command_used = tunnel_manager._exec_calls[0]
     assert ssh_info_used == _TEST_SSH_INFO
@@ -1301,6 +1301,11 @@ def test_restart_workspace_server_happy_path_returns_200_and_issues_command(tmp_
     # reconciles it back.
     assert "minds-my-mind:svc-system_interface" in command_used
     assert "/code/services.toml" in command_used
+    # The tracker is flipped to ``restarting`` as soon as the command is
+    # dispatched, so any SSE subscriber or mid-restart probe sees the
+    # in-flight restart, not the pre-click state.
+    tracker = _get_health_tracker(client)
+    assert tracker.get_health(str(agent_id)) == "RESTARTING"
 
 
 def test_restart_workspace_server_returns_502_on_ssh_failure(tmp_path: Path) -> None:
@@ -1311,6 +1316,10 @@ def test_restart_workspace_server_returns_502_on_ssh_failure(tmp_path: Path) -> 
     response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
 
     assert response.status_code == 502
+    # A failed restart must flip the tracker back to ``stuck`` so the UI
+    # stops showing "Restarting..." and offers the user another try.
+    tracker = _get_health_tracker(client)
+    assert tracker.get_health(str(agent_id)) == "STUCK"
 
 
 def test_restart_workspace_server_returns_500_on_nonzero_exit(tmp_path: Path) -> None:
@@ -1322,44 +1331,159 @@ def test_restart_workspace_server_returns_500_on_nonzero_exit(tmp_path: Path) ->
 
     assert response.status_code == 500
     assert "oh no" in response.text
+    tracker = _get_health_tracker(client)
+    assert tracker.get_health(str(agent_id)) == "STUCK"
 
 
 # -- Workspace server health tracker integration --
 
 
-def test_snapshot_stuck_for_chrome_orders_and_serializes() -> None:
-    """Chrome-side snapshot sorts entries deterministically and shapes them for SSE JSON.
+def test_snapshot_non_healthy_for_chrome_omits_healthy_agents() -> None:
+    """Chrome SSE payload only carries agents that are stuck or restarting.
 
-    The SSE change-detection loop compares snapshots by equality, so unstable
-    ordering would spuriously fire events. Cover the ordering + serialization
-    shape directly since the SSE stream itself can't be driven from TestClient.
+    Healthy agents are the common case and are implied by absence from the
+    map -- clients (sidebar, overlay controller, landing page) all default
+    missing agents to "healthy". This keeps the wire payload small.
     """
-    tracker = WorkspaceServerHealthTracker(failure_threshold=1)
-    # Intentionally record in an order different from the expected sorted output.
-    tracker.record_failure("agent-b", "system_interface", "TimeoutException")
-    tracker.record_failure("agent-a", "web", "ReadError")
-    tracker.record_failure("agent-a", "system_interface", "ConnectError")
+    tracker = WorkspaceServerHealthTracker()
+    tracker.record_failure("agent-stuck")
+    tracker.mark_restarting("agent-restarting")
+    tracker.record_success("agent-healthy")
 
-    snapshot = _snapshot_stuck_for_chrome(tracker)
+    snapshot = _snapshot_non_healthy_for_chrome(tracker)
 
-    # Sorted by (agent_id, server_name).
-    keys = [(entry["agent_id"], entry["server_name"]) for entry in snapshot]
-    assert keys == [
-        ("agent-a", "system_interface"),
-        ("agent-a", "web"),
-        ("agent-b", "system_interface"),
-    ]
-    # Each entry carries exactly the fields the frontend expects.
-    expected_fields = {
-        "agent_id",
-        "server_name",
-        "stuck_since",
-        "failure_count",
-        "last_error_class",
-        "last_error_time",
+    assert snapshot == {
+        "agent-stuck": "STUCK",
+        "agent-restarting": "RESTARTING",
     }
-    for entry in snapshot:
-        assert set(entry.keys()) == expected_fields
+
+
+# -- Agent health probe endpoint tests --
+
+
+def _client_for_bare_origin(client: TestClient) -> TestClient:
+    """Return a TestClient that hits the bare-origin host so requests bypass the
+    subdomain-forwarding middleware and reach the regular FastAPI routes.
+
+    ``_create_subdomain_test_client`` defaults its base_url to the workspace
+    subdomain, which sends *every* request through the proxy. The probe,
+    restart, and chrome routes are served on the bare origin instead, so we
+    swap the host in-place for those tests.
+    """
+    client.base_url = httpx.URL("http://localhost")
+    return client
+
+
+def test_agent_health_probe_returns_403_when_unauthenticated(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
+    bare = _client_for_bare_origin(client)
+    response = bare.get(f"/api/agents/{agent_id}/health")
+    assert response.status_code == 403
+
+
+def test_agent_health_probe_returns_404_for_unknown_agent(tmp_path: Path) -> None:
+    known_id = AgentId()
+    unknown_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, known_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    bare = _client_for_bare_origin(client)
+
+    response = bare.get(f"/api/agents/{unknown_id}/health")
+
+    assert response.status_code == 404
+
+
+def test_agent_health_probe_returns_healthy_on_2xx_backend(tmp_path: Path) -> None:
+    """A successful probe flips the tracker to ``healthy`` and returns that status.
+
+    Covers the common case: user loads the main page, we probe each agent,
+    all of them respond 200, and the page renders them as ready to click.
+    """
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    bare = _client_for_bare_origin(client)
+
+    response = bare.get(f"/api/agents/{agent_id}/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"agent_id": str(agent_id), "status": "HEALTHY"}
+    tracker = _get_health_tracker(client)
+    assert tracker.get_health(str(agent_id)) == "HEALTHY"
+
+
+def test_agent_health_probe_returns_stuck_on_disconnecting_backend(tmp_path: Path) -> None:
+    """A probe against a workspace server that drops the connection is
+    reported as ``stuck``. This is the main-page "dead mind" signal."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    bare = _client_for_bare_origin(client)
+
+    response = bare.get(f"/api/agents/{agent_id}/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"agent_id": str(agent_id), "status": "STUCK"}
+    tracker = _get_health_tracker(client)
+    assert tracker.get_health(str(agent_id)) == "STUCK"
+
+
+def test_agent_health_probe_preserves_restarting_on_probe_failure(tmp_path: Path) -> None:
+    """During RESTARTING, a failing probe must not flip the tracker to STUCK.
+
+    The restart itself briefly breaks connectivity (tmux kill-window between
+    bootstrap reconcile cycles). If the probe flipped to STUCK every time it
+    caught the backend mid-restart, the overlay would thrash between
+    "Restarting..." and "Not responding" on every poll tick until the backend
+    came back. Instead, the probe leaves the tracker in RESTARTING until
+    something -- either this probe or a proxy observation -- sees a 2xx.
+    """
+    agent_id = AgentId()
+    # Disconnecting backend: the probe will always fail. The tracker should
+    # stay in RESTARTING regardless of how many probes fire.
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker = _get_health_tracker(client)
+    tracker.mark_restarting(str(agent_id))
+    bare = _client_for_bare_origin(client)
+
+    response = bare.get(f"/api/agents/{agent_id}/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"agent_id": str(agent_id), "status": "RESTARTING"}
+    assert tracker.get_health(str(agent_id)) == "RESTARTING"
+
+
+def test_agent_health_probe_flips_restarting_to_healthy_on_success(tmp_path: Path) -> None:
+    """A successful probe during RESTARTING means the restart completed --
+    flipping to HEALTHY is what clears the in-tab overlay via the SSE push."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker = _get_health_tracker(client)
+    tracker.mark_restarting(str(agent_id))
+    bare = _client_for_bare_origin(client)
+
+    response = bare.get(f"/api/agents/{agent_id}/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"agent_id": str(agent_id), "status": "HEALTHY"}
+    assert tracker.get_health(str(agent_id)) == "HEALTHY"
+
+
+def test_chrome_overlay_route_serves_overlay_html(tmp_path: Path) -> None:
+    """The /_chrome/overlay route is served without auth (like /_chrome) and
+    returns the IPC-driven overlay page."""
+    agent_id = AgentId()
+    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
+    bare = _client_for_bare_origin(client)
+    response = bare.get("/_chrome/overlay")
+    assert response.status_code == 200
+    # The overlay page listens on onOverlayStateChanged; asserting on that
+    # string is how tests verify the IPC wiring is present.
+    assert "onOverlayStateChanged" in response.text
 
 
 def _build_refresh_test_app(
@@ -1613,47 +1737,65 @@ def _create_subdomain_client_with_disconnecting_workspace(
     return client, auth_store
 
 
-def test_subdomain_forward_failure_records_in_health_tracker(tmp_path: Path) -> None:
-    """A wedged workspace_server (RemoteProtocolError on forward) must register
-    as a failure in the tracker and cross the stuck threshold."""
+def test_subdomain_forward_failure_marks_agent_stuck(tmp_path: Path) -> None:
+    """A single wedged workspace_server response (RemoteProtocolError) flips
+    the agent to ``stuck`` in the tracker. No threshold to cross."""
     agent_id = AgentId()
     client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
     _authenticate_client(client=client, auth_store=auth_store)
 
     tracker = _get_health_tracker(client)
-    # Threshold 1 lets a single request cross the wedge boundary so the
-    # assertion is not timing-dependent.
-    tracker.failure_threshold = 1
 
     response = client.get("/api/layout", headers={"accept": "application/json"})
 
     assert response.status_code == 502
-    stuck = tracker.snapshot_stuck()
-    assert len(stuck) == 1
-    assert stuck[0].agent_id == str(agent_id)
-    # The desktop client only proxies the workspace_server now, so the
-    # tracker tags every failure under the canonical system_interface name.
-    assert stuck[0].server_name == "system_interface"
-    assert stuck[0].last_error_class == "RemoteProtocolError"
+    assert tracker.get_health(str(agent_id)) == "STUCK"
+
+
+def test_subdomain_forward_main_frame_failure_returns_recovery_html(tmp_path: Path) -> None:
+    """Main-frame (GET + Accept: text/html) failures return a recovery page body
+    so the browser renders a Restart affordance instead of a blank error."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/", headers={"accept": "text/html"})
+
+    assert response.status_code == 502
+    # Recovery page body, not the plain-text fallback.
+    assert "Workspace server not responding" in response.text
+    assert "Restart" in response.text
+    assert str(agent_id) in response.text
+
+
+def test_subdomain_forward_non_html_failure_returns_plain_text(tmp_path: Path) -> None:
+    """XHR/JSON/image requests keep the plain-text failure body so clients
+    don't try to parse HTML as their expected type."""
+    agent_id = AgentId()
+    client, auth_store = _create_subdomain_client_with_disconnecting_workspace(tmp_path, agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/api/layout", headers={"accept": "application/json"})
+
+    assert response.status_code == 502
+    assert "<html" not in response.text.lower()
 
 
 def test_subdomain_forward_success_clears_stuck_state(tmp_path: Path) -> None:
-    """A 2xx response from the workspace_server must clear a prior stuck mark."""
+    """A 2xx response from the workspace_server flips the agent back to ``healthy``."""
     agent_id = AgentId()
     client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
     _authenticate_client(client=client, auth_store=auth_store)
 
     tracker = _get_health_tracker(client)
     # Seed the tracker as if this server had previously been marked stuck.
-    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
-    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
-    tracker.record_failure(str(agent_id), "system_interface", "TimeoutException")
-    assert len(tracker.snapshot_stuck()) == 1
+    tracker.record_failure(str(agent_id))
+    assert tracker.get_health(str(agent_id)) == "STUCK"
 
     response = client.get("/api/layout")
 
     assert response.status_code == 200
-    assert tracker.snapshot_stuck() == ()
+    assert tracker.get_health(str(agent_id)) == "HEALTHY"
 
 
 # -- Session cookie stripping tests --

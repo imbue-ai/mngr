@@ -1,0 +1,81 @@
+{#
+  Returned as the body of a 5xx response when a main-frame HTML navigation to
+  a workspace subdomain fails at the proxy layer. Acts as a fallback behind
+  the in-tab overlay: the overlay is the primary surface, but if it hasn't
+  caught up with the SSE ``workspace_server_status`` event yet, the body
+  itself carries a Restart affordance so the user never stares at a blank
+  "disconnected" message.
+
+  Not part of the Electron overlay plumbing -- that uses overlay.html. This
+  template is for the browser's own page body.
+#}
+{% extends 'base.html' %}
+{% block title %}Workspace server not responding{% endblock %}
+{% block body_class %}bg-zinc-950 text-zinc-100 font-sans antialiased min-h-screen flex items-center justify-center{% endblock %}
+{% block content %}
+<div class="max-w-md w-full mx-6 bg-zinc-900 border border-amber-500/40 rounded-lg p-6 shadow-lg"
+     style="--workspace-accent: {{ accent }};">
+  <h1 class="text-lg font-semibold text-amber-400 mb-2">Workspace server not responding</h1>
+  <p class="text-sm text-zinc-300 mb-4" id="recovery-message">
+    The workspace server for this mind isn't responding. Restarting usually recovers it.
+  </p>
+  <div class="flex gap-2">
+    <button id="recovery-restart-btn"
+            class="bg-amber-700 hover:bg-amber-600 text-white text-sm px-3 py-1.5 rounded border border-amber-700">
+      Restart
+    </button>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var agentId = {{ agent_id | tojson }};
+  var btn = document.getElementById('recovery-restart-btn');
+  var msg = document.getElementById('recovery-message');
+  var pollTimer = null;
+
+  function pollUntilHealthy() {
+    if (pollTimer !== null) return;
+    var tick = function () {
+      fetch('/api/agents/' + encodeURIComponent(agentId) + '/health', { credentials: 'same-origin' })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (body) {
+          if (body && body.status === 'HEALTHY') {
+            window.location.reload();
+            return;
+          }
+          pollTimer = setTimeout(tick, 2000);
+        })
+        .catch(function () { pollTimer = setTimeout(tick, 2000); });
+    };
+    tick();
+  }
+
+  btn.addEventListener('click', function () {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = 'Restarting...';
+    msg.textContent = 'Restart requested. The workspace server usually comes back within a few seconds.';
+    fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+      .then(function (resp) {
+        if (!resp.ok) {
+          return resp.json().then(
+            function (body) { throw new Error((body && body.error) || ('HTTP ' + resp.status)); },
+            function () { throw new Error('HTTP ' + resp.status); },
+          );
+        }
+        pollUntilHealthy();
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = 'Restart';
+        msg.textContent = 'Restart failed: ' + err.message + '. Try again?';
+      });
+  });
+})();
+</script>
+{% endblock %}

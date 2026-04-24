@@ -32,6 +32,15 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));
   },
 
+  // Overlay (workspace-server stuck/restarting). Main.js pushes
+  // {agent_id, state: 'stuck'|'restarting'} via this channel whenever the
+  // workspace view's agent needs to show the overlay; the overlay view is
+  // hidden entirely (via setVisible(false)) once the agent becomes healthy
+  // again, so there's no explicit "clear" message.
+  onOverlayStateChanged: (callback) => {
+    ipcRenderer.on('overlay-state-changed', (_event, state) => callback(state));
+  },
+
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
 

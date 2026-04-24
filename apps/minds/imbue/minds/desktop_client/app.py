@@ -73,12 +73,15 @@ from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_overlay_page
+from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
 from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.desktop_client.workspace_server_health import AgentHealth
 from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -89,6 +92,11 @@ from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+# Per-probe timeout for the /api/agents/{id}/health endpoint used by the
+# main-page polling. Much tighter than the regular proxy timeout: anything
+# slower than this is effectively unreachable for the purpose of "is this
+# mind clickable right now?"
+_PROBE_TIMEOUT_SECONDS: Final[float] = 3.0
 
 # Prefix used for the tmux session both inside minds agent containers and on
 # the local host for non-docker minds. The canonical workspace-server service
@@ -506,6 +514,32 @@ def _unauthenticated_subdomain_response(request: Request) -> Response:
     return Response(status_code=403, content="Not authenticated")
 
 
+def _is_main_frame_html_get(request: Request) -> bool:
+    """Whether this request is a user-initiated main-frame HTML navigation.
+
+    Main-frame HTML GETs that fail at the proxy layer deserve a recovery page
+    in the response body so the browser doesn't render a blank "disconnected"
+    error. Non-HTML GETs (images, XHR, SSE, etc.) keep the short plain-text
+    failure body so clients don't try to parse HTML as their expected type.
+    """
+    if request.method != "GET":
+        return False
+    accept = request.headers.get("accept", "")
+    return "text/html" in accept
+
+
+def _proxy_failure_response(
+    request: Request, agent_id: AgentId, status_code: int, fallback_text: str
+) -> Response:
+    """Return either an HTML recovery page (for main-frame navigations) or a
+    plain-text failure body."""
+    if _is_main_frame_html_get(request):
+        return HTMLResponse(
+            content=render_recovery_page(agent_id=str(agent_id)), status_code=status_code
+        )
+    return Response(status_code=status_code, content=fallback_text)
+
+
 async def _forward_workspace_http(
     request: Request,
     agent_id: AgentId,
@@ -518,14 +552,12 @@ async def _forward_workspace_http(
     buffers everything else. Does NOT rewrite body or headers: the workspace_server
     already emits /service/<name>/ prefixed URLs, scoped cookies, and the SW shim.
 
-    Connection-level failures are reported to the workspace-server health
-    tracker so the chrome can surface a restart toast if one wedges.
+    Connection-level failures flip the workspace-server health tracker's level
+    for this agent to ``stuck``; 2xx/3xx responses flip it back to ``healthy``.
+    Main-frame HTML navigations that fail return a recovery page body so the
+    user sees a Restart button instead of a blank disconnected error.
     """
     tracker: WorkspaceServerHealthTracker = request.app.state.workspace_server_health_tracker
-    # The desktop client only ever proxies the workspace_server (which answers
-    # under the "system_interface" service name inside each agent). Tagging
-    # failures with that name lets the SSE payload stay self-describing.
-    server_name = str(_WORKSPACE_SERVER_SERVICE_NAME)
 
     base = workspace_backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
@@ -558,27 +590,26 @@ async def _forward_workspace_http(
         try:
             backend_response = await http_client.send(backend_request, stream=True)
         except httpx.ConnectError:
-            tracker.record_failure(str(agent_id), server_name, "ConnectError")
-            return Response(status_code=502, content="Workspace server connection refused")
+            tracker.record_failure(str(agent_id))
+            return _proxy_failure_response(request, agent_id, 502, "Workspace server connection refused")
         except httpx.TimeoutException:
-            tracker.record_failure(str(agent_id), server_name, "TimeoutException")
-            return Response(status_code=504, content="Workspace server stream timed out")
+            tracker.record_failure(str(agent_id))
+            return _proxy_failure_response(request, agent_id, 504, "Workspace server stream timed out")
 
         async def _stream() -> AsyncGenerator[bytes, None]:
             try:
                 async for chunk in backend_response.aiter_bytes():
                     yield chunk
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
-                # Also count mid-stream drops toward the wedge detector so
-                # a server that 200s the initial SSE open and then dies is
-                # still observable.
-                tracker.record_failure(str(agent_id), server_name, type(e).__name__)
+                # Also count mid-stream drops as stuck so a server that 200s
+                # the initial SSE open and then dies is still observable.
+                tracker.record_failure(str(agent_id))
                 logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
             finally:
                 await backend_response.aclose()
 
         if backend_response.status_code < 400:
-            tracker.record_success(str(agent_id), server_name)
+            tracker.record_success(str(agent_id))
 
         media_type = backend_response.headers.get("content-type", "text/event-stream")
         return StreamingResponse(
@@ -595,23 +626,24 @@ async def _forward_workspace_http(
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except httpx.ConnectError:
-        tracker.record_failure(str(agent_id), server_name, "ConnectError")
-        return Response(status_code=502, content="Workspace server connection refused")
+        tracker.record_failure(str(agent_id))
+        return _proxy_failure_response(request, agent_id, 502, "Workspace server connection refused")
     except httpx.ReadError:
-        tracker.record_failure(str(agent_id), server_name, "ReadError")
-        return Response(status_code=502, content="Workspace server connection lost")
+        tracker.record_failure(str(agent_id))
+        return _proxy_failure_response(request, agent_id, 502, "Workspace server connection lost")
     except httpx.RemoteProtocolError:
-        tracker.record_failure(str(agent_id), server_name, "RemoteProtocolError")
-        return Response(status_code=502, content="Workspace server disconnected without response")
+        tracker.record_failure(str(agent_id))
+        return _proxy_failure_response(request, agent_id, 502, "Workspace server disconnected without response")
     except httpx.TimeoutException:
-        tracker.record_failure(str(agent_id), server_name, "TimeoutException")
-        return Response(status_code=504, content="Workspace server timed out")
+        tracker.record_failure(str(agent_id))
+        return _proxy_failure_response(request, agent_id, 504, "Workspace server timed out")
 
-    # Record success on 2xx/3xx so the tracker can clear the "stuck" marker.
-    # 4xx/5xx are NOT counted as recovery -- a 500 from the workspace server
-    # is itself a sign it is unhealthy.
+    # Record success on 2xx/3xx so the tracker can clear the stuck level.
+    # 4xx/5xx are NOT treated as recovery -- a 500 from the workspace server
+    # is itself a sign it is unhealthy -- but they also don't flip a healthy
+    # agent to stuck, since the backend is reachable.
     if backend_response.status_code < 400:
-        tracker.record_success(str(agent_id), server_name)
+        tracker.record_success(str(agent_id))
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():
@@ -1133,16 +1165,23 @@ async def _handle_restart_workspace_server(
             media_type="application/json",
         )
 
+    tracker: WorkspaceServerHealthTracker = request.app.state.workspace_server_health_tracker
+    # Flip to restarting immediately so any SSE subscriber (or subsequent probe)
+    # sees the in-flight restart, not the pre-click state.
+    tracker.mark_restarting(str(parsed_id))
+
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
         return await _restart_workspace_server_locally(
             agent_id=str(parsed_id),
             workspace_name=workspace_name,
+            tracker=tracker,
             backend_resolver=backend_resolver,
         )
 
     tunnel_manager: SSHTunnelManager | None = request.app.state.tunnel_manager
     if tunnel_manager is None:
+        tracker.record_failure(str(parsed_id))
         return Response(
             status_code=501,
             content=json.dumps({"error": "SSH tunnel manager not configured"}),
@@ -1154,6 +1193,7 @@ async def _handle_restart_workspace_server(
         exit_status, stderr_output = await asyncio.to_thread(tunnel_manager.exec_remote_command, ssh_info, command)
     except SSHTunnelError as e:
         logger.warning("Restart workspace server failed for {}: {}", agent_id, e)
+        tracker.record_failure(str(parsed_id))
         return Response(
             status_code=502,
             content=json.dumps({"error": f"SSH exec failed: {e}"}),
@@ -1162,6 +1202,7 @@ async def _handle_restart_workspace_server(
 
     if exit_status != 0:
         logger.warning("Restart workspace server exited {} for {}: {}", exit_status, agent_id, stderr_output)
+        tracker.record_failure(str(parsed_id))
         return Response(
             status_code=500,
             content=json.dumps({"error": f"Remote command failed (exit {exit_status}): {stderr_output}"}),
@@ -1170,7 +1211,7 @@ async def _handle_restart_workspace_server(
 
     logger.info("Restart requested for workspace_server of {}", agent_id)
     return Response(
-        content=json.dumps({"agent_id": str(parsed_id), "status": "restarting"}),
+        content=json.dumps({"agent_id": str(parsed_id), "status": str(AgentHealth.RESTARTING)}),
         media_type="application/json",
     )
 
@@ -1209,6 +1250,7 @@ def _run_local_restart_commands(workspace_name: str, services_toml_path: Path) -
 async def _restart_workspace_server_locally(
     agent_id: str,
     workspace_name: str,
+    tracker: WorkspaceServerHealthTracker,
     backend_resolver: BackendResolverInterface,
 ) -> Response:
     """Restart the workspace_server service for a local (non-SSH) agent.
@@ -1221,6 +1263,7 @@ async def _restart_workspace_server_locally(
     """
     work_dir = backend_resolver.get_work_dir(AgentId(agent_id))
     if work_dir is None:
+        tracker.record_failure(agent_id)
         return Response(
             status_code=500,
             content=json.dumps({"error": "Cannot locate services.toml for local agent: work_dir unavailable"}),
@@ -1234,6 +1277,7 @@ async def _restart_workspace_server_locally(
 
     if exit_status != 0:
         logger.warning("Local restart for {} exited {}: {}", agent_id, exit_status, stderr_output)
+        tracker.record_failure(agent_id)
         return Response(
             status_code=500,
             content=json.dumps({"error": f"Local command failed (exit {exit_status}): {stderr_output}"}),
@@ -1242,9 +1286,101 @@ async def _restart_workspace_server_locally(
 
     logger.info("Restart requested for workspace_server of local agent {}", agent_id)
     return Response(
-        content=json.dumps({"agent_id": agent_id, "status": "restarting"}),
+        content=json.dumps({"agent_id": agent_id, "status": str(AgentHealth.RESTARTING)}),
         media_type="application/json",
     )
+
+
+def _probe_response(agent_id: AgentId, status: AgentHealth) -> Response:
+    """JSON response body for the /api/agents/{id}/health probe endpoint."""
+    return Response(
+        content=json.dumps({"agent_id": str(agent_id), "status": str(status)}),
+        media_type="application/json",
+    )
+
+
+async def _handle_agent_health_probe(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Probe the workspace_server for liveness and return its current health level.
+
+    GET /api/agents/{agent_id}/health
+
+    Used by the landing page's per-agent polling so the main menu can render
+    each mind's state (healthy / stuck / restarting) without waiting for the
+    user to click in. Updates the health tracker as a side effect, so a stuck
+    server surfaced here also drives the in-tab overlay via the SSE stream.
+
+    A ``restarting`` agent short-circuits without hitting the backend: actively
+    probing mid-restart would flip the tracker out of restarting to stuck.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(
+            status_code=403,
+            content=json.dumps({"error": "Not authenticated"}),
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return Response(
+            status_code=404,
+            content=json.dumps({"error": "Unknown agent"}),
+            media_type="application/json",
+        )
+
+    tracker: WorkspaceServerHealthTracker = request.app.state.workspace_server_health_tracker
+    # Capture the pre-probe state once: failure paths during a restart
+    # should NOT flip RESTARTING -> STUCK (the restart itself briefly
+    # breaks connectivity, and we don't want to thrash the UI between
+    # "Restarting..." and "Not responding"). Success paths always flip
+    # to HEALTHY -- the restart succeeded in that case.
+    current = tracker.get_health(str(parsed_id))
+    is_restarting = current == AgentHealth.RESTARTING
+
+    workspace_url = backend_resolver.get_backend_url(parsed_id, _WORKSPACE_SERVER_SERVICE_NAME)
+    if workspace_url is None:
+        # No URL registered yet -- the user can't reach this mind, so report
+        # stuck. Note: this is distinct from the 404 path above (unknown agent)
+        # and from "cleanly shut down" (which omits the agent from the workspace
+        # list entirely, so the landing page never probes it).
+        if not is_restarting:
+            tracker.record_failure(str(parsed_id))
+        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+
+    try:
+        tunnel_client = await asyncio.get_running_loop().run_in_executor(
+            None, _get_tunnel_http_client, request.app, parsed_id, workspace_url, backend_resolver
+        )
+    except (SSHTunnelError, paramiko.SSHException, OSError):
+        if not is_restarting:
+            tracker.record_failure(str(parsed_id))
+        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+
+    active_client = tunnel_client or request.app.state.http_client
+    probe_url = workspace_url.rstrip("/") + "/"
+    try:
+        probe_response = await active_client.get(probe_url, timeout=_PROBE_TIMEOUT_SECONDS)
+    except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException):
+        if not is_restarting:
+            tracker.record_failure(str(parsed_id))
+        return _probe_response(parsed_id, current or AgentHealth.STUCK)
+
+    if probe_response.status_code < 400:
+        # A successful probe during RESTARTING means the restart completed;
+        # flipping to HEALTHY clears the overlay via the SSE push.
+        tracker.record_success(str(parsed_id))
+        return _probe_response(parsed_id, AgentHealth.HEALTHY)
+
+    # 4xx/5xx from the upstream workspace_server -- the backend is reachable
+    # but returning app-level errors. We don't flip the tracker on these:
+    # neither the proxy path nor this probe treats them as healthy/stuck
+    # transitions. Return whatever the tracker already knows (defaulting to
+    # healthy since the probe itself did complete).
+    return _probe_response(parsed_id, tracker.get_health(str(parsed_id)) or AgentHealth.HEALTHY)
 
 
 # -- Chrome (persistent shell) route handlers --
@@ -1278,6 +1414,17 @@ def _handle_chrome_page(
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
     html = render_sidebar_page()
+    return HTMLResponse(content=html)
+
+
+def _handle_chrome_overlay(request: Request) -> Response:
+    """Serve the stuck-server overlay page for the Electron overlay WebContentsView.
+
+    The overlay sits on top of a workspace's content view when its backend is
+    stuck or restarting. State is driven by IPC from main.js (which consumes
+    the SSE ``workspace_server_status`` stream).
+    """
+    html = render_overlay_page()
     return HTMLResponse(content=html)
 
 
@@ -1322,8 +1469,8 @@ async def _handle_chrome_events(
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
             yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
-            last_stuck_servers = _snapshot_stuck_for_chrome(health_tracker)
-            yield "data: {}\n\n".format(json.dumps({"type": "workspace_server_status", "stuck": last_stuck_servers}))
+            last_health = _snapshot_non_healthy_for_chrome(health_tracker)
+            yield "data: {}\n\n".format(json.dumps({"type": "workspace_server_status", "health": last_health}))
 
             # Wait for changes and push updates until client disconnects
             connected = not await request.is_disconnected()
@@ -1350,11 +1497,11 @@ async def _handle_chrome_events(
                     last_request_count = current_request_count
                     yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": current_request_count}))
 
-                current_stuck_servers = _snapshot_stuck_for_chrome(health_tracker)
-                if current_stuck_servers != last_stuck_servers:
-                    last_stuck_servers = current_stuck_servers
+                current_health = _snapshot_non_healthy_for_chrome(health_tracker)
+                if current_health != last_health:
+                    last_health = current_health
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "workspace_server_status", "stuck": current_stuck_servers})
+                        json.dumps({"type": "workspace_server_status", "health": current_health})
                     )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -1372,27 +1519,20 @@ async def _handle_chrome_events(
     )
 
 
-def _snapshot_stuck_for_chrome(
+def _snapshot_non_healthy_for_chrome(
     health_tracker: WorkspaceServerHealthTracker,
-) -> list[dict[str, str | int | float]]:
-    """Return a JSON-serializable view of currently-stuck servers for the chrome toast.
+) -> dict[str, str]:
+    """Return a JSON-serializable per-agent health map for the chrome SSE payload.
 
-    Returns a list with deterministic ordering (by agent_id then server_name) so
-    equality comparison for change detection works without set/dict churn.
+    Only includes agents that are currently stuck or restarting: healthy agents
+    are the common case and omitted to keep the wire payload small (clients
+    treat missing agents as healthy).
     """
-    infos = health_tracker.snapshot_stuck()
-    ordered = sorted(infos, key=lambda info: (info.agent_id, info.server_name))
-    return [
-        {
-            "agent_id": info.agent_id,
-            "server_name": info.server_name,
-            "stuck_since": info.stuck_since,
-            "failure_count": info.failure_count,
-            "last_error_class": info.last_error_class,
-            "last_error_time": info.last_error_time,
-        }
-        for info in ordered
-    ]
+    return {
+        agent_id: str(state)
+        for agent_id, state in health_tracker.snapshot_all().items()
+        if state != AgentHealth.HEALTHY
+    }
 
 
 def _build_workspace_list(
@@ -2161,6 +2301,7 @@ def create_desktop_client(
     # Chrome (persistent shell) routes
     app.get("/_chrome")(_handle_chrome_page)
     app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
+    app.get("/_chrome/overlay")(_handle_chrome_overlay)
     app.get("/_chrome/events")(_handle_chrome_events)
 
     # Register routes
@@ -2209,6 +2350,7 @@ def create_desktop_client(
 
     # Workspace server lifecycle
     app.post("/api/agents/{agent_id}/restart-workspace-server")(_handle_restart_workspace_server)
+    app.get("/api/agents/{agent_id}/health")(_handle_agent_health_probe)
 
     # Catch-all WebSocket route for ``<agent-id>.localhost:PORT/*``. For
     # requests arriving on the bare-origin host, the handler closes the WS

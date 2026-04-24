@@ -1,10 +1,20 @@
 // Electron sidebar WebContentsView: renders the workspace list and wires
 // clicks + context menus through window.minds IPC. In browser mode the
 // chrome.js embedded sidebar handles the same job instead.
+//
+// Per-agent health state (driven by the /_chrome/events workspace_server_status
+// SSE stream) dims stuck / restarting rows and annotates them inline. The
+// per-agent overlay (shown on top of the workspace view) is the primary
+// recovery affordance; the sidebar just mirrors the state so the user can
+// see at a glance which minds are healthy from the workspace list.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
   var lastWorkspaces = [];
+  // Per-agent health map, mirrored from the SSE workspace_server_status
+  // payload. Absent keys imply "healthy" -- the backend omits healthy agents
+  // to keep the payload small.
+  var healthByAgentId = Object.create(null);
 
   // Per-agent accent color comes from the shared
   // `window.mindsAccent.get(agentId, cb)` helper in
@@ -34,6 +44,25 @@
       '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>' +
       '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>';
     return btn;
+  }
+
+  function applyHealthToRow(row, health) {
+    // health: undefined | 'STUCK' | 'RESTARTING' (healthy rows get no
+    // indicator, just the default styling).
+    var statusEl = row.querySelector('.sidebar-health-status');
+    row.classList.toggle('opacity-60', health === 'STUCK' || health === 'RESTARTING');
+    if (!statusEl) return;
+    if (health === 'STUCK') {
+      statusEl.textContent = 'not responding';
+      statusEl.className = 'sidebar-health-status text-[11px] text-amber-400 ml-2';
+      statusEl.hidden = false;
+    } else if (health === 'RESTARTING') {
+      statusEl.textContent = 'restarting...';
+      statusEl.className = 'sidebar-health-status text-[11px] text-zinc-400 ml-2';
+      statusEl.hidden = false;
+    } else {
+      statusEl.hidden = true;
+    }
   }
 
   function renderWorkspaces(workspaces) {
@@ -69,8 +98,15 @@
           + (isCurrent ? ' is-current bg-white/5' : '');
         row.setAttribute('data-agent-id', w.id);
         var label = document.createElement('span');
-        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
-        label.textContent = w.name || w.id;
+        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis flex items-center';
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'truncate';
+        nameSpan.textContent = w.name || w.id;
+        label.appendChild(nameSpan);
+        var statusSpan = document.createElement('span');
+        statusSpan.className = 'sidebar-health-status text-[11px] text-amber-400 ml-2';
+        statusSpan.hidden = true;
+        label.appendChild(statusSpan);
         row.appendChild(label);
         var btn = buildOpenNewBtn(w.id);
         // Show the "open in new window" icon on hover (or focus-within).
@@ -83,9 +119,19 @@
         } else {
           getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
         }
+        applyHealthToRow(row, healthByAgentId[w.id]);
         container.appendChild(row);
       });
     });
+  }
+
+  function applyHealthToAllRows() {
+    var rows = document.querySelectorAll('.sidebar-item[data-agent-id]');
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i];
+      var agentId = row.getAttribute('data-agent-id');
+      applyHealthToRow(row, healthByAgentId[agentId]);
+    }
   }
 
   function handleRowClick(target) {
@@ -140,126 +186,9 @@
       lastWorkspaces = data.workspaces || [];
       renderWorkspaces(lastWorkspaces);
     } else if (data.type === 'workspace_server_status') {
-      renderStuckToasts(data.stuck || []);
+      healthByAgentId = (data && data.health) ? data.health : Object.create(null);
+      applyHealthToAllRows();
     }
-  }
-
-  // -- Stuck server toast --
-  // The backend's _handle_chrome_events endpoint pushes
-  // workspace_server_status events when an (agent_id, server_name) pair
-  // crosses a consecutive-failure threshold or recovers. We render a toast
-  // per stuck server with a Restart button that POSTs to the same endpoint
-  // the landing-page restart button uses.
-
-  function workspaceNameForAgentId(agentId) {
-    for (var i = 0; i < lastWorkspaces.length; i += 1) {
-      if (lastWorkspaces[i].id === agentId) return lastWorkspaces[i].name || agentId;
-    }
-    return agentId;
-  }
-
-  function formatStuckDuration(stuckSince) {
-    var seconds = Math.max(0, Math.round(Date.now() / 1000 - stuckSince));
-    if (seconds < 60) return seconds + 's';
-    return Math.round(seconds / 60) + 'm';
-  }
-
-  function triggerRestart(button, agentId) {
-    if (button.disabled) return;
-    button.disabled = true;
-    var original = button.textContent;
-    button.textContent = 'Restarting...';
-    fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', { method: 'POST' })
-      .then(function (resp) {
-        if (resp.ok) {
-          button.textContent = 'Restart requested';
-          return;
-        }
-        return resp.json().then(
-          function (body) {
-            button.textContent = 'Failed: ' + ((body && body.error) || ('HTTP ' + resp.status));
-          },
-          function () { button.textContent = 'Failed: HTTP ' + resp.status; },
-        );
-      })
-      .catch(function (err) { button.textContent = 'Failed: ' + err; })
-      .finally(function () {
-        setTimeout(function () { button.disabled = false; button.textContent = original; }, 4000);
-      });
-  }
-
-  function dismissToast(toastEl) {
-    if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
-  }
-
-  function renderStuckToasts(stuckServers) {
-    var stack = document.getElementById('stuck-toast-stack');
-    if (!stack) return;
-    var keysInPayload = {};
-    stuckServers.forEach(function (entry) {
-      keysInPayload[entry.agent_id + '|' + entry.server_name] = entry;
-    });
-    Array.prototype.slice.call(stack.children).forEach(function (el) {
-      var key = el.getAttribute('data-stuck-key');
-      if (!keysInPayload[key]) dismissToast(el);
-    });
-    stuckServers.forEach(function (entry) {
-      var key = entry.agent_id + '|' + entry.server_name;
-      if (stack.querySelector('[data-stuck-key="' + key + '"]')) return;
-      var toast = document.createElement('div');
-      toast.setAttribute('data-stuck-key', key);
-      toast.className = 'pointer-events-auto bg-zinc-800 text-zinc-200 border border-amber-500 rounded-md p-3 text-xs leading-snug shadow-lg';
-
-      var title = document.createElement('div');
-      title.className = 'font-semibold text-amber-400 mb-1';
-      title.textContent = 'Workspace server not responding';
-      toast.appendChild(title);
-
-      var body = document.createElement('div');
-      body.className = 'text-zinc-300 mb-2';
-      body.textContent =
-        'The "' + workspaceNameForAgentId(entry.agent_id) + '" mind has had '
-        + entry.failure_count + ' failed requests over the last '
-        + formatStuckDuration(entry.stuck_since) + '. '
-        + 'Restarting the workspace server usually recovers it.';
-      toast.appendChild(body);
-
-      var disclosure = document.createElement('button');
-      disclosure.className = 'bg-transparent border-0 text-zinc-400 p-0 cursor-pointer text-[11px] underline mb-1';
-      disclosure.textContent = 'Show details';
-      toast.appendChild(disclosure);
-
-      var details = document.createElement('div');
-      details.className = 'font-mono text-[11px] text-zinc-400 bg-black/30 rounded p-2 mb-2 whitespace-pre-wrap';
-      details.hidden = true;
-      details.textContent =
-        'server: ' + entry.server_name + '\n'
-        + 'agent_id: ' + entry.agent_id + '\n'
-        + 'last_error: ' + entry.last_error_class + '\n'
-        + 'failure_count: ' + entry.failure_count;
-      toast.appendChild(details);
-
-      disclosure.addEventListener('click', function () {
-        details.hidden = !details.hidden;
-        disclosure.textContent = details.hidden ? 'Show details' : 'Hide details';
-      });
-
-      var actions = document.createElement('div');
-      actions.className = 'flex gap-1.5 justify-end';
-      var dismissBtn = document.createElement('button');
-      dismissBtn.className = 'bg-transparent border border-zinc-600 text-zinc-200 text-xs px-2.5 py-1 rounded cursor-pointer hover:bg-white/10';
-      dismissBtn.textContent = 'Dismiss';
-      dismissBtn.addEventListener('click', function () { dismissToast(toast); });
-      actions.appendChild(dismissBtn);
-      var restartBtn = document.createElement('button');
-      restartBtn.className = 'bg-amber-700 border border-amber-700 text-white text-xs px-2.5 py-1 rounded cursor-pointer hover:bg-amber-600';
-      restartBtn.textContent = 'Restart';
-      restartBtn.addEventListener('click', function () { triggerRestart(restartBtn, entry.agent_id); });
-      actions.appendChild(restartBtn);
-      toast.appendChild(actions);
-
-      stack.appendChild(toast);
-    });
   }
 
   if (isElectron && window.minds.onChromeEvent) {

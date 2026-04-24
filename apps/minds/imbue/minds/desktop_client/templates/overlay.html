@@ -1,0 +1,84 @@
+{#
+  Standalone overlay page served into the Electron overlay WebContentsView.
+  State (agent_id + stuck/restarting) arrives over IPC from main.js via
+  window.minds.onOverlayStateChanged. The Restart button POSTs directly to
+  /api/agents/{id}/restart-workspace-server; main.js hides the overlay as
+  soon as the SSE stream reports this agent as healthy.
+
+  Deliberately decoupled from /_chrome/overlay so this HTML can be reloaded
+  or inspected without touching the main chrome.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Workspace server not responding</title>
+  <script src="/_static/tailwind.js"></script>
+  <link rel="stylesheet" href="/_static/tokens.css">
+</head>
+<body class="bg-zinc-950/95 text-zinc-100 font-sans antialiased min-h-screen flex items-center justify-center">
+  <div id="overlay-card"
+       class="max-w-md w-full mx-6 bg-zinc-900 border border-amber-500/40 rounded-lg p-6 shadow-lg hidden">
+    <h1 id="overlay-title" class="text-lg font-semibold text-amber-400 mb-2">
+      Workspace server not responding
+    </h1>
+    <p id="overlay-message" class="text-sm text-zinc-300 mb-4">
+      Restarting the workspace server usually recovers it.
+    </p>
+    <div class="flex gap-2">
+      <button id="overlay-restart-btn"
+              class="bg-amber-700 hover:bg-amber-600 text-white text-sm px-3 py-1.5 rounded border border-amber-700">
+        Restart
+      </button>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var currentAgentId = null;
+    var card = document.getElementById('overlay-card');
+    var title = document.getElementById('overlay-title');
+    var message = document.getElementById('overlay-message');
+    var btn = document.getElementById('overlay-restart-btn');
+
+    function render(state) {
+      if (!state || !state.agent_id) {
+        card.classList.add('hidden');
+        return;
+      }
+      currentAgentId = state.agent_id;
+      card.classList.remove('hidden');
+      if (state.state === 'RESTARTING') {
+        title.textContent = 'Restarting workspace server...';
+        message.textContent = 'This usually takes a few seconds.';
+        btn.disabled = true;
+        btn.textContent = 'Restarting...';
+      } else {
+        title.textContent = 'Workspace server not responding';
+        message.textContent = 'Restarting the workspace server usually recovers it.';
+        btn.disabled = false;
+        btn.textContent = 'Restart';
+      }
+    }
+
+    btn.addEventListener('click', function () {
+      if (btn.disabled || !currentAgentId) return;
+      btn.disabled = true;
+      btn.textContent = 'Restarting...';
+      title.textContent = 'Restarting workspace server...';
+      message.textContent = 'This usually takes a few seconds.';
+      fetch('/api/agents/' + encodeURIComponent(currentAgentId) + '/restart-workspace-server', {
+        method: 'POST',
+        credentials: 'same-origin',
+      }).catch(function () {
+        // Failure is surfaced by main.js via the next SSE event (which will
+        // flip state back to stuck). No local error handling needed here.
+      });
+    });
+
+    if (window.minds && window.minds.onOverlayStateChanged) {
+      window.minds.onOverlayStateChanged(render);
+    }
+  })();
+  </script>
+</body>
+</html>
