@@ -161,6 +161,9 @@ def test_spawn_proxy_hook_depth_limit_passes_through(tmp_path: Path) -> None:
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "allow"
     assert "updatedInput" not in hook_out
+    system_message = hook_out.get("systemMessage", "")
+    assert "depth limit" in system_message
+    assert "3/3" in system_message
 
     assert not (state_dir / "subagent_prompts").exists() or not any((state_dir / "subagent_prompts").iterdir())
     assert not (state_dir / "subagent_map").exists() or not any((state_dir / "subagent_map").iterdir())

@@ -1,68 +1,54 @@
-"""Shared test utilities for mngr_subagent_proxy tests.
-
-Provides FakeHost and FakeAgent — minimal stubs of OnlineHostInterface and
-AgentInterface respectively — for use in plugin unit and integration tests.
-"""
-
-from __future__ import annotations
+"""Test utilities for mngr_subagent_proxy: thin subclasses of the shared fakes."""
 
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+from pydantic import Field
+
+from imbue.mngr.api.testing import FakeAgent as BaseFakeAgent
+from imbue.mngr.api.testing import FakeHost as BaseFakeHost
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
 
 
-class FakeHost:
-    """Minimal OnlineHostInterface stub for plugin tests.
+class FakeAgent(BaseFakeAgent):
+    """AgentInterface stub that adds id and agent_config for subagent-proxy tests."""
 
-    Records all file writes and executes idempotent commands locally so
-    that real directory creation happens under the provided host_dir.
-    """
+    id: AgentId = Field(description="Agent identifier")
+    agent_config: Any = Field(description="Agent configuration (ClaudeAgentConfig or sentinel)")
+
+    def __init__(self, agent_id: AgentId, work_dir: Path, agent_config: Any) -> None:
+        BaseModel.__init__(self, id=agent_id, work_dir=work_dir, agent_config=agent_config)
+
+
+class FakeHost(BaseFakeHost):
+    """OnlineHostInterface stub that records writes and executed commands."""
+
+    written_files: dict[Path, bytes] = Field(default_factory=dict, description="Files written via write_file")
+    executed_commands: list[str] = Field(
+        default_factory=list, description="Commands passed to execute_idempotent_command"
+    )
 
     def __init__(self, host_dir: Path) -> None:
-        self._host_dir = host_dir
-        self.written_files: dict[Path, bytes] = {}
-        self.executed_commands: list[str] = []
+        super().__init__(host_dir=host_dir)
 
-    @property
-    def host_dir(self) -> Path:
-        return self._host_dir
-
-    def write_file(
-        self,
-        path: Path,
-        content: bytes,
-        mode: str | None = None,
-        is_atomic: bool = False,
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-        if mode is not None:
-            path.chmod(int(mode, 8))
+    def write_file(self, path: Path, content: bytes, mode: str | None = None) -> None:
         self.written_files[path] = content
+        super().write_file(path, content, mode)
 
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        self.write_file(path, content.encode(encoding), mode)
-
-    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
-        if not path.exists():
-            raise FileNotFoundError(path)
-        return path.read_text(encoding=encoding)
+    def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
+        self.written_files[path] = content.encode(encoding)
+        super().write_text_file(path, content, encoding, mode)
 
     def execute_idempotent_command(
         self,
         command: str,
         user: str | None = None,
         cwd: Path | None = None,
-        env: Any = None,
+        env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.executed_commands.append(command)
@@ -79,12 +65,3 @@ class FakeHost:
             stderr=completed.stderr,
             success=completed.returncode == 0,
         )
-
-
-class FakeAgent:
-    """Minimal AgentInterface stub carrying id, work_dir, and agent_config."""
-
-    def __init__(self, agent_id: AgentId, work_dir: Path, agent_config: Any) -> None:
-        self.id = agent_id
-        self.work_dir = work_dir
-        self.agent_config = agent_config
