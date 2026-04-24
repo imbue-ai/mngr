@@ -1,10 +1,8 @@
 """Per-agent Latchkey gateway processes for locally-reachable agents.
 
-For each workspace agent running on the local machine or in a container/VM
-on the local host (providers: ``local``, ``docker``, ``lima``), the desktop
-client spawns a dedicated ``latchkey gateway`` subprocess bound to a free
-port on 127.0.0.1. Cloud/VPS providers (``modal``, ``vultr``, ...) do not
-get a gateway since agents there cannot reach the local machine directly.
+For each workspace agent, the desktop client spawns a dedicated ``latchkey
+gateway`` subprocess bound to a free port on 127.0.0.1. Outside of the `dev`
+launch mode, gateway is exposed to the agent via an SSH reverse tunnel.
 
 Gateways are intentionally *detached* from the desktop client: once spawned
 they keep running even if the desktop client exits. On the next desktop-client
