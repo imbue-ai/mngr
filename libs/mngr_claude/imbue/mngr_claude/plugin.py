@@ -1507,17 +1507,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Build both command variants using the dynamic session ID.
         # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
         # in the per-agent config dir rather than ~/.claude/.
-        #
-        # The `env ` prefix on each claude invocation is load-bearing for
-        # docker-release / offload sandbox runs: bare `claude ...` (or even
-        # the absolute path /root/.local/bin/claude) invoked directly from a
-        # tmux pane inside a sandboxed Linux container silent-hangs (0 bytes
-        # stdout/stderr, TUI never paints). Going through any fork+exec
-        # intermediary (env, timeout) fixes it. See the same workaround in
-        # HeadlessClaudeAgent.assemble_command and the ablation trail on
-        # commit b2036ed20 for the bisection details.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && env {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"env {base} --session-id {agent_uuid}"
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:

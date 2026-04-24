@@ -219,11 +219,7 @@ def test_assemble_command_uses_command_override(
     """assemble_command should use command_override when provided."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
     cmd = agent.assemble_command(host, agent_args=(), command_override=CommandString("/custom/claude"))
-    # Substring rather than startswith because assemble_command prefixes
-    # the real claude invocation with `env ` to dodge the silent-exit
-    # hang seen inside offload-release Modal-in-Modal sandboxes. See
-    # assemble_command's comment for details.
-    assert "env /custom/claude --print" in cmd
+    assert cmd.startswith("/custom/claude --print")
 
 
 def test_assemble_command_raises_without_command(
@@ -302,9 +298,14 @@ def test_stream_output_raises_when_empty_file(
     the always-appended [state-dir] diagnostic (and HeadlessClaude's
     [work-dir] diagnostic) under the stable 'exited without producing output'
     template.
+
+    Uses _AlwaysFinishedHeadlessClaude instead of _patch_agent_as_stopped to
+    keep the startup-grace window short: the tail loop now gates on file
+    content during the grace window, so an empty stdout means the loop
+    polls until grace expires.
     """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent)
 
@@ -431,9 +432,12 @@ def test_stream_output_raises_with_stderr_content(
     Marked @pytest.mark.tmux because _raise_no_output_error unconditionally
     captures the tmux pane as one of its detail sources, which invokes
     `tmux capture-pane` via the host interface.
+
+    Uses _AlwaysFinishedHeadlessClaude for the short grace window (stdout is
+    empty, so _authoritatively_finished polls until grace elapses).
     """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
 

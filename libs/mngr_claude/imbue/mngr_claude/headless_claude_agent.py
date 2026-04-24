@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -109,20 +110,34 @@ class _StreamTailState(MutableModel):
     stdout_path: Path
     host: OnlineHostInterface
     is_finished: Callable[[], bool]
+    # Monotonic deadline before which is_finished() is only trusted if the
+    # stdout file has some content. Guards against the race where tmux still
+    # shows the pre-send-keys idle pane at the moment we first check
+    # lifecycle; without this gate tail_until_done's loop exits immediately
+    # and we raise "no output" seconds before claude's output arrives.
+    startup_deadline: float
     last_mtime: datetime | None = None
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
 
+    def _authoritatively_finished(self) -> bool:
+        if time.monotonic() < self.startup_deadline:
+            try:
+                return self.is_finished() and self.host.read_text_file(self.stdout_path) != ""
+            except FileNotFoundError:
+                return False
+        return self.is_finished()
+
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
         if current_mtime is not None and current_mtime != self.last_mtime:
             return True
-        return self.is_finished()
+        return self._authoritatively_finished()
 
     def tail_until_done(self) -> Iterator[str]:
         got_result = False
-        while not got_result and not self.is_finished():
+        while not got_result and not self._authoritatively_finished():
             poll_until(
                 self._has_new_data_or_finished,
                 timeout=TAIL_POLL_TIMEOUT,
@@ -275,29 +290,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
             parts.extend(all_extra_args)
 
         cmd_str = " ".join(parts)
-        # Wrap `claude` in `env` so the tmux pane runs claude through an
-        # intermediate fork+exec rather than invoking it directly. Empirical
-        # finding from test_ask_simple_query inside offload-release sandboxes
-        # (Modal-in-Modal under gVisor): a bare `claude --print ...` (or
-        # equivalently, invoking claude by absolute path `/root/.local/bin/
-        # claude ...`) hangs indefinitely with 0 bytes of stdout and 0 bytes
-        # of stderr, even with `--verbose --include-partial-messages` set,
-        # which normally always emits at least a startup warning. Running
-        # `env claude ...` or `timeout 60 claude ...` both fix the hang
-        # with no other changes; ablation bisection across 9 variants
-        # confirmed the `env` wrapper is sufficient and no other piece of
-        # the original probe bundle (primer invocations, --debug flags,
-        # --version/--help warmup, stdin redirect, shell markers) matters.
-        # `type claude` inside the hanging sandbox shows no alias, no shell
-        # function, and a single PATH entry, so the mechanism isn't bash
-        # alias/function shadowing. Best working theory: the bare direct
-        # invocation interacts with the tmux pane's controlling-TTY / signal
-        # state in some way that env's extra exec layer breaks the
-        # dependency on. Explanation is open; fix is not -- ablation runs
-        # 54-58, 68-70 and 77-79 all passed 3/3 or 5/5 with the env prefix.
-        return CommandString(
-            f'env {cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
-        )
+        return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
 
     def _get_stdout_path(self) -> Path:
         """Return the path to the stdout.jsonl file for this agent."""
@@ -371,6 +364,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         without producing any output (startup failure, auth error, etc.).
         """
         stdout_path = self._get_stdout_path()
+        startup_deadline = time.monotonic() + self._startup_grace_seconds
 
         if not self._wait_for_stdout_file(stdout_path):
             self._raise_no_output_error()
@@ -379,6 +373,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
             stdout_path=stdout_path,
             host=self.host,
             is_finished=self._is_agent_finished,
+            startup_deadline=startup_deadline,
         )
         is_any_output_yielded = False
         for chunk in state.tail_until_done():
