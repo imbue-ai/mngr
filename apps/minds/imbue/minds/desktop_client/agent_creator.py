@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Final
 from typing import assert_never
 
+import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -412,12 +413,24 @@ class AgentCreator(MutableModel):
             "auto-refresh retry page on the target subdomain."
         ),
     )
-    # Upper bound on how long to wait for the workspace server to register after
-    # mngr create returns. On timeout, creation still completes and the user is
-    # redirected -- the subdomain forwarder's auto-refresh retry page covers the
-    # remaining gap. Configurable so tests can lower it.
+    # Upper bound on how long to wait for the workspace server to register and
+    # start serving HTTP after mngr create returns. On timeout, creation still
+    # completes and the user is redirected -- the subdomain forwarder's
+    # auto-refresh retry page covers the remaining gap. Configurable so tests
+    # can lower it.
     workspace_ready_timeout_seconds: float = Field(default=60.0, frozen=True)
     workspace_ready_poll_interval_seconds: float = Field(default=0.2, frozen=True)
+    # HTTP probe timeout per attempt. The resolver learns about the workspace
+    # URL when the agent writes a line to its services/events.jsonl -- which
+    # happens around server-socket bind, before the ASGI app is fully up. A
+    # fast probe per poll lets us notice the server has actually started
+    # answering HTTP, rather than redirecting the browser into a dead page
+    # that just happens to have a registered URL.
+    workspace_ready_probe_timeout_seconds: float = Field(default=2.0, frozen=True)
+    # When False, skip the HTTP probe and treat "URL registered" as ready.
+    # Used by tests that exercise the resolver-polling path with a stub URL
+    # that isn't actually reachable.
+    workspace_ready_probe_enabled: bool = Field(default=True, frozen=True)
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -489,21 +502,62 @@ class AgentCreator(MutableModel):
         with self._lock:
             return self._log_queues.get(str(agent_id))
 
-    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
-        """Block until the agent's workspace server registers its backend URL.
+    def _probe_workspace_http(self, url: str) -> bool:
+        """Return True iff a GET against ``url`` gets any HTTP response.
 
-        Returns True once ``backend_resolver.get_backend_url`` for the workspace
-        server returns a non-None URL. Returns False if the timeout elapses
-        first -- callers should still mark creation complete in that case,
-        since the subdomain forwarder's auto-refresh retry page covers the
-        remaining window.
+        Any status code counts as "up" -- we're only trying to distinguish
+        "server is answering HTTP" from "TCP-only / still booting". Transport
+        errors (ConnectError, RemoteProtocolError, ReadError, timeouts, etc.)
+        mean the server hasn't finished coming up yet; the caller should keep
+        polling.
+
+        For remote agents whose service URL isn't directly reachable from the
+        desktop client without an SSH tunnel, the probe will always fail and
+        the outer poll will fall through to the timeout. The subdomain
+        forwarder's auto-refresh retry page (which does set up the tunnel)
+        handles those cases.
+        """
+        try:
+            with httpx.Client(timeout=self.workspace_ready_probe_timeout_seconds) as client:
+                client.get(url)
+        except httpx.TransportError:
+            return False
+        return True
+
+    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
+        """Block until the agent's workspace server is serving HTTP.
+
+        Two-stage readiness check:
+
+        1. Poll the resolver until a backend URL is registered for the
+           workspace service. This happens around the time the agent writes
+           to its services/events.jsonl.
+        2. HTTP-probe that URL each poll until a response arrives. The agent
+           typically writes the URL before uvicorn has finished starting, so
+           the URL can exist for a brief window while the server still isn't
+           answering -- without the probe, we'd redirect the browser straight
+           into that gap.
+
+        Returns True once both signals pass. Returns False if the timeout
+        elapses first -- callers should still mark creation complete in that
+        case, since the subdomain forwarder's auto-refresh retry page covers
+        the remaining window.
 
         Polls synchronously from the caller's thread (typically the creation
         background thread) so that status stays in CREATING and the
         creating-progress page keeps streaming logs until the server is up.
         """
+
+        def _is_ready() -> bool:
+            url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+            if url is None:
+                return False
+            if not self.workspace_ready_probe_enabled:
+                return True
+            return self._probe_workspace_http(url)
+
         if poll_until(
-            lambda: self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME) is not None,
+            _is_ready,
             timeout=self.workspace_ready_timeout_seconds,
             poll_interval=self.workspace_ready_poll_interval_seconds,
         ):

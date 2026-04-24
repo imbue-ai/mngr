@@ -1,6 +1,9 @@
 import queue as queue_mod
+import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
 from pathlib import Path
 
 import pytest
@@ -456,7 +459,9 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(tmp_path: Path) 
     """Polling returns True after the workspace server registers its URL.
 
     The countdown resolver forces at least a few poll iterations, so this
-    also guards against a regression where the loop exits too early.
+    also guards against a regression where the loop exits too early. The
+    HTTP probe is disabled here because the stub URL isn't reachable; the
+    probe itself is covered by dedicated tests below.
     """
     agent_id = AgentId()
     resolver = _CountdownReadyResolver(url="http://workspace-backend", calls_before_ready=3)
@@ -465,6 +470,7 @@ def test_wait_for_workspace_ready_returns_true_once_url_appears(tmp_path: Path) 
         backend_resolver=resolver,
         workspace_ready_timeout_seconds=5.0,
         workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
@@ -485,6 +491,7 @@ def test_wait_for_workspace_ready_returns_false_on_timeout(tmp_path: Path) -> No
         backend_resolver=resolver,
         workspace_ready_timeout_seconds=0.05,
         workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
     )
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
 
@@ -528,7 +535,93 @@ def test_wait_for_workspace_ready_uses_the_workspace_service_name(tmp_path: Path
         backend_resolver=_RecordingResolver(),
         workspace_ready_timeout_seconds=1.0,
         workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_enabled=False,
     )
 
     assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
     assert observed_service_names == [WORKSPACE_SERVER_SERVICE_NAME]
+
+
+# -- workspace_ready HTTP probe tests --
+
+
+def _start_local_http_server() -> tuple[HTTPServer, str]:
+    """Start a minimal HTTP server on a free local port.
+
+    Returns the server (for shutdown) and its base URL. Any GET returns 200,
+    which is what the probe needs to classify the server as "serving HTTP".
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format: str, *args: object) -> None:
+            # Silence access logs in test output.
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{port}"
+
+
+def _find_unused_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_wait_for_workspace_ready_requires_http_readiness_not_just_url(tmp_path: Path) -> None:
+    """A registered URL whose server isn't answering must NOT satisfy readiness.
+
+    Reproduces the production bug: the agent writes its URL to events.jsonl
+    around server-socket bind, but the ASGI app can still be starting up.
+    Previously this returned True as soon as the resolver had a URL, and the
+    browser got redirected straight into a "Workspace server not yet
+    available" page. The probe must keep polling until the server actually
+    responds.
+    """
+    agent_id = AgentId()
+    unused_port = _find_unused_local_port()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"system_interface": f"http://127.0.0.1:{unused_port}"}},
+    )
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        backend_resolver=resolver,
+        workspace_ready_timeout_seconds=0.15,
+        workspace_ready_poll_interval_seconds=0.01,
+        workspace_ready_probe_timeout_seconds=0.05,
+    )
+
+    start = time.monotonic()
+    assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is False
+    elapsed = time.monotonic() - start
+    # Must have actually waited for the timeout -- not short-circuited on
+    # the "URL exists" check.
+    assert elapsed >= 0.15
+
+
+def test_wait_for_workspace_ready_returns_true_once_server_answers(tmp_path: Path) -> None:
+    """Once the HTTP probe gets a response, readiness is satisfied."""
+    agent_id = AgentId()
+    server, url = _start_local_http_server()
+    try:
+        resolver = StaticBackendResolver(
+            url_by_agent_and_service={str(agent_id): {"system_interface": url}},
+        )
+        creator = AgentCreator(
+            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            backend_resolver=resolver,
+            workspace_ready_timeout_seconds=2.0,
+            workspace_ready_poll_interval_seconds=0.01,
+            workspace_ready_probe_timeout_seconds=0.5,
+        )
+        assert creator._wait_for_workspace_ready(agent_id, queue_mod.Queue()) is True
+    finally:
+        server.shutdown()
+        server.server_close()
