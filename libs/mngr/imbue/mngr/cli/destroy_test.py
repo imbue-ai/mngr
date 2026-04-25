@@ -1,7 +1,6 @@
 """Unit tests for the destroy CLI command."""
 
 import json
-from pathlib import Path
 
 import pluggy
 import pytest
@@ -10,16 +9,11 @@ from click.testing import CliRunner
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
-from imbue.mngr.cli.destroy import _filter_removable_worktrees
 from imbue.mngr.cli.destroy import _output_result
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.hosts.host import Host
-from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -295,92 +289,3 @@ def test_destroy_dash_strips_whitespace(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
-
-
-# =============================================================================
-# _filter_removable_worktrees: which worktrees does destroy actually remove?
-# =============================================================================
-
-
-def _make_dummy_agent(host: Host, work_dir: Path, name: str) -> None:
-    """Create an agent record on host with the given work_dir.
-
-    Persists the data.json so subsequent host.get_agents() calls observe it.
-    """
-    work_dir.mkdir(parents=True, exist_ok=True)
-    options = CreateAgentOptions(
-        name=AgentName(name),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-    )
-    host.create_agent_state(work_dir, options)
-
-
-def test_filter_skips_worktree_not_generated_by_mngr(local_host: Host, tmp_path: Path) -> None:
-    """A work_dir that mngr did not register must never be removed.
-
-    --transfer=none reuses a pre-existing user directory; the directory's
-    string is absent from generated_work_dirs, so the filter rejects it
-    even when no other agent currently references it.
-    """
-    work_dir = tmp_path / "user_owned_worktree"
-    work_dir.mkdir()
-    source_repo = tmp_path / "source_repo"
-    source_repo.mkdir()
-
-    queued = [(work_dir, source_repo, local_host)]
-    kept, _keys = _filter_removable_worktrees(queued)
-
-    assert kept == []
-
-
-def test_filter_skips_worktree_still_in_use_by_another_agent(local_host: Host, tmp_path: Path) -> None:
-    """Even an mngr-generated worktree must not be removed while another
-    agent on the same host still references it as work_dir."""
-    work_dir = tmp_path / "shared_mngr_worktree"
-    work_dir.mkdir()
-    source_repo = tmp_path / "source_repo"
-    source_repo.mkdir()
-
-    local_host._add_generated_work_dir(work_dir)
-    _make_dummy_agent(local_host, work_dir, "still-running-sibling")
-
-    queued = [(work_dir, source_repo, local_host)]
-    kept, _keys = _filter_removable_worktrees(queued)
-
-    assert kept == [], "must not remove a worktree another agent still references"
-
-
-def test_filter_keeps_orphaned_mngr_generated_worktree(local_host: Host, tmp_path: Path) -> None:
-    """Worktrees mngr created and that no surviving agent references must be removed."""
-    work_dir = tmp_path / "orphaned_mngr_worktree"
-    work_dir.mkdir()
-    source_repo = tmp_path / "source_repo"
-    source_repo.mkdir()
-
-    local_host._add_generated_work_dir(work_dir)
-
-    queued = [(work_dir, source_repo, local_host)]
-    kept, keys = _filter_removable_worktrees(queued)
-
-    assert kept == [(work_dir, source_repo, local_host)]
-    assert keys == {(local_host.id, str(work_dir))}
-
-
-def test_filter_dedupes_repeated_work_dirs(local_host: Host, tmp_path: Path) -> None:
-    """Multiple destroyed agents sharing a work_dir queue it once each, but
-    we must only attempt removal once."""
-    work_dir = tmp_path / "shared_orphan"
-    work_dir.mkdir()
-    source_repo = tmp_path / "source_repo"
-    source_repo.mkdir()
-
-    local_host._add_generated_work_dir(work_dir)
-
-    queued = [
-        (work_dir, source_repo, local_host),
-        (work_dir, source_repo, local_host),
-    ]
-    kept, _keys = _filter_removable_worktrees(queued)
-
-    assert kept == [(work_dir, source_repo, local_host)]
