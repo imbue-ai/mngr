@@ -299,10 +299,13 @@ class _StreamTailState(MutableModel):
         # Top-level assistant event: reconcile against the per-turn buffer.
         # An assistant event always ends the current turn (it is the message
         # summary), so the per-turn state is reset unconditionally on exit --
-        # even when the message has no text (e.g. tool_use-only) and no
-        # reconciliation is needed.
+        # even when the message has no text (e.g. tool_use-only, or the rare
+        # case of a single empty text block) and no reconciliation is needed.
+        # The truthiness check skips the empty-text case for free, matching
+        # the `if trailing_text:` guard one branch deeper that prevents
+        # yielding an empty string.
         assistant_text = _extract_assistant_text_from_parsed(parsed)
-        if assistant_text is not None:
+        if assistant_text:
             assistant_id = _extract_assistant_message_id_from_parsed(parsed)
             is_definitely_different_message = (
                 self.streaming_message_id is not None
