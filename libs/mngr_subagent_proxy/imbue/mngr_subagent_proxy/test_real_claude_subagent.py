@@ -489,14 +489,10 @@ def test_depth_limit_denies_task(
 ) -> None:
     """At depth >= max_depth, the hook denies the Task tool entirely.
 
-    The current spawn hook emits ``permissionDecision: deny`` with a
+    The spawn hook emits ``permissionDecision: deny`` with a
     ``permissionDecisionReason`` mentioning the depth limit. Claude sees
     the denial and does not invoke Task. Crucially, **no mngr-managed
     subagent is created**. This test verifies that property.
-
-    A sibling refactor may change this to ``deny``; the invariant asserted
-    here -- "no mngr subagent is spawned when the parent is at max depth"
-    -- is stable across both behaviors.
     """
     mngr = _mngr_subprocess_env
     parent_name = _make_parent_agent_name()
