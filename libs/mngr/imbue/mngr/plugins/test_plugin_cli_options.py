@@ -730,7 +730,11 @@ def test_setup_command_context_does_not_crash_with_plugin_params(
     with _plugin_manager_with_plugin(_PluginWithStringOption()) as pm:
         captured_plugin_params: dict[str, Any] = {}
 
+        # `--pass-host-env` matches the baseline default in load_config which
+        # populates `commands.create.defaults["pass_host_env"]`; the strict
+        # unknown-param check otherwise rejects the baseline.
         @click.command("test-create")
+        @click.option("--pass-host-env", multiple=True, default=())
         @add_common_options
         @click.pass_context
         def test_cmd(ctx: click.Context, **kwargs: Any) -> None:
@@ -759,7 +763,11 @@ def test_setup_command_context_stores_plugin_params_in_ctx_meta(
     with _plugin_manager_with_plugin(_PluginWithMultipleOptions()) as pm:
         captured_plugin_params: dict[str, Any] = {}
 
+        # `--pass-host-env` matches the baseline default in load_config which
+        # populates `commands.create.defaults["pass_host_env"]`; the strict
+        # unknown-param check otherwise rejects the baseline.
         @click.command("test-create")
+        @click.option("--pass-host-env", multiple=True, default=())
         @add_common_options
         @click.pass_context
         def test_cmd(ctx: click.Context, **kwargs: Any) -> None:

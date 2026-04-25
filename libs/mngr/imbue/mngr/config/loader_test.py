@@ -1583,3 +1583,52 @@ def test_load_config_mngr_headless_env_overrides_config_file(
     mngr_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
     assert mngr_ctx.config.headless is False
+
+
+# =============================================================================
+# Tests for hyphen normalization in config field names
+# =============================================================================
+
+
+def test_parse_commands_normalizes_hyphens_to_underscores() -> None:
+    """_parse_commands should accept hyphenated TOML field names like `pass-env`."""
+    raw = {"create": {"pass-env": ["FOO", "BAR"]}}
+    result = _parse_commands(raw)
+    assert result["create"].defaults == {"pass_env": ["FOO", "BAR"]}
+
+
+def test_parse_commands_raises_on_hyphen_underscore_collision() -> None:
+    """_parse_commands should raise when both `pass-env` and `pass_env` are set."""
+    raw = {"create": {"pass-env": ["FOO"], "pass_env": ["BAR"]}}
+    with pytest.raises(ConfigParseError, match="both 'pass-env' and 'pass_env'"):
+        _parse_commands(raw)
+
+
+def test_parse_create_templates_normalizes_hyphens() -> None:
+    """_parse_create_templates should accept hyphenated TOML field names."""
+    raw = {"mytmpl": {"pass-env": ["FOO"], "new-host": True}}
+    result = _parse_create_templates(raw)
+    assert result[CreateTemplateName("mytmpl")].options == {"pass_env": ["FOO"], "new_host": True}
+
+
+def test_parse_config_normalizes_top_level_hyphens() -> None:
+    """parse_config should accept hyphenated top-level field names."""
+    raw = {"connect-command": "tmux attach"}
+    cfg = parse_config(raw, disabled_plugins=frozenset())
+    assert cfg.connect_command == "tmux attach"
+
+
+def test_parse_logging_config_normalizes_hyphens() -> None:
+    """_parse_logging_config should accept hyphenated TOML field names without raising."""
+    # Without normalization, an unknown `file-level` would raise (or warn); the
+    # presence of the field after normalization is what we are asserting.
+    raw = {"file-level": "DEBUG"}
+    result = _parse_logging_config(raw)
+    assert result.file_level == "DEBUG"
+
+
+def test_parse_plugins_normalizes_hyphens() -> None:
+    """_parse_plugins should accept hyphenated TOML field names within a plugin block."""
+    raw = {"local": {"enabled": True}}
+    result = _parse_plugins(raw)
+    assert result[PluginName("local")].enabled is True

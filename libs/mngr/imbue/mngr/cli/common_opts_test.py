@@ -481,8 +481,11 @@ def test_parse_output_options_invalid_template_raises(mngr_test_prefix: str) -> 
 # =============================================================================
 
 
-def test_apply_config_defaults_skips_unknown_param_names(mngr_test_prefix: str) -> None:
-    """apply_config_defaults should skip config defaults for params not in context."""
+def test_apply_config_defaults_raises_on_unknown_param_names(
+    monkeypatch: pytest.MonkeyPatch, mngr_test_prefix: str
+) -> None:
+    """apply_config_defaults should raise for params not in context."""
+    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
     ctx = _make_click_context(
         params={"name": "default"},
     )
@@ -490,9 +493,8 @@ def test_apply_config_defaults_skips_unknown_param_names(mngr_test_prefix: str) 
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"nonexistent_param": "value", "name": "overridden"})},
     )
-    result = apply_config_defaults(ctx, config, "create")
-    assert result["name"] == "overridden"
-    assert "nonexistent_param" not in result
+    with pytest.raises(ConfigParseError, match="nonexistent_param"):
+        apply_config_defaults(ctx, config, "create")
 
 
 # =============================================================================
@@ -1058,8 +1060,12 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
 
     captured_params: list[dict[str, Any]] = []
 
+    # `--pass-host-env` matches the baseline default in load_config (which
+    # populates `commands.create.defaults["pass_host_env"]`); the test command
+    # must accept it or the new strict-unknown-param check rejects it.
     @click.command()
     @click.option("--extra-window", multiple=True, default=())
+    @click.option("--pass-host-env", multiple=True, default=())
     @add_common_options
     @click.pass_context
     def test_create(ctx: click.Context, **kwargs: Any) -> None:
@@ -1077,7 +1083,7 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
         catch_exceptions=False,
         env={"MNGR_PROJECT_DIR": str(tmp_path)},
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
     assert len(captured_params) == 1
 
     extra_window = captured_params[0].get("extra_window", ())
@@ -1086,3 +1092,38 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
         f"Disabled plugin's override_command_options hook still fired, "
         f"injecting: {terminal_entries}. extra_window={extra_window}"
     )
+
+
+# Tests for unknown command default params -- they should fail loudly, not be
+# silently dropped.
+
+
+def test_apply_config_defaults_raises_on_unknown_param(monkeypatch: pytest.MonkeyPatch, mngr_test_prefix: str) -> None:
+    """apply_config_defaults should raise ConfigParseError for unknown param names."""
+    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
+    ctx = _make_click_context(params={"name": "default", "extra_window": ()})
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
+    )
+
+    with pytest.raises(ConfigParseError, match="definitely_not_a_real_param"):
+        apply_config_defaults(ctx, config, "create")
+
+
+def test_apply_config_defaults_warns_on_unknown_param_when_allowed(
+    monkeypatch: pytest.MonkeyPatch, mngr_test_prefix: str
+) -> None:
+    """apply_config_defaults should warn (not raise) when MNGR_ALLOW_UNKNOWN_CONFIG is set."""
+    monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
+    ctx = _make_click_context(params={"name": "default"})
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
+    )
+
+    # Should not raise; unknown param is silently warned about.
+    result = apply_config_defaults(ctx, config, "create")
+    assert "definitely_not_a_real_param" not in result

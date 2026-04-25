@@ -1,4 +1,5 @@
 import json
+import os
 import string
 import sys
 import uuid
@@ -15,6 +16,7 @@ from click.core import ParameterSource
 from click_option_group import GroupedOption
 from click_option_group import OptionGroup
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
@@ -30,10 +32,12 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 
@@ -439,10 +443,18 @@ def apply_config_defaults(ctx: click.Context, config: MngrConfig, command_name: 
     updated_params = ctx.params.copy()
 
     # For each parameter, check if it came from a default and if config has an override
+    allow_unknown = parse_bool_env(os.environ.get("MNGR_ALLOW_UNKNOWN_CONFIG", ""))
     for param_name, config_value in command_defaults.defaults.items():
         # Check if this parameter exists in the context
         if param_name not in ctx.params:
-            continue
+            msg = (
+                f"Unknown parameter '{param_name}' in commands.{command_name} config. "
+                f"Valid parameters: {sorted(ctx.params.keys())}"
+            )
+            if allow_unknown:
+                logger.warning(msg)
+                continue
+            raise ConfigParseError(msg)
 
         # Check the source of the parameter value
         source = ctx.get_parameter_source(param_name)
