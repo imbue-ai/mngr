@@ -30,6 +30,7 @@ from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
+from imbue.mngr.config.loader import load_bootstrap_context
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ConfigParseError
@@ -1583,3 +1584,70 @@ def test_load_config_mngr_headless_env_overrides_config_file(
     mngr_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
     assert mngr_ctx.config.headless is False
+
+
+# =============================================================================
+# Tests for load_bootstrap_context
+# =============================================================================
+
+
+def test_load_bootstrap_context_skips_plugin_section_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    log_warnings: list[str],
+) -> None:
+    """Bootstrap context must not warn for unknown fields/backends in plugin-defined sections.
+
+    Regression test for the issue where ``mngr plugin add`` was emitting
+    ``Unknown fields in agent_types.*`` and ``Provider ... references unknown
+    backend`` warnings when the config referenced plugins not yet installed.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    (mngr_dir / "settings.toml").write_text(
+        '[providers.totally_fake]\nbackend = "totally_fake_backend"\n\n'
+        '[agent_types.worker]\nparent_type = "claude"\nnonexistent_field = true\n'
+    )
+
+    mngr_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mngr_ctx.config.providers == {}
+    assert mngr_ctx.config.agent_types == {}
+    assert mngr_ctx.config.plugins == {}
+    assert not any("Unknown fields" in msg for msg in log_warnings), log_warnings
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+
+def test_load_bootstrap_context_still_loads_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Bootstrap context should populate top-level config fields like prefix and headless."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNGR_HEADLESS", raising=False)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    (mngr_dir / "settings.toml").write_text('prefix = "custom-"\nheadless = true\n')
+
+    mngr_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mngr_ctx.config.prefix == "custom-"
+    assert mngr_ctx.config.headless is True

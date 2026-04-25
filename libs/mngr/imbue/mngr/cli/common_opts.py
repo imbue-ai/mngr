@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.loader import block_disabled_plugins
+from imbue.mngr.config.loader import load_bootstrap_context
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
@@ -136,9 +137,83 @@ def setup_command_context(
 
     Plugin-registered CLI option values are stored in ctx.meta["plugin_cli_params"]
     as a dict, accessible by plugins via their hooks.
+
+    For plugin lifecycle commands (``mngr plugin add`` etc.) where the loaded
+    config may reference plugins not yet installed, use
+    ``setup_bootstrap_command_context`` instead.
+    """
+    initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
+    mngr_ctx = load_config(
+        pm,
+        cg,
+        enabled_plugins=initial_opts.plugin,
+        disabled_plugins=initial_opts.disable_plugin,
+        is_interactive=False,
+        strict=strict,
+    )
+    return _finalize_command_setup(
+        ctx,
+        command_name,
+        command_class,
+        is_format_template_supported,
+        cg=cg,
+        pm=pm,
+        initial_opts=initial_opts,
+        mngr_ctx=mngr_ctx,
+    )
+
+
+def setup_bootstrap_command_context(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+    is_format_template_supported: bool = False,
+) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
+    """Set up config and logging for a plugin lifecycle command.
+
+    Sibling of ``setup_command_context`` for commands that operate on the
+    plugin set itself (``mngr plugin add``/``remove``/``enable``/``disable``).
+    The loaded config may reference plugins that are not yet installed, so the
+    [agent_types], [providers], and [plugins] sections are skipped to avoid
+    spurious unknown-field and unknown-backend warnings.
+
+    Behaves identically to ``setup_command_context`` in every other respect.
+    The returned ``MngrContext.config`` has empty ``providers``, ``agent_types``,
+    and ``plugins`` -- callers must not rely on those fields.
+    """
+    initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
+    mngr_ctx = load_bootstrap_context(
+        pm,
+        cg,
+        enabled_plugins=initial_opts.plugin,
+        disabled_plugins=initial_opts.disable_plugin,
+        is_interactive=False,
+    )
+    return _finalize_command_setup(
+        ctx,
+        command_name,
+        command_class,
+        is_format_template_supported,
+        cg=cg,
+        pm=pm,
+        initial_opts=initial_opts,
+        mngr_ctx=mngr_ctx,
+    )
+
+
+def _acquire_command_resources(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+) -> tuple[TCommandOptions, ConcurrencyGroup, pluggy.PluginManager]:
+    """Set up shared resources used by every command-context setup function.
+
+    Returns the initial parsed options, the entered ConcurrencyGroup (which is
+    registered to be exited on click context close), and the plugin manager
+    stashed on ``ctx.obj``.
     """
     # Separate plugin-registered params from known command class fields
-    known_params, plugin_params = _split_known_and_plugin_params(ctx.params, command_class)
+    known_params, _plugin_params = _split_known_and_plugin_params(ctx.params, command_class)
 
     # First parse options from CLI args to extract common parameters
     initial_opts = command_class(**known_params)
@@ -150,17 +225,27 @@ def setup_command_context(
     # wrapped in ConcurrencyExceptionGroup, which would break Click's error handling.
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
-    # Load config (is_interactive will be resolved below)
     pm = ctx.obj
-    mngr_ctx = load_config(
-        pm,
-        cg,
-        enabled_plugins=initial_opts.plugin,
-        disabled_plugins=initial_opts.disable_plugin,
-        is_interactive=False,
-        strict=strict,
-    )
+    return initial_opts, cg, pm
 
+
+def _finalize_command_setup(
+    ctx: click.Context,
+    command_name: str,
+    command_class: type[TCommandOptions],
+    is_format_template_supported: bool,
+    *,
+    cg: ConcurrencyGroup,
+    pm: pluggy.PluginManager,
+    initial_opts: TCommandOptions,
+    mngr_ctx: MngrContext,
+) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
+    """Run the post-load setup steps shared by full and bootstrap command contexts.
+
+    Resolves interactivity, applies overrides and config defaults, sets up
+    logging, runs pre-command scripts, and fires the ``on_before_command``
+    hook. Returns the final (mngr_ctx, output_opts, opts) tuple.
+    """
     # Resolve is_interactive from all sources.
     # Precedence: --headless CLI flag > config/env headless > TTY auto-detect
     if initial_opts.headless or mngr_ctx.config.headless:

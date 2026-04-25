@@ -20,6 +20,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import setup_bootstrap_command_context
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import get_config_path
@@ -491,12 +492,10 @@ def _parse_remove_sources(opts: PluginCliOptions) -> list[_RemoveSource]:
 
 def _plugin_add_impl(ctx: click.Context) -> None:
     """Implementation of plugin add command."""
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_bootstrap_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
-        # this is set so that, even if we cannot find an existing provider from our config, the command still works
-        strict=False,
     )
 
     # Validate arguments before checking uv tool receipt so users get clear
@@ -576,7 +575,7 @@ def _plugin_add_impl(ctx: click.Context) -> None:
 
 def _plugin_remove_impl(ctx: click.Context) -> None:
     """Implementation of plugin remove command."""
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_bootstrap_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
@@ -680,7 +679,7 @@ def _plugin_disable_impl(ctx: click.Context, **kwargs: Any) -> None:
 
 def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool) -> None:
     """Shared implementation for plugin enable/disable commands."""
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_bootstrap_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
