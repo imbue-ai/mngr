@@ -343,6 +343,61 @@ def _destroy_agents_quietly(mngr: _MngrSubprocess, names: Iterator[str]) -> None
             pass
 
 
+def _agent_settings_local_json(agent_name: str, work_dir: Path) -> str:
+    """Return the contents of <work_dir>/.claude/settings.local.json or '<missing>'."""
+    settings = work_dir / ".claude" / "settings.local.json"
+    if not settings.is_file():
+        return f"<settings.local.json missing for {agent_name} at {settings}>"
+    try:
+        return settings.read_text(errors="replace")
+    except OSError as e:
+        return f"<read failed for {settings}: {e}>"
+
+
+def _diagnose_no_subagent(
+    mngr: _MngrSubprocess,
+    parent_name: str,
+    parent_work_dir: Path,
+    host_dir: Path,
+) -> str:
+    """Build a diagnostic report when the subagent never appears.
+
+    Captures:
+    - whether the subagent_proxy plugin is registered in this subprocess.
+    - the parent's settings.local.json (does it have PreToolUse:Agent?).
+    - the tail of the parent's transcript (did Claude actually call Task?).
+    """
+    parts: list[str] = ["", "=== DIAGNOSTIC ==="]
+
+    plugins_check = mngr.run(
+        [
+            "list",
+            "--format",
+            "json",
+        ],
+        timeout=_MNGR_LIST_TIMEOUT_SECONDS,
+    )
+    parts.append(f"mngr list returncode: {plugins_check.returncode}")
+
+    settings_text = _agent_settings_local_json(parent_name, parent_work_dir)
+    has_pretooluse_agent = '"matcher": "Agent"' in settings_text or '"matcher":"Agent"' in settings_text
+    parts.append(f"settings.local.json has PreToolUse:Agent matcher: {has_pretooluse_agent}")
+    parts.append("settings.local.json (truncated to 4000 chars):")
+    parts.append(settings_text[:4000])
+
+    parent = next((a for a in mngr.list_agents() if a.get("name") == parent_name), None)
+    if parent is not None:
+        transcript = _agent_transcript_text(parent, host_dir)
+        has_task = '"name":"Task"' in transcript or '"name": "Task"' in transcript
+        parts.append(f"parent transcript has Task tool_use: {has_task}")
+        parts.append(f"transcript length: {len(transcript)} chars")
+        parts.append("transcript tail (last 3000 chars):")
+        parts.append(transcript[-3000:])
+    else:
+        parts.append("parent agent not found in mngr list (already destroyed?)")
+    return "\n".join(parts)
+
+
 def _agent_transcript_text(agent: dict[str, Any], host_dir: Path) -> str:
     """Concatenate all assistant/user text from the agent's transcript JSONL files.
 
@@ -405,6 +460,7 @@ def _create_parent_claude_agent(
 def test_task_tool_spawns_mngr_subagent(
     _skip_if_no_real_claude: None,
     _mngr_subprocess_env: _MngrSubprocess,
+    _source_repo: Path,
     temp_host_dir: Path,
 ) -> None:
     """Golden path: the Task tool is intercepted and an mngr subagent is spawned.
@@ -436,11 +492,14 @@ def test_task_tool_spawns_mngr_subagent(
             subagent_prefix,
             timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
-        assert subagent is not None, (
-            f"No mngr-managed subagent with prefix {subagent_prefix!r} appeared within "
-            f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. This strongly suggests the PreToolUse "
-            f"hook did not fire, or Claude never called the Task tool."
-        )
+        if subagent is None:
+            diagnostics = _diagnose_no_subagent(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"No mngr-managed subagent with prefix {subagent_prefix!r} appeared within "
+                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. This strongly suggests the PreToolUse "
+                f"hook did not fire, or Claude never called the Task tool."
+                f"{diagnostics}"
+            )
         subagent_name = subagent["name"]
         created_agents.append(subagent_name)
 
@@ -461,10 +520,15 @@ def test_task_tool_spawns_mngr_subagent(
             _is_waiting_end_of_turn,
             timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
-        assert final_parent is not None and _is_waiting_end_of_turn(final_parent), (
-            f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
-            f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. Last seen: {final_parent!r}"
-        )
+        if final_parent is None or not _is_waiting_end_of_turn(final_parent):
+            diagnostics = _diagnose_no_subagent(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
+                f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. Subagent finished but parent is "
+                f"stuck -- likely the PostToolUse hook didn't substitute the result, "
+                f"or Haiku didn't end its turn after the wait-script returned DONE."
+                f"{diagnostics}"
+            )
 
         # Content check: the parent transcript should mention BANANA if the
         # subagent's reply was actually wired back in.
