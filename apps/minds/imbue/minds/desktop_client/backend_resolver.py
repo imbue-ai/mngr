@@ -555,7 +555,7 @@ class MngrStreamManager(MutableModel):
         try:
             event = parse_discovery_event_line(line)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.opt(exception=e).error("Failed to parse discovery event line: (line: {})", line[:200])
+            logger.opt(exception=e).error("Failed to parse discovery event line (line: {})", line[:200])
             return
 
         if isinstance(event, FullDiscoverySnapshotEvent):
