@@ -585,12 +585,12 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     """Invoke the deployed modal function for a trigger.
 
     Calls modal.Function.from_name() to look up the deployed function and
-    invokes it remotely. Returns the full captured output of the command
-    (from run_scheduled_trigger's return value).
+    invokes it remotely. Returns the captured stdout of the mngr command
+    that the runner executed, extracted from the structured result dict
+    (shape: {"status": ..., "output": <str>, ...}).
 
-    Raises MngrError if the function is not found, the invocation fails,
-    or the returned value is not a string (signalling a deployed-function
-    signature drift).
+    Raises MngrError if the function is not found or the invocation fails,
+    or if the result shape is not the expected dict-with-output.
     """
     try:
         fn = modal.Function.from_name(
@@ -606,12 +606,19 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
-    if not isinstance(result, str):
+
+    if not isinstance(result, dict):
         raise MngrError(
-            f"Modal function returned unexpected type {type(result).__name__}; expected str. "
-            "run_scheduled_trigger may have a mismatched signature."
+            f"run_scheduled_trigger returned unexpected type {type(result).__name__}; "
+            "expected a dict with an 'output' field."
         )
-    return result
+    output = result.get("output")
+    if not isinstance(output, str):
+        raise MngrError(
+            f"run_scheduled_trigger result missing string 'output' field (got {type(output).__name__}). "
+            "The trigger may need to be re-deployed with 'mngr schedule add'."
+        )
+    return output
 
 
 def remove_modal_schedule(
@@ -962,17 +969,18 @@ def deploy_schedule(
     logger.info("Schedule '{}' deployed to Modal app '{}'", trigger.name, app_name)
 
     # FIXME: split this verification logic out and up a layer, this function is already more complicated than necessary
-    # Post-deploy verification (must happen while temp dir is still alive)
+    # Post-deploy verification (must happen while temp dir is still alive).
+    # The runner does the real verify work inside the container and reports
+    # back via a sentinel line; this side just streams logs and interprets
+    # the result.
     if verify_mode != VerifyMode.NONE:
-        is_finish = verify_mode == VerifyMode.FULL
         with log_span("Verifying deployment of schedule '{}'", trigger.name):
             verify_schedule_deployment(
                 trigger_name=trigger.name,
                 modal_env_name=modal_env_name,
-                is_finish_initial_run=is_finish,
+                verify_mode=verify_mode,
                 env=env,
                 cron_runner_path=cron_runner_path,
-                mngr_ctx=mngr_ctx,
             )
 
     # Save the creation record to the provider's state volume.

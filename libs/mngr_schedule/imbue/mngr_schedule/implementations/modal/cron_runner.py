@@ -6,8 +6,13 @@
 # command.
 #
 # IMPORTANT: This file must NOT import from imbue.* or any other 3rd-party packages
-# We simply want to call into the mngr command, which can then use those other packages if necessary.
-# This avoids modal needing to package or load any additional dependencies.
+# at module scope. Modal runs this file as a standalone app — its Python
+# interpreter does NOT inherit the uv-tool-managed mngr install's site-packages,
+# so `from imbue.mngr_schedule... import X` raises ModuleNotFoundError at deploy
+# time. Values that mirror imbue enums (RUNNING_STATES, VALID_VERIFY_MODES,
+# AGENT_MISSING_STATE, RESULT_SENTINEL) must therefore be duplicated here as
+# bare literals; verification.py defines the deploy-side copies. Any changes
+# must be mirrored by hand in both files.
 #
 # Image building strategy:
 # 1. Base image: built from the mngr Dockerfile, which provides a complete
@@ -28,9 +33,11 @@
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +143,56 @@ app = modal.App(name=_APP_NAME, image=_image)
 # --- Runtime functions ---
 
 
+class CronRunnerError(Exception):
+    """Errors raised by the in-container verify path.
+
+    cron_runner.py is forbidden from importing imbue exception types (see
+    the file-level comment). Raising a locally-defined exception class
+    instead of a built-in gives the verify path a namespaced error type
+    without violating the import policy.
+    """
+
+
+# Lifecycle states (as reported by `mngr list --format json`) that indicate
+# the agent is still actively running. Mirror of the running subset of
+# `imbue.mngr.primitives.AgentLifecycleState`; verification.py defines the
+# deploy-side copy. Any change must be applied in both places.
+RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
+
+# Accepted values for the `verify_mode` parameter of `run_scheduled_trigger`.
+# Mirror of `imbue.mngr_schedule.data_types.VerifyMode` values (lowercased);
+# duplicated here because Modal runs this file outside the imbue namespace.
+VALID_VERIFY_MODES: frozenset[str] = frozenset({"none", "quick", "full"})
+
+# Sentinel returned by `_get_lifecycle_state` when the named agent is absent
+# from `mngr list` output. Deliberately distinct from any real
+# AgentLifecycleState value so the deploy-side verifier can distinguish
+# "agent vanished" from "agent reached an unexpected terminal state".
+# Must match verification._AGENT_MISSING_STATE exactly.
+AGENT_MISSING_STATE: str = "MISSING"
+
+# Sentinel line prefix used to communicate a structured verification result
+# to the deploying machine. Must match verification._RESULT_SENTINEL exactly.
+RESULT_SENTINEL: str = "__MNGR_SCHEDULE_VERIFY__"
+
+# Regex that extracts the agent name from `mngr create` output. The CLI logs
+# a line like: "Starting agent <name> ..." once the agent has been created.
+_AGENT_NAME_PATTERN: re.Pattern[str] = re.compile(r"Starting agent\s+(\S+)")
+
+# How often to poll the agent's lifecycle state during full verification.
+_AGENT_POLL_INTERVAL_SECONDS: float = 10.0
+
+# Maximum time to wait for the agent to reach a terminal state during full
+# verification. Kept far enough below the Modal function timeout (3600s) that
+# the full timeout path -- poll loop exhausts, best-effort destroy (its own
+# 300s subprocess timeout), sentinel emission -- still fits, even after
+# `mngr create` has already consumed some of the function's budget. Rough
+# accounting: 3600 - 180 (mngr create) - 300 (destroy) - 20 (overhead) = 3100s;
+# using 3000s leaves additional slack so the container is never killed before
+# `_print_result_sentinel` runs.
+_AGENT_FINISH_TIMEOUT_SECONDS: float = 3000.0
+
+
 def _run_and_stream(
     cmd: list[str] | str,
     *,
@@ -172,27 +229,164 @@ def _run_and_stream(
     return process.returncode, full_output
 
 
+def _get_lifecycle_state(agent_name: str) -> str | None:
+    """Look up the lifecycle state of the named agent.
+
+    Shells `mngr list --provider local --include 'name == "<agent_name>"'
+    --format json` and parses the result. A transient subprocess failure
+    yields None so the caller can retry; an absent agent yields
+    `AGENT_MISSING_STATE`; otherwise yields the state string reported by
+    mngr.
+    """
+    # Agent names from `Starting agent <name>` are produced by mngr itself and
+    # use a restricted character set ([\w-]+), so interpolating into the CEL
+    # expression is safe. Guard against unexpected characters defensively.
+    if not re.fullmatch(r"[\w-]+", agent_name):
+        raise CronRunnerError(f"unexpected agent name for lifecycle lookup: {agent_name!r}")
+    try:
+        completed = subprocess.run(
+            [
+                "mngr",
+                "list",
+                "--provider",
+                "local",
+                "--include",
+                f'name == "{agent_name}"',
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface the failure so a persistently-hanging `mngr list` is
+        # visible in the container logs rather than only manifesting as a
+        # generic "timed out waiting for agent" at the end of the poll loop.
+        print(f"mngr list for agent {agent_name!r} timed out after {exc.timeout}s")
+        return None
+    if completed.returncode != 0:
+        # Truncate stderr so a runaway error doesn't flood the logs every
+        # poll interval; the tail is what matters for diagnostics.
+        stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
+        print(
+            f"mngr list for agent {agent_name!r} exited with code {completed.returncode}; stderr tail:\n{stderr_tail}"
+        )
+        return None
+    try:
+        data = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        stdout_preview = completed.stdout[:2000] if completed.stdout else ""
+        print(
+            f"mngr list for agent {agent_name!r} returned non-JSON output ({exc}); stdout preview:\n{stdout_preview}"
+        )
+        return None
+    agents = data.get("agents", [])
+    if not agents:
+        return AGENT_MISSING_STATE
+    state = agents[0].get("state")
+    return str(state) if state is not None else None
+
+
+def _poll_until_done(
+    agent_name: str,
+    timeout_seconds: float = _AGENT_FINISH_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = _AGENT_POLL_INTERVAL_SECONDS,
+) -> str:
+    """Poll the agent's lifecycle state until it leaves the running states.
+
+    Returns the final state string. Raises CronRunnerError on timeout.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        state = _get_lifecycle_state(agent_name)
+        if state is not None and state not in RUNNING_STATES:
+            return state
+        if time.monotonic() >= deadline:
+            raise CronRunnerError(f"Timed out waiting for agent '{agent_name}' to finish after {timeout_seconds:.0f}s")
+        time.sleep(poll_interval_seconds)
+
+
+def _destroy_agent(agent_name: str) -> tuple[int, str]:
+    """Destroy the named agent via the mngr CLI (best-effort; --force swallows not-found).
+
+    Returns (exit_code, stderr). The caller is responsible for surfacing the
+    result (typically by including it in the verification result dict).
+
+    If the subprocess times out, returns a sentinel exit code of -1 with a
+    stderr message explaining the timeout, so the caller can emit the
+    structured result instead of letting TimeoutExpired propagate and
+    break the sentinel contract.
+    """
+    try:
+        completed = subprocess.run(
+            ["mngr", "destroy", "--force", agent_name],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return -1, f"`mngr destroy --force {agent_name}` timed out after {exc.timeout}s"
+    return completed.returncode, completed.stderr
+
+
+def _print_result_sentinel(result: dict[str, Any]) -> None:
+    """Write the structured verification result on a single line for the deploy-side parser."""
+    sys.stdout.write(f"{RESULT_SENTINEL} {json.dumps(result)}\n")
+    sys.stdout.flush()
+
+
 @app.function(
     schedule=modal.Cron(_CRON_SCHEDULE, timezone=_CRON_TIMEZONE),
     timeout=3600,
 )
-def run_scheduled_trigger() -> str:
-    """Run the scheduled mngr command and return its output.
+def run_scheduled_trigger(verify_mode: str = "none") -> dict[str, Any]:
+    """Run the scheduled mngr command and return a structured result.
 
-    This function executes on the cron schedule and:
-    1. Checks if the trigger is enabled
-    2. Loads consolidated environment variables from the secrets env file
-    3. Sets up GitHub authentication
-    4. Builds and runs the mngr command with secrets env file
+    Scheduled (cron-driven) invocations call this with no arguments, so
+    `verify_mode` defaults to "none" and no post-create verification runs.
+    The deploy-side verifier invokes the function manually via `modal run
+    ... --verify-mode quick|full` to exercise the post-create path from
+    inside the same container that owns the agent.
 
-    Deploy files (config, settings, etc.) are already baked into $HOME and
-    WORKDIR during the image build via dockerfile_commands.
+    Steps:
+    1. Check if the trigger is enabled
+    2. Load consolidated environment variables from the secrets env file
+    3. Optionally set up GitHub authentication and auto-merge
+    4. Build and run the mngr command with secrets env file
+    5. If the command is `create` and verify_mode is not "none", extract the
+       agent name from the output and either destroy it (quick) or poll its
+       lifecycle state until it finishes (full)
+    6. Emit a sentinel line with the structured result and return the same
+       dict, so callers using either `modal run` or `fn.remote()` can inspect
+       the outcome
+
+    Raises RuntimeError if the underlying mngr command fails, and
+    CronRunnerError if verify_mode is invalid. A full-verify timeout is
+    reported via the sentinel (status="timeout") rather than an exception.
     """
+    # Validate verify_mode up front, before any side effects. Otherwise an
+    # invalid value would only be caught after `mngr create` has already
+    # created an agent, leaving it orphaned because we would raise before
+    # the destroy/poll path could run.
+    normalized_verify = verify_mode.lower()
+    if normalized_verify not in VALID_VERIFY_MODES:
+        raise CronRunnerError(f"unknown verify_mode: {verify_mode!r}")
+
     trigger = _deploy_config["trigger"]
 
     if not trigger.get("is_enabled", True):
         print("Schedule trigger is disabled, skipping")
-        return ""
+        # Include an empty `output` field so callers that extract
+        # result["output"] (e.g. invoke_modal_trigger_function, which powers
+        # `mngr schedule run --provider modal`) see the same dict shape they
+        # get for a successful run. `mngr schedule run` deliberately invokes
+        # disabled triggers with a warning; without this field, that call
+        # would fail the result-shape check and raise a misleading
+        # "re-deploy" error.
+        disabled_result: dict[str, Any] = {"status": "disabled", "output": ""}
+        _print_result_sentinel(disabled_result)
+        return disabled_result
 
     # Load consolidated env vars into the process environment so that the
     # mngr CLI and any subprocesses it spawns have access to them.
@@ -244,4 +438,58 @@ def run_scheduled_trigger() -> str:
     if exit_code != 0:
         raise RuntimeError(f"mngr {command} failed with exit code {exit_code}\nOutput:\n{full_output}")
 
-    return full_output
+    # Include `output` so callers using fn.remote() (e.g. `mngr schedule run
+    # --provider modal`) can print the captured command output. fn.remote()
+    # does not stream container stdout to the caller, so this field is the
+    # only way that output reaches the local process.
+    result: dict[str, Any] = {
+        "status": "ok",
+        "command": command,
+        "verify_mode": normalized_verify,
+        "output": full_output,
+    }
+
+    if command != "create" or normalized_verify == "none":
+        _print_result_sentinel(result)
+        return result
+
+    match = _AGENT_NAME_PATTERN.search(full_output)
+    if match is None:
+        # No agent name to act on -- still a successful mngr create from the
+        # CLI's perspective, but we couldn't do in-container verify. Surface
+        # this so the deploy side can decide whether to fail.
+        result["verify"] = {"status": "no_agent_name"}
+        _print_result_sentinel(result)
+        return result
+
+    agent_name = match.group(1)
+    result["agent_name"] = agent_name
+
+    if normalized_verify == "quick":
+        destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
+        result["verify"] = {
+            "status": "destroyed",
+            "destroy_exit_code": destroy_exit_code,
+            "destroy_stderr": destroy_stderr,
+        }
+    else:
+        try:
+            final_state = _poll_until_done(agent_name)
+        except CronRunnerError as exc:
+            # Full-verify hit its inner timeout. Best-effort destroy so the
+            # agent is not orphaned, then report the timeout via the sentinel
+            # (instead of propagating the error, which would bypass
+            # _print_result_sentinel and leave the deploy side with only a
+            # generic non-zero-exit error).
+            destroy_exit_code, destroy_stderr = _destroy_agent(agent_name)
+            result["verify"] = {
+                "status": "timeout",
+                "timeout_message": str(exc),
+                "destroy_exit_code": destroy_exit_code,
+                "destroy_stderr": destroy_stderr,
+            }
+        else:
+            result["verify"] = {"status": "finished", "final_state": final_state}
+
+    _print_result_sentinel(result)
+    return result
