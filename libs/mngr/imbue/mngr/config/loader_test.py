@@ -227,11 +227,10 @@ def test_parse_providers_raises_on_unknown_fields() -> None:
 
 
 def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_providers with strict=False should warn about unknown fields and strip them."""
+    """_parse_providers with strict=False should warn about unknown fields rather than raising."""
     raw = {"my-local": {"backend": "local", "typo_field": "value"}}
     result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False)
     assert ProviderInstanceName("my-local") in result
-    assert "typo_field" not in raw["my-local"]
     assert any("typo_field" in msg and "providers.my-local" in msg for msg in log_warnings)
 
 
@@ -330,12 +329,11 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
 
 
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_agent_types with strict=False should warn about unknown fields and strip them."""
+    """_parse_agent_types with strict=False should warn about unknown fields rather than raising."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
     result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False)
     assert AgentTypeName("claude") in result
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
-    assert "bogus_option" not in raw["claude"]
     assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
 
 
@@ -457,12 +455,11 @@ def test_parse_plugins_raises_on_unknown_fields() -> None:
 
 
 def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_plugins with strict=False should warn about unknown fields and strip them."""
+    """_parse_plugins with strict=False should warn about unknown fields rather than raising."""
     raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
     result = _parse_plugins(raw, strict=False)
     assert PluginName("my-plugin") in result
     assert result[PluginName("my-plugin")].enabled is True
-    assert "nonexistent_setting" not in raw["my-plugin"]
     assert any("nonexistent_setting" in msg and "plugins.my-plugin" in msg for msg in log_warnings)
 
 
@@ -552,11 +549,10 @@ def test_parse_logging_config_raises_on_unknown_fields() -> None:
 
 
 def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
-    """_parse_logging_config with strict=False should warn about unknown fields and strip them."""
+    """_parse_logging_config with strict=False should warn about unknown fields rather than raising."""
     raw = {"file_level": "DEBUG", "unknown_log_option": 42}
     result = _parse_logging_config(raw, strict=False)
     assert isinstance(result, LoggingConfig)
-    assert "unknown_log_option" not in raw
     assert any("unknown_log_option" in msg for msg in log_warnings)
 
 

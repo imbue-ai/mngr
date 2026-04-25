@@ -304,16 +304,14 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     underscores (`pass_env`). Normalize so both forms map to the same field.
     Raises ConfigParseError if normalization would create a duplicate key.
 
-    Note: when no key contains a hyphen, the input dict is returned as-is
-    (not a copy). Callers that subsequently mutate the result must defensively
-    wrap with `dict(...)` to avoid mutating the caller's dict.
+    Always returns a fresh dict, so callers can freely mutate the result
+    (e.g. via `del` in `_check_unknown_fields` or `pop` in `parse_config`)
+    without affecting the caller's input.
     """
-    if not any("-" in k for k in raw):
-        return raw
     result: dict[str, Any] = {}
     seen_originals: dict[str, str] = {}
     for key, value in raw.items():
-        normalized = key.replace("-", "_")
+        normalized = key.replace("-", "_") if "-" in key else key
         if normalized in result:
             raise ConfigParseError(
                 f"Config in {context} has both '{seen_originals[normalized]}' and '{key}' "
@@ -635,9 +633,9 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
 
     for command_name, raw_defaults in raw_commands.items():
         # Normalize hyphens to underscores so TOML-style `pass-env` matches `pass_env`.
-        # Returns a fresh dict (or the input unchanged if no hyphens), so the caller's
-        # dict is never mutated by the pop() below.
-        defaults_copy = dict(_normalize_field_keys(raw_defaults, f"commands.{command_name}"))
+        # _normalize_field_keys always returns a fresh dict, so the pop() below
+        # cannot mutate the caller's input.
+        defaults_copy = _normalize_field_keys(raw_defaults, f"commands.{command_name}")
         default_subcommand = defaults_copy.pop("default_subcommand", None)
         commands[command_name] = CommandDefaults.model_construct(
             defaults=defaults_copy,
