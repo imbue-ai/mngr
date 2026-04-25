@@ -6,9 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
 from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
@@ -78,8 +81,13 @@ def _seed_settings_with_stop_hooks(work_dir: Path) -> Path:
     return settings_path
 
 
-def test_plugin_strips_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> None:
-    """A proxy-child agent (name contains --subagent-) has Stop/SubagentStop stripped after provisioning."""
+def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> None:
+    """A proxy-child agent with user-configured Stop/SubagentStop hooks raises NotImplementedError.
+
+    The plugin doesn't know whether a user's Stop hook is meant to fire on
+    every subagent turn or only at the outer end_turn, so it refuses to
+    proceed rather than silently guess.
+    """
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     work_dir = tmp_path / "work"
@@ -92,16 +100,61 @@ def test_plugin_strips_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> No
         ClaudeAgentConfig(),
         name=AgentName("reviewer--subagent-code-review-abcd1234"),
     )
-    settings_path = _seed_settings_with_stop_hooks(work_dir)
+    _seed_settings_with_stop_hooks(work_dir)
+
+    with pytest.raises(UnsupportedSubagentHookError):
+        _provision(agent, host, None)
+
+
+def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path: Path) -> None:
+    """A proxy-child agent inheriting only mngr-managed Stop hooks provisions cleanly.
+
+    mngr_claude's readiness Stop hook (which runs wait_for_stop_hook.sh)
+    is recognized as baseline and passed through without triggering the
+    NotImplementedError.
+    """
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    settings_path = claude_dir / "settings.local.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+                                    'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    host = FakeHost(host_dir)
+    agent = FakeAgent(
+        AgentId.generate(),
+        work_dir,
+        ClaudeAgentConfig(),
+        name=AgentName("reviewer--subagent-code-review-abcd1234"),
+    )
 
     _provision(agent, host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
-    assert "Stop" not in hooks
-    assert "SubagentStop" not in hooks
-    # The usual proxy hooks were still merged in.
-    assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
+    assert "Stop" in hooks
+    assert "PreToolUse" in hooks
 
 
 def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None:
