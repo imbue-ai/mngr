@@ -185,9 +185,12 @@ def setup_bootstrap_command_context(
     1. The plugin-defined sections above are not parsed -- the returned
        ``MngrContext.config`` has empty ``providers``, ``agent_types``, and
        ``plugins`` and callers must not rely on those fields.
-    2. Top-level fields are parsed in non-strict mode (unknown fields warn
-       instead of raising), to match ``load_bootstrap_context``. There is
-       therefore no ``strict`` parameter on this function.
+    2. Top-level fields *loaded from config files* are parsed in non-strict
+       mode (unknown fields warn instead of raising), to match
+       ``load_bootstrap_context``. There is therefore no ``strict`` parameter
+       on this function. Note that ``-S`` overrides typed on the command line
+       are still strict for unknown top-level keys: since the user typed them
+       explicitly, typos should surface as errors rather than warnings.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
     mngr_ctx = load_bootstrap_context(
