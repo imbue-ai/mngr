@@ -789,7 +789,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
-            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+            env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -847,7 +847,7 @@ ensure_clean = false
             ],
             obj=plugin_manager,
             catch_exceptions=False,
-            env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+            env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
         )
 
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
@@ -905,7 +905,7 @@ ensure_clean = false
             "130006",
         ],
         obj=plugin_manager,
-        env={"MNGR_PROJECT_DIR": str(mngr_dir)},
+        env={"MNGR_PROJECT_CONFIG_DIR": str(mngr_dir)},
     )
 
     assert result.exit_code != 0
