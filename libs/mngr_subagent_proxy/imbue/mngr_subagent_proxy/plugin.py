@@ -152,16 +152,6 @@ _MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
     "wait_for_stop_hook.sh",
 )
 
-# Same markers but the subset that's recognized as specifically the
-# mngr_claude baseline -- safe to carry into a subagent without
-# translation. The other mngr markers (subagent-proxy / readiness)
-# are already safe by construction since they're installed by us.
-_KNOWN_SAFE_HOOK_COMMAND_MARKERS: Final[tuple[str, ...]] = _MNGR_MANAGED_HOOK_MARKERS
-
-
-def _hook_command_is_mngr_managed(command: str) -> bool:
-    return any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS)
-
 
 def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
     """Return True if every command in the hook entry is recognized as safe."""
@@ -174,7 +164,7 @@ def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
         command = cmd_entry.get("command")
         if not isinstance(command, str):
             return False
-        if not any(marker in command for marker in _KNOWN_SAFE_HOOK_COMMAND_MARKERS):
+        if not any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
             return False
     return True
 
