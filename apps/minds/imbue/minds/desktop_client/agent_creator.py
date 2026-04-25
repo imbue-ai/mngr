@@ -28,7 +28,9 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -45,6 +47,7 @@ from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -53,6 +56,33 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+
+
+def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
+    """Create a ``ConcurrencyGroup`` named ``name`` that is a child of ``parent``.
+
+    ``AgentCreator`` always supplies its ``root_concurrency_group`` (required
+    field), so the ``parent is None`` branch only fires when a module-level
+    helper (``clone_git_repo``, ``checkout_branch``, ``resolve_template_version``)
+    is called standalone by a test that doesn't thread a root CG in. Those
+    helpers still accept ``parent_cg=None`` for test ergonomics.
+    """
+    if parent is None:
+        return ConcurrencyGroup(name=name)
+    return parent.make_concurrency_group(name=name)
+
+
+def _leased_agent_address(agent_id: AgentId) -> str:
+    """Explicit mngr address for a leased agent.
+
+    Uses ``<agent-id>@leased-<agent-id>.ssh`` so mngr discovery only loads the
+    SSH provider configured by ``imbue.minds.bootstrap._ensure_mngr_settings``
+    and skips name/ID lookup entirely. This assumes the leased-mode invariant
+    that the canonical agent id equals ``lease_result.agent_id`` (set in
+    ``_lease_host_synchronously``).
+    """
+    return f"{agent_id}@leased-{agent_id}.ssh"
+
 
 OutputCallback = Callable[[str, bool], None]
 
@@ -142,6 +172,7 @@ def clone_git_repo(
     on_output: OutputCallback | None = None,
     *,
     is_shallow: bool = False,
+    parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
@@ -154,7 +185,7 @@ def clone_git_repo(
     if is_shallow:
         command.extend(["--depth", "1"])
     command.extend([str(git_url), str(clone_dir)])
-    cg = ConcurrencyGroup(name="git-clone")
+    cg = _make_child_cg("git-clone", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=command,
@@ -174,13 +205,15 @@ def checkout_branch(
     repo_dir: Path,
     branch: GitBranch,
     on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Check out a specific branch in a cloned repository.
 
     Raises GitOperationError if the checkout fails (e.g. branch does not exist).
     """
     logger.debug("Checking out branch {} in {}", branch, repo_dir)
-    cg = ConcurrencyGroup(name="git-checkout")
+    cg = _make_child_cg("git-checkout", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=["git", "checkout", str(branch)],
@@ -202,6 +235,8 @@ def _rsync_worktree_over_clone(
     worktree_dir: Path,
     clone_dir: Path,
     on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Rsync a worktree's working directory over a shallow clone.
 
@@ -226,7 +261,7 @@ def _rsync_worktree_over_clone(
         f"{worktree_dir}/",
         f"{clone_dir}/",
     ]
-    cg = ConcurrencyGroup(name="rsync-worktree")
+    cg = _make_child_cg("rsync-worktree", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=command,
@@ -256,15 +291,15 @@ def _build_latchkey_gateway_url(launch_mode: LaunchMode, info: LatchkeyGatewayIn
     """Return the ``LATCHKEY_GATEWAY`` URL the agent should see in its environment.
 
     DEV agents run on the bare host and reach the gateway on its dynamic host
-    port directly. Every other mode runs inside a container/VM/VPS whose own
-    loopback is bridged to the host-side gateway via an SSH reverse tunnel
-    bound to a fixed remote port, so the URL is the same constant for every
-    such agent.
+    port directly. Every other mode (container / VM / VPS / leased pool host)
+    runs inside an isolated runtime whose own loopback is bridged to the
+    host-side gateway via an SSH reverse tunnel bound to a fixed remote port,
+    so the URL is the same constant for every such agent.
     """
     match launch_mode:
         case LaunchMode.DEV:
             return f"http://{info.host}:{info.port}"
-        case LaunchMode.LOCAL | LaunchMode.LIMA | LaunchMode.CLOUD:
+        case LaunchMode.LOCAL | LaunchMode.LIMA | LaunchMode.CLOUD | LaunchMode.LEASED:
             return f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
         case _ as unreachable:
             assert_never(unreachable)
@@ -387,7 +422,11 @@ def _remote_host_env_flags() -> list[str]:
     ]
 
 
-def _load_or_create_leased_host_keypair(data_dir: Path) -> tuple[Path, str]:
+def _load_or_create_leased_host_keypair(
+    data_dir: Path,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> tuple[Path, str]:
     """Load or generate an SSH keypair for connecting to leased hosts.
 
     The keypair lives at ``<data_dir>/ssh/keys/leased_host/id_ed25519``. If
@@ -401,7 +440,7 @@ def _load_or_create_leased_host_keypair(data_dir: Path) -> tuple[Path, str]:
 
     if not private_key_path.exists():
         with log_span("Generating SSH keypair for leased hosts"):
-            cg = ConcurrencyGroup(name="ssh-keygen")
+            cg = _make_child_cg("ssh-keygen", parent_cg)
             with cg:
                 result = cg.run_process_to_completion(
                     command=[
@@ -504,7 +543,12 @@ def _remove_lease_info(data_dir: Path, agent_id: AgentId) -> None:
 _SEMVER_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(r"^refs/tags/(v\d+\.\d+\.\d+)$")
 
 
-def resolve_template_version(git_url: str, branch: str) -> str:
+def resolve_template_version(
+    git_url: str,
+    branch: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
     """Resolve the template version to use when leasing a host.
 
     If branch is non-empty, the branch name is the version (dev workflow).
@@ -514,7 +558,7 @@ def resolve_template_version(git_url: str, branch: str) -> str:
     if branch:
         return branch
 
-    cg = ConcurrencyGroup(name="git-ls-remote-tags")
+    cg = _make_child_cg("git-ls-remote-tags", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=["git", "ls-remote", "--tags", git_url],
@@ -555,6 +599,8 @@ def run_mngr_create(
     on_output: OutputCallback | None = None,
     host_env_file: Path | None = None,
     latchkey_gateway_url: str | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
 ) -> str:
     """Create an mngr agent via ``mngr create``.
 
@@ -574,7 +620,7 @@ def run_mngr_create(
 
     logger.info("Running: {}", " ".join(mngr_command))
 
-    cg = ConcurrencyGroup(name="mngr-create")
+    cg = _make_child_cg("mngr-create", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=mngr_command,
@@ -629,6 +675,22 @@ class AgentCreator(MutableModel):
             "For DEV agents the URL is the gateway's dynamic host port; for container/VM/VPS "
             "agents it is a constant URL on the agent-side loopback that ``LatchkeyGatewayDiscoveryHandler`` "
             "bridges back via an SSH reverse tunnel once the agent is discovered."
+        ),
+    )
+    root_concurrency_group: ConcurrencyGroup = Field(
+        frozen=True,
+        description=(
+            "Top-level ``ConcurrencyGroup`` owned by ``start_desktop_client`` and entered for "
+            "the duration of the FastAPI lifespan. Every subprocess and thread spawned by this "
+            "creator is tracked under it so the desktop-client shutdown can cleanly wait on "
+            "(or cancel) in-flight work."
+        ),
+    )
+    notification_dispatcher: NotificationDispatcher = Field(
+        frozen=True,
+        description=(
+            "Dispatcher for surfacing failures from background tasks (e.g. the detached "
+            "Cloudflare tunnel setup task) to the user as OS notifications."
         ),
     )
 
@@ -728,7 +790,9 @@ class AgentCreator(MutableModel):
         if not version:
             raise MngrCommandError("LEASED mode requires a version string")
 
-        private_key_path, public_key = _load_or_create_leased_host_keypair(self.paths.data_dir)
+        private_key_path, public_key = _load_or_create_leased_host_keypair(
+            self.paths.data_dir, parent_cg=self.root_concurrency_group
+        )
         log_queue.put("[minds] Requesting a leased host (version: {})...".format(version))
         lease_result = self.host_pool_client.lease_host(access_token, public_key, version)
         logger.debug(
@@ -869,7 +933,7 @@ class AgentCreator(MutableModel):
 
     def _get_host_id_for_agent(self, agent_id: AgentId) -> str | None:
         """Look up the host ID for an agent via ``mngr list``."""
-        cg = ConcurrencyGroup(name="mngr-list-host")
+        cg = _make_child_cg("mngr-list-host", self.root_concurrency_group)
         with cg:
             result = cg.run_process_to_completion(
                 command=[
@@ -896,7 +960,7 @@ class AgentCreator(MutableModel):
 
     def _destroy_all_agents_on_host(self, host_id: str) -> None:
         """Destroy all agents on the given host via ``mngr destroy -f``."""
-        cg = ConcurrencyGroup(name="mngr-destroy-host")
+        cg = _make_child_cg("mngr-destroy-host", self.root_concurrency_group)
         with cg:
             result = cg.run_process_to_completion(
                 command=[
@@ -920,7 +984,7 @@ class AgentCreator(MutableModel):
 
     def _destroy_single_agent(self, agent_id: AgentId) -> None:
         """Destroy a single agent via ``mngr destroy``."""
-        cg = ConcurrencyGroup(name="mngr-destroy")
+        cg = _make_child_cg("mngr-destroy", self.root_concurrency_group)
         with cg:
             result = cg.run_process_to_completion(
                 command=[MNGR_BINARY, "destroy", str(agent_id), "-f"],
@@ -995,12 +1059,20 @@ class AgentCreator(MutableModel):
                         if clone_target.exists():
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
-                        clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
+                        clone_git_repo(
+                            file_url,
+                            clone_target,
+                            on_output=emit_log,
+                            is_shallow=True,
+                            parent_cg=self.root_concurrency_group,
+                        )
                         # The shallow clone only contains committed content. Rsync
                         # the worktree's working directory over so that uncommitted
                         # changes (e.g. a locally-rsynced vendor/mngr/) are included
                         # in the Docker build context.
-                        _rsync_worktree_over_clone(resolved_path, clone_target, on_output=emit_log)
+                        _rsync_worktree_over_clone(
+                            resolved_path, clone_target, on_output=emit_log, parent_cg=self.root_concurrency_group
+                        )
                         workspace_dir = clone_target
                     else:
                         workspace_dir = resolved_path
@@ -1011,12 +1083,23 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(repo_source))
-                    clone_git_repo(GitUrl(repo_source), clone_target, on_output=emit_log, is_shallow=True)
+                    clone_git_repo(
+                        GitUrl(repo_source),
+                        clone_target,
+                        on_output=emit_log,
+                        is_shallow=True,
+                        parent_cg=self.root_concurrency_group,
+                    )
                     workspace_dir = clone_target
 
                 if branch:
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(workspace_dir, GitBranch(branch), on_output=emit_log)
+                    checkout_branch(
+                        workspace_dir,
+                        GitBranch(branch),
+                        on_output=emit_log,
+                        parent_cg=self.root_concurrency_group,
+                    )
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
@@ -1038,6 +1121,7 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                     host_env_file=host_env_file,
                     latchkey_gateway_url=latchkey_gateway_url,
+                    parent_cg=self.root_concurrency_group,
                 )
 
                 # Persist the API key hash
@@ -1047,18 +1131,19 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                if on_created is not None:
-                    try:
-                        on_created(agent_id)
-                    except (ValueError, OSError) as callback_exc:
-                        logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
-
                 port_suffix = ":{}".format(self.server_port) if self.server_port else ""
                 redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
 
+                # Set DONE before invoking on_created so the UI can redirect as
+                # soon as the agent is usable. ``on_created`` is expected to
+                # return quickly (it only schedules background work -- see
+                # ``_OnCreatedCallbackFactory``).
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = redirect_url
+
+                if on_created is not None:
+                    on_created(agent_id)
 
         except (GitCloneError, GitOperationError, MngrCommandError, HostPoolError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
@@ -1115,7 +1200,9 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Set up a leased host (write dynamic host entry, rename, start)."""
         aid = str(agent_id)
-        private_key_path = _load_or_create_leased_host_keypair(self.paths.data_dir)[0]
+        private_key_path = _load_or_create_leased_host_keypair(
+            self.paths.data_dir, parent_cg=self.root_concurrency_group
+        )[0]
 
         with log_span("Setting up leased agent {} on {}", agent_id, lease_result.vps_ip):
             with self._lock:
@@ -1172,101 +1259,101 @@ class AgentCreator(MutableModel):
         lease_result: LeaseHostResult,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
-        """Label, rename, and start the leased agent. Raises on failure."""
+        """Rename, apply labels, inject the API key, and start the leased agent.
+
+        Sequence:
+          1. ``mngr rename`` (sequential).
+          2. ``mngr label`` + ``mngr exec sed ... MINDS_API_KEY`` (parallel).
+          3. ``mngr start`` (sequential).
+
+        All four subprocesses share a single ``ConcurrencyGroup`` child of
+        ``self.root_concurrency_group``. Every mngr invocation addresses the
+        agent via ``_leased_agent_address(agent_id)`` so mngr only queries the
+        SSH provider (skipping name/ID resolution across every other provider).
+
+        Raises ``MngrCommandError`` on any failure; the parallel step uses
+        ``is_checked_by_group=True`` so a failure in either sibling aborts the
+        other and propagates through the shared group.
+        """
         parsed_name = AgentName(agent_name)
+        address = _leased_agent_address(agent_id)
 
-        log_queue.put("[minds] Setting workspace labels...")
-        cg_label = ConcurrencyGroup(name="mngr-label")
-        with cg_label:
-            label_result = cg_label.run_process_to_completion(
-                command=[
-                    MNGR_BINARY,
-                    "label",
-                    lease_result.agent_id,
-                    "-l",
-                    "workspace={}".format(parsed_name),
-                    "-l",
-                    "user_created=true",
-                    "-l",
-                    "is_primary=true",
-                ],
-                is_checked_after=False,
-                on_output=emit_log,
-            )
-        if label_result.returncode != 0:
-            raise MngrCommandError(
-                "mngr label failed (exit code {}): {}".format(
-                    label_result.returncode,
-                    label_result.stderr.strip() if label_result.stderr.strip() else label_result.stdout.strip(),
-                )
-            )
-
-        log_queue.put("[minds] Renaming agent to '{}'...".format(parsed_name))
-        cg_rename = ConcurrencyGroup(name="mngr-rename")
-        with cg_rename:
-            rename_result = cg_rename.run_process_to_completion(
-                command=[MNGR_BINARY, "rename", lease_result.agent_id, str(parsed_name)],
-                is_checked_after=False,
-                on_output=emit_log,
-            )
-        if rename_result.returncode != 0:
-            raise MngrCommandError(
-                "mngr rename failed (exit code {}): {}".format(
-                    rename_result.returncode,
-                    rename_result.stderr.strip() if rename_result.stderr.strip() else rename_result.stdout.strip(),
-                )
-            )
-
-        log_queue.put("[minds] Starting agent '{}'...".format(parsed_name))
-        cg_start = ConcurrencyGroup(name="mngr-start")
-        with cg_start:
-            start_result = cg_start.run_process_to_completion(
-                command=[MNGR_BINARY, "start", str(parsed_name)],
-                is_checked_after=False,
-                on_output=emit_log,
-            )
-        if start_result.returncode != 0:
-            raise MngrCommandError(
-                "mngr start failed (exit code {}): {}".format(
-                    start_result.returncode,
-                    start_result.stderr.strip() if start_result.stderr.strip() else start_result.stdout.strip(),
-                )
-            )
-
-        # Generate a new API key, inject it into the agent's env, and persist the hash
+        # Generate the API key up front so the parallel inject step has it
+        # ready; ``generate_api_key`` / ``hash_api_key`` are in-process and
+        # cheap. The on-disk hash is persisted after the agent starts so that
+        # a failure in the setup flow does not leave an orphan hash file.
         api_key = generate_api_key()
-        log_queue.put("[minds] Injecting MINDS_API_KEY...")
         env_path = "/mngr/agents/{}/env".format(agent_id)
         inject_command = ("sed -i '/^MINDS_API_KEY=/d' {path} && echo 'MINDS_API_KEY={key}' >> {path}").format(
             path=env_path, key=api_key
         )
-        cg_exec = ConcurrencyGroup(name="mngr-exec-apikey")
-        with cg_exec:
-            exec_result = cg_exec.run_process_to_completion(
-                command=[MNGR_BINARY, "exec", str(agent_id), inject_command],
-                is_checked_after=False,
-                on_output=emit_log,
-            )
-        if exec_result.returncode != 0:
-            logger.warning("Failed to inject MINDS_API_KEY: {}", exec_result.stderr.strip())
+
+        cg = _make_child_cg("mngr-leased-setup", self.root_concurrency_group)
+        try:
+            with cg:
+                log_queue.put("[minds] Renaming agent to '{}'...".format(parsed_name))
+                cg.run_process_to_completion(
+                    command=[MNGR_BINARY, "rename", address, str(parsed_name)],
+                    is_checked_after=True,
+                    on_output=emit_log,
+                )
+
+                log_queue.put("[minds] Applying labels and injecting MINDS_API_KEY in parallel...")
+                label_proc = cg.run_process_in_background(
+                    command=[
+                        MNGR_BINARY,
+                        "label",
+                        address,
+                        "-l",
+                        "workspace={}".format(parsed_name),
+                        "-l",
+                        "user_created=true",
+                        "-l",
+                        "is_primary=true",
+                    ],
+                    is_checked_by_group=True,
+                    on_output=emit_log,
+                )
+                apikey_proc = cg.run_process_in_background(
+                    command=[MNGR_BINARY, "exec", address, inject_command],
+                    is_checked_by_group=True,
+                    on_output=emit_log,
+                )
+                label_proc.wait()
+                apikey_proc.wait()
+
+                log_queue.put("[minds] Starting agent '{}'...".format(parsed_name))
+                cg.run_process_to_completion(
+                    command=[MNGR_BINARY, "start", address],
+                    is_checked_after=True,
+                    on_output=emit_log,
+                )
+        except (ProcessError, ConcurrencyExceptionGroup) as e:
+            # Convert CG exceptions into MngrCommandError so the caller's
+            # existing except clause (MngrCommandError, HostPoolError, ...)
+            # triggers lease cleanup. Preserve the original exception chain
+            # for debuggability.
+            raise MngrCommandError("Leased agent setup failed: {}".format(e)) from e
+
         key_hash = hash_api_key(api_key)
         save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
-        log_queue.put("[minds] API key generated and hash stored.")
-
+        log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
-
-        if on_created is not None:
-            try:
-                on_created(agent_id)
-            except (ValueError, OSError) as callback_exc:
-                logger.warning("on_created callback failed for {}: {}", agent_id, callback_exc)
 
         port_suffix = ":{}".format(self.server_port) if self.server_port else ""
         redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
 
+        # Set DONE before invoking on_created so the UI can redirect as soon
+        # as the agent is actually usable. ``on_created`` is expected to
+        # return quickly (it only schedules background work -- see
+        # ``_OnCreatedCallbackFactory``), so the try/except wrapper that
+        # previously guarded a blocking callback is intentionally gone.
         with self._lock:
             self._statuses[aid] = AgentCreationStatus.DONE
             self._redirect_urls[aid] = redirect_url
+
+        if on_created is not None:
+            on_created(agent_id)
 
     def _cleanup_failed_lease(
         self,
