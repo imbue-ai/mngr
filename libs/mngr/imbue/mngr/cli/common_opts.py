@@ -495,11 +495,12 @@ def apply_settings_to_config(
     the same semantics as config file values but at a higher precedence.
 
     When ``parse_plugin_sections`` is False, ``-S`` keys targeting
-    [agent_types], [providers], or [plugins] are dropped without validation --
-    matching ``load_bootstrap_context`` so that plugin lifecycle commands stay
-    quiet about plugins/backends that are not yet installed. A warning is
-    emitted naming any such dropped sections, so the user is not left guessing
-    why their override had no effect.
+    [agent_types], [providers], or [plugins] are dropped without validation,
+    mirroring the same skip-plugin-sections behavior that
+    ``load_bootstrap_context`` applies to config-file content, so that plugin
+    lifecycle commands stay quiet about plugins/backends that are not yet
+    installed. A warning is emitted naming any such dropped sections, so the
+    user is not left guessing why their override had no effect.
     """
     if not settings:
         return config
