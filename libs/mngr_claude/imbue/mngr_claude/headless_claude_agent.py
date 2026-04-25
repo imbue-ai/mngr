@@ -38,7 +38,8 @@ def extract_text_delta(line: str) -> str | None:
     """Extract text from a stream-json content_block_delta event.
 
     Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise.
+    or None otherwise. This handles the partial-message envelope emitted by
+    `claude --output-format stream-json --include-partial-messages`.
     """
     try:
         parsed = json.loads(line)
@@ -69,6 +70,47 @@ def extract_text_delta(line: str) -> str | None:
         return text
 
     return None
+
+
+@pure
+def extract_assistant_text(line: str) -> str | None:
+    """Extract concatenated text from a top-level `assistant` event's content blocks.
+
+    Without `--include-partial-messages`, `claude --output-format stream-json`
+    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
+    line per assistant turn. Returns the concatenation of all text blocks, or
+    None if the line is not an `assistant` event with at least one text block.
+    """
+    try:
+        parsed = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        # Expected: non-JSON lines in the stream (see extract_text_delta).
+        return None
+
+    if parsed.get("type") != "assistant":
+        return None
+
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    content_blocks = message.get("content")
+    if not isinstance(content_blocks, list):
+        return None
+
+    text_parts: list[str] = []
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            text_parts.append(text)
+
+    if not text_parts:
+        return None
+    return "".join(text_parts)
 
 
 @pure
@@ -112,12 +154,35 @@ class _StreamTailState(MutableModel):
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
+    # Tracks whether any partial text deltas (from `--include-partial-messages`)
+    # have been yielded during the current assistant turn. Used to avoid
+    # double-emitting text when claude also emits a final `assistant` summary
+    # message containing the same content. Resets at each `assistant` boundary.
+    is_partial_text_yielded_in_turn: bool = False
 
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
         if current_mtime is not None and current_mtime != self.last_mtime:
             return True
         return self.is_finished()
+
+    def _yield_text_for_line(self, stripped: str) -> Iterator[str]:
+        # Partial-message envelope: yield the delta and remember we did so,
+        # so we can suppress the matching `assistant` summary later this turn.
+        partial_text = extract_text_delta(stripped)
+        if partial_text is not None:
+            self.is_partial_text_yielded_in_turn = True
+            yield partial_text
+            return
+
+        # Whole-message envelope: yield only if no partial deltas were already
+        # streamed for this turn, then reset for the next turn.
+        assistant_text = extract_assistant_text(stripped)
+        if assistant_text is None:
+            return
+        if not self.is_partial_text_yielded_in_turn:
+            yield assistant_text
+        self.is_partial_text_yielded_in_turn = False
 
     def tail_until_done(self) -> Iterator[str]:
         got_result = False
@@ -153,9 +218,7 @@ class _StreamTailState(MutableModel):
                         self.result_error = _extract_result_error(stripped)
                         got_result = True
                         break
-                    text = extract_text_delta(stripped)
-                    if text is not None:
-                        yield text
+                    yield from self._yield_text_for_line(stripped)
 
         if not got_result:
             # Final drain after agent exits
@@ -172,9 +235,7 @@ class _StreamTailState(MutableModel):
                     if _is_result_event(stripped):
                         self.result_error = _extract_result_error(stripped)
                         break
-                    text = extract_text_delta(stripped)
-                    if text is not None:
-                        yield text
+                    yield from self._yield_text_for_line(stripped)
 
 
 class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):

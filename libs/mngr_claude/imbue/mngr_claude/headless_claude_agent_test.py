@@ -24,6 +24,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
+from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
 
@@ -259,6 +260,23 @@ def _make_stream_json_line(text: str) -> str:
                 "type": "content_block_delta",
                 "index": 0,
                 "delta": {"type": "text_delta", "text": text},
+            },
+        }
+    )
+
+
+def _make_assistant_message_line(text: str) -> str:
+    """Build a stream-json line for a top-level `assistant` event with one text block.
+
+    This is the envelope `claude --output-format stream-json` emits by default
+    (without `--include-partial-messages`) on v2.1.114 and similar versions.
+    """
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
             },
         }
     )
@@ -643,3 +661,163 @@ def test_extract_text_delta_text_not_string() -> None:
         }
     )
     assert extract_text_delta(event) is None
+
+
+# =============================================================================
+# Tests for extract_assistant_text and dual-envelope stream_output
+# =============================================================================
+
+
+def test_extract_assistant_text_single_text_block() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+        }
+    )
+    assert extract_assistant_text(event) == "hello"
+
+
+def test_extract_assistant_text_concatenates_multiple_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Hello "},
+                    {"type": "text", "text": "world!"},
+                ],
+            },
+        }
+    )
+    assert extract_assistant_text(event) == "Hello world!"
+
+
+def test_extract_assistant_text_skips_non_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}},
+                    {"type": "text", "text": "after tool"},
+                ],
+            },
+        }
+    )
+    assert extract_assistant_text(event) == "after tool"
+
+
+def test_extract_assistant_text_returns_none_when_no_text_blocks() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}}],
+            },
+        }
+    )
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_for_non_assistant_event() -> None:
+    event = json.dumps({"type": "system", "subtype": "init"})
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_for_malformed_json() -> None:
+    assert extract_assistant_text("not valid json {{{") is None
+
+
+def test_extract_assistant_text_returns_none_when_message_not_dict() -> None:
+    event = json.dumps({"type": "assistant", "message": "not_a_dict"})
+    assert extract_assistant_text(event) is None
+
+
+def test_extract_assistant_text_returns_none_when_content_not_list() -> None:
+    event = json.dumps({"type": "assistant", "message": {"content": "not_a_list"}})
+    assert extract_assistant_text(event) is None
+
+
+def test_stream_output_yields_assistant_envelope_without_partial_messages(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should yield text from the default `assistant`-event envelope.
+
+    Reproduces the issue from claude CLI v2.1.114+: without
+    --include-partial-messages, claude emits only system/assistant/result events
+    (no `stream_event` deltas). The parser must still surface the response text.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        '{"type":"system","subtype":"init","session_id":"abc"}',
+        _make_assistant_message_line("Hello from claude"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"Hello from claude"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["Hello from claude"]
+
+
+def test_stream_output_does_not_double_emit_when_partial_and_assistant_interleave(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output must not double-yield text when both envelopes appear in one turn.
+
+    With --include-partial-messages, claude emits per-token stream_event deltas
+    AND a final `assistant` summary message containing the same text. The parser
+    must yield each token once (from the deltas) and skip the summary.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_stream_json_line("Hello "),
+        _make_stream_json_line("world!"),
+        _make_assistant_message_line("Hello world!"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"Hello world!"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["Hello ", "world!"]
+
+
+def test_stream_output_yields_assistant_envelopes_across_multiple_turns(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subsequent assistant turn after a fully-streamed turn should still be yielded.
+
+    Verifies the dedup flag resets at each `assistant` boundary. Otherwise a
+    tool-using session (partial deltas + assistant summary, then a second
+    assistant-only turn) would lose the second turn's text.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_stream_json_line("first "),
+        _make_stream_json_line("answer"),
+        _make_assistant_message_line("first answer"),
+        _make_assistant_message_line("second answer"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"second answer"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["first ", "answer", "second answer"]
