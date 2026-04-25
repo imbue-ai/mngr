@@ -1,5 +1,6 @@
 """Tests for common_opts module."""
 
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pluggy
 import pytest
 from click.core import ParameterSource
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import _parse_setting_value
@@ -34,6 +36,15 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 
 hookimpl = pluggy.HookimplMarker("mngr")
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    yield messages
+    logger.remove(handler_id)
 
 
 def _make_click_context(
@@ -494,7 +505,10 @@ def test_apply_config_defaults_raises_on_unknown_param_names(mngr_test_prefix: s
         apply_config_defaults(ctx, config, "create", strict=True)
 
 
-def test_apply_config_defaults_warns_on_unknown_param_when_lax(mngr_test_prefix: str) -> None:
+def test_apply_config_defaults_warns_on_unknown_param_when_lax(
+    mngr_test_prefix: str,
+    log_warnings: list[str],
+) -> None:
     """apply_config_defaults should warn (not raise) when strict=False."""
     ctx = _make_click_context(params={"name": "default"})
 
@@ -503,9 +517,12 @@ def test_apply_config_defaults_warns_on_unknown_param_when_lax(mngr_test_prefix:
         commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
     )
 
-    # Should not raise; unknown param is silently warned about.
+    # Should not raise; the unknown param should produce a warning instead.
     result = apply_config_defaults(ctx, config, "create", strict=False)
     assert "definitely_not_a_real_param" not in result
+    assert any("definitely_not_a_real_param" in msg for msg in log_warnings), (
+        f"Expected a warning mentioning the unknown param, got: {log_warnings}"
+    )
 
 
 # =============================================================================
