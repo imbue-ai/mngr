@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -114,6 +115,75 @@ def fake_pool_server() -> Iterator[HostPoolClient]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     client = HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:{}".format(port)),
+    )
+    yield client
+    server.shutdown()
+
+
+_FAKE_CREATE_KEY_RESPONSE: Final[dict[str, object]] = {
+    "key": "sk-litellm-test-virtual-key-0123456789abcdef",
+    "base_url": "https://litellm-proxy.modal.run/anthropic",
+}
+
+_FAKE_KEY_INFO: Final[dict[str, object]] = {
+    "token": "hashed-token-abc123",
+    "key_alias": "agent-test",
+    "key_name": None,
+    "spend": 12.50,
+    "max_budget": 100.0,
+    "budget_duration": "1d",
+    "user_id": "user-abc123",
+}
+
+
+class _FakeKeyHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler returning canned responses for /keys/* endpoints."""
+
+    def do_POST(self) -> None:
+        if self.path == "/keys/create":
+            self._respond(200, _FAKE_CREATE_KEY_RESPONSE)
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_GET(self) -> None:
+        if self.path == "/keys":
+            self._respond(200, [_FAKE_KEY_INFO])
+        elif self.path.startswith("/keys/"):
+            self._respond(200, _FAKE_KEY_INFO)
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        if "/budget" in self.path:
+            self._respond(200, {"status": "updated"})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        if self.path.startswith("/keys/"):
+            self._respond(200, {"status": "deleted"})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def _respond(self, status: int, body: object) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def fake_key_server() -> Iterator[LiteLLMKeyClient]:
+    """Start a local HTTP server and return a LiteLLMKeyClient pointing to it."""
+    server = HTTPServer(("127.0.0.1", 0), _FakeKeyHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = LiteLLMKeyClient(
         connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:{}".format(port)),
     )
     yield client
