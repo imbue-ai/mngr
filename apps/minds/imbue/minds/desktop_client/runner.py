@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructionHandler
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
@@ -152,11 +153,13 @@ def start_desktop_client(
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
     host_pool_client = _build_host_pool_client(minds_config.remote_service_connector_url)
+    litellm_key_client = _build_litellm_key_client(minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
         latchkey_gateway_manager=latchkey_gateway_manager,
         host_pool_client=host_pool_client,
+        litellm_key_client=litellm_key_client,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
     )
@@ -272,6 +275,13 @@ def start_desktop_client(
 def _build_host_pool_client(connector_url: AnyUrl) -> HostPoolClient:
     """Build a HostPoolClient from the remote service connector URL."""
     return HostPoolClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
+    )
+
+
+def _build_litellm_key_client(connector_url: AnyUrl) -> LiteLLMKeyClient:
+    """Build a LiteLLMKeyClient from the remote service connector URL."""
+    return LiteLLMKeyClient(
         connector_url=RemoteServiceConnectorUrl(str(connector_url)),
     )
 
