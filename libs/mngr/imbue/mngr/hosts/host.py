@@ -1343,13 +1343,7 @@ class Host(BaseHost, OnlineHostInterface):
                         if not self._is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)
                         continue
-                    try:
-                        data = json.loads(content)
-                    except json.JSONDecodeError as e:
-                        logger.warning(
-                            "Could not load agent reference from {} because json was invalid: {}", data_path, e
-                        )
-                        continue
+                    data = json.loads(content)
                     ref = self._validate_and_create_discovered_agent(data)
                     if ref is not None:
                         agent_refs.append(ref)
@@ -2268,15 +2262,18 @@ class Host(BaseHost, OnlineHostInterface):
             return agent
 
     def _read_existing_create_time(self, state_dir: Path) -> datetime:
-        """Read the create_time from an existing agent's data.json, falling back to now."""
+        """Read the create_time from an existing agent's data.json, falling back to now if the file is missing.
+
+        Corrupt or incomplete data.json contents raise instead of silently falling back -- the user
+        must clean up the invalid file manually (see style guide: Config and settings file parse errors).
+        """
         data_path = state_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
-            data = json.loads(content)
-            return datetime.fromisoformat(data["create_time"])
-        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("Could not read existing create_time from {}: {}", data_path, e)
+        except FileNotFoundError:
             return datetime.now(timezone.utc)
+        data = json.loads(content)
+        return datetime.fromisoformat(data["create_time"])
 
     def _get_agent_state_dir(self, agent: AgentInterface) -> Path:
         """Get the state directory for an agent."""
