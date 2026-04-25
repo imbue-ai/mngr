@@ -248,7 +248,7 @@ def test_resolve_project_config_dir_env_var_takes_precedence_over_context_dir(
 # =============================================================================
 
 
-def test_load_project_config_uses_mngr_project_dir(
+def test_load_project_config_uses_mngr_project_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     cg: ConcurrencyGroup,
