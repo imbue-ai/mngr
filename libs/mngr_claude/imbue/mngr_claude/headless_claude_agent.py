@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from typing import Callable
 
 from pydantic import Field
@@ -34,19 +35,26 @@ _STARTUP_GRACE_SECONDS: float = 10.0
 
 
 @pure
-def extract_text_delta(line: str) -> str | None:
-    """Extract text from a stream-json content_block_delta event.
+def _parse_stream_line(line: str) -> dict[str, Any] | None:
+    """Decode a single stream-json line into a dict.
 
-    Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise.
+    Returns the parsed dict on success, or None if the line is not valid
+    JSON or does not decode to a JSON object. Non-JSON lines (blank lines,
+    debug output that claude sometimes leaks to stdout) are expected and
+    silently skipped.
     """
     try:
         parsed = json.loads(line)
     except (json.JSONDecodeError, ValueError):
-        # Expected: the stream contains non-JSON lines (blank lines, debug
-        # output that claude sometimes leaks to stdout). Skip them silently.
         return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
+
+@pure
+def _extract_text_delta_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract text from an already-parsed stream-json content_block_delta event."""
     if parsed.get("type") != "stream_event":
         return None
 
@@ -72,12 +80,126 @@ def extract_text_delta(line: str) -> str | None:
 
 
 @pure
+def extract_text_delta(line: str) -> str | None:
+    """Extract text from a stream-json content_block_delta event.
+
+    Returns the delta text if the line is a content_block_delta with a text_delta,
+    or None otherwise. This handles the partial-message envelope emitted by
+    `claude --output-format stream-json --include-partial-messages`.
+    """
+    parsed = _parse_stream_line(line)
+    if parsed is None:
+        return None
+    return _extract_text_delta_from_parsed(parsed)
+
+
+@pure
+def _extract_assistant_text_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract concatenated text from an already-parsed top-level `assistant` event."""
+    if parsed.get("type") != "assistant":
+        return None
+
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    content_blocks = message.get("content")
+    if not isinstance(content_blocks, list):
+        return None
+
+    text_parts: list[str] = []
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            text_parts.append(text)
+
+    if not text_parts:
+        return None
+    return "".join(text_parts)
+
+
+@pure
+def extract_assistant_text(line: str) -> str | None:
+    """Extract concatenated text from a top-level `assistant` event's content blocks.
+
+    Without `--include-partial-messages`, `claude --output-format stream-json`
+    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
+    line per assistant turn. Returns the concatenation of all text blocks, or
+    None if the line is not an `assistant` event with at least one text block.
+    """
+    parsed = _parse_stream_line(line)
+    if parsed is None:
+        return None
+    return _extract_assistant_text_from_parsed(parsed)
+
+
+@pure
+def _extract_assistant_message_id_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract `message.id` from an already-parsed top-level `assistant` event."""
+    if parsed.get("type") != "assistant":
+        return None
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str):
+        return message_id
+    return None
+
+
+@pure
+def extract_assistant_message_id(line: str) -> str | None:
+    """Extract `message.id` from a top-level `assistant` event, if present."""
+    parsed = _parse_stream_line(line)
+    if parsed is None:
+        return None
+    return _extract_assistant_message_id_from_parsed(parsed)
+
+
+@pure
+def _extract_message_start_id_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract `message.id` from an already-parsed partial-stream `message_start` event."""
+    if parsed.get("type") != "stream_event":
+        return None
+    event = parsed.get("event")
+    if not isinstance(event, dict):
+        return None
+    if event.get("type") != "message_start":
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str):
+        return message_id
+    return None
+
+
+@pure
+def extract_message_start_id(line: str) -> str | None:
+    """Extract `message.id` from a partial-stream `message_start` event, if present.
+
+    With `--include-partial-messages`, claude emits a
+    `{"type":"stream_event","event":{"type":"message_start","message":{"id":"...",...}}}`
+    line at the start of each assistant message. The id lets us correlate
+    subsequent text deltas with a later top-level `assistant` summary that
+    carries the same id.
+    """
+    parsed = _parse_stream_line(line)
+    if parsed is None:
+        return None
+    return _extract_message_start_id_from_parsed(parsed)
+
+
+@pure
 def _is_result_event(line: str) -> bool:
     """Check if a stream-json line is a result event (signals completion)."""
-    try:
-        parsed = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        # Expected: non-JSON lines in the stream (see extract_text_delta).
+    parsed = _parse_stream_line(line)
+    if parsed is None:
         return False
     return parsed.get("type") == "result"
 
@@ -88,10 +210,8 @@ def _extract_result_error(line: str) -> str | None:
 
     Returns the error message if this is an error result, None otherwise.
     """
-    try:
-        parsed = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        # Expected: non-JSON lines in the stream (see extract_text_delta).
+    parsed = _parse_stream_line(line)
+    if parsed is None:
         return None
     if parsed.get("type") == "result" and parsed.get("is_error"):
         return parsed.get("result", "unknown error")
@@ -112,12 +232,94 @@ class _StreamTailState(MutableModel):
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
+    # Id of the assistant message currently being streamed via partial deltas
+    # (from `--include-partial-messages`'s `message_start` event), if any.
+    # Used to correlate deltas with the later top-level `assistant` summary
+    # that carries the same id. None when no partial-stream context is active.
+    streaming_message_id: str | None = None
+    # Concatenation of text already yielded for the in-progress turn. Used
+    # to compute the trailing diff when the `assistant` summary arrives, so
+    # that text present in the summary but not in the deltas is still emitted
+    # without re-emitting text already streamed.
+    yielded_text_in_current_turn: str = ""
 
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
         if current_mtime is not None and current_mtime != self.last_mtime:
             return True
         return self.is_finished()
+
+    def _reset_turn_state(self) -> None:
+        self.streaming_message_id = None
+        self.yielded_text_in_current_turn = ""
+
+    def _yield_text_for_line(self, stripped: str) -> Iterator[str]:
+        # Parse the line once and dispatch on its `type`, then delegate to
+        # the module-level extract helpers (their dict-accepting variants)
+        # so dict-walking logic lives in one place. The string-accepting
+        # public helpers are thin wrappers around the same dict logic.
+        parsed = _parse_stream_line(stripped)
+        if parsed is None:
+            return
+
+        event_type = parsed.get("type")
+
+        if event_type == "stream_event":
+            yield from self._handle_stream_event(parsed)
+            return
+
+        if event_type == "assistant":
+            yield from self._handle_assistant_event(parsed)
+            return
+
+    def _handle_stream_event(self, parsed: dict[str, Any]) -> Iterator[str]:
+        # message_start (partial stream): begin a new turn. Any deltas for
+        # the previous turn whose summary never arrived have already been
+        # yielded directly, so dropping the buffer here is safe.
+        start_id = _extract_message_start_id_from_parsed(parsed)
+        if start_id is not None:
+            self._reset_turn_state()
+            self.streaming_message_id = start_id
+            return
+
+        # text_delta (partial stream): yield the delta and record it in the
+        # per-turn buffer so we can subtract it from the matching summary.
+        delta_text = _extract_text_delta_from_parsed(parsed)
+        if delta_text is not None:
+            self.yielded_text_in_current_turn = self.yielded_text_in_current_turn + delta_text
+            yield delta_text
+
+    def _handle_assistant_event(self, parsed: dict[str, Any]) -> Iterator[str]:
+        # Top-level assistant event: reconcile against the per-turn buffer.
+        assistant_text = _extract_assistant_text_from_parsed(parsed)
+        if assistant_text is None:
+            return
+
+        assistant_id = _extract_assistant_message_id_from_parsed(parsed)
+        is_definitely_different_message = (
+            self.streaming_message_id is not None
+            and assistant_id is not None
+            and assistant_id != self.streaming_message_id
+        )
+
+        if is_definitely_different_message:
+            # The streamed deltas belonged to a previous message whose summary
+            # never arrived. Yield the full summary for this new message.
+            yield assistant_text
+        elif assistant_text.startswith(self.yielded_text_in_current_turn):
+            # Summary continues / matches what we already yielded; emit only
+            # the trailing extra text (empty string when they match exactly).
+            trailing_text = assistant_text[len(self.yielded_text_in_current_turn) :]
+            if trailing_text:
+                yield trailing_text
+        else:
+            # Buffer is not a prefix of the summary. Either deltas drifted from
+            # the summary or this is a different message we cannot disambiguate
+            # by id. Yield the full summary; better a possible partial double-
+            # emit than dropping the assistant message entirely.
+            yield assistant_text
+
+        self._reset_turn_state()
 
     def tail_until_done(self) -> Iterator[str]:
         got_result = False
@@ -153,9 +355,7 @@ class _StreamTailState(MutableModel):
                         self.result_error = _extract_result_error(stripped)
                         got_result = True
                         break
-                    text = extract_text_delta(stripped)
-                    if text is not None:
-                        yield text
+                    yield from self._yield_text_for_line(stripped)
 
         if not got_result:
             # Final drain after agent exits
@@ -172,9 +372,7 @@ class _StreamTailState(MutableModel):
                     if _is_result_event(stripped):
                         self.result_error = _extract_result_error(stripped)
                         break
-                    text = extract_text_delta(stripped)
-                    if text is not None:
-                        yield text
+                    yield from self._yield_text_for_line(stripped)
 
 
 class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
