@@ -21,6 +21,7 @@ from imbue.mngr.cli.common_opts import apply_config_defaults
 from imbue.mngr.cli.common_opts import apply_create_template
 from imbue.mngr.cli.common_opts import apply_settings_to_config
 from imbue.mngr.cli.common_opts import parse_output_options
+from imbue.mngr.cli.common_opts import setup_bootstrap_command_context
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -1060,6 +1061,72 @@ def test_setting_flag_sets_command_defaults_in_config(
     )
     assert result.exit_code == 0
     assert captured_config[0].commands["create"].defaults["connect"] is False
+
+
+# =============================================================================
+# Tests for setup_bootstrap_command_context
+# =============================================================================
+
+
+def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+    log_warnings: list[str],
+) -> None:
+    """End-to-end check that lifecycle commands skip plugin-section validation.
+
+    Regression guard for the branch's stated purpose: ``mngr plugin add``
+    and friends must not emit ``Unknown fields in providers.*`` or
+    ``references unknown backend`` warnings when the project config
+    references plugins not yet installed. This wires together
+    setup_bootstrap_command_context with a real project config file via
+    MNGR_PROJECT_DIR (mirroring the way the actual plugin lifecycle
+    commands invoke it).
+    """
+    # MNGR_PROJECT_DIR points at the directory that directly contains
+    # settings.toml (no .{root_name}/ subdirectory needed). Top-level keys
+    # like ``headless`` must come BEFORE any TOML table so they don't get
+    # absorbed into that table.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "settings.toml").write_text(
+        "headless = true\n\n"
+        '[providers.totally_fake]\nbackend = "totally_fake_backend"\n\n'
+        '[agent_types.worker]\nparent_type = "claude"\nnonexistent_field = true\n'
+    )
+
+    captured: list[tuple[Any, Any, bool]] = []
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        mngr_ctx, _output_opts, _opts = setup_bootstrap_command_context(
+            ctx=ctx,
+            command_name="plugin",
+            command_class=CommonCliOptions,
+        )
+        captured.append((mngr_ctx.config.providers, mngr_ctx.config.agent_types, mngr_ctx.config.headless))
+
+    result = cli_runner.invoke(
+        test_command,
+        [],
+        obj=plugin_manager,
+        catch_exceptions=False,
+        env={"MNGR_PROJECT_DIR": str(project_dir)},
+    )
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    providers, agent_types, headless = captured[0]
+    # Plugin-defined sections must be empty under the bootstrap path.
+    assert providers == {}
+    assert agent_types == {}
+    # Top-level fields must still be loaded.
+    assert headless is True
+    # No spurious warnings about plugin-defined sections.
+    assert not any("Unknown fields" in msg for msg in log_warnings), log_warnings
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
 
 
 def test_disable_plugin_in_command_defaults_blocks_override_hook(
