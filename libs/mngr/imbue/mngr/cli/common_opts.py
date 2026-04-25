@@ -282,9 +282,10 @@ def _finalize_command_setup(
         updated_params = apply_create_template(ctx, updated_params, mngr_ctx.config)
 
     # Block plugins that were disabled via command defaults or create templates
-    # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
-    # only blocks plugins from CLI args and [plugins] config sections; command
-    # defaults are applied later and need a second blocking pass.
+    # (e.g. disable_plugin from [commands.create] in settings.toml). The
+    # initial config-load step blocks plugins from CLI args and from the
+    # [plugins] config section (full load only); command defaults are applied
+    # after that and need a second blocking pass.
     updated_disable_plugin = updated_params.get("disable_plugin", ())
     if updated_disable_plugin:
         block_disabled_plugins(pm, frozenset(updated_disable_plugin))
