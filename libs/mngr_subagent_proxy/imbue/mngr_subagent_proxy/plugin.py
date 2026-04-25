@@ -122,8 +122,10 @@ def _is_subagent_proxy_child(agent: AgentInterface) -> bool:
     We mint proxy-child names as ``<parent>--subagent-<slug>-<tid>``; use
     that pattern as the signal. Conservative: the user could theoretically
     name a top-level agent with ``--subagent-`` in it and hit this by
-    accident, but it's exceedingly unlikely and the consequence is just
-    "Stop hooks are skipped" -- not a correctness hazard.
+    accident, in which case provisioning would refuse to proceed if the
+    agent inherits user-configured Stop/SubagentStop hooks (see
+    ``_check_subagent_hooks_compat``) and would strip any other
+    non-mngr hooks from the spawned subagent's settings.
     """
     return _SUBAGENT_NAME_INFIX in str(agent.name)
 
