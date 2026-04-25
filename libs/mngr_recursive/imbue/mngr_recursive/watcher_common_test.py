@@ -15,6 +15,7 @@ from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileOpenedEvent
 
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr_recursive.watcher_common import ChangeHandler
 from imbue.mngr_recursive.watcher_common import load_watchers_section
 from imbue.mngr_recursive.watcher_common import mtime_poll_directories
@@ -111,9 +112,10 @@ def test_load_watchers_section_reads_watchers_table(tmp_path: Path) -> None:
     assert result["conversation_poll_interval_seconds"] == 15
 
 
-def test_load_watchers_section_handles_corrupt_file(tmp_path: Path) -> None:
+def test_load_watchers_section_raises_on_corrupt_file(tmp_path: Path) -> None:
     _write_minds_settings_toml(tmp_path, "this is not valid toml {{{")
-    assert load_watchers_section(tmp_path) == {}
+    with pytest.raises(ConfigParseError):
+        load_watchers_section(tmp_path)
 
 
 def test_load_watchers_section_returns_empty_for_missing_section(tmp_path: Path) -> None:

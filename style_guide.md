@@ -543,16 +543,24 @@ Be very conservative with what exceptions are caught. Prefer to crash instead of
 
 ## Config and settings file parse errors
 
-Config and settings files (`.toml`, `.json`, and similar) must never be silently dropped on parse failure. A user whose file is corrupt must see a loud, immediate crash naming the bad file so they can repair it -- logging a warning and continuing turns a visible syntax problem into an invisible misconfiguration.
+The rule here is specifically about **user-managed config and settings files** -- `.toml` / `.json` files the user authored or edited (`settings.toml`, `minds.toml`, a credentials file they set up, etc.). These must never be silently dropped on parse failure. A user whose file is corrupt must see a loud, immediate crash naming the bad file so they can repair it -- logging a warning and continuing turns a visible syntax problem into an invisible misconfiguration.
 
-The only acceptable responses to corrupt config/settings data are:
+The only acceptable responses to a corrupt user config file are:
 
 - **(A) Make it impossible to create.** If our code writes the file, write it atomically (temp file + `os.replace`) so a crash mid-write can never leave a partial file behind.
-- **(B) Crash so the user can clean up manually.** If the file was written by another process (or predates our atomic-write discipline), let `tomllib.TOMLDecodeError` / `json.JSONDecodeError` propagate, optionally wrapped in a domain-specific error like `ConfigParseError` whose message includes the file path.
+- **(B) Crash so the user can clean up manually.** Let `tomllib.TOMLDecodeError` / `json.JSONDecodeError` propagate, optionally wrapped in a domain-specific error like `ConfigParseError` whose message includes the file path.
 
-Do not `pass`, `continue`, `return None`, log-and-fall-back, or otherwise swallow a decode error for any config or settings file. The `check_silent_decode_error_catches` ratchet guards this rule.
+Do not `pass`, `continue`, `return None`, or log-and-fall-back on a decode error for a user config file.
 
-The one narrow exception is JSONL event-stream parsers: individual malformed lines in an event log are a separate concern and may be skipped with an explicit log (the file as a whole is not a config).
+### When this rule does NOT apply
+
+The `check_silent_decode_error_catches` ratchet is a reminder, not a strict ban -- there are whole categories where silent-skip / graceful fallback is the correct behavior, and those sites legitimately count toward the ratchet:
+
+- **Internal state we wrote ourselves** -- agent `data.json`, host-store records, container tag labels, lock files, volume caches. If one record is corrupt we can log it and move on; we also own the writer, so the real fix is atomic writes (option A above), not crashing the reader.
+- **JSONL event streams** -- discovery/observe/transcript logs. A bad line must not take down the whole stream; skip-and-log per line is right.
+- **External input outside our control** -- subprocess stdout (e.g. `docker`, `limactl`), HTTP API responses, user-typed CLI flag values (where JSON duck-typing with a string fallback is intentional), shell-completion caches (blocking tab-complete on a stale cache is worse than the stale cache).
+
+If you hit the ratchet, first ask: *is the file a user-authored config?* If yes, fix it (crash or wrap-and-raise). If no, bump the ratchet count in the project's `test_ratchets.py` and leave a comment explaining which bucket it falls into.
 
 ## Timeouts
 

@@ -403,10 +403,15 @@ PREVENT_CAST_USAGE = RatchetRuleInfo(
 PREVENT_SILENT_DECODE_ERROR_CATCH = RatchetRuleInfo(
     rule_name="silent catches of TOMLDecodeError / JSONDecodeError",
     rule_description=(
-        "Do not silently catch TOMLDecodeError or JSONDecodeError. Corrupt config/settings files must "
-        "crash the process (or re-raise, possibly wrapped) so the user knows to clean them up. "
-        "Silently dropping a decode error turns a visible syntax problem into a silent misconfiguration. "
-        "See style guide: 'Config and settings file parse errors'."
+        "Do not silently catch TOMLDecodeError / JSONDecodeError when parsing a **user-managed config "
+        "or settings file** (e.g. .toml / settings.json the user authored or edited). A corrupt user "
+        "config must crash the process (or re-raise, possibly wrapped) so the user knows to clean it "
+        "up -- silently dropping the file turns a visible syntax problem into an invisible "
+        "misconfiguration. This rule does NOT apply when parsing internal state we wrote ourselves "
+        "(agent data.json, host-store caches, JSONL event streams, lock files) or external input "
+        "outside our control (subprocess stdout, API responses, user-typed CLI flag values). For "
+        "those, silent-skip / graceful-fallback is the right behavior -- bump the ratchet count to "
+        "cover them. See style guide: 'Config and settings file parse errors'."
     ),
 )
 
