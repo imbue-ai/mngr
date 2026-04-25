@@ -63,10 +63,13 @@ import sys
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
-# Claude Code embeds stop hook output as user-message text starting with this
-# marker. We reclassify those messages as tool results so transcript viewers
-# show them with the tool role rather than the user role (the human did not
-# type them).
+# Claude Code marks framework-injected user messages (stop hook output,
+# local-command caveats, etc.) with isMeta=true on the top-level event. We
+# use that flag to reclassify those messages as tool results so transcript
+# viewers show them under the tool role rather than the user role (no human
+# typed them). The prefix below is a best-effort label refinement -- if
+# Claude renames it, the message is still classified correctly under
+# tool_name="meta".
 _STOP_HOOK_PREFIX = "Stop hook feedback:"
 
 
@@ -146,6 +149,7 @@ def convert():
             event_type = raw.get("type", "")
             uuid = raw.get("uuid", "")
             timestamp = raw.get("timestamp", "")
+            is_meta = bool(raw.get("isMeta", False))
 
             if not uuid or not timestamp:
                 continue
@@ -224,9 +228,15 @@ def convert():
                 # Emit user text message if there is actual user text
                 if not _has_tool_results_only(content):
                     text = _extract_text_content(content)
-                    if text.startswith(_STOP_HOOK_PREFIX):
-                        event_id = _make_event_id(uuid, "stop_hook")
-                        if event_id not in existing_ids:
+                    if is_meta:
+                        # Framework-injected message (stop hook output, etc.) --
+                        # reclassify as tool_result so it doesn't masquerade as user input.
+                        if text.startswith(_STOP_HOOK_PREFIX):
+                            tool_name = "stop_hook"
+                        else:
+                            tool_name = "meta"
+                        event_id = _make_event_id(uuid, tool_name)
+                        if event_id not in existing_ids and text:
                             output = text
                             if len(output) > _MAX_OUTPUT_LENGTH:
                                 output = output[:_MAX_OUTPUT_LENGTH] + "..."
@@ -235,8 +245,8 @@ def convert():
                                 "type": "tool_result",
                                 "event_id": event_id,
                                 "source": "claude/common_transcript",
-                                "tool_call_id": f"stop_hook-{uuid}",
-                                "tool_name": "stop_hook",
+                                "tool_call_id": f"{tool_name}-{uuid}",
+                                "tool_name": tool_name,
                                 "output": output,
                                 "is_error": False,
                                 "message_uuid": uuid,

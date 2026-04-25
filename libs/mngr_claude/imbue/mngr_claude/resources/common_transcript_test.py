@@ -63,6 +63,7 @@ def _make_user_event(
     timestamp: str,
     text: str = "",
     tool_results: list[dict[str, object]] | None = None,
+    is_meta: bool = False,
 ) -> str:
     if text and not tool_results:
         content: str | list[dict[str, object]] = text
@@ -74,14 +75,15 @@ def _make_user_event(
             for tr in tool_results:
                 blocks.append({"type": "tool_result", **tr})
         content = blocks
-    return json.dumps(
-        {
-            "type": "user",
-            "uuid": uuid,
-            "timestamp": timestamp,
-            "message": {"role": "user", "content": content},
-        }
-    )
+    event: dict[str, Any] = {
+        "type": "user",
+        "uuid": uuid,
+        "timestamp": timestamp,
+        "message": {"role": "user", "content": content},
+    }
+    if is_meta:
+        event["isMeta"] = True
+    return json.dumps(event)
 
 
 class ScriptRunner:
@@ -496,17 +498,19 @@ def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) ->
     assert len(expected_path.read_text().strip().splitlines()) == 1
 
 
-def test_stop_hook_feedback_emitted_as_tool_result(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """User messages whose text starts with 'Stop hook feedback:' are reclassified as tool_result.
+def test_meta_user_message_with_stop_hook_prefix_classified_as_stop_hook(
+    tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    """isMeta=true messages whose text starts with the stop hook marker get tool_name='stop_hook'.
 
-    Claude Code injects stop hook output into the user-message stream, but the
-    human did not type it -- transcripts should display it with the tool role.
+    Claude Code injects stop hook output into the user-message stream with isMeta=true.
+    Transcripts should show it under the tool role since no human typed it.
     """
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     feedback = (
         "Stop hook feedback:\n[./scripts/main_claude_stop_hook.sh]: Everything up-to-date\nERROR: Some checks failed"
     )
-    runner.write_input([_make_user_event("uuid-stop", "2026-01-01T00:00:00Z", text=feedback)])
+    runner.write_input([_make_user_event("uuid-stop", "2026-01-01T00:00:00Z", text=feedback, is_meta=True)])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -521,10 +525,32 @@ def test_stop_hook_feedback_emitted_as_tool_result(tmp_path: Path, stub_mngr_log
     assert events[0]["event_id"] == "uuid-stop-stop_hook"
 
 
-def test_stop_hook_feedback_truncates_long_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_meta_user_message_without_stop_hook_prefix_classified_as_meta(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """isMeta=true messages that don't match the stop hook prefix get tool_name='meta'.
+
+    Claude Code uses isMeta=true for other framework-injected content too (e.g.
+    <local-command-caveat>). They still aren't user-typed, so they shouldn't show
+    under the user role -- but we don't pretend to know they are stop hook output.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    text = "<local-command-caveat>Caveat: framework-generated note</local-command-caveat>"
+    runner.write_input([_make_user_event("uuid-meta", "2026-01-01T00:00:00Z", text=text, is_meta=True)])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["tool_name"] == "meta"
+    assert events[0]["tool_call_id"] == "meta-uuid-meta"
+    assert events[0]["event_id"] == "uuid-meta-meta"
+
+
+def test_meta_user_message_truncates_long_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     feedback = "Stop hook feedback:\n" + "x" * 5000
-    runner.write_input([_make_user_event("uuid-stop2", "2026-01-01T00:00:00Z", text=feedback)])
+    runner.write_input([_make_user_event("uuid-stop2", "2026-01-01T00:00:00Z", text=feedback, is_meta=True)])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -535,14 +561,15 @@ def test_stop_hook_feedback_truncates_long_output(tmp_path: Path, stub_mngr_log_
     assert len(events[0]["output"]) <= 2003
 
 
-def test_stop_hook_feedback_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """Stop hook feedback delivered as a content list (with a text block) is also reclassified."""
+def test_meta_user_message_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """isMeta=true messages delivered as a content list (with a text block) are also reclassified."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     user = json.dumps(
         {
             "type": "user",
             "uuid": "uuid-stop-list",
             "timestamp": "2026-01-01T00:00:00Z",
+            "isMeta": True,
             "message": {
                 "role": "user",
                 "content": [{"type": "text", "text": "Stop hook feedback:\nWARN: nothing"}],
@@ -560,15 +587,46 @@ def test_stop_hook_feedback_with_list_content(tmp_path: Path, stub_mngr_log_sh: 
     assert events[0]["tool_name"] == "stop_hook"
 
 
-def test_user_text_not_starting_with_stop_hook_marker_unchanged(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """User text that merely mentions 'Stop hook feedback' but does not start with it stays a user_message."""
+def test_real_claude_stop_hook_entry_classified_correctly(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Regression test pinned to a real Claude Code stop hook session entry.
+
+    If Claude Code changes either the isMeta flag or the 'Stop hook feedback:'
+    marker, this test fails loudly so the converter can be updated deliberately.
+    The fixture below was captured from an actual ~/.claude/projects/.../*.jsonl
+    line emitted by Claude Code; only the uuid and timestamp were sanitized.
+    """
+    real_entry = (
+        '{"type": "user", "uuid": "fixture-uuid", "timestamp": "2026-01-01T00:00:00.000Z",'
+        ' "isMeta": true, "message": {"role": "user", "content":'
+        ' "Stop hook feedback:\\n[${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook_orchestrator.sh]:'
+        " Everything up-to-date\\nThe following review gates have not been satisfied:\\n"
+        '  - architecture verification (/verify-architecture)"}}'
+    )
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([real_entry])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["tool_name"] == "stop_hook"
+
+
+def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A real user message quoting the stop hook marker (no isMeta) is NOT reclassified.
+
+    This is the discriminating case where a content-prefix-only check would misfire:
+    a human pasting the marker into chat must still appear under the user role.
+    """
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     runner.write_input(
         [
             _make_user_event(
-                "uuid-mention",
+                "uuid-quote",
                 "2026-01-01T00:00:00Z",
-                text="I want to discuss Stop hook feedback: how does it work?",
+                text="Stop hook feedback:\nplease explain what this means",
             )
         ]
     )
