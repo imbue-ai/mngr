@@ -13,3 +13,8 @@ export DATABASE_URL=
 
 # Master key for litellm admin API (key generation, spend queries, etc.).
 export LITELLM_MASTER_KEY=
+
+# Public URL of the deployed litellm proxy. Used by the remote service
+# connector to return the base URL to clients (agents set ANTHROPIC_BASE_URL
+# to this value + "/anthropic"). Ignored by the litellm proxy itself.
+export LITELLM_PROXY_URL=

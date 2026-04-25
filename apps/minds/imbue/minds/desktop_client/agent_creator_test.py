@@ -12,8 +12,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import PLACEHOLDER_ANTHROPIC_API_KEY
 from imbue.minds.desktop_client.agent_creator import _build_latchkey_gateway_url
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
+from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _leased_agent_address
 from imbue.minds.desktop_client.agent_creator import _load_lease_info
@@ -33,6 +35,7 @@ from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -1021,3 +1024,60 @@ def test_agent_creator_cleans_up_pre_spawned_latchkey_gateway_on_failure(
         assert gateway_manager.get_gateway_info(agent_id) is None
     finally:
         gateway_manager.stop()
+
+
+def test_is_git_worktree_returns_false_for_normal_repo(tmp_path: Path) -> None:
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    assert _is_git_worktree(tmp_path) is False
+
+
+def test_is_git_worktree_returns_true_for_worktree(tmp_path: Path) -> None:
+    git_file = tmp_path / ".git"
+    git_file.write_text("gitdir: /some/other/path/.git/worktrees/foo")
+    assert _is_git_worktree(tmp_path) is True
+
+
+def test_is_git_worktree_returns_false_when_no_git(tmp_path: Path) -> None:
+    assert _is_git_worktree(tmp_path) is False
+
+
+def test_make_host_name_appends_host_suffix() -> None:
+    result = _make_host_name(AgentName("my-agent"))
+    assert result == "my-agent-host"
+
+
+def test_placeholder_anthropic_api_key_has_correct_prefix() -> None:
+    assert PLACEHOLDER_ANTHROPIC_API_KEY.startswith("sk-ant-api03-")
+
+
+def test_placeholder_anthropic_api_key_has_realistic_length() -> None:
+    assert len(PLACEHOLDER_ANTHROPIC_API_KEY) >= 100
+
+
+def test_agent_creator_accepts_litellm_key_client(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    client = LiteLLMKeyClient(connector_url=RemoteServiceConnectorUrl("http://127.0.0.1:1"))
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        litellm_key_client=client,
+    )
+    assert creator.litellm_key_client is client
+
+
+def test_agent_creator_litellm_key_client_defaults_to_none(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+    assert creator.litellm_key_client is None
