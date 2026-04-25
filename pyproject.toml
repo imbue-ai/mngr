@@ -183,7 +183,10 @@ source = [
 ]
 
 [tool.importlinter]
-root_package = "imbue"
+root_packages = [
+    "imbue.mngr",
+    "imbue.minds",
+]
 
 [[tool.importlinter.contracts]]
 name = "mngr layers contract"
