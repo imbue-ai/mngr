@@ -370,6 +370,7 @@ cli.add_command(provision, name="prov")
 cli.add_command(limit, name="lim")
 cli.add_command(rename, name="mv")
 cli.add_command(snapshot, name="snap")
+cli.add_command(events, name="events")
 
 
 # Add commands that use UNPROCESSED args and delegate to other commands.

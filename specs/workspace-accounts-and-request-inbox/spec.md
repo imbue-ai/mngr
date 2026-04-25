@@ -141,7 +141,7 @@
   - SuperTokens init remains the same (OAuth callback updates `MultiAccountSessionStore`)
 
 * **`apps/minds/imbue/minds/desktop_client/backend_resolver.py`** -- Changes:
-  - `_start_events_stream()` passes both `servers` and `requests` sources: `[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "requests", "--follow", "--quiet"]`
+  - `_start_events_stream()` passes both `servers` and `requests` sources: `[self.mngr_binary, "event", aid_str, SERVERS_EVENT_SOURCE_NAME, "requests", "--follow", "--quiet"]`
   - `_on_events_stream_output()` differentiates between server events and request events by checking the `source` field (from `EventEnvelope`)
   - New callback: `add_on_request_callback()` to notify the app when request events arrive
   - Convert `ServerLogRecord` to inherit from `EventEnvelope`
