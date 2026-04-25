@@ -128,19 +128,67 @@ def _is_subagent_proxy_child(agent: AgentInterface) -> bool:
     return _SUBAGENT_NAME_INFIX in str(agent.name)
 
 
-def _strip_stop_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Remove Stop and SubagentStop hooks from the agent's settings.local.json.
+class UnsupportedSubagentHookError(NotImplementedError):
+    """A spawned subagent inherits Stop/SubagentStop hooks we don't know how to translate.
 
-    Native Claude Code Task subagents never fire Stop hooks (the parent's
-    Stop hook runs at the outer end_turn, not per nested subagent). Our
-    mngr-managed proxy subagents should match that behavior, because
-    user-configured Stop hooks (e.g. imbue-code-guardian's
-    stop_hook_orchestrator.sh) often re-prompt the agent with
-    ``"Stop hook feedback: ..."``, which in a spawned subagent context
-    means the subagent never actually ends its turn and
-    ``subagent_wait`` hangs indefinitely.
+    Top-level-vs-subagent hook semantics differ (e.g. parent ``Stop`` hooks
+    often re-prompt the agent and would prevent the subagent from ever
+    ending its turn; a user's ``SubagentStop`` hook might be the one that
+    actually wants to fire when the mngr subagent completes its work).
+    Rather than guess wrong, refuse to proceed and make the user decide.
     """
-    settings_path = work_dir / ".claude" / "settings.local.json"
+
+
+# Substrings that mark a hook command as mngr-managed (readiness,
+# credential sync, subagent-proxy, wait pipeline). Anything whose command
+# doesn't contain one of these is treated as a user-configured hook --
+# i.e. a regular hook whose top-level-vs-subagent semantics we don't
+# know how to reason about, and which gets stripped from the spawned
+# subagent's settings.
+_MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
+    "$MNGR_AGENT_STATE_DIR",
+    "imbue.mngr_subagent_proxy.hooks.",
+    "sync_keychain_credentials.py",
+    "wait_for_stop_hook.sh",
+)
+
+# Same markers but the subset that's recognized as specifically the
+# mngr_claude baseline -- safe to carry into a subagent without
+# translation. The other mngr markers (subagent-proxy / readiness)
+# are already safe by construction since they're installed by us.
+_KNOWN_SAFE_HOOK_COMMAND_MARKERS: Final[tuple[str, ...]] = _MNGR_MANAGED_HOOK_MARKERS
+
+
+def _hook_command_is_mngr_managed(command: str) -> bool:
+    return any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS)
+
+
+def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
+    """Return True if every command in the hook entry is recognized as safe."""
+    inner = hook_entry.get("hooks")
+    if not isinstance(inner, list) or not inner:
+        return False
+    for cmd_entry in inner:
+        if not isinstance(cmd_entry, dict):
+            return False
+        command = cmd_entry.get("command")
+        if not isinstance(command, str):
+            return False
+        if not any(marker in command for marker in _KNOWN_SAFE_HOOK_COMMAND_MARKERS):
+            return False
+    return True
+
+
+def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterface) -> None:
+    """Refuse to provision a subagent-proxy child whose inherited Stop/SubagentStop hooks
+    need custom translation between top-level and subagent semantics.
+
+    We recognize the baseline mngr_claude readiness hook and let it through;
+    anything else is a user-configured hook whose intended scope we don't
+    know (should it run once per subagent turn? once per outer turn? not at
+    all?). Fail loudly rather than silently strip or silently duplicate.
+    """
+    settings_path = agent.work_dir / ".claude" / "settings.local.json"
     try:
         content = host.read_text_file(settings_path)
     except FileNotFoundError:
@@ -148,20 +196,27 @@ def _strip_stop_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
     try:
         settings: dict[str, Any] = json.loads(content)
     except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; not stripping Stop hooks", settings_path)
+        logger.warning("Could not parse settings.local.json at {}; assuming no stop hooks", settings_path)
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return
-    removed: list[str] = []
     for event_name in ("Stop", "SubagentStop"):
-        if event_name in hooks:
-            hooks.pop(event_name)
-            removed.append(event_name)
-    if not removed:
-        return
-    logger.info("Stripped {} hooks from spawned subagent {}", removed, settings_path)
-    host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            continue
+        unsafe = [e for e in entries if isinstance(e, dict) and not _is_known_safe_hook(e)]
+        if unsafe:
+            raise UnsupportedSubagentHookError(
+                f"Spawned mngr subagent {agent.name!r} inherits {len(unsafe)} "
+                f"{event_name} hook(s) whose top-level-vs-subagent semantics "
+                f"are ambiguous. mngr_subagent_proxy does not yet know how "
+                f"to translate these between the parent's scope and a "
+                f"spawned subagent's scope. Review each hook: if it should "
+                f"fire per subagent turn, install it there directly; if it "
+                f"should only fire at the outer end_turn, narrow its "
+                f"matcher. Offending settings path: {settings_path}"
+            )
 
 
 @hookimpl(trylast=True)
@@ -170,9 +225,9 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
 
     Runs trylast so mngr_claude's provisioning (which writes the base
     settings.local.json) has already completed. For agents we recognize
-    as our own spawned proxy-children, strip Stop / SubagentStop hooks
-    so the subagent matches native-Task end-of-turn semantics rather
-    than getting pulled back into a user-configured post-turn ritual.
+    as our own spawned proxy-children, refuse to proceed if they inherit
+    any Stop / SubagentStop hooks whose semantics differ between top-level
+    and subagent contexts -- the user has to decide how those should apply.
     """
     del mngr_ctx  # unused
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
@@ -182,4 +237,51 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     _merge_subagent_proxy_hooks(host, agent.work_dir)
 
     if _is_subagent_proxy_child(agent):
-        _strip_stop_hooks(host, agent.work_dir)
+        _check_subagent_hooks_compat(host, agent)
+        _strip_user_hooks_from_subagent(host, agent.work_dir)
+
+
+def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Strip non-mngr user-configured hooks from the spawned subagent's settings.
+
+    A spawned mngr subagent inherits the full settings.local.json from
+    the source repo at create time, which typically includes whatever
+    hooks the user has configured on the parent (PreToolUse filters,
+    PostToolUse notifications, etc.). Their top-level-vs-subagent
+    semantics are ambiguous, so drop everything that isn't recognized
+    as mngr-managed. The Stop/SubagentStop compat check already
+    rejected unsafe ones before we got here, so anything still present
+    in those events must be mngr baseline; the loop below simply
+    filters again for uniformity.
+    """
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    try:
+        content = host.read_text_file(settings_path)
+    except FileNotFoundError:
+        return
+    try:
+        settings: dict[str, Any] = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Could not parse settings.local.json at {}; not stripping user hooks", settings_path)
+        return
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+
+    stripped_any = False
+    for event_name in list(hooks.keys()):
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            continue
+        filtered = [e for e in entries if isinstance(e, dict) and _is_known_safe_hook(e)]
+        if len(filtered) != len(entries):
+            stripped_any = True
+        if filtered:
+            hooks[event_name] = filtered
+        else:
+            hooks.pop(event_name)
+
+    if not stripped_any:
+        return
+    logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
+    host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
