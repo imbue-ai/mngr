@@ -1137,6 +1137,44 @@ def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
     assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
 
 
+def test_setup_bootstrap_command_context_threads_setting_skip_to_apply(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    log_warnings: list[str],
+) -> None:
+    """End-to-end check that -S overrides for plugin sections are dropped on the bootstrap path.
+
+    Regression guard against the wiring from setup_bootstrap_command_context
+    through _finalize_command_setup into apply_settings_to_config silently
+    flipping back to parse_plugin_sections=True. If that happened, a
+    -S overriding a [providers.<name>].backend pointing at a missing backend
+    would raise ConfigParseError instead of emitting the drop warning.
+    """
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        setup_bootstrap_command_context(
+            ctx=ctx,
+            command_name="plugin",
+            command_class=CommonCliOptions,
+        )
+
+    result = cli_runner.invoke(
+        test_command,
+        ["-S", "providers.totally_fake.backend=totally_fake_backend"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    # Must exit cleanly: the unknown backend would raise on the strict full
+    # path, so a successful exit proves parse_plugin_sections=False reached
+    # apply_settings_to_config.
+    assert result.exit_code == 0, result.output
+    # Drop warning must be emitted, naming the providers section.
+    assert any("Ignoring" in msg and "providers" in msg for msg in log_warnings), log_warnings
+
+
 def test_disable_plugin_in_command_defaults_blocks_override_hook(
     cli_runner: CliRunner,
     tmp_path: Path,
