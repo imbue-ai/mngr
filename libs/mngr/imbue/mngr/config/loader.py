@@ -121,12 +121,16 @@ def load_bootstrap_context(
     fields and unknown backends.
 
     Top-level config fields (logging, retry, headless, etc.) are still validated
-    in non-strict mode. Disabled-plugin discovery comes from the lightweight
-    pre-reader in ``pre_readers.py`` rather than parsing the [plugins] section.
+    in non-strict mode.
 
     Returns a MngrContext whose ``config.providers``, ``config.agent_types``,
-    and ``config.plugins`` are all empty dicts. Callers that depend on those
-    fields must use ``load_config`` instead.
+    and ``config.plugins`` are all empty dicts. ``config.disabled_plugins``
+    reflects only CLI-level ``--disable-plugin`` flags; plugins disabled via
+    ``[plugins.<name>] enabled = false`` in a config file remain blocked at
+    plugin-manager creation time (via the lightweight pre-reader in
+    ``pre_readers.py``) but will not appear in ``config.disabled_plugins``.
+    Callers that depend on any of these fields must use ``load_config``
+    instead.
     """
     return _load_context(
         pm=pm,
