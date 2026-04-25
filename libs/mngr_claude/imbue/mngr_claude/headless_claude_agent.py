@@ -268,15 +268,15 @@ class _StreamTailState(MutableModel):
         # delegate to the module-level extract helpers (their dict-accepting
         # variants) so dict-walking logic lives in one place. The string-
         # accepting public helpers are thin wrappers around the same dict logic.
-        event_type = parsed.get("type")
-
-        if event_type == "stream_event":
-            yield from self._handle_stream_event(parsed)
-            return
-
-        if event_type == "assistant":
-            yield from self._handle_assistant_event(parsed)
-            return
+        match parsed.get("type"):
+            case "stream_event":
+                yield from self._handle_stream_event(parsed)
+            case "assistant":
+                yield from self._handle_assistant_event(parsed)
+            case _:
+                # Other event types (system, user, etc.) carry no text to
+                # surface here and are intentionally skipped.
+                pass
 
     def _handle_stream_event(self, parsed: dict[str, Any]) -> Iterator[str]:
         # message_start (partial stream): begin a new turn. Any deltas for
