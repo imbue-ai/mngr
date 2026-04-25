@@ -163,7 +163,7 @@ def _stream_all_events_cli(
 CommandHelpMetadata(
     key="event",
     one_line_description="View events from an agent or host",
-    synopsis="mngr [event|events] TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]",
+    synopsis="mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host name/ID whose events to view\n"
         "- `SOURCES`: Event sources to include (optional; includes all sources if omitted). "

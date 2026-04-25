@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [event|events] TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
+mngr event TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]
 ```
 
 View events from an agent or host.
