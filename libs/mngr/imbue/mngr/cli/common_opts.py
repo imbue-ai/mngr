@@ -531,16 +531,16 @@ def apply_settings_to_config(
         parsed_value = _parse_setting_value(value_str)
         _set_nested_dict_value(raw, key_path, parsed_value)
 
-    # When the bootstrap path skips plugin sections, surface a warning naming
-    # any --setting overrides that target those sections so the user does not
+    # When the caller skips plugin sections, surface a warning naming any
+    # --setting overrides that target those sections so the user does not
     # silently lose an explicitly-requested override.
     if not parse_plugin_sections:
         dropped_sections = [section for section in ("agent_types", "providers", "plugins") if section in raw]
         if dropped_sections:
             logger.warning(
-                "Ignoring --setting overrides for plugin-defined section(s) {} on this command "
-                "(plugin lifecycle commands skip plugin config to avoid validating plugins that "
-                "may not yet be installed).",
+                "Ignoring --setting overrides for plugin-defined section(s) {}: this command does "
+                "not parse plugin-defined config sections, since the referenced plugins may not be "
+                "installed yet.",
                 dropped_sections,
             )
 
