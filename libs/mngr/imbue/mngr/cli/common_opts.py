@@ -160,6 +160,7 @@ def setup_command_context(
         pm=pm,
         initial_opts=initial_opts,
         mngr_ctx=mngr_ctx,
+        parse_plugin_sections=True,
     )
 
 
@@ -198,6 +199,7 @@ def setup_bootstrap_command_context(
         pm=pm,
         initial_opts=initial_opts,
         mngr_ctx=mngr_ctx,
+        parse_plugin_sections=False,
     )
 
 
@@ -239,12 +241,19 @@ def _finalize_command_setup(
     pm: pluggy.PluginManager,
     initial_opts: TCommandOptions,
     mngr_ctx: MngrContext,
+    parse_plugin_sections: bool,
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
     """Run the post-load setup steps shared by full and bootstrap command contexts.
 
     Resolves interactivity, applies overrides and config defaults, sets up
     logging, runs pre-command scripts, and fires the ``on_before_command``
     hook. Returns the final (mngr_ctx, output_opts, opts) tuple.
+
+    ``parse_plugin_sections`` controls whether ``--setting`` overrides that
+    target plugin-defined sections ([agent_types], [providers], [plugins]) are
+    parsed and validated. Pass False on the bootstrap path so that lifecycle
+    commands (``mngr plugin add`` etc.) do not warn about unknown backends or
+    fields in plugin sections that may reference plugins not yet installed.
     """
     # Resolve is_interactive from all sources.
     # Precedence: --headless CLI flag > config/env headless > TTY auto-detect
@@ -269,6 +278,7 @@ def _finalize_command_setup(
             mngr_ctx.config,
             initial_opts.setting,
             mngr_ctx.config.disabled_plugins,
+            parse_plugin_sections=parse_plugin_sections,
         )
         mngr_ctx = mngr_ctx.model_copy_update(
             to_update(mngr_ctx.field_ref().config, updated_config),
@@ -475,12 +485,19 @@ def apply_settings_to_config(
     config: MngrConfig,
     settings: Sequence[str],
     disabled_plugins: frozenset[str],
+    *,
+    parse_plugin_sections: bool = True,
 ) -> MngrConfig:
     """Apply --setting KEY=VALUE overrides to a loaded config.
 
     Parses each setting string, builds a raw config dict, parses it through the
     config system, and merges it with the existing config. This gives --setting
     the same semantics as config file values but at a higher precedence.
+
+    When ``parse_plugin_sections`` is False, ``-S`` keys targeting
+    [agent_types], [providers], or [plugins] are dropped without validation --
+    matching ``load_bootstrap_context`` so that plugin lifecycle commands stay
+    quiet about plugins/backends that are not yet installed.
     """
     if not settings:
         return config
@@ -501,7 +518,12 @@ def apply_settings_to_config(
         _set_nested_dict_value(raw, key_path, parsed_value)
 
     # Parse through the config system and merge with the existing config
-    settings_config = parse_config(raw, disabled_plugins=disabled_plugins, strict=True)
+    settings_config = parse_config(
+        raw,
+        disabled_plugins=disabled_plugins,
+        strict=True,
+        parse_plugin_sections=parse_plugin_sections,
+    )
     return config.merge_with(settings_config)
 
 
