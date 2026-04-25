@@ -116,10 +116,12 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 ## Available Fields
 
-The fields below can be used in three places, with the same names everywhere:
+The fields below use the same names across the three places they can appear:
 - CEL expressions for `--include`/`--exclude` (filtering)
 - CEL expressions for `--sort` (ordering)
 - `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+Each subsection notes where its fields are available; agent and host fields work in all three contexts, while computed fields are only available in the CEL contexts.
 
 **Agent fields:**
 - `name` - Agent name
