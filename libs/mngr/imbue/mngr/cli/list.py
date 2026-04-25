@@ -73,6 +73,19 @@ _HEADER_LABELS: Final[dict[str, str]] = {
     "activity_sources": "ACTIVITY",
 }
 
+# Aliases that let users reference fields by the same name in --fields/--format
+# templates as they do in CEL filters and --sort. host.provider is the short form
+# documented for CEL; the underlying attribute is host.provider_name.
+_FIELD_ALIASES: Final[dict[str, str]] = {
+    "host.provider": "host.provider_name",
+}
+
+
+@pure
+def _resolve_field_alias(field: str) -> str:
+    """Map a user-supplied field name to its canonical form for attribute/dict lookups."""
+    return _FIELD_ALIASES.get(field, field)
+
 
 @pure
 def _is_streaming_eligible(
@@ -140,12 +153,12 @@ class ListCliOptions(CommonCliOptions):
 @optgroup.option(
     "--include",
     multiple=True,
-    help="Include agents matching CEL expression (repeatable)",
+    help="Include agents matching CEL expression, repeatable (e.g. 'state == \"RUNNING\"'); see 'Available Fields' below",
 )
 @optgroup.option(
     "--exclude",
     multiple=True,
-    help="Exclude agents matching CEL expression (repeatable)",
+    help="Exclude agents matching CEL expression, repeatable (e.g. 'host.provider == \"local\"'); see 'Available Fields' below",
 )
 @optgroup.option(
     "--running",
@@ -722,8 +735,9 @@ def _get_header_label(field: str, custom_headers: dict[str, str] | None = None) 
     """Get the display label for a column header."""
     if custom_headers and field in custom_headers:
         return custom_headers[field]
-    if field in _HEADER_LABELS:
-        return _HEADER_LABELS[field]
+    canonical_field = _resolve_field_alias(field)
+    if canonical_field in _HEADER_LABELS:
+        return _HEADER_LABELS[canonical_field]
     return field.upper().replace(".", " ")
 
 
@@ -734,10 +748,12 @@ def _compute_column_widths(
     """Compute column widths sized to the terminal, distributing extra space to expandable columns."""
     separator_total = len(_COLUMN_SEPARATOR) * max(len(fields) - 1, 0)
 
-    # Start with minimum widths, ensuring each column is at least as wide as its header
+    # Start with minimum widths, ensuring each column is at least as wide as its header.
+    # Column-width tables are keyed by canonical field names, so resolve aliases before lookup.
     width_by_field: dict[str, int] = {}
     for field in fields:
-        min_data_width = _MIN_COLUMN_WIDTHS.get(field, _DEFAULT_MIN_COLUMN_WIDTH)
+        canonical_field = _resolve_field_alias(field)
+        min_data_width = _MIN_COLUMN_WIDTHS.get(canonical_field, _DEFAULT_MIN_COLUMN_WIDTH)
         header_width = len(_get_header_label(field, custom_headers))
         width_by_field[field] = max(min_data_width, header_width)
 
@@ -748,14 +764,14 @@ def _compute_column_widths(
     # Process columns sorted by tightest max cap first so capped leftovers flow to less
     # constrained columns in a single pass.
     if fields and extra_space > 0:
-        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(f, float("inf")))
+        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(f), float("inf")))
         remaining = extra_space
         for idx, field in enumerate(sorted_fields):
             fields_left = len(sorted_fields) - idx
             per_column = remaining // fields_left
             extra = 1 if (remaining % fields_left) > 0 else 0
             bonus = per_column + extra
-            max_width = _MAX_COLUMN_WIDTHS.get(field)
+            max_width = _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(field))
             if max_width is not None and width_by_field[field] + bonus > max_width:
                 bonus = max(max_width - width_by_field[field], 0)
             width_by_field[field] = width_by_field[field] + bonus
@@ -1054,6 +1070,9 @@ def _get_field_value(agent: AgentDetails, field: str) -> str:
     Supports nested fields like "host.name" and list slicing syntax like
     "host.snapshots[0]" or "host.snapshots[:3]".
     """
+    # Resolve aliases first so a user-supplied alias (e.g. host.provider) maps to the
+    # canonical attribute name (host.provider_name) before walking the agent object.
+    field = _resolve_field_alias(field)
     # Handle nested fields (e.g., "host.name") with optional bracket notation
     # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
     parts = field.split(".")
@@ -1176,7 +1195,12 @@ All agent fields from the "Available Fields" section can be used in filter expre
         ),
         (
             "Available Fields",
-            """**Agent fields** (same syntax for `--fields` and CEL filters):
+            """The fields below can be used in three places, with the same names everywhere:
+- CEL expressions for `--include`/`--exclude` (filtering)
+- CEL expressions for `--sort` (ordering)
+- `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+**Agent fields:**
 - `name` - Agent name
 - `id` - Agent ID
 - `type` - Agent type (claude, codex, etc.)
@@ -1189,7 +1213,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `runtime_seconds` - How long the agent has been running
 - `user_activity_time` - Timestamp of the last user activity
 - `agent_activity_time` - Timestamp of the last agent activity
-- `idle_seconds` - How long since the agent was active
+- `idle_seconds` - How long since the agent was active (also factors in host SSH activity)
 - `idle_mode` - Idle detection mode
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
@@ -1199,10 +1223,15 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
 
-**Host fields** (dot notation for both `--fields` and CEL filters):
+**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
+- `age` - Seconds since `create_time`
+- `runtime` - Alias for `runtime_seconds`
+- `idle` - Seconds since the more recent of `user_activity_time` and `agent_activity_time` (only present when at least one is set; differs from `idle_seconds`, which also factors in host SSH activity)
+
+**Host fields** (dot notation):
 - `host.name` - Host name
 - `host.id` - Host ID
-- `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
+- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Host labels (metadata key-value pairs)

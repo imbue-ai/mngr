@@ -369,8 +369,12 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
     assert context["idle"] < 320
 
 
-def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
-    """agent_details_to_cel_context should rename host.provider_name to host.provider."""
+def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
+    """agent_details_to_cel_context exposes host.provider_name as host.provider too.
+
+    Both names must work in CEL filters and templates so users do not have to remember
+    which form the implementation chose.
+    """
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -381,9 +385,8 @@ def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
 
     assert "host" in context
     host = context["host"]
-    assert "provider" in host
-    assert "provider_name" not in host
     assert host["provider"] == "modal"
+    assert host["provider_name"] == "modal"
 
 
 # =============================================================================
