@@ -268,9 +268,13 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         else:
             raise NoCommandDefinedError(f"No command defined for agent type '{self.agent_type}'")
 
-        all_extra_args = self.agent_config.cli_args + agent_args
-        quoted_extra_args = " ".join(shlex.quote(arg) for arg in all_extra_args)
-        cmd_str = f"{base} --print {quoted_extra_args}".rstrip()
+        # cli_args reach here already shell-safe: string-form configs go through split_cli_args_string
+        # (non-POSIX shlex that preserves quote chars in tokens). agent_args come from Click in POSIX
+        # mode with quotes stripped, so we must re-quote them to survive shell splicing.
+        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
+        all_extra_args = self.agent_config.cli_args + quoted_agent_args
+        extra_args_str = " ".join(all_extra_args)
+        cmd_str = f"{base} --print {extra_args_str}".rstrip()
         return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
 
     def _get_stdout_path(self) -> Path:

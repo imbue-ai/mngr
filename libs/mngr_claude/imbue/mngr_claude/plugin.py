@@ -1471,9 +1471,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Use the agent ID as the stable UUID for session identification
         agent_uuid = str(self.id.get_uuid())
 
-        # Build the additional arguments (cli_args from config + agent_args from CLI)
-        all_extra_args = self.agent_config.cli_args + agent_args
-        args_str = " ".join(shlex.quote(arg) for arg in all_extra_args) if all_extra_args else ""
+        # Build the additional arguments (cli_args from config + agent_args from CLI).
+        # cli_args reach here already shell-safe (string-form configs are split with non-POSIX
+        # shlex that preserves quotes); agent_args come from Click in POSIX mode and must be
+        # re-quoted to survive shell splicing.
+        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
+        all_extra_args = self.agent_config.cli_args + quoted_agent_args
+        args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
         # This handles session replacement (e.g., exit plan mode, /clear, compaction) where

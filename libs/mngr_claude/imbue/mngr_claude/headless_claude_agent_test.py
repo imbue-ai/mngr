@@ -264,6 +264,33 @@ def test_assemble_command_quotes_agent_args_with_shell_metacharacters(
     assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
 
 
+def test_assemble_command_does_not_double_quote_pre_quoted_cli_args(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """cli_args reach assemble_command already shell-safe (see split_cli_args_string).
+
+    Re-quoting them would break the documented round-trip contract: a string config like
+    --settings '{"key": "value"}' is shlex-split in non-POSIX mode so the JSON keeps its
+    outer single quotes in-token. A second round of shlex.quote would wrap those single
+    quotes in another layer, breaking the final shell command.
+    """
+    # Same tokens split_cli_args_string produces for --settings '{"key": "value"}'
+    pre_quoted_json = '\'{"key": "value"}\''
+    config = HeadlessClaudeAgentConfig(
+        cli_args=("--settings", pre_quoted_json),
+        check_installation=False,
+    )
+    agent, host = _make_headless_agent(local_provider, tmp_path, agent_config=config)
+    cmd = agent.assemble_command(host, agent_args=(), command_override=None)
+
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert '{"key": "value"}' in tokens, (
+        f'pre-quoted cli_arg JSON should pass through shell as \'{{"key": "value"}}\', got tokens={tokens!r}'
+    )
+
+
 # =============================================================================
 # Tests for stream_output
 # =============================================================================
