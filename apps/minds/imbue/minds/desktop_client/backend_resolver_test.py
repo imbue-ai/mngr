@@ -590,6 +590,61 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVICE_WEB) == "http://127.0.0.1:9200"
 
 
+def test_stream_manager_on_events_stream_output_dispatches_refresh_source() -> None:
+    """A refresh-source event fires the refresh callback, not the service update path."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    received: list[tuple[str, str]] = []
+    manager.resolver.add_on_refresh_callback(lambda aid, raw: received.append((aid, raw)))
+
+    refresh_line = json.dumps({"source": "refresh", "type": "refresh_service", "service_name": "web"})
+    manager._on_events_stream_output(refresh_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert len(received) == 1
+    aid, raw = received[0]
+    assert aid == str(_AGENT_A)
+    assert json.loads(raw)["service_name"] == "web"
+    # Must not touch the service map.
+    assert manager.resolver.list_services_for_agent(_AGENT_A) == ()
+
+
+def test_stream_manager_on_events_stream_output_dispatches_requests_source() -> None:
+    """A requests-source event fires the request callback, not the refresh callback."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    refresh_seen: list[tuple[str, str]] = []
+    request_seen: list[tuple[str, str]] = []
+    manager.resolver.add_on_refresh_callback(lambda aid, raw: refresh_seen.append((aid, raw)))
+    manager.resolver.add_on_request_callback(lambda aid, raw: request_seen.append((aid, raw)))
+
+    request_line = json.dumps({"source": "requests", "type": "sharing_request"})
+    manager._on_events_stream_output(request_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert len(request_seen) == 1
+    assert refresh_seen == []
+
+
+def test_refresh_callback_remove_stops_dispatch() -> None:
+    """remove_on_refresh_callback unregisters the callback."""
+    manager = _make_stream_manager()
+    manager._events_services[str(_AGENT_A)] = {}
+
+    received: list[tuple[str, str]] = []
+
+    def _cb(aid: str, raw: str) -> None:
+        received.append((aid, raw))
+
+    manager.resolver.add_on_refresh_callback(_cb)
+    manager.resolver.remove_on_refresh_callback(_cb)
+
+    refresh_line = json.dumps({"source": "refresh", "service_name": "web"})
+    manager._on_events_stream_output(refresh_line, is_stdout=True, agent_id=_AGENT_A)
+
+    assert received == []
+
+
 def _make_discovery_full_line(
     agents: list[tuple[str, str]],
     hosts: list[str],
