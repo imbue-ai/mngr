@@ -364,8 +364,9 @@ def test_parse_agent_types_uses_parent_type_config_class() -> None:
 
 
 def test_parse_agent_types_unknown_field_hints_at_missing_plugin() -> None:
-    """When the agent type has no registered config class, the unknown-field
-    error should hint that the providing plugin may not be installed."""
+    """When the agent type has no registered config class and no plugins are
+    disabled, the unknown-field error should suggest the providing plugin
+    package may not be installed."""
     reset_agent_config_registry()
     try:
         # claude is intentionally not registered here -- simulates the plugin
@@ -375,7 +376,23 @@ def test_parse_agent_types_unknown_field_hints_at_missing_plugin() -> None:
             _parse_agent_types(raw, disabled_plugins=frozenset())
         msg = str(exc_info.value)
         assert "is_fast" in msg
-        assert "plugin that provides agent type 'claude' is not installed" in msg
+        assert "imbue-mngr-claude" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_unknown_field_hints_when_other_plugins_disabled() -> None:
+    """When some plugins are disabled but not the unknown type itself, the
+    error should list the disabled plugins so the user can spot a match."""
+    reset_agent_config_registry()
+    try:
+        raw = {"claude": {"is_fast": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset({"codex"}))
+        msg = str(exc_info.value)
+        assert "is_fast" in msg
+        assert "Currently disabled plugins" in msg
+        assert "codex" in msg
     finally:
         reset_agent_config_registry()
 
@@ -393,6 +410,7 @@ def test_parse_agent_types_no_plugin_hint_when_type_is_registered() -> None:
         msg = str(exc_info.value)
         assert "bogus_option" in msg
         assert "not installed" not in msg
+        assert "imbue-mngr-" not in msg
     finally:
         reset_agent_config_registry()
 

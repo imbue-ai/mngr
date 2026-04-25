@@ -468,20 +468,31 @@ def _parse_agent_types(
             continue
         effective_type = parent_type if parent_type is not None else name
         config_class = get_agent_config_class(effective_type)
-        # If no specific config class is registered for this type, the field set
-        # we'll validate against is the bare base AgentTypeConfig -- which will
-        # reject any plugin-specific fields (e.g. claude's `is_fast`). Surface
-        # this so the user knows the failure may be due to a missing plugin
-        # rather than a typo.
-        if not is_agent_config_registered(effective_type):
+        # If no specific config class is registered for this type, the field
+        # set we'll validate against is the bare base AgentTypeConfig -- which
+        # will reject any plugin-specific fields (e.g. claude's `is_fast`).
+        # Mirror the hint shape used by _parse_providers so users learn whether
+        # the cause is a missing plugin (or a typo) rather than thinking they
+        # mistyped a field name. The "type name matches a disabled plugin"
+        # case is already handled upstream by _has_disabled_ancestor (the
+        # entire block is skipped), so it isn't surfaced here.
+        if is_agent_config_registered(effective_type):
+            extra_hint = None
+        elif disabled_plugins:
             extra_hint = (
-                "This may be because:\n"
-                f"  - The plugin that provides agent type '{effective_type}' is not installed\n"
-                f"  - Agent type '{effective_type}' is not defined (check the name for typos)\n"
-                "  - One or more field names are misspelled"
+                f"If '{effective_type}' is provided by a disabled plugin, enable it. "
+                f"Currently disabled plugins: {', '.join(sorted(disabled_plugins))}. "
+                "Otherwise the plugin package that provides this agent type may not be "
+                f"installed (try reinstalling mngr with --with 'imbue-mngr-{effective_type}'), "
+                "or one or more field names are misspelled."
             )
         else:
-            extra_hint = None
+            extra_hint = (
+                f"The plugin package that provides agent type '{effective_type}' may not be "
+                f"installed. If you installed mngr as a tool, try reinstalling with the "
+                f"plugin package (e.g. --with 'imbue-mngr-{effective_type}'). "
+                "Otherwise the agent type name or one of the field names may be misspelled."
+            )
         _check_unknown_fields(
             raw_config,
             config_class,
