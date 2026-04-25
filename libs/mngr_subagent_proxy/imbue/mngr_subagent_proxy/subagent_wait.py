@@ -76,7 +76,6 @@ class TailState:
     path: Path | None = None
     offset: int = 0
     pending_buffer: str = ""
-    text_events: list[dict] = field(default_factory=list)
 
 
 def _run_mngr_list() -> list[dict]:
