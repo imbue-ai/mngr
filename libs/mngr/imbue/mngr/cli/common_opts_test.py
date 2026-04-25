@@ -1,5 +1,6 @@
 """Tests for common_opts module."""
 
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pluggy
 import pytest
 from click.core import ParameterSource
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import _parse_setting_value
@@ -34,6 +36,15 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 
 hookimpl = pluggy.HookimplMarker("mngr")
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    yield messages
+    logger.remove(handler_id)
 
 
 def _make_click_context(
@@ -928,6 +939,49 @@ def test_apply_settings_to_config_unknown_field_raises() -> None:
     config = MngrConfig(prefix="test-")
     with pytest.raises(ConfigParseError, match="Unknown configuration fields"):
         apply_settings_to_config(config, ("totally_bogus_key=value",), frozenset())
+
+
+def test_apply_settings_to_config_warns_when_dropping_plugin_section_overrides(
+    mngr_test_prefix: str, log_warnings: list[str]
+) -> None:
+    """When parse_plugin_sections=False, dropping a -S override targeting a plugin section warns."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    apply_settings_to_config(
+        config,
+        ("providers.totally_fake.backend=fake",),
+        frozenset(),
+        parse_plugin_sections=False,
+    )
+    assert any("providers" in msg and "Ignoring" in msg for msg in log_warnings), log_warnings
+
+
+def test_apply_settings_to_config_no_warning_when_no_plugin_section_overrides(
+    mngr_test_prefix: str, log_warnings: list[str]
+) -> None:
+    """parse_plugin_sections=False must not warn about non-plugin -S overrides."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    apply_settings_to_config(
+        config,
+        ("prefix=other-",),
+        frozenset(),
+        parse_plugin_sections=False,
+    )
+    assert not any("Ignoring" in msg for msg in log_warnings), log_warnings
+
+
+def test_apply_settings_to_config_full_path_does_not_warn_for_plugin_sections(
+    mngr_test_prefix: str, log_warnings: list[str]
+) -> None:
+    """The default parse_plugin_sections=True path must not emit the bootstrap drop warning."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    # This will raise on unknown backend (strict=True), but should NOT trigger the bootstrap-drop warning.
+    with pytest.raises(ConfigParseError):
+        apply_settings_to_config(
+            config,
+            ("providers.totally_fake.backend=fake",),
+            frozenset(),
+        )
+    assert not any("Ignoring" in msg for msg in log_warnings), log_warnings
 
 
 # =============================================================================

@@ -15,6 +15,7 @@ from click.core import ParameterSource
 from click_option_group import GroupedOption
 from click_option_group import OptionGroup
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
@@ -497,7 +498,9 @@ def apply_settings_to_config(
     When ``parse_plugin_sections`` is False, ``-S`` keys targeting
     [agent_types], [providers], or [plugins] are dropped without validation --
     matching ``load_bootstrap_context`` so that plugin lifecycle commands stay
-    quiet about plugins/backends that are not yet installed.
+    quiet about plugins/backends that are not yet installed. A warning is
+    emitted naming any such dropped sections, so the user is not left guessing
+    why their override had no effect.
     """
     if not settings:
         return config
@@ -516,6 +519,19 @@ def apply_settings_to_config(
             raise UserInputError("Invalid --setting: key cannot be empty")
         parsed_value = _parse_setting_value(value_str)
         _set_nested_dict_value(raw, key_path, parsed_value)
+
+    # When the bootstrap path skips plugin sections, surface a warning naming
+    # any --setting overrides that target those sections so the user does not
+    # silently lose an explicitly-requested override.
+    if not parse_plugin_sections:
+        dropped_sections = [section for section in ("agent_types", "providers", "plugins") if section in raw]
+        if dropped_sections:
+            logger.warning(
+                "Ignoring --setting overrides for plugin-defined section(s) {} on this command "
+                "(plugin lifecycle commands skip plugin config to avoid validating plugins that "
+                "may not yet be installed).",
+                dropped_sections,
+            )
 
     # Parse through the config system and merge with the existing config
     settings_config = parse_config(
