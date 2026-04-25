@@ -481,7 +481,6 @@ def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> N
     current[keys[-1]] = value
 
 
-@pure
 def apply_settings_to_config(
     config: MngrConfig,
     settings: Sequence[str],
