@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -267,13 +268,9 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         else:
             raise NoCommandDefinedError(f"No command defined for agent type '{self.agent_type}'")
 
-        parts = [base, "--print"]
-
         all_extra_args = self.agent_config.cli_args + agent_args
-        if all_extra_args:
-            parts.extend(all_extra_args)
-
-        cmd_str = " ".join(parts)
+        quoted_extra_args = " ".join(shlex.quote(arg) for arg in all_extra_args)
+        cmd_str = f"{base} --print {quoted_extra_args}".rstrip()
         return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
 
     def _get_stdout_path(self) -> Path:

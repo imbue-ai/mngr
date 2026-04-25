@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 import time
 from datetime import datetime
@@ -243,6 +244,24 @@ def test_assemble_command_is_posix_compatible(
     command = agent.assemble_command(host, agent_args=(), command_override=None)
 
     assert_posix_compatible(str(command))
+
+
+def test_assemble_command_quotes_agent_args_with_shell_metacharacters(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Agent args containing shell metacharacters must survive shell parsing as single tokens."""
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+    prompt = "respond with only the word HELLO; echo pwned & rm -rf $HOME"
+    cmd = agent.assemble_command(
+        host,
+        agent_args=("--verbose", prompt),
+        command_override=None,
+    )
+
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
 
 
 # =============================================================================
