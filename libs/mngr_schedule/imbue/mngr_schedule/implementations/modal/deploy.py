@@ -606,12 +606,6 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
-    if not isinstance(result, str):
-        raise MngrError(
-            f"Modal function returned unexpected type {type(result).__name__}; expected str. "
-            "run_scheduled_trigger may have a mismatched signature."
-        )
-    return result
 
     if not isinstance(result, dict):
         raise MngrError(
