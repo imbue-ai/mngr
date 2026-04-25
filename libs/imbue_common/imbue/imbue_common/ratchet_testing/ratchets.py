@@ -578,6 +578,80 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
     return violations
 
 
+_DECODE_ERROR_NAMES: Final[frozenset[str]] = frozenset({"TOMLDecodeError", "JSONDecodeError"})
+
+
+@pure
+def _exception_name(node: ast.expr) -> str | None:
+    """Return the final identifier of an exception reference (e.g. 'JSONDecodeError' for json.JSONDecodeError)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+@pure
+def _handler_catches_decode_error(handler: ast.ExceptHandler) -> bool:
+    """Return True if the except clause catches TOMLDecodeError or JSONDecodeError."""
+    exc_type = handler.type
+    if exc_type is None:
+        return False
+    candidates: list[ast.expr] = list(exc_type.elts) if isinstance(exc_type, ast.Tuple) else [exc_type]
+    return any(_exception_name(cand) in _DECODE_ERROR_NAMES for cand in candidates)
+
+
+@pure
+def _handler_re_raises(handler: ast.ExceptHandler) -> bool:
+    """Return True if the except handler's body contains any raise statement."""
+    for stmt in handler.body:
+        for inner in ast.walk(stmt):
+            if isinstance(inner, ast.Raise):
+                return True
+    return False
+
+
+def find_silent_decode_error_catches(
+    source_dir: Path,
+    excluded_path_patterns: tuple[str, ...] = (),
+) -> tuple[RatchetMatchChunk, ...]:
+    """Find except blocks catching TOMLDecodeError or JSONDecodeError that do not re-raise.
+
+    Corrupt config/settings files must crash the process so the user knows to clean them up --
+    silently swallowing a decode error turns a loud problem into a silent misconfiguration.
+    Handlers that re-raise (optionally wrapping the original) are fine and do not count.
+    Test files are excluded so tests can simulate bad input without tripping the ratchet.
+    """
+    file_paths = _get_non_ignored_files_with_extension(
+        source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
+    )
+    chunks: list[RatchetMatchChunk] = []
+
+    for file_path in file_paths:
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        handler_nodes = nodes_by_type.get(ast.ExceptHandler, [])
+
+        for node in handler_nodes:
+            assert isinstance(node, ast.ExceptHandler)
+            if not _handler_catches_decode_error(node):
+                continue
+            if _handler_re_raises(node):
+                continue
+
+            start_line = LineNumber(node.lineno)
+            end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
+            chunk = RatchetMatchChunk(
+                file_path=file_path,
+                matched_content=f"silent decode-error catch at line {start_line}",
+                start_line=start_line,
+                end_line=end_line,
+            )
+            chunks.append(chunk)
+
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
+    return tuple(sorted_chunks)
+
+
 def find_code_in_init_files(
     source_dir: Path,
     allowed_root_init_lines: set[str] | None = None,

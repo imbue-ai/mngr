@@ -400,6 +400,17 @@ PREVENT_CAST_USAGE = RatchetRuleInfo(
     ),
 )
 
+PREVENT_SILENT_DECODE_ERROR_CATCH = RatchetRuleInfo(
+    rule_name="silent catches of TOMLDecodeError / JSONDecodeError",
+    rule_description=(
+        "Never silently skip a parse error on a user-authored config or settings file -- let "
+        "TOMLDecodeError / JSONDecodeError propagate so the user knows to fix the file. Silent-skip "
+        "is fine for internal state, JSONL streams, and external input (subprocess / API output, CLI "
+        "flag values); bump the ratchet count to cover those. This ratchet is a reminder, not a "
+        "strict ban. See style guide: 'Config and settings file parse errors'."
+    ),
+)
+
 PREVENT_ASSERT_ISINSTANCE = RatchetRuleInfo(
     rule_name="assert isinstance() usages",
     rule_description=(

@@ -29,6 +29,7 @@ from watchdog.observers import Observer
 from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
+from imbue.mngr.errors import ConfigParseError
 
 
 class MngrNotInstalledError(RuntimeError):
@@ -226,19 +227,22 @@ def read_event_ids_from_jsonl(file_path: Path) -> set[str]:
 
 
 def load_watchers_section(agent_work_dir: Path) -> dict[str, Any]:
-    """Load the [watchers] section from minds.toml.
+    """Load the [watchers] section from minds.toml, or {} if the file is missing.
 
-    Returns an empty dict on any error (missing file, corrupt TOML, etc.).
+    Raises ConfigParseError if the file exists but contains invalid TOML -- minds.toml
+    is user-authored config, so a parse error must surface to the user rather than be
+    silently dropped (see style guide: 'Config and settings file parse errors').
     """
     settings_path = agent_work_dir / "minds.toml"
     try:
-        if not settings_path.exists():
-            return {}
-        raw = tomllib.loads(settings_path.read_text())
-        return raw.get("watchers", {})
-    except (OSError, tomllib.TOMLDecodeError, ValueError, KeyError) as exc:
-        logger.warning("Failed to load watcher settings: {}", exc)
+        content = settings_path.read_text()
+    except FileNotFoundError:
         return {}
+    try:
+        raw = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigParseError(f"Failed to parse {settings_path}: {exc}") from exc
+    return raw.get("watchers", {})
 
 
 def mtime_poll_files(

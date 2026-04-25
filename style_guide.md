@@ -541,6 +541,10 @@ class TodoNotificationService(MutableModel):
 
 Be very conservative with what exceptions are caught. Prefer to crash instead of catching errors.
 
+## Config and settings file parse errors
+
+- Never silently skip a parse error on a user-authored config or settings file (e.g. `settings.toml`, `minds.toml`). Let `TOMLDecodeError` / `JSONDecodeError` propagate so the user knows to fix the file. Silent-skip is fine for internal state, JSONL streams, and external input -- the `check_silent_decode_error_catches` ratchet is a reminder, not a strict ban.
+
 ## Timeouts
 
 When calling external commands or making network requests, always use a two-threshold timeout pattern:
