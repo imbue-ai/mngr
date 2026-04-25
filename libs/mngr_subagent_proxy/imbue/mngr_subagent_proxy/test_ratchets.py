@@ -219,7 +219,11 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(0))
+    # Three uses in plugin_test.py for the cascade-destroy hook tests:
+    # the on_before_agent_destroy hook is invoked by pluggy with a fixed
+    # (agent, host) signature, so DI isn't available; monkeypatch.setattr
+    # on destroy_agent_detached is the cleanest available recorder.
+    rc.check_monkeypatch_setattr(_DIR, snapshot(3))
 
 
 def test_prevent_test_container_classes() -> None:

@@ -11,8 +11,10 @@ import pytest
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_subagent_proxy import plugin as plugin_module
 from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
+from imbue.mngr_subagent_proxy.plugin import on_before_agent_destroy
 from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
 
@@ -20,6 +22,7 @@ from imbue.mngr_subagent_proxy.testing import FakeHost
 # immediately ``del``-s it. Tests pass through an untyped wrapper so the
 # None sentinel doesn't leak argument-type noise to every call site.
 _provision: Any = on_after_provisioning
+_destroy: Any = on_before_agent_destroy
 
 
 def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
@@ -259,6 +262,76 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
     assert len(inner_commands) == 2
     assert any("tmux wait-for" in h["command"] for h in inner_commands)
     assert any('touch "$MNGR_AGENT_STATE_DIR/active"' in h["command"] for h in inner_commands)
+
+
+def test_on_before_agent_destroy_cascades_to_recorded_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Destroying a Claude parent fires detached destroy for every subagent_map entry."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent_id = AgentId.generate()
+    state_dir = host_dir / "agents" / str(agent_id)
+    map_dir = state_dir / "subagent_map"
+    map_dir.mkdir(parents=True)
+    (map_dir / "toolu_aaa.json").write_text(json.dumps({"target_name": "parent--subagent-a-aaa"}))
+    (map_dir / "toolu_bbb.json").write_text(json.dumps({"target_name": "parent--subagent-b-bbb"}))
+    (map_dir / "toolu_bad.json").write_text("{not json")  # malformed -- skipped
+    (map_dir / "ignored.txt").write_text("not a json file")
+
+    calls: list[tuple[str, Path]] = []
+    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append((name, log)))
+
+    host = FakeHost(host_dir)
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("parent"))
+    _destroy(agent, host)
+
+    target_names = sorted(name for name, _ in calls)
+    assert target_names == ["parent--subagent-a-aaa", "parent--subagent-b-bbb"]
+    assert all(log == state_dir / "subagent_cascade_destroy.log" for _, log in calls)
+
+
+def test_on_before_agent_destroy_skips_non_claude_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cascade hook never fires destroys for non-Claude agents."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent_id = AgentId.generate()
+    state_dir = host_dir / "agents" / str(agent_id)
+    map_dir = state_dir / "subagent_map"
+    map_dir.mkdir(parents=True)
+    (map_dir / "toolu_xxx.json").write_text(json.dumps({"target_name": "should-not-be-destroyed"}))
+
+    calls: list[str] = []
+    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append(name))
+
+    host = FakeHost(host_dir)
+    agent = FakeAgent(agent_id, work_dir, object(), name=AgentName("non-claude"))
+    _destroy(agent, host)
+
+    assert calls == []
+
+
+def test_on_before_agent_destroy_no_op_without_subagent_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parent with no subagent_map dir is destroyed without firing any cascades."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    agent_id = AgentId.generate()
+    (host_dir / "agents" / str(agent_id)).mkdir(parents=True)
+
+    calls: list[str] = []
+    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append(name))
+
+    host = FakeHost(host_dir)
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("parent-no-children"))
+    _destroy(agent, host)
+
+    assert calls == []
 
 
 def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:

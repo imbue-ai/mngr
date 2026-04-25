@@ -10,6 +10,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude.claude_config import SESSION_GUARD
@@ -17,6 +18,7 @@ from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
+from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
@@ -281,3 +283,66 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
         return
     logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
     host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+
+
+_SUBAGENT_MAP_DIRNAME: Final[str] = "subagent_map"
+_CASCADE_LOG_NAME: Final[str] = "subagent_cascade_destroy.log"
+
+
+def _read_subagent_map_targets(state_dir: Path) -> list[str]:
+    """Return target_name values from every subagent_map entry under state_dir.
+
+    Best-effort: malformed entries are skipped, missing dir returns [].
+    """
+    map_dir = state_dir / _SUBAGENT_MAP_DIRNAME
+    if not map_dir.is_dir():
+        return []
+    targets: list[str] = []
+    try:
+        entries = list(map_dir.iterdir())
+    except OSError as e:
+        logger.warning("cascade-destroy: failed to list {}: {}", map_dir, e)
+        return []
+    for entry in entries:
+        if entry.suffix != ".json":
+            continue
+        try:
+            payload = json.loads(entry.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("cascade-destroy: skipping malformed {}: {}", entry, e)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        target = payload.get("target_name")
+        if isinstance(target, str) and target:
+            targets.append(target)
+    return targets
+
+
+@hookimpl
+def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) -> None:
+    """Cascade-destroy any proxy children of a Claude agent before its state dir is wiped.
+
+    Closes the gap where the PostToolUse:Agent hook never fires (parent
+    Ctrl+C'd, crashed, or force-destroyed mid-Task) and the SessionStart
+    reaper can't catch the orphans because the parent's
+    ``$MNGR_AGENT_STATE_DIR/subagent_map/`` is about to disappear.
+
+    Best-effort: launches a detached destroy for each recorded child.
+    Errors are logged, never raised -- failing the parent's destroy
+    because a child cleanup failed would leave both stuck.
+    """
+    if not isinstance(agent.agent_config, ClaudeAgentConfig):
+        return
+    state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    targets = _read_subagent_map_targets(state_dir)
+    if not targets:
+        return
+    log_path = state_dir / _CASCADE_LOG_NAME
+    logger.info(
+        "cascade-destroy: parent {} being destroyed; spawning detached destroy for {} child agent(s)",
+        agent.name,
+        len(targets),
+    )
+    for target in targets:
+        destroy_agent_detached(target, log_path)
