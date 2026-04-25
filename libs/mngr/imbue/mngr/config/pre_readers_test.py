@@ -264,7 +264,7 @@ def test_load_project_config_uses_mngr_project_config_dir(
     assert result["prefix"] == "custom-"
 
 
-def test_load_local_config_uses_mngr_project_dir(
+def test_load_local_config_uses_mngr_project_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     cg: ConcurrencyGroup,
