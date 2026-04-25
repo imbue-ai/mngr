@@ -266,8 +266,43 @@ def extract_assistant_text(event: dict) -> str:
     return "".join(parts)
 
 
-def _is_user_event(event: dict) -> bool:
-    return event.get("type") == "user"
+_MACHINE_USER_PREFIXES: Final[tuple[str, ...]] = (
+    "Stop hook feedback:",
+    "PostToolUse hook feedback:",
+    "PreToolUse hook feedback:",
+    "PostToolUseFailure hook feedback:",
+    "UserPromptSubmit hook feedback:",
+    "Notification hook feedback:",
+    "SessionStart hook feedback:",
+)
+
+
+def is_real_user_event(event: dict) -> bool:
+    """Return True only for events that look like a fresh human-typed prompt.
+
+    Claude Code emits ``type=user`` for three distinct things:
+    (1) actual user prompts (human input), (2) ``tool_result`` blocks echoed
+    back to the assistant, and (3) synthetic hook-injected messages
+    ("Stop hook feedback: ..."). Only (1) should reset the end-turn settle
+    window; (2) and (3) are machinery that fires during and after a normal
+    assistant turn and would otherwise prevent the settle from ever
+    elapsing.
+    """
+    if event.get("type") != "user":
+        return False
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, list):
+        return False
+    if isinstance(content, str):
+        stripped = content.lstrip()
+        for prefix in _MACHINE_USER_PREFIXES:
+            if stripped.startswith(prefix):
+                return False
+        return True
+    return False
 
 
 def truncate_result_text(text: str, max_chars: int) -> str:
@@ -325,7 +360,7 @@ def _process_new_events(
         if is_end_turn_event(event):
             runtime.pending_end_turn_text = extract_assistant_text(event)
             runtime.pending_end_turn_deadline = now + _END_TURN_SETTLE_SECONDS
-        elif _is_user_event(event) and runtime.pending_end_turn_text is not None:
+        elif is_real_user_event(event) and runtime.pending_end_turn_text is not None:
             logger.info("New user event during settle window; discarding pending end_turn")
             runtime.pending_end_turn_text = None
             runtime.pending_end_turn_deadline = None
