@@ -34,6 +34,10 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
+from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -225,11 +229,30 @@ def _make_host_name(agent_name: AgentName) -> str:
 WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
 
 
+def _build_latchkey_gateway_url(launch_mode: LaunchMode, info: LatchkeyGatewayInfo) -> str:
+    """Return the ``LATCHKEY_GATEWAY`` URL the agent should see in its environment.
+
+    DEV agents run on the bare host and reach the gateway on its dynamic host
+    port directly. Every other mode runs inside a container/VM/VPS whose own
+    loopback is bridged to the host-side gateway via an SSH reverse tunnel
+    bound to a fixed remote port, so the URL is the same constant for every
+    such agent.
+    """
+    match launch_mode:
+        case LaunchMode.DEV:
+            return f"http://{info.host}:{info.port}"
+        case LaunchMode.LOCAL | LaunchMode.LIMA | LaunchMode.CLOUD:
+            return f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
     agent_id: AgentId,
     host_env_file: Path | None = None,
+    latchkey_gateway_url: str | None = None,
 ) -> tuple[list[str], str]:
     """Build the mngr create command and generate an API key for the agent.
 
@@ -249,6 +272,10 @@ def _build_mngr_create_command(
     When ``host_env_file`` is supplied, its contents are loaded into the host
     environment via ``--host-env-file`` so secrets from a local ``.env`` reach
     the agent without being baked into the template.
+
+    When ``latchkey_gateway_url`` is supplied, it is injected as
+    ``LATCHKEY_GATEWAY=<url>`` so the agent's ``latchkey`` CLI forwards
+    its calls to the gateway minds is running for this agent.
     """
     match launch_mode:
         case LaunchMode.DEV:
@@ -279,6 +306,7 @@ def _build_mngr_create_command(
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
+        *(["--env", f"LATCHKEY_GATEWAY={latchkey_gateway_url}"] if latchkey_gateway_url else []),
         "--label",
         "is_primary=true",
         "--template",
@@ -338,6 +366,7 @@ def run_mngr_create(
     agent_id: AgentId,
     on_output: OutputCallback | None = None,
     host_env_file: Path | None = None,
+    latchkey_gateway_url: str | None = None,
 ) -> str:
     """Create an mngr agent via ``mngr create``.
 
@@ -347,7 +376,13 @@ def run_mngr_create(
     Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
-    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id, host_env_file=host_env_file)
+    mngr_command, api_key = _build_mngr_create_command(
+        launch_mode,
+        agent_name,
+        agent_id,
+        host_env_file=host_env_file,
+        latchkey_gateway_url=latchkey_gateway_url,
+    )
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -381,6 +416,28 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
+    server_port: int = Field(
+        default=0,
+        frozen=True,
+        description=(
+            "Port the desktop client is listening on. Used to build the absolute "
+            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
+            "The default of 0 is only appropriate for tests that never exercise the "
+            "happy-path redirect."
+        ),
+    )
+    latchkey_gateway_manager: LatchkeyGatewayManager | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Optional gateway manager. When provided, creation pre-spawns a gateway for every "
+            "agent and passes the appropriate URL to ``mngr create`` as "
+            "``--env LATCHKEY_GATEWAY=...`` so the agent's ``latchkey`` CLI proxies through it. "
+            "For DEV agents the URL is the gateway's dynamic host port; for container/VM/VPS "
+            "agents it is a constant URL on the agent-side loopback that ``LatchkeyGatewayDiscoveryHandler`` "
+            "bridges back via an SSH reverse tunnel once the agent is discovered."
+        ),
+    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -518,6 +575,13 @@ class AgentCreator(MutableModel):
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING
 
+                # Pre-spawn a Latchkey gateway for every agent so we can
+                # inject ``LATCHKEY_GATEWAY`` at ``mngr create`` time. For
+                # container/VM/VPS agents the URL points at a constant
+                # agent-side port that is bridged back to the host-side
+                # gateway via an SSH reverse tunnel set up on discovery.
+                latchkey_gateway_url = self._maybe_start_latchkey_gateway(agent_id, launch_mode, log_queue)
+
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
                 api_key = run_mngr_create(
@@ -527,6 +591,7 @@ class AgentCreator(MutableModel):
                     agent_id=agent_id,
                     on_output=emit_log,
                     host_env_file=host_env_file,
+                    latchkey_gateway_url=latchkey_gateway_url,
                 )
 
                 # Persist the API key hash
@@ -536,9 +601,17 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
+                # After phase 6 deleted the legacy /forwarding/ routes the new
+                # workspace entry point is http://<agent-id>.localhost:<port>/,
+                # which the desktop client's subdomain middleware forwards to the
+                # per-agent minds_workspace_server. Construct the absolute URL
+                # here because the browser uses it verbatim in window.location.
+                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
+                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
-                    self._redirect_urls[aid] = "/forwarding/{}/".format(agent_id)
+                    self._redirect_urls[aid] = redirect_url
 
         except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
@@ -546,5 +619,39 @@ class AgentCreator(MutableModel):
             with self._lock:
                 self._statuses[aid] = AgentCreationStatus.FAILED
                 self._errors[aid] = str(e)
+            # A gateway we pre-spawned for this agent is now orphaned (the
+            # agent never came into existence), so tear it down to avoid a
+            # leaked subprocess + record.
+            if self.latchkey_gateway_manager is not None:
+                self.latchkey_gateway_manager.stop_gateway_for_agent(agent_id)
         finally:
             log_queue.put(LOG_SENTINEL)
+
+    def _maybe_start_latchkey_gateway(
+        self,
+        agent_id: AgentId,
+        launch_mode: LaunchMode,
+        log_queue: queue.Queue[str],
+    ) -> str | None:
+        """Pre-spawn a Latchkey gateway for this agent and return the URL to inject.
+
+        The URL depends on ``launch_mode``: DEV agents see the gateway on its
+        dynamic host port directly; containerized/VM/VPS agents see it on a
+        constant port on their own loopback, which is bridged back to the host
+        by a reverse SSH tunnel established when the agent is discovered (see
+        ``LatchkeyGatewayDiscoveryHandler``).
+
+        Returns ``None`` (and logs a warning) when gateway spawning fails so
+        agent creation can still proceed without a gateway URL.
+        """
+        if self.latchkey_gateway_manager is None:
+            return None
+        try:
+            info = self.latchkey_gateway_manager.ensure_gateway_started(agent_id)
+        except LatchkeyGatewayError as e:
+            logger.warning("Pre-spawning Latchkey gateway for agent {} failed: {}", agent_id, e)
+            log_queue.put(f"[minds] Warning: Latchkey gateway could not be started for this agent: {e}")
+            return None
+        url = _build_latchkey_gateway_url(launch_mode, info)
+        log_queue.put(f"[minds] Latchkey gateway for this agent: {url}")
+        return url

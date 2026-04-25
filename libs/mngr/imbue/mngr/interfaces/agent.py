@@ -500,7 +500,7 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         should override to stage it where their command can read it.
         """
         logger.warning(
-            "Ignoring initial_message for agent type {}: this agent does not implement "
+            "Ignoring initial_message for agent type {}: this agent does not override "
             "stage_initial_message, so the --message content cannot be delivered.",
             type(self).__name__,
         )

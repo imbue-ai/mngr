@@ -11,16 +11,6 @@ import uvicorn
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
-from supertokens_python import InputAppInfo
-from supertokens_python import SupertokensConfig
-from supertokens_python import init as supertokens_init
-from supertokens_python.recipe import emailpassword
-from supertokens_python.recipe import emailverification
-from supertokens_python.recipe import session as session_recipe
-from supertokens_python.recipe import thirdparty
-from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderConfig
-from supertokens_python.recipe.thirdparty.provider import ProviderInput
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import WorkspacePaths
@@ -28,13 +18,16 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
-from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
-from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
+from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
+from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
+from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructionHandler
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayReconcileCallback
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -141,16 +134,26 @@ def start_desktop_client(
     backend_resolver = MngrCliBackendResolver()
     stream_manager = MngrStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
+    latchkey_gateway_manager = _build_latchkey_gateway_manager(data_directory=data_directory)
+    latchkey_gateway_manager.start(data_dir=data_directory)
 
     minds_config = MindsConfig(data_dir=data_directory)
-    cloudflare_client = _build_cloudflare_client(minds_config.cloudflare_forwarding_url)
-    agent_creator = AgentCreator(paths=paths)
+    cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
+    auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
+    agent_creator = AgentCreator(
+        paths=paths,
+        server_port=port,
+        latchkey_gateway_manager=latchkey_gateway_manager,
+    )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
 
     # Initialize multi-account session store
-    session_store = MultiAccountSessionStore(data_dir=data_directory)
+    session_store = MultiAccountSessionStore(
+        data_dir=data_directory,
+        auth_backend_client=auth_backend_client,
+    )
 
     # Initialize request inbox from stored response events
     response_events = load_response_events(data_directory)
@@ -158,17 +161,16 @@ def start_desktop_client(
     for resp in response_events:
         request_inbox = request_inbox.add_response(resp)
 
-    # Initialize SuperTokens SDK if configured
-    _init_supertokens(
-        connection_uri=str(minds_config.supertokens_connection_uri),
-        host=host,
-        port=port,
-    )
-
-    # Generate a one-time login URL for the user
+    # Generate a one-time login URL for the user. The URL hostname is
+    # always ``localhost`` (not the internal bind address) so that the
+    # session cookie issued by /authenticate -- which sets
+    # ``Domain=localhost`` when the request host is on localhost -- is
+    # valid on every ``<agent-id>.localhost`` subdomain the desktop
+    # client forwards to. uvicorn binding 127.0.0.1 still accepts the
+    # localhost-addressed requests because localhost resolves there.
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
     auth_store.add_one_time_code(code=code)
-    login_url = "http://{}:{}/login?one_time_code={}".format(host, port, code)
+    login_url = "http://localhost:{}/login?one_time_code={}".format(port, code)
 
     # Log to stderr (always)
     logger.info("Login URL (one-time use): {}", login_url)
@@ -189,6 +191,28 @@ def start_desktop_client(
         data_dir=data_directory,
     )
     stream_manager.add_on_agent_discovered_callback(discovery_handler)
+
+    # Register callbacks that spawn/terminate a dedicated ``latchkey gateway``
+    # subprocess for each discovered agent. For agents running in a container,
+    # VM, or VPS the handler also sets up a reverse SSH tunnel so the agent
+    # can reach the host-side gateway on a constant ``127.0.0.1`` URL.
+    latchkey_discovery_handler = LatchkeyGatewayDiscoveryHandler(
+        gateway_manager=latchkey_gateway_manager,
+        tunnel_manager=tunnel_manager,
+    )
+    latchkey_destruction_handler = LatchkeyGatewayDestructionHandler(gateway_manager=latchkey_gateway_manager)
+    stream_manager.add_on_agent_discovered_callback(latchkey_discovery_handler)
+    stream_manager.add_on_agent_destroyed_callback(latchkey_destruction_handler)
+
+    # Once the initial mngr-observe snapshot arrives, reconcile any adopted
+    # gateways whose agent is no longer known so orphans from the previous
+    # desktop-client session are cleaned up.
+    reconcile_callback = LatchkeyGatewayReconcileCallback(
+        gateway_manager=latchkey_gateway_manager,
+        resolver=backend_resolver,
+    )
+    backend_resolver.add_on_change_callback(reconcile_callback)
+
     stream_manager.start()
 
     # Start health checking for reverse tunnels
@@ -199,6 +223,7 @@ def start_desktop_client(
         backend_resolver=backend_resolver,
         http_client=None,
         tunnel_manager=tunnel_manager,
+        latchkey_gateway_manager=latchkey_gateway_manager,
         agent_creator=agent_creator,
         cloudflare_client=cloudflare_client,
         telegram_orchestrator=telegram_orchestrator,
@@ -206,6 +231,7 @@ def start_desktop_client(
         paths=paths,
         stream_manager=stream_manager,
         session_store=session_store,
+        auth_backend_client=auth_backend_client,
         minds_config=minds_config,
         request_inbox=request_inbox,
         server_port=port,
@@ -229,104 +255,40 @@ def start_desktop_client(
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
 
 
-def _init_supertokens(
-    connection_uri: str,
-    host: str,
-    port: int,
-) -> None:
-    """Initialize the SuperTokens SDK using the supplied core URI.
+def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:
+    """Build a shared CloudflareClient holding only the remote service connector URL.
 
-    ``connection_uri`` is resolved upstream by ``MindsConfig.supertokens_connection_uri``
-    (env > config.toml > built-in default), so this function always has a
-    URI to point at. The API key and OAuth client credentials remain
-    env-var-only since they are secrets.
+    Per-request auth (SuperTokens token, user-id prefix, email) is attached in
+    ``api_v1.get_cf_client_with_auth`` from the caller's signed-in account.
     """
-    api_key = os.environ.get("SUPERTOKENS_API_KEY")
-    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-    github_client_id = os.environ.get("GITHUB_CLIENT_ID")
-    github_client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
-
-    # Build OAuth provider list
-    providers: list[ProviderInput] = []
-    if google_client_id and google_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="google",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=google_client_id,
-                            client_secret=google_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-    if github_client_id and github_client_secret:
-        providers.append(
-            ProviderInput(
-                config=ProviderConfig(
-                    third_party_id="github",
-                    clients=[
-                        ProviderClientConfig(
-                            client_id=github_client_id,
-                            client_secret=github_client_secret,
-                        )
-                    ],
-                ),
-            )
-        )
-
-    api_domain = f"http://{host}:{port}"
-
-    supertokens_init(
-        supertokens_config=SupertokensConfig(
-            connection_uri=connection_uri,
-            api_key=api_key,
-        ),
-        app_info=InputAppInfo(
-            app_name="Minds",
-            api_domain=api_domain,
-            website_domain=api_domain,
-            api_base_path="/auth",
-            website_base_path="/auth",
-        ),
-        framework="fastapi",
-        recipe_list=[
-            session_recipe.init(),
-            emailpassword.init(),
-            thirdparty.init(
-                sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=providers),
-            )
-            if providers
-            else thirdparty.init(),
-            emailverification.init(mode="REQUIRED"),
-        ],
-        mode="asgi",
+    return CloudflareClient(
+        connector_url=RemoteServiceConnectorUrl(str(connector_url)),
     )
 
-    logger.info("SuperTokens initialized (core: {})", connection_uri)
 
+def _build_latchkey_gateway_manager(data_directory: Path) -> LatchkeyGatewayManager:
+    """Build a ``LatchkeyGatewayManager`` honoring minds-level env var overrides.
 
-def _build_cloudflare_client(forwarding_url: AnyUrl) -> CloudflareForwardingClient:
-    """Build a CloudflareForwardingClient from the config URL + env-var-only auth fields.
-
-    The forwarding URL comes from ``MindsConfig.cloudflare_forwarding_url``
-    (env > config.toml > built-in default) and always has a value. Basic Auth
-    fields (username, secret, owner_email) stay env-var-only because they are
-    secrets and are only used as a fallback when per-account SuperTokens auth
-    is not available.
+    ``MINDS_LATCHKEY_BINARY`` can override the path to the ``latchkey`` CLI
+    (typically supplied by the Electron shell, which installs the npm
+    package under its own ``node_modules``). ``MINDS_LATCHKEY_DIRECTORY``
+    overrides the shared ``LATCHKEY_DIRECTORY`` that every spawned gateway
+    inherits; when unset we default to ``<minds_data_dir>/latchkey`` so all
+    gateways share a single credential store instead of scribbling into
+    ``~/.latchkey``.
     """
-    username = os.environ.get("CLOUDFLARE_FORWARDING_USERNAME")
-    secret = os.environ.get("CLOUDFLARE_FORWARDING_SECRET")
-    owner_email = os.environ.get("OWNER_EMAIL")
+    binary_override = os.environ.get("MINDS_LATCHKEY_BINARY")
+    latchkey_binary = binary_override if binary_override else LATCHKEY_BINARY
 
-    return CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl(str(forwarding_url)),
-        username=CloudflareUsername(username) if username else None,
-        secret=CloudflareSecret(secret) if secret else None,
-        owner_email=OwnerEmail(owner_email) if owner_email else None,
+    directory_override = os.environ.get("MINDS_LATCHKEY_DIRECTORY")
+    if directory_override:
+        latchkey_directory: Path | None = Path(directory_override).expanduser()
+    else:
+        latchkey_directory = data_directory / "latchkey"
+
+    return LatchkeyGatewayManager(
+        latchkey_binary=latchkey_binary,
+        latchkey_directory=latchkey_directory,
     )
 
 

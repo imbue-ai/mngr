@@ -4,10 +4,10 @@ Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
 and the auto-open behavior for the requests panel.
 
-Also exposes static service URLs (``cloudflare_forwarding_url``,
-``supertokens_connection_uri``) used by the desktop client to talk to the
-backing services. Those URLs follow env > file > default precedence so ops
-can point a local build at a different deployment without editing code.
+Also exposes the ``remote_service_connector_url`` (the backend that fronts
+Cloudflare tunnels and the auth backend) used by the desktop client to talk
+to the backing service. The URL follows env > file > default precedence so
+ops can point a local build at a different deployment without editing code.
 """
 
 import os
@@ -27,16 +27,13 @@ from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME = "config.toml"
 
-DEFAULT_CLOUDFLARE_FORWARDING_URL: Final[str] = "https://joshalbrecht--cloudflare-forwarding-fastapi-app.modal.run"
-DEFAULT_SUPERTOKENS_CONNECTION_URI: Final[str] = (
-    "https://st-dev-aba73a80-3754-11f1-9afe-f5bb4fa720bc.aws.supertokens.io"
+DEFAULT_REMOTE_SERVICE_CONNECTOR_URL: Final[str] = (
+    "https://joshalbrecht--remote-service-connector-production-fastapi-app.modal.run"
 )
 
-_CLOUDFLARE_FORWARDING_URL_ENV: Final[str] = "CLOUDFLARE_FORWARDING_URL"
-_SUPERTOKENS_CONNECTION_URI_ENV: Final[str] = "SUPERTOKENS_CONNECTION_URI"
+_REMOTE_SERVICE_CONNECTOR_URL_ENV: Final[str] = "REMOTE_SERVICE_CONNECTOR_URL"
 
-_CLOUDFLARE_FORWARDING_URL_KEY: Final[str] = "cloudflare_forwarding_url"
-_SUPERTOKENS_CONNECTION_URI_KEY: Final[str] = "supertokens_connection_uri"
+_REMOTE_SERVICE_CONNECTOR_URL_KEY: Final[str] = "remote_service_connector_url"
 
 _URL_VALIDATOR: Final[TypeAdapter[AnyUrl]] = TypeAdapter(AnyUrl)
 
@@ -144,25 +141,13 @@ class MindsConfig(MutableModel):
         return _validate_url(default, source=f"{file_key} default")
 
     @property
-    def cloudflare_forwarding_url(self) -> AnyUrl:
-        """Base URL of the Cloudflare forwarding API.
+    def remote_service_connector_url(self) -> AnyUrl:
+        """Base URL of the remote service connector (Cloudflare tunnel API + auth backend).
 
-        Precedence: ``$CLOUDFLARE_FORWARDING_URL`` > ``config.toml`` > built-in default.
+        Precedence: ``$REMOTE_SERVICE_CONNECTOR_URL`` > ``config.toml`` > built-in default.
         """
         return self._resolve_url_setting(
-            env_var=_CLOUDFLARE_FORWARDING_URL_ENV,
-            file_key=_CLOUDFLARE_FORWARDING_URL_KEY,
-            default=DEFAULT_CLOUDFLARE_FORWARDING_URL,
-        )
-
-    @property
-    def supertokens_connection_uri(self) -> AnyUrl:
-        """URI of the SuperTokens core.
-
-        Precedence: ``$SUPERTOKENS_CONNECTION_URI`` > ``config.toml`` > built-in default.
-        """
-        return self._resolve_url_setting(
-            env_var=_SUPERTOKENS_CONNECTION_URI_ENV,
-            file_key=_SUPERTOKENS_CONNECTION_URI_KEY,
-            default=DEFAULT_SUPERTOKENS_CONNECTION_URI,
+            env_var=_REMOTE_SERVICE_CONNECTOR_URL_ENV,
+            file_key=_REMOTE_SERVICE_CONNECTOR_URL_KEY,
+            default=DEFAULT_REMOTE_SERVICE_CONNECTOR_URL,
         )

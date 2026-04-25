@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}{{ title }}{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 id="page-heading" class="text-2xl font-semibold text-zinc-900 leading-tight">
+      Share <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ service_name }}</code>
+      in <a href="/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+      {% if account_email %}(<a href="/accounts" class="text-blue-600 hover:underline">{{ account_email }}</a>){% endif %}?
+    </h1>
+
+    {% if not has_account %}
+      {% include '_associate.html' %}
+      {% if is_request %}
+        <form method="POST" action="/requests/{{ request_id }}/deny" class="mt-2">
+          {{ ui.btn_submit('Deny request', variant='danger') }}
+        </form>
+      {% endif %}
+    {% else %}
+
+      <div id="sharing-editor">
+        <p id="loading-state" class="text-zinc-500 py-4">Loading...</p>
+      </div>
+
+      <div id="editor-content" class="hidden">
+        <div id="url-section" class="hidden mb-4">
+          <p class="font-medium mb-1">Shared URL</p>
+          <div class="flex gap-2 items-center bg-zinc-100 border border-zinc-200 rounded-md px-3 py-2 my-2">
+            <input type="text" id="share-url" readonly
+                   class="flex-1 bg-transparent border-0 text-sm text-zinc-900 font-mono outline-none"
+                   onclick="this.select()">
+            {{ ui.btn_button('Copy', variant='secondary', id='copy-btn', onclick='copyUrl()') }}
+          </div>
+        </div>
+
+        <h2 class="text-sm font-medium text-zinc-600 mt-6 mb-3">Access List</h2>
+        <div id="email-list"></div>
+        <div class="flex gap-2 items-center mt-2">
+          <input type="email" id="new-email" placeholder="Add email address"
+                 class="flex-1 px-3 py-2.5 text-sm rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+                 onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }">
+          {{ ui.btn_button('Add', variant='secondary', onclick='addEmail()') }}
+        </div>
+
+        <div class="flex gap-2 mt-5 justify-between" id="action-buttons">
+          {% if is_request %}
+            {{ ui.btn_button('Deny', variant='danger', id='deny-btn', onclick='submitDeny()') }}
+          {% else %}
+            <div class="flex gap-2">
+              {{ ui.btn_link('Cancel', '/workspace/' ~ agent_id ~ '/settings', variant='secondary') }}
+              {{ ui.btn_button('Disable Sharing', variant='danger', id='disable-btn', onclick='submitDisable()', extra='hidden') }}
+            </div>
+          {% endif %}
+          {{ ui.btn_button('Update', variant='success', id='action-btn', onclick='submitUpdate()') }}
+        </div>
+        <div id="submit-spinner" class="hidden py-4">
+          <span class="text-zinc-500">Saving changes...</span>
+        </div>
+      </div>
+    {% endif %}
+  {% endcall %}
+
+  {% if has_account %}
+    {#
+      Page-specific data goes in a JSON-serialized data island so sharing.js
+      can pick it up without us having to template JS. Safe because we use
+      Jinja's `tojson` filter -- the emitted payload is valid JSON and
+      cannot break out into active code.
+    #}
+    <script id="sharing-config" type="application/json">
+{
+  "agentId": {{ agent_id | tojson }},
+  "serviceName": {{ service_name | tojson }},
+  "wsName": {{ (ws_name or agent_id) | tojson }},
+  "accountEmail": {{ (account_email or '') | tojson }},
+  "isRequest": {{ is_request | tojson }},
+  "requestId": {{ request_id | tojson }},
+  "initialEmails": {{ initial_emails | tojson }}
+}
+    </script>
+  {% endif %}
+{% endblock %}
+{% block scripts %}
+  {% if has_account %}
+    <script src="/_static/sharing.js" defer></script>
+  {% endif %}
+{% endblock %}

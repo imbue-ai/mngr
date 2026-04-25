@@ -71,10 +71,13 @@ if modal.is_local():
 else:
     _deploy_config: dict[str, Any] = json.loads(Path("/staging/deploy_config.json").read_text())
 
-    _BUILD_CONTEXT_DIR = ""
-    _STAGING_DIR = ""
-    _DOCKERFILE = ""
-    _TARGET_REPO_DIR = ""
+    # Deploy-time-only paths: never consumed at runtime (all usages are
+    # guarded by ``if modal.is_local()``), but keep the annotations aligned
+    # with the local branch so the module-level types are unambiguous.
+    _BUILD_CONTEXT_DIR: str = ""
+    _STAGING_DIR: str = ""
+    _DOCKERFILE: str = ""
+    _TARGET_REPO_DIR: str | None = None
 
 # Extract config values used by both deploy-time image building and runtime scheduling
 _APP_NAME: str = _deploy_config["app_name"]

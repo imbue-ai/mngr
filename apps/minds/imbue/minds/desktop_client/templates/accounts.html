@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Manage Accounts{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 class="text-xl font-semibold text-zinc-900 leading-tight mb-5">Manage Accounts</h1>
+
+    {% if accounts %}
+      {% for acct in accounts %}
+        {% call ui.card_row() %}
+          <div>
+            <div class="font-medium">{{ acct.email }}</div>
+            <div class="text-xs text-zinc-400">
+              {{ acct.workspace_ids | length }} workspace(s)
+              {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
+            </div>
+          </div>
+          <div class="flex gap-2">
+            {% if acct.user_id | string != default_account_id %}
+              <form method="POST" action="/accounts/set-default">
+                <input type="hidden" name="user_id" value="{{ acct.user_id }}">
+                {{ ui.btn_submit('Set default', variant='secondary') }}
+              </form>
+            {% else %}
+              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-zinc-900 border border-zinc-200 opacity-60 cursor-default">Default</span>
+            {% endif %}
+            <form method="POST" action="/accounts/{{ acct.user_id }}/logout">
+              {{ ui.btn_submit('Log out', variant='danger') }}
+            </form>
+          </div>
+        {% endcall %}
+      {% endfor %}
+    {% else %}
+      <p class="text-zinc-500">No accounts logged in.</p>
+    {% endif %}
+
+    <div class="mt-4">
+      {{ ui.btn_link('Add account', '/auth/login', variant='primary') }}
+    </div>
+    <div class="mt-4"><a href="/" class="text-blue-600 hover:underline">&larr; Back to projects</a></div>
+  {% endcall %}
+{% endblock %}

@@ -41,8 +41,8 @@ class CookieSigningKey(SecretStr):
     ...
 
 
-class ServerName(NonEmptyStr):
-    """Name of a server run by an agent (e.g. 'web', 'api')."""
+class ServiceName(NonEmptyStr):
+    """Name of a service run by an agent (e.g. 'web', 'api')."""
 
     ...
 

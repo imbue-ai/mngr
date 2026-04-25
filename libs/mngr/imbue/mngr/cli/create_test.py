@@ -8,6 +8,7 @@ from typing import cast
 import click
 import pluggy
 import pytest
+import tomlkit
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
@@ -60,7 +61,23 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.logging import LoggingSuppressor
-from imbue.mngr.utils.testing import write_agent_type_to_settings_toml
+from imbue.mngr.utils.toml_config import load_config_file_tomlkit
+from imbue.mngr.utils.toml_config import save_config_file
+
+
+def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, command: str) -> None:
+    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+
+    Inlines the load / setdefault("agent_types") / save dance so tests that
+    declare a lightweight agent type do not need a top-level helper.
+    """
+    settings_doc = load_config_file_tomlkit(settings_path)
+    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    type_table = tomlkit.table()
+    type_table["command"] = command
+    agent_types[type_name] = type_table
+    save_config_file(settings_path, settings_doc)
+
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -786,7 +803,9 @@ def test_create_headless_streams_output(
     source dir, which is slow and unnecessary for a one-line ``echo`` agent).
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
     source_dir = tmp_path / "headless-src"
     source_dir.mkdir()
     result = cli_runner.invoke(
@@ -825,7 +844,9 @@ def test_create_headless_with_message_does_not_raise(
     checking that the flow completes when --message is supplied.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "echo headless-test-output")
+    _write_agent_type_command_to_settings(
+        profile_dir / "settings.toml", "headless_command", "echo headless-test-output"
+    )
     source_dir = tmp_path / "headless-src"
     source_dir.mkdir()
     result = cli_runner.invoke(
@@ -936,6 +957,46 @@ def test_create_headless_rejects_multiple_incompatible_flags(
     assert "--start-on-boot" in result.output
 
 
+@pytest.mark.parametrize(
+    "no_form_flag",
+    [
+        "--no-reconnect",
+        "--no-reuse",
+        "--no-update",
+        "--no-start-on-boot",
+    ],
+)
+def test_create_headless_allows_no_forms_of_boolean_pair_flags(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    no_form_flag: str,
+) -> None:
+    """The --no-* forms of boolean-pair flags are redundant with headless and should be allowed.
+
+    Matches the --no-connect treatment: headless already does not
+    connect/reconnect/reuse/update/start-on-boot, so the --no-* form is a
+    redundant-but-compatible assertion, not a conflict. Pairs each
+    allowed flag with --attach-command (still rejected) so the validator
+    runs and we can confirm the allowed flag is not in the error listing.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "--type",
+            "headless_command",
+            "--foreground",
+            no_form_flag,
+            "--attach-command",
+            "tmux attach",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--attach-command" in result.output
+    assert no_form_flag not in result.output
+
+
 def test_create_headless_rejects_conflicting_positional_and_type_flag(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -1024,7 +1085,7 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
     work directory path.
     """
     profile_dir = get_or_create_profile_dir(temp_host_dir)
-    write_agent_type_to_settings_toml(profile_dir / "settings.toml", "headless_command", "pwd")
+    _write_agent_type_command_to_settings(profile_dir / "settings.toml", "headless_command", "pwd")
     # Use a nested dir so the source-must-not-contain-state-dir check (which
     # scans for ``.mngr/``) does not fire against the shared pytest tmp root.
     source_dir = tmp_path / "headless-src"
@@ -1060,9 +1121,9 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
 # _create_agent calls _apply_host_labels on resolved online hosts so that
 # --host-label KEY=VALUE entries are honored for both headless and
 # interactive create (both for existing/local hosts and as a second,
-# idempotent application on newly-created hosts). These tests pin down the
-# helper's behavior so a refactor cannot silently re-introduce the
-# silent-drop bug that the headless path originally had.
+# idempotent application on newly-created hosts). These tests pin down
+# that behavior so a refactor cannot silently skip the host-label
+# application on any of those paths.
 
 
 def test_apply_host_labels_adds_tags_to_local_host(
@@ -1101,26 +1162,21 @@ def test_apply_host_labels_strips_whitespace(
     assert local_provider.get_host_tags(local_host).get("env") == "prod"
 
 
-def test_apply_host_labels_ignores_entries_without_equals(
+def test_apply_host_labels_raises_on_entries_without_equals(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Labels without '=' are silently dropped (documented current behavior).
+    """Labels without '=' must raise UserInputError.
 
     _parse_target_host raises UserInputError for missing '=' on the new-host
-    branch; _apply_host_labels does not. The CLI layer catches invalid input
-    upstream, so here we only document that the helper tolerates malformed
-    entries rather than crashing.
+    branch. _apply_host_labels mirrors that validation so malformed entries
+    cannot slip through on the existing-host or local-host paths, where
+    _parse_target_host returns early before its own label validator runs.
+    Silently dropping them would hide user mistakes.
     """
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    before_keys = set(local_provider.get_host_tags(local_host).keys())
 
-    _apply_host_labels(local_host, ("no-equals-here", "env=prod"))
-
-    tags = local_provider.get_host_tags(local_host)
-    assert tags.get("env") == "prod"
-    # The malformed entry should not have produced a new key.
-    new_keys = set(tags.keys()) - before_keys
-    assert new_keys == {"env"}
+    with pytest.raises(UserInputError, match="KEY=VALUE"):
+        _apply_host_labels(local_host, ("no-equals-here", "env=prod"))
 
 
 # =============================================================================
@@ -1561,7 +1617,7 @@ def test_create_rejects_update_without_reuse(
     """--update without --reuse should fail with a clear error."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--update", "--type", "true", "--no-connect"],
+        ["my-agent", "--update", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1581,7 +1637,7 @@ def test_create_rejects_positional_and_name_together(
     """Providing both a positional address and --name should fail."""
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1601,7 +1657,7 @@ def test_create_edit_message_error_not_swallowed(
     """
     result = cli_runner.invoke(
         create,
-        ["my-agent", "--name", "other-agent", "--type", "true", "--no-connect", "--edit-message"],
+        ["my-agent", "--name", "other-agent", "--type", "command", "--no-connect", "--edit-message"],
         obj=plugin_manager,
     )
 
@@ -1623,11 +1679,13 @@ def test_create_accepts_name_flag_alone(
             "--name",
             "@.local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1654,11 +1712,13 @@ def test_create_provider_flag_sets_provider(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )
@@ -1673,7 +1733,7 @@ def test_create_provider_flag_conflicts_with_address_provider(
     """--provider that conflicts with the address provider should abort."""
     result = cli_runner.invoke(
         create,
-        ["my-agent@.modal", "--provider", "docker", "--type", "true", "--no-connect"],
+        ["my-agent@.modal", "--provider", "docker", "--type", "command", "--no-connect"],
         obj=plugin_manager,
     )
 
@@ -1695,11 +1755,13 @@ def test_create_provider_flag_redundant_with_address_is_ok(
             "--provider",
             "local",
             "--type",
-            "true",
+            "command",
             "--no-connect",
             "--transfer=none",
             "--from",
             str(temp_work_dir),
+            "--",
+            "true",
         ],
         obj=plugin_manager,
     )

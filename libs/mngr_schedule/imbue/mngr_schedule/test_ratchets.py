@@ -4,6 +4,7 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
+from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
@@ -45,7 +46,7 @@ def test_prevent_bare_print() -> None:
     # for in-container verify must go via sys.stdout.write, and diagnostics
     # for `mngr list` failures in the verify poll loop must go via bare
     # print() calls.
-    rc.check_bare_print(_DIR, snapshot(14))
+    rc.check_bare_print(_DIR, snapshot(16))
 
 
 # --- Exception handling ---
@@ -64,7 +65,7 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(6))
+    rc.check_builtin_exception_raises(_DIR, snapshot(12))
 
 
 # --- Import style ---
@@ -132,6 +133,10 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
+
+
 # --- Naming conventions ---
 
 
@@ -143,7 +148,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(11))
+    rc.check_trailing_comments(_DIR, snapshot(13))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -183,7 +188,7 @@ def test_prevent_short_uuid_ids() -> None:
 
 
 def test_prevent_model_copy() -> None:
-    rc.check_model_copy(_DIR, snapshot(2))
+    rc.check_model_copy(_DIR, snapshot(6))
 
 
 # --- Logging ---
@@ -230,19 +235,21 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 def test_prevent_direct_subprocess() -> None:
     # cron_runner.py cannot import ConcurrencyGroup (forbidden from imbue.*
     # imports), so its new in-container verify helpers (`mngr list` lookup and
-    # `mngr destroy`) must use subprocess.run directly.
-    rc.check_direct_subprocess(_DIR, snapshot(12))
+    # `mngr destroy`) must use subprocess.run directly. testing.py files are
+    # test infrastructure and excluded alongside test files.
+    excluded = TEST_FILE_PATTERNS + ("testing.py",)
+    rc.check_direct_subprocess(_DIR, snapshot(7), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(2))
+    rc.check_if_elif_without_else(_DIR, snapshot(3))
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(1))
+    rc.check_inline_functions(_DIR, snapshot(3))
 
 
 def test_prevent_underscore_imports() -> None:

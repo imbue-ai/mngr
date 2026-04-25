@@ -180,31 +180,55 @@ test-offload-release args="":
         cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
     fi
 
+# Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
+# so they don't leak into offload sandboxes (which run `-p no:xdist`).
+_parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
+# Default mark filter for local unit + integration recipes. Kept out of
+# pyproject addopts because it would collide with offload-modal-acceptance
+# (which runs the opposite filter). A later -m on CLI overrides this.
+_skip_acceptance_and_release := "-m 'not acceptance and not release'"
+
 test-unit:
-  uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
 
 test-integration:
-  uv run pytest
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
 
-# can run without coverage to make things slightly faster when checking locally
-test-quick:
-  uv run pytest --no-cov --cov-fail-under=0
+# Examples:
+#   just test-quick
+#   just test-quick libs/mngr
+#   just test-quick libs/mngr/.../foo_test.py::test_bar
+#   just test-quick "libs/mngr -m 'not tmux and not modal'"
+# Note: pass complex argument strings (anything with spaces, like -m exprs)
+# as ONE outer-quoted argument. Variadic {{args}} splits on whitespace
+# and drops inner quoting, which would truncate `-m 'a and b'` to `-m a`.
+# The recipe's default `-m 'not acceptance and not release'` can be
+# overridden by supplying a `-m` inside args (later CLI -m wins).
+# Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
+test-quick args="":
+  uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "no release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "acceptance or not acceptance"
+  PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest {{_parallel}} --no-cov -m "acceptance or not acceptance"
 
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
+  PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
 
 # useful for running against a single test, regardless of how it is marked
 test target:
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# Download the Tailwind Play CDN JS bundle for the minds desktop client.
+# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
+# same script also runs automatically as a pnpm `postinstall` hook, so
+# normally you do not need to invoke this recipe. Use it when you want to
+# force-verify the file or after nuking the static/ dir.
+minds-tailwind:
+  bash apps/minds/scripts/fetch_tailwind.sh

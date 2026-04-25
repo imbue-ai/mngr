@@ -213,13 +213,9 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
 
 
 _MNGR_PROMPT_FILE: str = ".mngr-prompt"
-# Canonical form of the "read the staged prompt" arg. The prompt file lives
-# in the agent's state dir ($MNGR_AGENT_STATE_DIR) so it is cleaned up
-# automatically when the agent is destroyed and never pollutes an in-place
-# source directory. assemble_command appends this string automatically when
-# an initial_message is supplied; any caller that has already injected the
-# same exact string into agent_args gets it de-duplicated rather than
-# double-fed.
+# Canonical form of the "read the staged prompt" arg. Written by
+# stage_initial_message under $MNGR_AGENT_STATE_DIR so it is cleaned up
+# when the agent is destroyed.
 _MNGR_PROMPT_CAT_ARG: str = f'"$(cat "$MNGR_AGENT_STATE_DIR/{_MNGR_PROMPT_FILE}")"'
 
 

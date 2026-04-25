@@ -606,6 +606,12 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
+    if not isinstance(result, str):
+        raise MngrError(
+            f"Modal function returned unexpected type {type(result).__name__}; expected str. "
+            "run_scheduled_trigger may have a mismatched signature."
+        )
+    return result
 
     if not isinstance(result, dict):
         raise MngrError(
@@ -699,6 +705,9 @@ def list_schedule_creation_records(
     except (modal.exception.NotFoundError, FileNotFoundError):
         return []
 
+    # Sort so the returned records are ordered deterministically regardless
+    # of the volume's listing order.
+    entries = sorted(entries, key=lambda e: e.path)
     records: list[ModalScheduleCreationRecord] = []
     for entry in entries:
         if not entry.path.endswith(".json"):

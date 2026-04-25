@@ -85,7 +85,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(11))
+    rc.check_getattr(_DIR, snapshot(9))
 
 
 def test_prevent_setattr() -> None:
@@ -128,6 +128,13 @@ def test_prevent_exit_stack() -> None:
 
 def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
+
+
+# The non-zero count covers the session-scoped dockerd-startup fixture in conftest.py,
+# which is autouse and fires for tests without @pytest.mark.docker, so it must bypass
+# the PATH wrapper (which would otherwise block the docker invocation).
+def test_prevent_hardcoded_guarded_binary() -> None:
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(2))
 
 
 # --- Naming conventions ---

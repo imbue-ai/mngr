@@ -24,9 +24,18 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     mngr create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
+    # Use --hostname instead of --gpus to avoid requiring GPU hardware on the test host.
     result = e2e.run(
-        'mngr create my-task --provider docker -s "--gpus all" --no-connect --no-ensure-clean',
+        'mngr create my-task --provider docker -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean',
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,
     )
     expect(result).to_succeed()
+
+    # Verify the start arg was passed through to docker run
+    hostname_result = e2e.run(
+        "mngr exec my-task hostname",
+        comment="verify start arg was applied to the container",
+    )
+    expect(hostname_result).to_succeed()
+    expect(hostname_result.stdout).to_contain("mngr-start-arg-test")

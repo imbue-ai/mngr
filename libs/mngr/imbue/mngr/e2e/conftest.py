@@ -22,7 +22,8 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import make_test_sleep_agent_type_at
+from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
+from imbue.mngr_modal.backend import truncate_modal_name
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -34,14 +35,12 @@ class E2eSession(Session):
     """
 
     output_dir: Path
-    settings_local_path: Path
 
     @classmethod
-    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path, settings_local_path: Path) -> "E2eSession":
+    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path) -> "E2eSession":
         """Create an E2eSession with the given output directory."""
         session = cls(env=env, cwd=cwd)
         session.output_dir = output_dir
-        session.settings_local_path = settings_local_path
         return session
 
     def collect_remote_diagnostics(self, agent_name: str) -> str:
@@ -91,18 +90,6 @@ class E2eSession(Session):
         """
         cleaned = textwrap.dedent(block).strip() + "\n"
         (self.output_dir / "tutorial_block.txt").write_text(cleaned)
-
-    def make_sleep_agent_type(self, command: str) -> str:
-        """Declare a long-running placeholder agent type in settings.local.toml and return its name.
-
-        Replaces the removed ``--command`` flag for e2e (subprocess) tests.
-        ``command`` is a required pinned shell command (typically
-        ``"sleep <N>"`` with a value hand-picked to be distinguishable in
-        ``ps`` output) -- the pinned value is the traceability identifier
-        back to the specific test. Pass the returned name to ``mngr`` as
-        ``--type <name>``.
-        """
-        return make_test_sleep_agent_type_at(self.settings_local_path, command=command)
 
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -286,9 +273,8 @@ def _setup_test_profile(host_dir: Path) -> str:
     return user_id
 
 
-def _delete_modal_environment(prefix: str, user_id: str, env: dict[str, str], cwd: Path) -> None:
+def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: Path) -> None:
     """Delete the Modal environment for this test."""
-    environment_name = f"{prefix}{user_id}"
     logger.info("Deleting Modal environment: {}", environment_name)
     try:
         result = run_command(
@@ -404,17 +390,24 @@ def e2e(
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
+    # e2e tests create fresh Modal environments, so they must deploy the
+    # snapshot_and_shutdown function rather than looking up an existing one.
+    env.pop("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", None)
 
     # Use a short fixed prefix so that derived names (e.g. Modal environment
     # names, which are {prefix}{user_id}) stay well under provider length
     # limits. Test isolation comes from MNGR_HOST_DIR, not the prefix.
     # The mngr_test- prefix is required by the Modal backend guard.
-    env["MNGR_PREFIX"] = "mngr_test-"
+    test_prefix = "mngr_test-"
+    env["MNGR_PREFIX"] = test_prefix
 
     # Create the mngr profile proactively so that:
     # 1. The user_id follows the timestamp convention for Modal cleanup
     # 2. The tmux onboarding screen is suppressed in test transcripts
     test_user_id = _setup_test_profile(temp_host_dir)
+    # Pre-compute the Modal environment name so create (inside the mngr
+    # subprocess) and delete (below) agree without either side re-deriving it.
+    test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
@@ -423,10 +416,6 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
-    #
-    # Tests that need a long-running placeholder agent (formerly the job of
-    # the removed ``--command`` flag) mint per-test agent types via
-    # ``E2eSession.make_sleep_agent_type``, which appends to this same file.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -444,9 +433,7 @@ def e2e(
         gitignore_path.write_text(".claude/settings.local.json\n")
         run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
-    session = E2eSession.create(
-        env=env, cwd=temp_git_repo, output_dir=test_output_dir, settings_local_path=settings_path
-    )
+    session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
 
     yield session
 
@@ -488,7 +475,7 @@ def e2e(
     )
 
     # Delete the Modal environment (if one was created)
-    _delete_modal_environment("mngr_test-", test_user_id, env=env, cwd=temp_git_repo)
+    _delete_modal_environment(test_modal_env_name, env=env, cwd=temp_git_repo)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)

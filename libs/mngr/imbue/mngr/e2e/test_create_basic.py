@@ -1,6 +1,7 @@
 """Tests for basic agent creation from the BASIC CREATION tutorial section."""
 
 import json
+import os
 
 import pytest
 
@@ -12,31 +13,37 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_default(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100070")
     e2e.write_tutorial_block("""
-    # running mngr create is strictly better than running claude! It's less letters to type :-D
+    # running mngr create is strictly better than running claude!
+    # (if you use the alias `mngr c`, it's no more letters to type :-D)
     # running this command launches claude (Claude Code) immediately *in a new worktree*
     mngr create
     # the defaults are the following: agent=claude, provider=local, project=current dir
     """)
     result = e2e.run(
-        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
+        "mngr create my-task --type command --no-ensure-clean -- sleep 100070",
         comment="running mngr create is strictly better than running claude!",
     )
     expect(result).to_succeed()
 
     list_result = e2e.run(
-        "mngr list", comment="the defaults are the following: agent=claude, provider=local, project=current dir"
+        "mngr list --format json",
+        comment="the defaults are the following: agent=claude, provider=local, project=current dir",
     )
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1
+    agent = matching[0]
+    # Default creation should use a worktree (not in-place)
+    assert "worktrees" in agent["work_dir"], f"Expected worktree-based work_dir, got: {agent['work_dir']}"
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_in_place(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100071")
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
     mngr create --transfer=none
@@ -44,14 +51,19 @@ def test_create_in_place(e2e: E2eSession) -> None:
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        f"mngr create my-task --transfer=none --type {sleep_agent_type} --no-ensure-clean",
+        "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100071",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
 
+    # Verify the agent's work_dir is the session cwd (not a generated worktree)
+    pwd_result = e2e.run("pwd", comment="Get the session cwd for comparison")
+    expect(pwd_result).to_succeed()
+    session_cwd = pwd_result.stdout.strip()
+
     list_result = e2e.run(
         "mngr list --format json",
-        comment="mngr defaults to creating a new worktree for each agent",
+        comment="Verify agent runs in-place, not in a worktree",
     )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
@@ -59,40 +71,45 @@ def test_create_in_place(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent_work_dir = matching[0]["work_dir"]
-    # With --transfer=none, the work directory should be the session cwd (the temp git repo),
+    # With --transfer=none, the work directory should be exactly the session cwd,
     # not a generated worktree path.
-    assert "worktrees" not in agent_work_dir, f"Expected in-place work_dir to not be a worktree, got: {agent_work_dir}"
+    assert os.path.realpath(agent_work_dir) == os.path.realpath(session_cwd), (
+        f"Expected in-place work_dir to match session cwd.\n  work_dir: {agent_work_dir}\n  session cwd: {session_cwd}"
+    )
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_short_forms(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100072")
     e2e.write_tutorial_block("""
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
     mngr create my-task claude
     mngr c my-task
     """)
-    # Test "mngr create <name>" form. --type test_sleep stands in for the real
-    # claude agent so the test doesn't need claude installed.
+    # Test "mngr create <name>" form. --type command -- sleep <N> stands in
+    # for the real claude agent so the test doesn't need claude installed.
     result_full = e2e.run(
-        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
+        "mngr create my-task --type command --no-ensure-clean -- sleep 100072",
         comment="you can use a short form for most commands (like create) as well",
     )
     expect(result_full).to_succeed()
 
     # Test "mngr c <name>" short form (needs a different name since my-task already exists)
+    # Pinned sleep value distinct from the one above so leaked processes trace back to this call.
     result_short = e2e.run(
-        f"mngr c my-other-task --type {sleep_agent_type} --no-ensure-clean",
+        "mngr c my-other-task --type command --no-ensure-clean -- sleep 100117",
         comment="the above command is the same as these",
     )
     expect(result_short).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify both agents are running")
+    # Verify both agents were created and are running
+    list_result = e2e.run("mngr list --format json", comment="Verify both agents are running")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
-    expect(list_result.stdout).to_match(r"my-other-task\s+(RUNNING|WAITING)")
+    parsed = json.loads(list_result.stdout)
+    agents_by_name = {a["name"]: a for a in parsed["agents"]}
+    assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
+    assert "my-other-task" in agents_by_name, f"my-other-task not found in agents: {list(agents_by_name)}"
 
 
 @pytest.mark.release
@@ -124,21 +141,28 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert matching[0]["type"] == "codex"
+    assert matching[0]["state"] in ("RUNNING", "WAITING")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100073")
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
     # by using `--` to separate the agent arguments from the mngr arguments:
     mngr create my-task -- --model opus
     # that command launches claude with the "opus" model instead of the default
     """)
+    # `--` is consumed by _CreateCommand.parse_args the first time it appears,
+    # so everything after it becomes agent_args and is joined with spaces into
+    # the stored command. The test asserts on the stored command string only,
+    # so whether the spawned `sleep` process actually stays alive is irrelevant
+    # (GNU sleep would reject `--model` as an unknown option and exit). We put
+    # the pinned sleep value first so it shows up at the start of `ps` output
+    # for leak traceability.
     result = e2e.run(
-        f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean -- --model opus",
+        "mngr create my-task --type command --no-ensure-clean -- sleep 100073 --model opus",
         comment="you can specify the arguments to the *agent* by using `--` to separate the agent arguments",
     )
     expect(result).to_succeed()
@@ -149,6 +173,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
+    assert "sleep 100073" in matching[0]["command"]
     assert "--model opus" in matching[0]["command"]
 
 
@@ -156,52 +181,64 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_named_agent(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100074")
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
     mngr create my-task
-    # that command give the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+    # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean",
+            "mngr create my-task --type command --no-ensure-clean -- sleep 100074",
             comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify agent appears in list")
+    # Verify the agent appears with the exact name we specified
+    list_result = e2e.run("mngr list --format json", comment="Verify agent appears with exact name")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1, f"Expected exactly 1 agent named 'my-task', got {len(matching)}"
+    assert matching[0]["state"] in ("RUNNING", "WAITING")
+
+    # Verify the agent is actually running by executing a command on its host
+    exec_result = e2e.run("mngr exec my-task pwd", comment="Verify agent is actually running")
+    expect(exec_result).to_succeed()
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_json_output(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100075")
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
     mngr create my-task --no-connect --format json
     # (--quiet suppresses all output)
     """)
-    expect(
-        e2e.run(
-            f"mngr create my-task --no-connect --type {sleep_agent_type} --no-ensure-clean --format json",
-            comment="you can control output format for scripting",
-        )
-    ).to_succeed()
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --type command --no-ensure-clean --format json -- sleep 100075",
+        comment="you can control output format for scripting",
+    )
+    expect(create_result).to_succeed()
+
+    # The create command with --format json should produce valid JSON with agent_id and host_id
+    create_json = json.loads(create_result.stdout)
+    assert "agent_id" in create_json
+    assert "host_id" in create_json
 
     list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
-    assert len(parsed["agents"]) == 1
+    agents = parsed["agents"]
+    assert len(agents) == 1
+    assert agents[0]["name"] == "my-task"
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
-    sleep_agent_type = e2e.make_sleep_agent_type("sleep 100076")
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
     # if you want to be sure that interactivity is disabled, you can use the --headless flag:
@@ -209,11 +246,11 @@ def test_create_headless(e2e: E2eSession) -> None:
     """)
     expect(
         e2e.run(
-            f"mngr create my-task --type {sleep_agent_type} --no-ensure-clean --headless",
+            "mngr create my-task --type command --no-ensure-clean --headless -- sleep 100076",
             comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
         )
     ).to_succeed()
 
     list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")

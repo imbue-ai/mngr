@@ -5,12 +5,15 @@ An agent type is a named configuration that tells `mngr` how to set up and run a
 ```bash
 mngr create my-agent claude        # "claude" is the agent type
 mngr create my-agent codex         # "codex" is the agent type
-mngr create my-agent my-script     # any command on PATH whose name is a plain identifier
 ```
 
-To run a literal command with spaces or shell metacharacters, define a [custom agent type](#custom-agent-types) with that command.
+To run a literal shell command, use the built-in `command` agent type and pass the command after `--`:
 
-Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
+```bash
+mngr create my-task --type command -- python -m http.server 8080
+```
+
+Agent types are registered by [plugins](./plugins.md) or defined in your config, and can specify:
 
 - Command to run (e.g., `claude`, `codex`)
 - Environment variables (API keys, model selection, feature flags)
@@ -24,9 +27,8 @@ When you run `mngr create my-agent <type>` (or `mngr create my-agent --type <typ
 
 1. **Custom type lookup**: If you defined `<type>` in your config, use that configuration
 2. **Plugin lookup**: If a plugin registered `<type>` as an agent type, use its configuration
-3. **Direct command**: Otherwise, treat `<type>` as a command to run
 
-This fallback lets you run any program as an agent without needing a plugin or custom type.
+If `<type>` is not found in either, `mngr create` fails. Use `--type command -- <shell command>` to run an arbitrary command without registering a type.
 
 ## Custom Agent Types
 
@@ -49,10 +51,11 @@ mngr create my-agent my_claude
 
 Custom types can be scoped to a project by using `mngr config edit --scope project`. This is useful for project-specific configurations that shouldn't apply globally.
 
-To run a literal shell command (with spaces, pipes, or other shell metacharacters), set `command` on a custom type and omit `parent_type`:
+For a reusable shortcut that runs a fixed shell command (instead of repeating `--type command -- ...` each time), set `parent_type = "command"` on a custom type and pin the command in config:
 
 ```toml
 [agent_types.my_server]
+parent_type = "command"
 command = "python -m http.server 8080"
 ```
 
@@ -62,7 +65,7 @@ mngr create my-task my_server
 
 ### Available Settings
 
-- `command`: literal shell command to run as the agent. When set on a type without a `parent_type`, this defines a standalone command-based agent type; when set alongside `parent_type`, it overrides the command inherited from the parent type.
+- `command`: literal shell command to run as the agent. Typically set alongside `parent_type = "command"` to pin a fixed command for a reusable custom type, or alongside another `parent_type` to override the command inherited from that parent. Arguments passed after `--` at invocation time are appended to this command.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
 - `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
@@ -90,4 +93,4 @@ Agent types come from installed plugins and your config:
 mngr plugin list    # Shows installed plugins (listing agent types per plugin [future])
 ```
 
-Built-in plugins provide `claude` and `codex` by default.
+Built-in plugins provide `claude`, `codex`, and `command` by default.

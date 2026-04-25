@@ -230,10 +230,7 @@ class ClaudeBackendInterface(MutableModel, ABC):
 
 
 # Extra claude CLI args for ask's stream-json tailing. The user prompt is
-# passed via initial_message (HeadlessClaude.stage_initial_message writes
-# it to .mngr-prompt under $MNGR_AGENT_STATE_DIR, and assemble_command
-# appends the cat reference), so this tuple only contains the ask-specific
-# flags and the system-prompt file reference.
+# passed via ``initial_message``, not included here.
 _HEADLESS_CLAUDE_ARGS: Final[tuple[str, ...]] = (
     "--system-prompt",
     '"$(cat "$MNGR_AGENT_WORK_DIR/.mngr-system-prompt")"',
@@ -260,8 +257,8 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
         # `ask` always runs in a fresh throwaway directory -- nothing in the
-        # user's cwd should leak in, and our prompt files should not land in
-        # their repo.
+        # user's cwd should leak in, and our system-prompt file should not
+        # land in their repo.
         with (
             ephemeral_work_location(self.host) as work_location,
             headless_agent_output(

@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.duration import parse_duration_to_seconds
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
 from imbue.mngr_wait.api import poll_target_state
 from imbue.mngr_wait.api import resolve_wait_target
 from imbue.mngr_wait.api import wait_for_state
@@ -41,6 +42,7 @@ class WaitCliOptions(CommonCliOptions):
     state: tuple[str, ...]
     timeout: str | None
     interval: str
+    daemonize: bool = False
 
 
 def _read_target_from_stdin(
@@ -157,6 +159,13 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
     show_default=True,
     help="Poll interval (e.g. '5s', '1m'). Default: 5s.",
 )
+@click.option(
+    "--daemonize/--no-daemonize",
+    default=False,
+    show_default=True,
+    help="When not daemonized (default), exit if the parent process dies. "
+    "Use --daemonize to keep running independently.",
+)
 @add_common_options
 @click.pass_context
 def wait(ctx: click.Context, **kwargs: object) -> None:
@@ -165,6 +174,10 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
         command_name="wait",
         command_class=WaitCliOptions,
     )
+
+    # Start parent death watcher unless running as a daemon
+    if not opts.daemonize:
+        start_parent_death_watcher(mngr_ctx.concurrency_group)
 
     # Resolve the target identifier
     target_identifier = opts.target
