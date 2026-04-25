@@ -2187,7 +2187,7 @@ class Host(BaseHost, OnlineHostInterface):
                 ]
             )
 
-            # Pre-create empty events.jsonl files so that `mngr events --follow`
+            # Pre-create empty events.jsonl files so that `mngr event --follow`
             # finds the sources immediately on startup, rather than waiting for a
             # 10-second rescan after the agent's services start writing events.
             services_events_file = services_events_dir / "events.jsonl"

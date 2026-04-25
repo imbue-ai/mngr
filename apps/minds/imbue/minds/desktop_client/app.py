@@ -200,7 +200,7 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
-    # Captured here so background callbacks (e.g. the mngr events refresh
+    # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
     inner_app.state.event_loop = asyncio.get_running_loop()

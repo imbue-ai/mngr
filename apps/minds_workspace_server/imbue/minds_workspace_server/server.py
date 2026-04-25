@@ -688,7 +688,7 @@ async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
 
     Called by agents inside the container to tell the minds desktop client
     that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr events --follow`` and POSTs back to the broadcast
+    event up via ``mngr event --follow`` and POSTs back to the broadcast
     endpoint below.
     """
     try:
@@ -703,7 +703,7 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
     """Broadcast a refresh_service WebSocket message for the given service_name.
 
     Called by the desktop client after it observes a refresh event on the
-    mngr events stream. Locked to loopback clients since no authentication
+    mngr event stream. Locked to loopback clients since no authentication
     exists between the desktop client and the workspace server inside the
     container.
     """

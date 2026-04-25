@@ -1183,7 +1183,7 @@ def _build_refresh_test_app(
 
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr events stream triggers a POST to the agent's
+    """A refresh event on the mngr event stream triggers a POST to the agent's
     workspace server broadcast endpoint with the correct service_name."""
     agent_id = AgentId()
     service_name = "web"

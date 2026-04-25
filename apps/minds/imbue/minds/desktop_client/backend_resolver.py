@@ -274,7 +274,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     State is updated externally via update_agents() and update_services() methods.
     In production, a MngrStreamManager calls these methods from background threads
-    that stream data from `mngr observe --discovery-only` and `mngr events --follow`.
+    that stream data from `mngr observe --discovery-only` and `mngr event --follow`.
 
     All reads are thread-safe via an internal lock.
     """
@@ -460,7 +460,7 @@ class MngrStreamManager(MutableModel):
        - AGENT_DISCOVERED: incrementally adds or updates a single agent
        - AGENT_DESTROYED: incrementally removes a single agent
        - HOST_DESTROYED: removes all agents on a destroyed host
-    2. `mngr events <agent-id> servers --follow --quiet` (one per workspace agent)
+    2. `mngr event <agent-id> servers --follow --quiet` (one per workspace agent)
        to discover each agent's servers.
 
     Only agents with the ``workspace`` label get events streams -- other agents
@@ -514,7 +514,7 @@ class MngrStreamManager(MutableModel):
     def stop(self) -> None:
         """Stop all streaming subprocesses.
 
-        Terminates the mngr observe and mngr events processes first so
+        Terminates the mngr observe and mngr event processes first so
         that the threads reading their output unblock immediately, then
         exits the ConcurrencyGroup (which joins the threads).
         """
@@ -788,7 +788,7 @@ class MngrStreamManager(MutableModel):
                 self._start_events_stream(AgentId(aid_str))
 
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
-        """Handle a line of output from mngr events --follow for a specific agent.
+        """Handle a line of output from mngr event --follow for a specific agent.
 
         Dispatches based on the ``source`` field in the event envelope:
         service events update the resolver's service map, request events are
@@ -798,7 +798,7 @@ class MngrStreamManager(MutableModel):
         if not is_stdout:
             stripped = line.strip()
             if stripped:
-                logger.debug("mngr events stderr for {}: {}", agent_id, stripped)
+                logger.debug("mngr event stderr for {}: {}", agent_id, stripped)
             return
         stripped = line.strip()
         if not stripped:
@@ -826,7 +826,7 @@ class MngrStreamManager(MutableModel):
             logger.error("Failed to parse event line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> services requests refresh --follow for a workspace agent."""
+        """Start mngr event <agent-id> services requests refresh --follow for a workspace agent."""
         if self._cg.is_shutting_down():
             logger.debug("Skipping events stream for {} -- shutting down", agent_id)
             return
@@ -839,7 +839,7 @@ class MngrStreamManager(MutableModel):
             process = self._cg.run_process_in_background(
                 command=[
                     self.mngr_binary,
-                    "events",
+                    "event",
                     aid_str,
                     SERVICES_EVENT_SOURCE_NAME,
                     REQUESTS_EVENT_SOURCE_NAME,
