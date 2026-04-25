@@ -146,9 +146,13 @@ class UnsupportedSubagentHookError(NotImplementedError):
 # doesn't contain one of these is treated as a user-configured hook --
 # i.e. a regular hook whose top-level-vs-subagent semantics we don't
 # know how to reason about, and which gets stripped from the spawned
-# subagent's settings.
+# subagent's settings. ``MAIN_CLAUDE_SESSION_ID`` matches the session-guard
+# prefix shared by every mngr_claude readiness hook, so readiness entries
+# that happen not to touch $MNGR_AGENT_STATE_DIR (e.g. the tmux
+# submit-signal in UserPromptSubmit) are still recognized.
 _MNGR_MANAGED_HOOK_MARKERS: Final[tuple[str, ...]] = (
     "$MNGR_AGENT_STATE_DIR",
+    "MAIN_CLAUDE_SESSION_ID",
     "imbue.mngr_subagent_proxy.hooks.",
     "sync_keychain_credentials.py",
     "wait_for_stop_hook.sh",

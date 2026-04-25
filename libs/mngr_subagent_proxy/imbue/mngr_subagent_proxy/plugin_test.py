@@ -193,6 +193,74 @@ def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
     assert not (work_dir / ".claude").exists()
 
 
+def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(tmp_path: Path) -> None:
+    """mngr_claude's UserPromptSubmit readiness entry survives the subagent-proxy strip.
+
+    The UserPromptSubmit entry contains two inner commands: one touches
+    $MNGR_AGENT_STATE_DIR and one signals tmux. Both are prefixed with
+    SESSION_GUARD (which contains MAIN_CLAUDE_SESSION_ID), so the entry
+    must be recognized as mngr-managed and left in place rather than
+    stripped along with user-configured hooks.
+    """
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    settings_path = claude_dir / "settings.local.json"
+    session_guard = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": session_guard + 'touch "$MNGR_AGENT_STATE_DIR/active"',
+                                },
+                                {
+                                    "type": "command",
+                                    "command": session_guard + "tmux wait-for -S mngr-submit 2>/dev/null || true",
+                                },
+                            ]
+                        }
+                    ]
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    host = FakeHost(host_dir)
+    agent = FakeAgent(
+        AgentId.generate(),
+        work_dir,
+        ClaudeAgentConfig(),
+        name=AgentName("parent--subagent-slug-deadbeef"),
+    )
+
+    _provision(agent, host, None)
+
+    settings = json.loads(settings_path.read_text())
+    hooks = settings["hooks"]
+    assert "UserPromptSubmit" in hooks
+    user_prompt_entries = hooks["UserPromptSubmit"]
+    # The readiness entry survived with both inner commands intact.
+    readiness_entries = [
+        entry
+        for entry in user_prompt_entries
+        if any("MAIN_CLAUDE_SESSION_ID" in h.get("command", "") for h in entry.get("hooks", []))
+    ]
+    assert len(readiness_entries) == 1
+    inner_commands = readiness_entries[0]["hooks"]
+    assert len(inner_commands) == 2
+    assert any("tmux wait-for" in h["command"] for h in inner_commands)
+    assert any('touch "$MNGR_AGENT_STATE_DIR/active"' in h["command"] for h in inner_commands)
+
+
 def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:
     """A subagent-proxy-child agent with no pre-existing settings.local.json provisions without error."""
     host_dir = tmp_path / "host"
