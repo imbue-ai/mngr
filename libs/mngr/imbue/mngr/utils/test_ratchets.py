@@ -65,7 +65,7 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
 
 
-def test_prevent_silent_config_decode_error_catches() -> None:
+def test_prevent_silent_decode_error_catches() -> None:
     rc.check_silent_decode_error_catches(_DIR, snapshot(27))
 
 
