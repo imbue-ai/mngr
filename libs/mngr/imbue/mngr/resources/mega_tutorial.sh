@@ -1231,7 +1231,10 @@ for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   mngr create "$task"@.modal --no-connect --message "Work on: $task"
 done
 
-# monitor all agents as they change in real time
+# monitor all agents in a refreshing dashboard (uses Unix watch(1))
+watch -n 5 mngr list --running
+
+# or get a JSONL stream of host/agent discovery events for programmatic consumers
 mngr observe --discovery-only
 
 # collect results from all agents
