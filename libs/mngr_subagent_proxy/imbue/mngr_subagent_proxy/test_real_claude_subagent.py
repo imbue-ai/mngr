@@ -354,30 +354,36 @@ def _agent_settings_local_json(agent_name: str, work_dir: Path) -> str:
         return f"<read failed for {settings}: {e}>"
 
 
-def _diagnose_no_subagent(
+def _diagnose_subagent_proxy_failure(
     mngr: _MngrSubprocess,
     parent_name: str,
     parent_work_dir: Path,
     host_dir: Path,
 ) -> str:
-    """Build a diagnostic report when the subagent never appears.
+    """Build a diagnostic report for subagent-proxy failure paths.
 
-    Captures:
-    - whether the subagent_proxy plugin is registered in this subprocess.
+    Called both when the expected mngr subagent never appeared AND when
+    the parent agent failed to reach WAITING/END_OF_TURN after the
+    subagent finished. Captures:
+    - whether ``mngr list`` itself works (and its stderr if it doesn't).
     - the parent's settings.local.json (does it have PreToolUse:Agent?).
     - the tail of the parent's transcript (did Claude actually call Task?).
+
+    Best-effort: this helper is only ever invoked on the failure path, so
+    it must never raise. Subprocess errors are caught and reported inline.
     """
     parts: list[str] = ["", "=== DIAGNOSTIC ==="]
 
-    plugins_check = mngr.run(
-        [
-            "list",
-            "--format",
-            "json",
-        ],
-        timeout=_MNGR_LIST_TIMEOUT_SECONDS,
-    )
-    parts.append(f"mngr list returncode: {plugins_check.returncode}")
+    try:
+        plugins_check = mngr.run(
+            ["list", "--format", "json"],
+            timeout=_MNGR_LIST_TIMEOUT_SECONDS,
+        )
+        parts.append(f"mngr list returncode: {plugins_check.returncode}")
+        if plugins_check.returncode != 0:
+            parts.append(f"mngr list stderr (truncated to 2000 chars): {plugins_check.stderr[:2000]}")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        parts.append(f"mngr list failed to run: {e!r}")
 
     settings_text = _agent_settings_local_json(parent_name, parent_work_dir)
     has_pretooluse_agent = '"matcher": "Agent"' in settings_text or '"matcher":"Agent"' in settings_text
@@ -493,7 +499,7 @@ def test_task_tool_spawns_mngr_subagent(
             timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
         if subagent is None:
-            diagnostics = _diagnose_no_subagent(mngr, parent_name, _source_repo, temp_host_dir)
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
             pytest.fail(
                 f"No mngr-managed subagent with prefix {subagent_prefix!r} appeared within "
                 f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. This strongly suggests the PreToolUse "
@@ -521,7 +527,7 @@ def test_task_tool_spawns_mngr_subagent(
             timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
         if final_parent is None or not _is_waiting_end_of_turn(final_parent):
-            diagnostics = _diagnose_no_subagent(mngr, parent_name, _source_repo, temp_host_dir)
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
             pytest.fail(
                 f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
                 f"{_DEFAULT_WAIT_TIMEOUT_SECONDS}s. Subagent finished but parent is "
