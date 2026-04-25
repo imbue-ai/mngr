@@ -444,9 +444,7 @@ def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
     # Host-only fields must not be silently hoisted to the top level. This catches the bug
     # class where computed-field code reads a host field as if it were a top-level agent
     # field (e.g. result.get("ssh_activity_time")) and gets None instead of the real value.
-    host_only_fields = (
-        set(HostDetails.model_fields) - set(AgentDetails.model_fields) - {"id", "name", "type", "command"}
-    )
+    host_only_fields = set(HostDetails.model_fields) - set(AgentDetails.model_fields)
     for field_name in host_only_fields:
         assert field_name not in context, f"Host-only field {field_name!r} must live under context['host']"
 
