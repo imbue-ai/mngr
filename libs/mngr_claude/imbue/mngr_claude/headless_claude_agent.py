@@ -294,6 +294,15 @@ class _StreamTailState(MutableModel):
         if delta_text is not None:
             self.yielded_text_chunks.append(delta_text)
             yield delta_text
+            return
+
+        # Other inner stream_event types (content_block_start, content_block_stop,
+        # message_stop, ping, future event types, etc.) carry no text to surface
+        # and are intentionally skipped. Trace-log for consistency with the
+        # outer dispatcher's handling of unknown top-level types.
+        event = parsed.get("event")
+        inner_event_type = event.get("type") if isinstance(event, dict) else None
+        logger.trace("Skipped stream-json stream_event of unhandled inner type {!r}", inner_event_type)
 
     def _handle_assistant_event(self, parsed: dict[str, Any]) -> Iterator[str]:
         # Top-level assistant event: reconcile against the per-turn buffer.
