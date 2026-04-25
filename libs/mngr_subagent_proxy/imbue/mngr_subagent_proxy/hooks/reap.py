@@ -93,7 +93,7 @@ def _do_reap(state_dir: Path) -> None:
         _process_map_file(state_dir, map_file, agents_map)
 
 
-def _background_reap() -> None:
+def spawn_background_reaper() -> None:
     """Re-invoke this module with MNGR_SUBAGENT_REAP_BACKGROUND=1 in a detached session."""
     env = os.environ.copy()
     env["MNGR_SUBAGENT_REAP_BACKGROUND"] = "1"
@@ -134,7 +134,7 @@ def main() -> None:
 
     # There is work to do; do it in a detached child so the SessionStart hook
     # returns immediately.
-    _background_reap()
+    spawn_background_reaper()
 
 
 if __name__ == "__main__":

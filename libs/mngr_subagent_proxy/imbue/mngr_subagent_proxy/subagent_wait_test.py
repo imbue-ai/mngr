@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
-import pytest
 from loguru import logger
 
 from imbue.mngr.primitives import AgentId
@@ -34,7 +33,6 @@ def _capture_loguru_messages() -> Iterator[list[str]]:
         logger.remove(handler_id)
 
 
-@pytest.mark.release
 def test_end_turn_detection_with_pure_text() -> None:
     """is_end_turn_event accepts pure-text end_turn and rejects tool_use / malformed events."""
     pure_text_event = {
@@ -88,7 +86,6 @@ def test_end_turn_detection_with_pure_text() -> None:
     assert extract_assistant_text(multi_text_event) == "hello world"
 
 
-@pytest.mark.release
 def test_jsonl_tail_handles_partial_lines(tmp_path: Path) -> None:
     """read_new_jsonl_lines parses complete lines, buffers partials, logs on malformed, resets on truncation."""
     transcript = tmp_path / "transcript.jsonl"
@@ -130,7 +127,6 @@ def test_jsonl_tail_handles_partial_lines(tmp_path: Path) -> None:
     assert parsed == [{"type": "assistant", "n": 99}]
 
 
-@pytest.mark.release
 def test_result_truncation() -> None:
     """truncate_result_text preserves short text, truncates long text, and clips budget safely."""
     short_text = "a" * 100
@@ -150,7 +146,6 @@ def test_result_truncation() -> None:
     assert len(tiny_result) == 13
 
 
-@pytest.mark.release
 def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
     """resolve_destroyed_result returns the last assistant_message text from preserved events."""
     host_dir = tmp_path / "fake_host_dir"
