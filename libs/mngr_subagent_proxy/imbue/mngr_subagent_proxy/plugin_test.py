@@ -1,12 +1,10 @@
-"""Acceptance test for the mngr_subagent_proxy plugin provisioning hooks."""
+"""Unit tests for the mngr_subagent_proxy plugin provisioning hooks."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -21,7 +19,6 @@ from imbue.mngr_subagent_proxy.testing import FakeHost
 _provision: Any = on_after_provisioning
 
 
-@pytest.mark.acceptance
 def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
@@ -81,7 +78,6 @@ def _seed_settings_with_stop_hooks(work_dir: Path) -> Path:
     return settings_path
 
 
-@pytest.mark.acceptance
 def test_plugin_strips_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> None:
     """A proxy-child agent (name contains --subagent-) has Stop/SubagentStop stripped after provisioning."""
     host_dir = tmp_path / "host"
@@ -108,7 +104,6 @@ def test_plugin_strips_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> No
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
 
 
-@pytest.mark.acceptance
 def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None:
     """A plain top-level agent (no --subagent- infix) keeps its Stop/SubagentStop hooks."""
     host_dir = tmp_path / "host"
@@ -128,7 +123,6 @@ def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None
     assert "SubagentStop" in hooks
 
 
-@pytest.mark.acceptance
 def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
     """Provisioning is a no-op for agents whose config is not ClaudeAgentConfig."""
     host_dir = tmp_path / "host"
@@ -146,7 +140,6 @@ def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
     assert not (work_dir / ".claude").exists()
 
 
-@pytest.mark.acceptance
 def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:
     """A subagent-proxy-child agent with no pre-existing settings.local.json provisions without error."""
     host_dir = tmp_path / "host"
