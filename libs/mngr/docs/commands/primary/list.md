@@ -136,7 +136,7 @@ Each subsection notes where its fields are available; agent and host fields work
 - `runtime_seconds` - How long the agent has been running
 - `user_activity_time` - Timestamp of the last user activity
 - `agent_activity_time` - Timestamp of the last agent activity
-- `idle_seconds` - How long since the agent was active (also factors in host SSH activity)
+- `idle_seconds` - How long since the agent was active
 - `idle_mode` - Idle detection mode
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
