@@ -73,6 +73,19 @@ _HEADER_LABELS: Final[dict[str, str]] = {
     "activity_sources": "ACTIVITY",
 }
 
+# Aliases that let users reference fields by the same name in --fields/--format
+# templates as they do in CEL filters and --sort. host.provider is the short form
+# documented for CEL; the underlying attribute is host.provider_name.
+_FIELD_ALIASES: Final[dict[str, str]] = {
+    "host.provider": "host.provider_name",
+}
+
+
+@pure
+def _resolve_field_alias(field: str) -> str:
+    """Map a user-supplied field name to its canonical form for attribute/dict lookups."""
+    return _FIELD_ALIASES.get(field, field)
+
 
 @pure
 def _is_streaming_eligible(
@@ -1004,19 +1017,6 @@ def _format_value_as_string(value: Any) -> str:
 # Pattern to match a field part with optional bracket notation
 # Matches: "fieldname", "fieldname[0]", "fieldname[-1]", "fieldname[:3]", "fieldname[1:3]", etc.
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
-
-# Aliases that let users reference fields by the same name in --fields/--format
-# templates as they do in CEL filters and --sort. host.provider is the short form
-# documented for CEL; the underlying attribute is host.provider_name.
-_FIELD_ALIASES: Final[dict[str, str]] = {
-    "host.provider": "host.provider_name",
-}
-
-
-@pure
-def _resolve_field_alias(field: str) -> str:
-    """Map a user-supplied field name to its canonical form for attribute/dict lookups."""
-    return _FIELD_ALIASES.get(field, field)
 
 
 class _CelSortKeyExtractor:
