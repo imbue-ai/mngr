@@ -376,7 +376,7 @@ def _check_permissions_newly_waiting(runtime: _WaitRuntime) -> bool:
     return False
 
 
-def _check_target_still_present(runtime: _WaitRuntime, now: float) -> bool:
+def _has_target_disappeared_past_grace(runtime: _WaitRuntime, now: float) -> bool:
     """Return True if the target has been missing from `mngr list` beyond the grace window."""
     try:
         agents = _run_mngr_list()
@@ -461,7 +461,7 @@ def wait_for_subagent(target_name: str) -> str:
             truncated = truncate_result_text(runtime.pending_end_turn_text, max_chars)
             return f"END_TURN:{truncated}"
 
-        if _check_target_still_present(runtime, now):
+        if _has_target_disappeared_past_grace(runtime, now):
             destroyed_text = resolve_destroyed_result(target_name, location)
             truncated = truncate_result_text(destroyed_text, max_chars)
             return f"END_TURN:{truncated}"
