@@ -123,8 +123,10 @@ def load_bootstrap_context(
     Top-level config fields (logging, retry, headless, etc.) are still validated
     in non-strict mode.
 
-    Returns a MngrContext whose ``config.providers``, ``config.agent_types``,
-    and ``config.plugins`` are all empty dicts. ``config.disabled_plugins``
+    Returns a MngrContext whose ``config.providers`` and ``config.agent_types``
+    are empty dicts. ``config.plugins`` is also empty *except* for entries
+    injected by CLI ``--plugin``/``--enable-plugin`` flags, which are still
+    applied via ``_apply_plugin_overrides``. ``config.disabled_plugins``
     reflects only CLI-level ``--disable-plugin`` flags; plugins disabled via
     ``[plugins.<name>] enabled = false`` in a config file remain blocked at
     plugin-manager creation time (via the lightweight pre-reader in
