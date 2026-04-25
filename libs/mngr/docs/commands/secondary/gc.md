@@ -38,7 +38,6 @@ mngr gc [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be cleaned without actually cleaning | `False` |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `abort` |
-| `-w`, `--watch` | integer | Re-run garbage collection at the specified interval (seconds) | None |
 
 ## Common
 
