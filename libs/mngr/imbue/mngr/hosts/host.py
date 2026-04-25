@@ -2120,6 +2120,16 @@ class Host(BaseHost, OnlineHostInterface):
             git_c = f"git -C {shlex.quote(str(source_path))}"
             mkdir_cmd = f"mkdir -p {work_dir_path.parent}"
 
+            # `git worktree add` cannot resolve any commit reference in a repo
+            # with no commits, producing a cryptic "fatal: invalid reference"
+            # error. Detect this up front so the user gets actionable guidance.
+            head_check = self.execute_idempotent_command(f"{git_c} rev-parse --verify HEAD")
+            if not head_check.success:
+                raise UserInputError(
+                    f"Cannot create an agent in {source_path}: the git repository has no commits. "
+                    f"Please make an initial commit first."
+                )
+
             # git worktree add <path> [-b <new>] [<base>]
             worktree_args = [mkdir_cmd, "&&", git_c, "worktree", "add", shlex.quote(str(work_dir_path))]
             if new_branch_name:
