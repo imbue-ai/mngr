@@ -1451,7 +1451,7 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
             email=email,
         )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signup: %s", exc)
+        logger.error("SuperTokens SDK error during signup", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -1495,7 +1495,7 @@ async def auth_signin(body: SignInRequest) -> AuthResponse:
                 email=email,
             )
     except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signin: %s", exc)
+        logger.error("SuperTokens SDK error during signin", exc_info=exc)
         return AuthResponse(status="ERROR", message="Auth backend unavailable")
     return AuthResponse(
         status="OK",
@@ -1593,7 +1593,7 @@ async def auth_verify_email_page(request: Request) -> HTMLResponse:
     try:
         result = await verify_email_using_token(tenant_id=tenant_id, token=token)
     except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
-        logger.error("Email verification error: %s", exc)
+        logger.error("Email verification error", exc_info=exc)
         return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
     if isinstance(result, VerifyEmailUsingTokenOkResult):
         return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
@@ -1695,7 +1695,7 @@ async def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
         )
         oauth_user = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
     except (ValueError, KeyError, OSError) as exc:
-        logger.error("OAuth callback failed for %s: %s", body.provider_id, exc)
+        logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
         return AuthResponse(status="ERROR", message=str(exc))
 
     if oauth_user.email is None or oauth_user.email.id is None:
