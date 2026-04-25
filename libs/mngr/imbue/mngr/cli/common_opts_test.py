@@ -494,6 +494,20 @@ def test_apply_config_defaults_raises_on_unknown_param_names(mngr_test_prefix: s
         apply_config_defaults(ctx, config, "create", strict=True)
 
 
+def test_apply_config_defaults_warns_on_unknown_param_when_lax(mngr_test_prefix: str) -> None:
+    """apply_config_defaults should warn (not raise) when strict=False."""
+    ctx = _make_click_context(params={"name": "default"})
+
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
+    )
+
+    # Should not raise; unknown param is silently warned about.
+    result = apply_config_defaults(ctx, config, "create", strict=False)
+    assert "definitely_not_a_real_param" not in result
+
+
 # =============================================================================
 # Tests for apply_create_template edge cases
 # =============================================================================
@@ -1089,34 +1103,3 @@ def test_disable_plugin_in_command_defaults_blocks_override_hook(
         f"Disabled plugin's override_command_options hook still fired, "
         f"injecting: {terminal_entries}. extra_window={extra_window}"
     )
-
-
-# Tests for unknown command default params -- they should fail loudly, not be
-# silently dropped.
-
-
-def test_apply_config_defaults_raises_on_unknown_param(mngr_test_prefix: str) -> None:
-    """apply_config_defaults should raise ConfigParseError for unknown param names when strict=True."""
-    ctx = _make_click_context(params={"name": "default", "extra_window": ()})
-
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
-    )
-
-    with pytest.raises(ConfigParseError, match="definitely_not_a_real_param"):
-        apply_config_defaults(ctx, config, "create", strict=True)
-
-
-def test_apply_config_defaults_warns_on_unknown_param_when_lax(mngr_test_prefix: str) -> None:
-    """apply_config_defaults should warn (not raise) when strict=False."""
-    ctx = _make_click_context(params={"name": "default"})
-
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        commands={"create": CommandDefaults(defaults={"definitely_not_a_real_param": "x"})},
-    )
-
-    # Should not raise; unknown param is silently warned about.
-    result = apply_config_defaults(ctx, config, "create", strict=False)
-    assert "definitely_not_a_real_param" not in result
