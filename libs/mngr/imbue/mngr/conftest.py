@@ -112,6 +112,15 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 
 @pytest.fixture
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    yield messages
+    logger.remove(handler_id)
+
+
+@pytest.fixture
 def mngr_test_id() -> str:
     """Generate a unique test ID for isolation.
 

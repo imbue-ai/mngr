@@ -1,12 +1,10 @@
 """Tests for config loader."""
 
-from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import pluggy
 import pytest
-from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -44,15 +42,6 @@ from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.logging import LoggingConfig
 
 hookimpl = pluggy.HookimplMarker("mngr")
-
-
-@pytest.fixture()
-def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests."""
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    yield messages
-    logger.remove(handler_id)
 
 
 # =============================================================================

@@ -1,6 +1,5 @@
 """Tests for common_opts module."""
 
-from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +8,6 @@ import pluggy
 import pytest
 from click.core import ParameterSource
 from click.testing import CliRunner
-from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import _parse_setting_value
@@ -36,15 +34,6 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 
 hookimpl = pluggy.HookimplMarker("mngr")
-
-
-@pytest.fixture()
-def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests."""
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    yield messages
-    logger.remove(handler_id)
 
 
 def _make_click_context(
