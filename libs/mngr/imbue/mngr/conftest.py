@@ -113,11 +113,20 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 @pytest.fixture
 def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests."""
+    """Capture loguru warning messages for assertion in tests.
+
+    Tolerates the handler having been wiped by setup_logging (which calls
+    logger.remove() with no args to clear all handlers) so tests that exercise
+    the full command setup path can still use this fixture.
+    """
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
     yield messages
-    logger.remove(handler_id)
+    try:
+        logger.remove(handler_id)
+    except ValueError:
+        # setup_logging() already removed our handler; nothing to clean up.
+        pass
 
 
 @pytest.fixture
