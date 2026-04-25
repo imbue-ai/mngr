@@ -53,17 +53,8 @@ def _parse_stream_line(line: str) -> dict[str, Any] | None:
 
 
 @pure
-def extract_text_delta(line: str) -> str | None:
-    """Extract text from a stream-json content_block_delta event.
-
-    Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise. This handles the partial-message envelope emitted by
-    `claude --output-format stream-json --include-partial-messages`.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-
+def _extract_text_delta_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract text from an already-parsed stream-json content_block_delta event."""
     if parsed.get("type") != "stream_event":
         return None
 
@@ -89,18 +80,22 @@ def extract_text_delta(line: str) -> str | None:
 
 
 @pure
-def extract_assistant_text(line: str) -> str | None:
-    """Extract concatenated text from a top-level `assistant` event's content blocks.
+def extract_text_delta(line: str) -> str | None:
+    """Extract text from a stream-json content_block_delta event.
 
-    Without `--include-partial-messages`, `claude --output-format stream-json`
-    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
-    line per assistant turn. Returns the concatenation of all text blocks, or
-    None if the line is not an `assistant` event with at least one text block.
+    Returns the delta text if the line is a content_block_delta with a text_delta,
+    or None otherwise. This handles the partial-message envelope emitted by
+    `claude --output-format stream-json --include-partial-messages`.
     """
     parsed = _parse_stream_line(line)
     if parsed is None:
         return None
+    return _extract_text_delta_from_parsed(parsed)
 
+
+@pure
+def _extract_assistant_text_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract concatenated text from an already-parsed top-level `assistant` event."""
     if parsed.get("type") != "assistant":
         return None
 
@@ -128,14 +123,54 @@ def extract_assistant_text(line: str) -> str | None:
 
 
 @pure
+def extract_assistant_text(line: str) -> str | None:
+    """Extract concatenated text from a top-level `assistant` event's content blocks.
+
+    Without `--include-partial-messages`, `claude --output-format stream-json`
+    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
+    line per assistant turn. Returns the concatenation of all text blocks, or
+    None if the line is not an `assistant` event with at least one text block.
+    """
+    parsed = _parse_stream_line(line)
+    if parsed is None:
+        return None
+    return _extract_assistant_text_from_parsed(parsed)
+
+
+@pure
+def _extract_assistant_message_id_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract `message.id` from an already-parsed top-level `assistant` event."""
+    if parsed.get("type") != "assistant":
+        return None
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str):
+        return message_id
+    return None
+
+
+@pure
 def extract_assistant_message_id(line: str) -> str | None:
     """Extract `message.id` from a top-level `assistant` event, if present."""
     parsed = _parse_stream_line(line)
     if parsed is None:
         return None
-    if parsed.get("type") != "assistant":
+    return _extract_assistant_message_id_from_parsed(parsed)
+
+
+@pure
+def _extract_message_start_id_from_parsed(parsed: dict[str, Any]) -> str | None:
+    """Extract `message.id` from an already-parsed partial-stream `message_start` event."""
+    if parsed.get("type") != "stream_event":
         return None
-    message = parsed.get("message")
+    event = parsed.get("event")
+    if not isinstance(event, dict):
+        return None
+    if event.get("type") != "message_start":
+        return None
+    message = event.get("message")
     if not isinstance(message, dict):
         return None
     message_id = message.get("id")
@@ -157,20 +192,7 @@ def extract_message_start_id(line: str) -> str | None:
     parsed = _parse_stream_line(line)
     if parsed is None:
         return None
-    if parsed.get("type") != "stream_event":
-        return None
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
-    if event.get("type") != "message_start":
-        return None
-    message = event.get("message")
-    if not isinstance(message, dict):
-        return None
-    message_id = message.get("id")
-    if isinstance(message_id, str):
-        return message_id
-    return None
+    return _extract_message_start_id_from_parsed(parsed)
 
 
 @pure
@@ -232,11 +254,10 @@ class _StreamTailState(MutableModel):
         self.yielded_text_in_current_turn = ""
 
     def _yield_text_for_line(self, stripped: str) -> Iterator[str]:
-        # Parse the line once and dispatch on its `type`. The public
-        # extract_* helpers each call json.loads independently; using them
-        # in sequence here would parse the same line up to four times. The
-        # helpers are kept (and unit-tested) as standalone APIs but the
-        # streaming hot path decodes once and inspects the dict directly.
+        # Parse the line once and dispatch on its `type`, then delegate to
+        # the module-level extract helpers (their dict-accepting variants)
+        # so dict-walking logic lives in one place. The string-accepting
+        # public helpers are thin wrappers around the same dict logic.
         parsed = _parse_stream_line(stripped)
         if parsed is None:
             return
@@ -252,62 +273,29 @@ class _StreamTailState(MutableModel):
             return
 
     def _handle_stream_event(self, parsed: dict[str, Any]) -> Iterator[str]:
-        event = parsed.get("event")
-        if not isinstance(event, dict):
-            return
-        inner_type = event.get("type")
-
         # message_start (partial stream): begin a new turn. Any deltas for
         # the previous turn whose summary never arrived have already been
         # yielded directly, so dropping the buffer here is safe.
-        if inner_type == "message_start":
-            message = event.get("message")
-            if isinstance(message, dict):
-                message_id = message.get("id")
-                if isinstance(message_id, str):
-                    self._reset_turn_state()
-                    self.streaming_message_id = message_id
+        start_id = _extract_message_start_id_from_parsed(parsed)
+        if start_id is not None:
+            self._reset_turn_state()
+            self.streaming_message_id = start_id
             return
 
         # text_delta (partial stream): yield the delta and record it in the
         # per-turn buffer so we can subtract it from the matching summary.
-        if inner_type == "content_block_delta":
-            delta = event.get("delta")
-            if not isinstance(delta, dict):
-                return
-            if delta.get("type") != "text_delta":
-                return
-            text = delta.get("text")
-            if not isinstance(text, str):
-                return
-            self.yielded_text_in_current_turn = self.yielded_text_in_current_turn + text
-            yield text
+        delta_text = _extract_text_delta_from_parsed(parsed)
+        if delta_text is not None:
+            self.yielded_text_in_current_turn = self.yielded_text_in_current_turn + delta_text
+            yield delta_text
 
     def _handle_assistant_event(self, parsed: dict[str, Any]) -> Iterator[str]:
         # Top-level assistant event: reconcile against the per-turn buffer.
-        message = parsed.get("message")
-        if not isinstance(message, dict):
-            return
-        content_blocks = message.get("content")
-        if not isinstance(content_blocks, list):
+        assistant_text = _extract_assistant_text_from_parsed(parsed)
+        if assistant_text is None:
             return
 
-        text_parts: list[str] = []
-        for block in content_blocks:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") != "text":
-                continue
-            text = block.get("text")
-            if isinstance(text, str):
-                text_parts.append(text)
-
-        if not text_parts:
-            return
-        assistant_text = "".join(text_parts)
-
-        message_id = message.get("id")
-        assistant_id = message_id if isinstance(message_id, str) else None
+        assistant_id = _extract_assistant_message_id_from_parsed(parsed)
         is_definitely_different_message = (
             self.streaming_message_id is not None
             and assistant_id is not None
