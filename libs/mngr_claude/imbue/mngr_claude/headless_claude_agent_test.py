@@ -24,7 +24,9 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
+from imbue.mngr_claude.headless_claude_agent import extract_assistant_message_id
 from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
+from imbue.mngr_claude.headless_claude_agent import extract_message_start_id
 from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
 
@@ -265,18 +267,34 @@ def _make_stream_json_line(text: str) -> str:
     )
 
 
-def _make_assistant_message_line(text: str) -> str:
+def _make_assistant_message_line(text: str, message_id: str | None = None) -> str:
     """Build a stream-json line for a top-level `assistant` event with one text block.
 
     This is the envelope `claude --output-format stream-json` emits by default
     (without `--include-partial-messages`) on v2.1.114 and similar versions.
     """
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+    }
+    if message_id is not None:
+        message["id"] = message_id
+    return json.dumps({"type": "assistant", "message": message})
+
+
+def _make_message_start_line(message_id: str) -> str:
+    """Build a stream-json `message_start` line carrying a message id.
+
+    With `--include-partial-messages`, claude emits this before the per-token
+    text deltas. The id lets the parser correlate the deltas with a later
+    top-level `assistant` summary that carries the same id.
+    """
     return json.dumps(
         {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": text}],
+            "type": "stream_event",
+            "event": {
+                "type": "message_start",
+                "message": {"id": message_id, "role": "assistant"},
             },
         }
     )
@@ -821,3 +839,156 @@ def test_stream_output_yields_assistant_envelopes_across_multiple_turns(
     chunks = list(agent.stream_output())
 
     assert chunks == ["first ", "answer", "second answer"]
+
+
+def test_stream_output_emits_trailing_text_when_summary_extends_past_deltas(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the assistant summary contains text beyond what the deltas yielded,
+    that trailing text must be emitted instead of silently dropped.
+
+    Reproduces the failure mode where partial deltas end early (dropped frame,
+    truncated stream, etc.) and only the final `assistant` summary carries the
+    full message text.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_message_start_line("msg_a"),
+        _make_stream_json_line("Hello "),
+        _make_stream_json_line("world"),
+        _make_assistant_message_line("Hello world! And then some.", message_id="msg_a"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"Hello world! And then some."}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["Hello ", "world", "! And then some."]
+
+
+def test_stream_output_yields_full_summary_when_assistant_id_does_not_match_streaming_id(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the partial-stream message_start id does not match the assistant
+    summary's id, treat them as separate messages: yield the deltas (already
+    streamed) AND the full summary, with no dedup attempt.
+
+    Covers the failure mode where a streamed message's summary is dropped and
+    a new message's summary arrives instead.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_message_start_line("msg_a"),
+        _make_stream_json_line("first message body"),
+        _make_assistant_message_line("second message body", message_id="msg_b"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"second message body"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["first message body", "second message body"]
+
+
+def test_stream_output_message_start_resets_buffer_across_turns(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new `message_start` must clear per-turn state so the second turn's
+    summary diff is computed against the second turn's deltas only.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_message_start_line("msg_a"),
+        _make_stream_json_line("first"),
+        _make_assistant_message_line("first", message_id="msg_a"),
+        _make_message_start_line("msg_b"),
+        _make_stream_json_line("second"),
+        _make_assistant_message_line("second extra", message_id="msg_b"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"second extra"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["first", "second", " extra"]
+
+
+def test_stream_output_yields_full_summary_when_buffer_is_not_a_prefix(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If deltas drift from the summary and no id info is available, fall back
+    to yielding the full summary rather than silently dropping it.
+
+    A possible partial double-emit is preferred over losing the assistant
+    message entirely.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    lines = [
+        _make_stream_json_line("drifted prefix"),
+        _make_assistant_message_line("totally different summary text"),
+        '{"type":"result","subtype":"success","is_error":false,"result":"totally different summary text"}',
+    ]
+    _write_fake_agent_output(host, agent, stdout="\n".join(lines) + "\n")
+
+    chunks = list(agent.stream_output())
+
+    assert chunks == ["drifted prefix", "totally different summary text"]
+
+
+def test_extract_assistant_message_id_returns_id_when_present() -> None:
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"id": "msg_xyz", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert extract_assistant_message_id(line) == "msg_xyz"
+
+
+def test_extract_assistant_message_id_returns_none_when_id_missing() -> None:
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_assistant_message_id_returns_none_for_non_assistant_event() -> None:
+    line = json.dumps({"type": "system", "subtype": "init"})
+    assert extract_assistant_message_id(line) is None
+
+
+def test_extract_message_start_id_returns_id_for_message_start_event() -> None:
+    line = _make_message_start_line("msg_abc")
+    assert extract_message_start_id(line) == "msg_abc"
+
+
+def test_extract_message_start_id_returns_none_for_text_delta_event() -> None:
+    assert extract_message_start_id(_make_stream_json_line("hello")) is None
+
+
+def test_extract_message_start_id_returns_none_for_top_level_assistant_event() -> None:
+    line = _make_assistant_message_line("hi", message_id="msg_abc")
+    assert extract_message_start_id(line) is None
+
+
+def test_extract_message_start_id_returns_none_for_malformed_json() -> None:
+    assert extract_message_start_id("not valid json {{{") is None

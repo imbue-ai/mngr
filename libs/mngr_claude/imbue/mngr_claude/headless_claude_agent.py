@@ -114,6 +114,54 @@ def extract_assistant_text(line: str) -> str | None:
 
 
 @pure
+def extract_assistant_message_id(line: str) -> str | None:
+    """Extract `message.id` from a top-level `assistant` event, if present."""
+    try:
+        parsed = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if parsed.get("type") != "assistant":
+        return None
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str):
+        return message_id
+    return None
+
+
+@pure
+def extract_message_start_id(line: str) -> str | None:
+    """Extract `message.id` from a partial-stream `message_start` event, if present.
+
+    With `--include-partial-messages`, claude emits a
+    `{"type":"stream_event","event":{"type":"message_start","message":{"id":"...",...}}}`
+    line at the start of each assistant message. The id lets us correlate
+    subsequent text deltas with a later top-level `assistant` summary that
+    carries the same id.
+    """
+    try:
+        parsed = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if parsed.get("type") != "stream_event":
+        return None
+    event = parsed.get("event")
+    if not isinstance(event, dict):
+        return None
+    if event.get("type") != "message_start":
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    if isinstance(message_id, str):
+        return message_id
+    return None
+
+
+@pure
 def _is_result_event(line: str) -> bool:
     """Check if a stream-json line is a result event (signals completion)."""
     try:
@@ -154,11 +202,16 @@ class _StreamTailState(MutableModel):
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
-    # Tracks whether any partial text deltas (from `--include-partial-messages`)
-    # have been yielded during the current assistant turn. Used to avoid
-    # double-emitting text when claude also emits a final `assistant` summary
-    # message containing the same content. Resets at each `assistant` boundary.
-    is_partial_text_yielded_in_turn: bool = False
+    # Id of the assistant message currently being streamed via partial deltas
+    # (from `--include-partial-messages`'s `message_start` event), if any.
+    # Used to correlate deltas with the later top-level `assistant` summary
+    # that carries the same id. None when no partial-stream context is active.
+    streaming_message_id: str | None = None
+    # Concatenation of text already yielded for the in-progress turn. Used
+    # to compute the trailing diff when the `assistant` summary arrives, so
+    # that text present in the summary but not in the deltas is still emitted
+    # without re-emitting text already streamed.
+    yielded_text_in_current_turn: str = ""
 
     def _has_new_data_or_finished(self) -> bool:
         current_mtime = self.host.get_file_mtime(self.stdout_path)
@@ -166,23 +219,57 @@ class _StreamTailState(MutableModel):
             return True
         return self.is_finished()
 
+    def _reset_turn_state(self) -> None:
+        self.streaming_message_id = None
+        self.yielded_text_in_current_turn = ""
+
     def _yield_text_for_line(self, stripped: str) -> Iterator[str]:
-        # Partial-message envelope: yield the delta and remember we did so,
-        # so we can suppress the matching `assistant` summary later this turn.
+        # message_start (partial stream): begin a new turn. Any deltas for the
+        # previous turn whose summary never arrived have already been yielded
+        # directly, so dropping the buffer here is safe.
+        started_id = extract_message_start_id(stripped)
+        if started_id is not None:
+            self._reset_turn_state()
+            self.streaming_message_id = started_id
+            return
+
+        # text_delta (partial stream): yield the delta and record it in the
+        # per-turn buffer so we can subtract it from the matching summary.
         partial_text = extract_text_delta(stripped)
         if partial_text is not None:
-            self.is_partial_text_yielded_in_turn = True
+            self.yielded_text_in_current_turn = self.yielded_text_in_current_turn + partial_text
             yield partial_text
             return
 
-        # Whole-message envelope: yield only if no partial deltas were already
-        # streamed for this turn, then reset for the next turn.
+        # Top-level assistant event: reconcile against the per-turn buffer.
         assistant_text = extract_assistant_text(stripped)
         if assistant_text is None:
             return
-        if not self.is_partial_text_yielded_in_turn:
+        assistant_id = extract_assistant_message_id(stripped)
+        is_definitely_different_message = (
+            self.streaming_message_id is not None
+            and assistant_id is not None
+            and assistant_id != self.streaming_message_id
+        )
+
+        if is_definitely_different_message:
+            # The streamed deltas belonged to a previous message whose summary
+            # never arrived. Yield the full summary for this new message.
             yield assistant_text
-        self.is_partial_text_yielded_in_turn = False
+        elif assistant_text.startswith(self.yielded_text_in_current_turn):
+            # Summary continues / matches what we already yielded; emit only
+            # the trailing extra text (empty string when they match exactly).
+            trailing_text = assistant_text[len(self.yielded_text_in_current_turn) :]
+            if trailing_text:
+                yield trailing_text
+        else:
+            # Buffer is not a prefix of the summary. Either deltas drifted from
+            # the summary or this is a different message we cannot disambiguate
+            # by id. Yield the full summary; better a possible partial double-
+            # emit than dropping the assistant message entirely.
+            yield assistant_text
+
+        self._reset_turn_state()
 
     def tail_until_done(self) -> Iterator[str]:
         got_result = False
