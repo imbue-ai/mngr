@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import stat
 import sys
 from pathlib import Path
@@ -391,12 +390,9 @@ def test_slugify_caps_length_and_collapses_runs() -> None:
     assert spawn_hook.slugify("A B  C") == "a-b-c"
 
 
-def test_spawn_env_vars_from_real_os_env() -> None:
+def test_spawn_env_vars_from_real_os_env(clean_env: pytest.MonkeyPatch) -> None:
     """Sanity: helpers read from the actual os.environ (not a closure)."""
     # This ensures we don't accidentally snapshot at import time.
     assert spawn_hook._parse_int_env("__DOES_NOT_EXIST__", 42) == 42
-    os.environ["__SPAWN_TEST_INT__"] = "7"
-    try:
-        assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
-    finally:
-        del os.environ["__SPAWN_TEST_INT__"]
+    clean_env.setenv("__SPAWN_TEST_INT__", "7")
+    assert spawn_hook._parse_int_env("__SPAWN_TEST_INT__", 0) == 7
