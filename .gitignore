@@ -226,6 +226,9 @@
 # Claude worktress
 **/.claude/worktrees
 
+# Agent definitions deployed by mngr_subagent_proxy at session start
+**/.claude/agents/
+
 # Local mngr settings (not committed)
 **/.mngr/settings.local.toml
 
