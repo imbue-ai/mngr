@@ -13,6 +13,7 @@ from imbue.mngr_subagent_proxy.subagent_wait import AgentLocation
 from imbue.mngr_subagent_proxy.subagent_wait import TailState
 from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
 from imbue.mngr_subagent_proxy.subagent_wait import is_end_turn_event
+from imbue.mngr_subagent_proxy.subagent_wait import is_real_user_event
 from imbue.mngr_subagent_proxy.subagent_wait import read_new_jsonl_lines
 from imbue.mngr_subagent_proxy.subagent_wait import resolve_destroyed_result
 from imbue.mngr_subagent_proxy.subagent_wait import truncate_result_text
@@ -84,6 +85,42 @@ def test_end_turn_detection_with_pure_text() -> None:
         },
     }
     assert extract_assistant_text(multi_text_event) == "hello world"
+
+
+def test_is_real_user_event_discriminates_human_from_machine_events() -> None:
+    """is_real_user_event accepts only plain-text human prompts, rejecting tool_result and hook-injected events."""
+    # Not a user event.
+    assistant_event = {"type": "assistant", "message": {"content": "hello"}}
+    assert is_real_user_event(assistant_event) is False
+
+    # Missing or malformed message payload.
+    assert is_real_user_event({"type": "user"}) is False
+    assert is_real_user_event({"type": "user", "message": "not-a-dict"}) is False
+
+    # tool_result blocks come in as list content; must be rejected.
+    tool_result_event = {
+        "type": "user",
+        "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "abc", "content": "done"}],
+        },
+    }
+    assert is_real_user_event(tool_result_event) is False
+
+    # Hook-injected synthetic user events must be rejected, including ones with
+    # leading whitespace before the prefix.
+    stop_hook_event = {"type": "user", "message": {"content": "Stop hook feedback: please continue"}}
+    assert is_real_user_event(stop_hook_event) is False
+
+    pretooluse_hook_event = {"type": "user", "message": {"content": "   PreToolUse hook feedback: blocked"}}
+    assert is_real_user_event(pretooluse_hook_event) is False
+
+    # Non-str, non-list content (e.g. None) is not a real user prompt.
+    null_content_event = {"type": "user", "message": {"content": None}}
+    assert is_real_user_event(null_content_event) is False
+
+    # Actual human prompt is accepted.
+    human_event = {"type": "user", "message": {"content": "please refactor foo.py"}}
+    assert is_real_user_event(human_event) is True
 
 
 def test_jsonl_tail_handles_partial_lines(tmp_path: Path) -> None:
