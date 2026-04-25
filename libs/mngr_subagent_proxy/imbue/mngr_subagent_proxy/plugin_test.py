@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,6 +14,11 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
 from imbue.mngr_subagent_proxy.testing import FakeAgent
 from imbue.mngr_subagent_proxy.testing import FakeHost
+
+# on_after_provisioning declares its third parameter as MngrContext but
+# immediately ``del``-s it. Tests pass through an untyped wrapper so the
+# None sentinel doesn't leak argument-type noise to every call site.
+_provision: Any = on_after_provisioning
 
 
 @pytest.mark.acceptance
@@ -31,7 +37,7 @@ def test_plugin_hooks_register_on_claude_agent(tmp_path: Path) -> None:
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig())
 
-    on_after_provisioning(agent, host, None)  # type: ignore[arg-type]
+    _provision(agent, host, None)
 
     settings_path = work_dir / ".claude" / "settings.local.json"
     assert settings_path.exists()
@@ -92,7 +98,7 @@ def test_plugin_strips_stop_hooks_for_subagent_proxy_child(tmp_path: Path) -> No
     )
     settings_path = _seed_settings_with_stop_hooks(work_dir)
 
-    on_after_provisioning(agent, host, None)  # type: ignore[arg-type]
+    _provision(agent, host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -114,7 +120,7 @@ def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
     settings_path = _seed_settings_with_stop_hooks(work_dir)
 
-    on_after_provisioning(agent, host, None)  # type: ignore[arg-type]
+    _provision(agent, host, None)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -138,7 +144,7 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> Non
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
-    on_after_provisioning(agent, host, None)  # type: ignore[arg-type]
+    _provision(agent, host, None)
 
     # Provisioning still wrote the merged settings (PreToolUse/PostToolUse/SessionStart),
     # and the to-be-stripped keys were never present to begin with.
