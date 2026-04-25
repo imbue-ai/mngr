@@ -1,4 +1,6 @@
 import json
+import os
+import pwd
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
@@ -14,8 +16,25 @@ from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import run_mngr_subprocess
 
 
+def _real_user_docker_config_dir() -> str:
+    """Return the user's real ~/.docker, resolved via pwd to bypass HOME overrides.
+
+    The autouse mngr test environment isolates HOME, which hides
+    ~/.docker/cli-plugins/docker-buildx (where Docker Desktop installs the
+    plugin via symlink). Without buildx the CLI falls back to the deprecated
+    legacy builder, which does not understand BuildKit flags like
+    --progress=plain. Restoring DOCKER_CONFIG to the real ~/.docker re-exposes
+    the plugin to tests that exercise `docker build`.
+    """
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    return str(real_home / ".docker")
+
+
 @pytest.fixture
-def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
+def docker_provider(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> Generator[DockerProviderInstance, None, None]:
+    monkeypatch.setenv("DOCKER_CONFIG", _real_user_docker_config_dir())
     yield from make_docker_provider_with_cleanup(temp_mngr_ctx)
 
 
@@ -36,6 +55,7 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         prefix=prefix,
         host_dir=host_dir,
     )
+    env["DOCKER_CONFIG"] = _real_user_docker_config_dir()
     yield env
 
     # Destroy all agents created during the test.

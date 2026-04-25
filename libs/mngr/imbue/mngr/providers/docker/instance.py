@@ -604,7 +604,7 @@ kill -TERM 1
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using native docker build with passthrough args."""
-        cmd = ["build", "-t", tag] + list(build_args)
+        cmd = ["build", "--progress=plain", "-t", tag] + list(build_args)
         with log_span("Running docker build with {} args", len(build_args)):
             self._run_docker_creation_command(cmd)
         return tag
