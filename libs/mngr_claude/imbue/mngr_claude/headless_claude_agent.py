@@ -366,6 +366,10 @@ class _StreamTailState(MutableModel):
                 continue
             parsed = _parse_stream_line(stripped)
             if parsed is None:
+                # Non-JSON output that claude leaked to stdout (debug, banners,
+                # warnings) or, more rarely, valid JSON that isn't an object.
+                # Truncate so a runaway line cannot blow up the log.
+                logger.trace("Skipped stream-json line that did not decode to a JSON object: {!r}", stripped[:200])
                 continue
             if parsed.get("type") == "result":
                 self.result_error = _result_error_from_parsed(parsed)
