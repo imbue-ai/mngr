@@ -507,10 +507,8 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
 
     # Expose host.provider_name as host.provider too, so CEL filters can use either name
     # (host.provider is the documented short form; host.provider_name matches the data type)
-    if result.get("host") and isinstance(result["host"], dict):
-        host = result["host"]
-        if "provider_name" in host:
-            host["provider"] = host["provider_name"]
+    if host_dict is not None and "provider_name" in host_dict:
+        host_dict["provider"] = host_dict["provider_name"]
 
     return result
 
