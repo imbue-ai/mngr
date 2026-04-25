@@ -10,6 +10,7 @@ from imbue.mngr.cli.events import _emit_event_record
 from imbue.mngr.cli.events import _write_and_flush_stdout
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.testing import create_agent_with_events_dir
+from imbue.mngr.main import cli
 
 
 def _make_events_opts(
@@ -44,6 +45,17 @@ def _make_events_opts(
 def test_events_cli_command_is_named_event_singular() -> None:
     """The CLI command is registered as singular `event` for consistency with other commands."""
     assert events.name == "event"
+
+
+def test_events_legacy_alias_is_registered() -> None:
+    """The legacy plural `events` name is kept as an alias of the singular `event` command.
+
+    This guards the backward-compat contract that existing scripts, scheduled jobs, and
+    vendored mngr callers invoking `mngr events` keep working after the rename.
+    """
+    assert "event" in cli.commands
+    assert "events" in cli.commands
+    assert cli.commands["event"] is cli.commands["events"]
 
 
 def test_events_cli_options_can_be_constructed() -> None:
