@@ -12,6 +12,7 @@ from imbue.mngr.api.testing import FakeAgent as BaseFakeAgent
 from imbue.mngr.api.testing import FakeHost as BaseFakeHost
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 
 
 class FakeAgent(BaseFakeAgent):
@@ -20,8 +21,17 @@ class FakeAgent(BaseFakeAgent):
     id: AgentId = Field(description="Agent identifier")
     agent_config: Any = Field(description="Agent configuration (ClaudeAgentConfig or sentinel)")
 
-    def __init__(self, agent_id: AgentId, work_dir: Path, agent_config: Any) -> None:
-        BaseModel.__init__(self, id=agent_id, work_dir=work_dir, agent_config=agent_config)
+    def __init__(
+        self,
+        agent_id: AgentId,
+        work_dir: Path,
+        agent_config: Any,
+        name: AgentName | None = None,
+    ) -> None:
+        kwargs: dict[str, Any] = {"id": agent_id, "work_dir": work_dir, "agent_config": agent_config}
+        if name is not None:
+            kwargs["name"] = name
+        BaseModel.__init__(self, **kwargs)
 
 
 class FakeHost(BaseFakeHost):
