@@ -42,6 +42,11 @@ def get_agent_config_class(agent_type: str) -> type[AgentTypeConfig]:
     return _agent_config_registry[key]
 
 
+def is_agent_config_registered(agent_type: str) -> bool:
+    """Whether a specific config class is registered for this agent type."""
+    return AgentTypeName(agent_type) in _agent_config_registry
+
+
 def list_registered_agent_config_types() -> list[str]:
     """List all agent type names with registered config classes."""
     return sorted(str(k) for k in _agent_config_registry.keys())
