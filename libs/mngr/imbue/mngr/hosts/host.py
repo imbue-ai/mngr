@@ -2120,16 +2120,6 @@ class Host(BaseHost, OnlineHostInterface):
             git_c = f"git -C {shlex.quote(str(source_path))}"
             mkdir_cmd = f"mkdir -p {work_dir_path.parent}"
 
-            # `git worktree add` cannot resolve any commit reference in a repo
-            # with no commits, producing a cryptic "fatal: invalid reference"
-            # error. Detect this up front so the user gets actionable guidance.
-            head_check = self.execute_idempotent_command(f"{git_c} rev-parse --verify HEAD")
-            if not head_check.success:
-                raise UserInputError(
-                    f"Cannot create an agent in {source_path}: the git repository has no commits. "
-                    f"Please make an initial commit first."
-                )
-
             # git worktree add <path> [-b <new>] [<base>]
             worktree_args = [mkdir_cmd, "&&", git_c, "worktree", "add", shlex.quote(str(work_dir_path))]
             if new_branch_name:
@@ -2148,6 +2138,18 @@ class Host(BaseHost, OnlineHostInterface):
                         f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
                         f"To work directly in the existing worktree, use --in-place from that directory"
                     )
+                # `git worktree add` cannot resolve any commit reference in a
+                # repo with no commits, producing a cryptic "fatal: invalid
+                # reference" error. Disambiguate that case from a genuine bad
+                # branch reference by checking HEAD on the failure path only,
+                # so the success path stays a single command.
+                if "invalid reference" in stderr:
+                    head_check = self.execute_idempotent_command(f"{git_c} rev-parse --verify HEAD")
+                    if not head_check.success:
+                        raise UserInputError(
+                            f"Cannot create an agent in {source_path}: the git repository has no commits. "
+                            "Please make an initial commit first."
+                        )
                 raise MngrError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
