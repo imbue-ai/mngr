@@ -661,10 +661,7 @@ def test_destroy_transfer_none_keeps_shared_worktree(
     # rider's create command without first listing agents.
     worktree_path = tmp_path / "shared_worktree"
 
-    with ExitStack() as stack:
-        stack.enter_context(tmux_session_cleanup(owner_session))
-        stack.enter_context(tmux_session_cleanup(rider_session))
-
+    with tmux_session_cleanup(owner_session), tmux_session_cleanup(rider_session):
         owner_create = cli_runner.invoke(
             create,
             [
