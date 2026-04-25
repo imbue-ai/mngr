@@ -140,12 +140,12 @@ class ListCliOptions(CommonCliOptions):
 @optgroup.option(
     "--include",
     multiple=True,
-    help="Include agents matching CEL expression (repeatable)",
+    help="Include agents matching CEL expression, repeatable (e.g. 'state == \"RUNNING\"'); see 'Available Fields' below",
 )
 @optgroup.option(
     "--exclude",
     multiple=True,
-    help="Exclude agents matching CEL expression (repeatable)",
+    help="Exclude agents matching CEL expression, repeatable (e.g. 'host.provider == \"local\"'); see 'Available Fields' below",
 )
 @optgroup.option(
     "--running",
@@ -1002,6 +1002,12 @@ def _format_value_as_string(value: Any) -> str:
 # Matches: "fieldname", "fieldname[0]", "fieldname[-1]", "fieldname[:3]", "fieldname[1:3]", etc.
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
+# Aliases that let users reference fields by the same name in --fields/templates and CEL filters.
+# host.provider is the short form documented for CEL; the underlying attribute is host.provider_name.
+_FIELD_ALIASES: Final[dict[str, str]] = {
+    "host.provider": "host.provider_name",
+}
+
 
 class _CelSortKeyExtractor:
     """Extracts a sort key from an (agent, cel_context) pair for a single CEL expression."""
@@ -1054,6 +1060,8 @@ def _get_field_value(agent: AgentDetails, field: str) -> str:
     Supports nested fields like "host.name" and list slicing syntax like
     "host.snapshots[0]" or "host.snapshots[:3]".
     """
+    # Resolve aliases first so the same field names work in --fields and CEL filters
+    field = _FIELD_ALIASES.get(field, field)
     # Handle nested fields (e.g., "host.name") with optional bracket notation
     # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
     parts = field.split(".")
@@ -1176,7 +1184,12 @@ All agent fields from the "Available Fields" section can be used in filter expre
         ),
         (
             "Available Fields",
-            """**Agent fields** (same syntax for `--fields` and CEL filters):
+            """The fields below can be used in three places, with the same names everywhere:
+- CEL expressions for `--include`/`--exclude` (filtering)
+- CEL expressions for `--sort` (ordering)
+- `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+**Agent fields:**
 - `name` - Agent name
 - `id` - Agent ID
 - `type` - Agent type (claude, codex, etc.)
@@ -1189,7 +1202,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `runtime_seconds` - How long the agent has been running
 - `user_activity_time` - Timestamp of the last user activity
 - `agent_activity_time` - Timestamp of the last agent activity
-- `idle_seconds` - How long since the agent was active
+- `idle_seconds` - How long since the agent was active (as reported by the agent)
 - `idle_mode` - Idle detection mode
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
@@ -1199,10 +1212,15 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
 
-**Host fields** (dot notation for both `--fields` and CEL filters):
+**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
+- `age` - Seconds since `create_time`
+- `runtime` - Alias for `runtime_seconds`
+- `idle` - Seconds since the most recent activity across `user_activity_time`, `agent_activity_time`, and `host.ssh_activity_time` (only present when at least one is set; differs from `idle_seconds`, which is the agent-reported value)
+
+**Host fields** (dot notation):
 - `host.name` - Host name
 - `host.id` - Host ID
-- `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
+- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Host labels (metadata key-value pairs)

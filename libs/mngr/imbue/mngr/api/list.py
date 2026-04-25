@@ -499,11 +499,12 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
         if latest_activity:
             result["idle"] = (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
-    # Normalize host.provider_name to host.provider for consistency
+    # Expose host.provider_name as host.provider too, so CEL filters can use either name
+    # (host.provider is the documented short form; host.provider_name matches the data type)
     if result.get("host") and isinstance(result["host"], dict):
         host = result["host"]
         if "provider_name" in host:
-            host["provider"] = host.pop("provider_name")
+            host["provider"] = host["provider_name"]
 
     return result
 

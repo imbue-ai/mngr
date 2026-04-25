@@ -27,8 +27,8 @@ mngr list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--include` | text | Include agents matching CEL expression (repeatable) | None |
-| `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
+| `--include` | text | Include agents matching CEL expression, repeatable (e.g. 'state == "RUNNING"'); see 'Available Fields' below | None |
+| `--exclude` | text | Exclude agents matching CEL expression, repeatable (e.g. 'host.provider == "local"'); see 'Available Fields' below | None |
 | `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
 | `--archived` | boolean | Show only stopped agents (alias for --include 'has(labels.archived_at)') | `False` |
@@ -116,7 +116,12 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 ## Available Fields
 
-**Agent fields** (same syntax for `--fields` and CEL filters):
+The fields below can be used in three places, with the same names everywhere:
+- CEL expressions for `--include`/`--exclude` (filtering)
+- CEL expressions for `--sort` (ordering)
+- `--fields` and `--format` template strings (selecting and formatting displayed data)
+
+**Agent fields:**
 - `name` - Agent name
 - `id` - Agent ID
 - `type` - Agent type (claude, codex, etc.)
@@ -129,7 +134,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `runtime_seconds` - How long the agent has been running
 - `user_activity_time` - Timestamp of the last user activity
 - `agent_activity_time` - Timestamp of the last agent activity
-- `idle_seconds` - How long since the agent was active
+- `idle_seconds` - How long since the agent was active (as reported by the agent)
 - `idle_mode` - Idle detection mode
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
@@ -139,10 +144,15 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
 
-**Host fields** (dot notation for both `--fields` and CEL filters):
+**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
+- `age` - Seconds since `create_time`
+- `runtime` - Alias for `runtime_seconds`
+- `idle` - Seconds since the most recent activity across `user_activity_time`, `agent_activity_time`, and `host.ssh_activity_time` (only present when at least one is set; differs from `idle_seconds`, which is the agent-reported value)
+
+**Host fields** (dot notation):
 - `host.name` - Host name
 - `host.id` - Host ID
-- `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
+- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Host labels (metadata key-value pairs)

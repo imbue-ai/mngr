@@ -187,6 +187,13 @@ def test_get_field_value_provider_name() -> None:
     assert result == "local"
 
 
+def test_get_field_value_provider_alias() -> None:
+    """host.provider should resolve via the alias to the same value as host.provider_name."""
+    agent = make_test_agent_details()
+    result = _get_field_value(agent, "host.provider")
+    assert result == "local"
+
+
 def test_get_field_value_list_index_first() -> None:
     """_get_field_value should extract first element with [0]."""
     snapshots = [
