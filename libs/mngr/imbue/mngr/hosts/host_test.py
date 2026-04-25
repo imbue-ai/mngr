@@ -186,19 +186,21 @@ def test_discover_agents_skips_missing_data_json(
     assert refs == []
 
 
-def test_discover_agents_raises_on_invalid_json(
+def test_discover_agents_skips_invalid_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """discover_agents must raise on a corrupt data.json rather than silently skip it."""
+    """Test that discover_agents skips agent dirs with invalid JSON."""
     host, agents_dir = host_with_agents_dir
 
+    # Create agent with invalid JSON
     agent_id = AgentId.generate()
     agent_dir = agents_dir / str(agent_id)
     agent_dir.mkdir()
     (agent_dir / "data.json").write_text("not valid json {{{")
 
-    with pytest.raises(json.JSONDecodeError):
-        host.discover_agents()
+    refs = host.discover_agents()
+
+    assert refs == []
 
 
 def test_discover_agents_skips_missing_id(

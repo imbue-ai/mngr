@@ -541,19 +541,6 @@ class TodoNotificationService(MutableModel):
 
 Be very conservative with what exceptions are caught. Prefer to crash instead of catching errors.
 
-## Config and settings file parse errors
-
-Config and settings files (`.toml`, `.json`, and similar) must never be silently dropped on parse failure. A user whose file is corrupt must see a loud, immediate crash naming the bad file so they can repair it -- logging a warning and continuing turns a visible syntax problem into an invisible misconfiguration.
-
-The only acceptable responses to corrupt config/settings data are:
-
-- **(A) Make it impossible to create.** If our code writes the file, write it atomically (temp file + `os.replace`) so a crash mid-write can never leave a partial file behind.
-- **(B) Crash so the user can clean up manually.** If the file was written by another process (or predates our atomic-write discipline), let `tomllib.TOMLDecodeError` / `json.JSONDecodeError` propagate, optionally wrapped in a domain-specific error like `ConfigParseError` whose message includes the file path.
-
-Do not `pass`, `continue`, `return None`, log-and-fall-back, or otherwise swallow a decode error for any config or settings file. The `check_silent_decode_error_catches` ratchet guards this rule.
-
-The one narrow exception is JSONL event-stream parsers: individual malformed lines in an event log are a separate concern and may be skipped with an explicit log (the file as a whole is not a config).
-
 ## Timeouts
 
 When calling external commands or making network requests, always use a two-threshold timeout pattern:
