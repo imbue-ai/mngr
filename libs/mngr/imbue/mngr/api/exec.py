@@ -55,7 +55,6 @@ def exec_command_on_agent(
     mngr_ctx: MngrContext,
     agent_str: str,
     command: str,
-    user: str | None = None,
     cwd: str | None = None,
     timeout_seconds: float | None = None,
     is_start_desired: bool = True,
@@ -76,7 +75,6 @@ def exec_command_on_agent(
     prefixed_command = host.build_source_env_prefix(agent) + command
     result = host.execute_stateful_command(
         prefixed_command,
-        user=user,
         cwd=effective_cwd,
         timeout_seconds=timeout_seconds,
     )
@@ -159,7 +157,6 @@ def _execute_on_single_agent(
     online_host: OnlineHostInterface,
     match: AgentMatch,
     command: str,
-    user: str | None,
     cwd: str | None,
     timeout_seconds: float | None,
     result: MultiExecResult,
@@ -187,7 +184,6 @@ def _execute_on_single_agent(
         with log_span("Executing command on agent {}", match.agent_name):
             cmd_result = online_host.execute_stateful_command(
                 prefixed_command,
-                user=user,
                 cwd=effective_cwd,
                 timeout_seconds=timeout_seconds,
             )
@@ -219,7 +215,6 @@ def exec_command_on_agents(
     agent_identifiers: Sequence[str],
     command: str,
     is_all: bool,
-    user: str | None = None,
     cwd: str | None = None,
     timeout_seconds: float | None = None,
     is_start_desired: bool = True,
@@ -267,7 +262,7 @@ def exec_command_on_agents(
         # Execute command on each agent on this host
         for match in agent_list:
             is_should_abort = _execute_on_single_agent(
-                online_host, match, command, user, cwd, timeout_seconds, result, on_success, on_error, error_behavior
+                online_host, match, command, cwd, timeout_seconds, result, on_success, on_error, error_behavior
             )
             if is_should_abort:
                 return result
