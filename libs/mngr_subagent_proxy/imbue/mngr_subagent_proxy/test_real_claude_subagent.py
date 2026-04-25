@@ -399,6 +399,8 @@ def _create_parent_claude_agent(
 
 
 @pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_task_tool_spawns_mngr_subagent(
     _skip_if_no_real_claude: None,
@@ -478,19 +480,19 @@ def test_task_tool_spawns_mngr_subagent(
 
 
 @pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(900)
-def test_depth_limit_passes_through_native_task(
+def test_depth_limit_denies_task(
     _skip_if_no_real_claude: None,
     _mngr_subprocess_env: _MngrSubprocess,
 ) -> None:
-    """At depth >= max_depth, the hook must NOT spawn a mngr subagent.
+    """At depth >= max_depth, the hook denies the Task tool entirely.
 
-    The shipped hook (``resources/spawn_proxy_subagent.sh``) treats a
-    depth-limit breach as an *allow* pass-through: it emits a
-    ``permissionDecision: allow`` with a ``systemMessage`` mentioning
-    ``depth limit`` and falls through to the native Claude Task loop.
-    Crucially, **no mngr-managed subagent is created**. This test verifies
-    that property.
+    The current spawn hook emits ``permissionDecision: deny`` with a
+    ``permissionDecisionReason`` mentioning the depth limit. Claude sees
+    the denial and does not invoke Task. Crucially, **no mngr-managed
+    subagent is created**. This test verifies that property.
 
     A sibling refactor may change this to ``deny``; the invariant asserted
     here -- "no mngr subagent is spawned when the parent is at max depth"
