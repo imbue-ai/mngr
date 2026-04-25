@@ -571,6 +571,7 @@ kill -TERM 1
                 to_update(host_record.field_ref().certified_host_data, updated_certified_data),
             )
         )
+        logger.debug("Marked host as DESTROYED: {}", host_id)
 
     def _save_failed_host_record(
         self,
