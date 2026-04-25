@@ -85,9 +85,7 @@ class LiteLLMKeyClient(FrozenModel):
             raise LiteLLMKeyError("Key creation request failed: {}".format(exc)) from exc
 
         if response.status_code not in (200, 201):
-            raise LiteLLMKeyError(
-                "Key creation failed ({}): {}".format(response.status_code, response.text[:200])
-            )
+            raise LiteLLMKeyError("Key creation failed ({}): {}".format(response.status_code, response.text[:200]))
 
         return CreateKeyResult.model_validate(response.json())
 
@@ -136,9 +134,7 @@ class LiteLLMKeyClient(FrozenModel):
             raise LiteLLMKeyError("Key info request failed: {}".format(exc)) from exc
 
         if response.status_code != 200:
-            raise LiteLLMKeyError(
-                "Key info failed ({}): {}".format(response.status_code, response.text[:200])
-            )
+            raise LiteLLMKeyError("Key info failed ({}): {}".format(response.status_code, response.text[:200]))
 
         return KeyInfo.model_validate(response.json())
 
@@ -169,9 +165,7 @@ class LiteLLMKeyClient(FrozenModel):
             raise LiteLLMKeyError("Budget update request failed: {}".format(exc)) from exc
 
         if response.status_code not in (200, 204):
-            raise LiteLLMKeyError(
-                "Budget update failed ({}): {}".format(response.status_code, response.text[:200])
-            )
+            raise LiteLLMKeyError("Budget update failed ({}): {}".format(response.status_code, response.text[:200]))
 
     def delete_key(self, access_token: str, key_id: str) -> None:
         """Delete a key.
@@ -188,6 +182,4 @@ class LiteLLMKeyClient(FrozenModel):
             raise LiteLLMKeyError("Key deletion request failed: {}".format(exc)) from exc
 
         if response.status_code not in (200, 204):
-            raise LiteLLMKeyError(
-                "Key deletion failed ({}): {}".format(response.status_code, response.text[:200])
-            )
+            raise LiteLLMKeyError("Key deletion failed ({}): {}".format(response.status_code, response.text[:200]))

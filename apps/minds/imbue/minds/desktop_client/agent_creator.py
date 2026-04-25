@@ -43,12 +43,12 @@ from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
 from imbue.minds.desktop_client.host_pool_client import HostPoolError
 from imbue.minds.desktop_client.host_pool_client import LeaseHostResult
-from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
-from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyError
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -95,9 +95,7 @@ LOG_SENTINEL: Final[str] = "__DONE__"
 # Claude Code validation accepts it during provisioning. Replaced with the
 # real LiteLLM virtual key via sed during lease setup.
 PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
-    "sk-ant-api03-PLACEHOLDER"
-    "0000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000"
+    "sk-ant-api03-PLACEHOLDER00000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 
 

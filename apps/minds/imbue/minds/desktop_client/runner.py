@@ -25,12 +25,12 @@ from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
 from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cloudflare_client import RemoteServiceConnectorUrl
 from imbue.minds.desktop_client.host_pool_client import HostPoolClient
-from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructionHandler
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayReconcileCallback
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox

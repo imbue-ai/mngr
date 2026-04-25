@@ -312,7 +312,9 @@ class LeasedHostInfo(BaseModel):
 class CreateKeyRequest(BaseModel):
     key_alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
     max_budget: float | None = Field(default=None, description="Optional max budget in USD (no limit if unset)")
-    budget_duration: str | None = Field(default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')")
+    budget_duration: str | None = Field(
+        default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')"
+    )
 
 
 class CreateKeyResponse(BaseModel):
@@ -1600,7 +1602,7 @@ def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, ob
     """Create a new LiteLLM virtual key for the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1626,7 +1628,7 @@ def list_litellm_keys(request: Request) -> list[dict[str, object]]:
     """List all LiteLLM virtual keys owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1655,7 +1657,7 @@ def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
     """Get info (including spend and budget) for a specific LiteLLM key."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1682,7 +1684,7 @@ def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetR
     """Update the budget for a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
@@ -1708,7 +1710,7 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
     """Delete a LiteLLM key owned by the authenticated user."""
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
-        admin = require_admin(auth)
+        require_admin(auth)
         token = request.headers.get("authorization", "")[7:]
         user_id = _get_user_id_from_access_token(token)
 
