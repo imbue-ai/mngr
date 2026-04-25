@@ -101,7 +101,7 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr list --running --format json\n\n"
     #
     "user: How do I watch agent status in real time?\n"
-    "response: mngr list --watch 5\n\n"
+    "response: mngr observe --discovery-only\n\n"
     #
     "user: How do I list all agents that are running or waiting?\n"
     "response: Use a CEL filter on the `state` field:\n"

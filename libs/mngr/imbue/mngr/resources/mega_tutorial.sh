@@ -1231,8 +1231,8 @@ for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   mngr create "$task"@.modal --no-connect --message "Work on: $task"
 done
 
-# monitor all agents in a watch loop
-mngr list --watch 5 --running
+# monitor all agents as they change in real time
+mngr observe --discovery-only
 
 # collect results from all agents
 for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
