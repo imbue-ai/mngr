@@ -30,11 +30,11 @@ from imbue.minds_workspace_server.models import ApplicationEntry
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
-from imbue.mngr.api.discovery_events import DiscoverySchemaChangedError
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
