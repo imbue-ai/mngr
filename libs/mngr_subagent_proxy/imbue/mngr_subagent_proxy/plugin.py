@@ -5,6 +5,7 @@ import json
 import shlex
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import Final
 
 from loguru import logger
@@ -13,12 +14,17 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
 from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+
+# Type alias so tests can inject a recording stub without monkey-patching
+# module-level names (mirrors hooks/reap.py's DI pattern).
+DestroyAgentDetachedCallable = Callable[[str, Path], None]
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
 
@@ -319,6 +325,29 @@ def _read_subagent_map_targets(state_dir: Path) -> list[str]:
     return targets
 
 
+def cascade_destroy_recorded_children(
+    state_dir: Path,
+    agent_name: AgentName,
+    destroy_callable: DestroyAgentDetachedCallable,
+) -> None:
+    """Read recorded children from ``state_dir`` and fan out detached destroys.
+
+    Best-effort: errors are logged, never raised -- failing the parent's
+    destroy because a child cleanup failed would leave both stuck.
+    """
+    targets = _read_subagent_map_targets(state_dir)
+    if not targets:
+        return
+    log_path = state_dir / _CASCADE_LOG_NAME
+    logger.info(
+        "cascade-destroy: parent {} being destroyed; spawning detached destroy for {} child agent(s)",
+        agent_name,
+        len(targets),
+    )
+    for target in targets:
+        destroy_callable(target, log_path)
+
+
 @hookimpl
 def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) -> None:
     """Cascade-destroy any proxy children of a Claude agent before its state dir is wiped.
@@ -327,22 +356,8 @@ def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) ->
     Ctrl+C'd, crashed, or force-destroyed mid-Task) and the SessionStart
     reaper can't catch the orphans because the parent's
     ``$MNGR_AGENT_STATE_DIR/subagent_map/`` is about to disappear.
-
-    Best-effort: launches a detached destroy for each recorded child.
-    Errors are logged, never raised -- failing the parent's destroy
-    because a child cleanup failed would leave both stuck.
     """
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return
     state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    targets = _read_subagent_map_targets(state_dir)
-    if not targets:
-        return
-    log_path = state_dir / _CASCADE_LOG_NAME
-    logger.info(
-        "cascade-destroy: parent {} being destroyed; spawning detached destroy for {} child agent(s)",
-        agent.name,
-        len(targets),
-    )
-    for target in targets:
-        destroy_agent_detached(target, log_path)
+    cascade_destroy_recorded_children(state_dir, agent.name, destroy_agent_detached)

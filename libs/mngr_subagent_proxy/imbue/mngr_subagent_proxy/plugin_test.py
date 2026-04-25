@@ -11,8 +11,8 @@ import pytest
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_subagent_proxy import plugin as plugin_module
 from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
+from imbue.mngr_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
 from imbue.mngr_subagent_proxy.plugin import on_before_agent_destroy
 from imbue.mngr_subagent_proxy.testing import FakeAgent
@@ -264,16 +264,9 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
     assert any('touch "$MNGR_AGENT_STATE_DIR/active"' in h["command"] for h in inner_commands)
 
 
-def test_on_before_agent_destroy_cascades_to_recorded_children(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Destroying a Claude parent fires detached destroy for every subagent_map entry."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent_id = AgentId.generate()
-    state_dir = host_dir / "agents" / str(agent_id)
+def test_cascade_destroy_recorded_children_fires_for_every_map_entry(tmp_path: Path) -> None:
+    """cascade_destroy_recorded_children fans out a detached destroy per subagent_map entry."""
+    state_dir = tmp_path / "state"
     map_dir = state_dir / "subagent_map"
     map_dir.mkdir(parents=True)
     (map_dir / "toolu_aaa.json").write_text(json.dumps({"target_name": "parent--subagent-a-aaa"}))
@@ -282,19 +275,19 @@ def test_on_before_agent_destroy_cascades_to_recorded_children(
     (map_dir / "ignored.txt").write_text("not a json file")
 
     calls: list[tuple[str, Path]] = []
-    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append((name, log)))
-
-    host = FakeHost(host_dir)
-    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("parent"))
-    _destroy(agent, host)
+    cascade_destroy_recorded_children(
+        state_dir,
+        AgentName("parent"),
+        destroy_callable=lambda name, log: calls.append((name, log)),
+    )
 
     target_names = sorted(name for name, _ in calls)
     assert target_names == ["parent--subagent-a-aaa", "parent--subagent-b-bbb"]
     assert all(log == state_dir / "subagent_cascade_destroy.log" for _, log in calls)
 
 
-def test_on_before_agent_destroy_skips_non_claude_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cascade hook never fires destroys for non-Claude agents."""
+def test_on_before_agent_destroy_skips_non_claude_agents(tmp_path: Path) -> None:
+    """The cascade hook is a no-op for non-Claude agents (even if a subagent_map exists)."""
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     work_dir = tmp_path / "work"
@@ -305,33 +298,27 @@ def test_on_before_agent_destroy_skips_non_claude_agents(tmp_path: Path, monkeyp
     map_dir.mkdir(parents=True)
     (map_dir / "toolu_xxx.json").write_text(json.dumps({"target_name": "should-not-be-destroyed"}))
 
-    calls: list[str] = []
-    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append(name))
-
     host = FakeHost(host_dir)
     agent = FakeAgent(agent_id, work_dir, object(), name=AgentName("non-claude"))
+    # Should not raise, should not produce a cascade log file.
     _destroy(agent, host)
+    assert not (state_dir / "subagent_cascade_destroy.log").exists()
 
-    assert calls == []
 
-
-def test_on_before_agent_destroy_no_op_without_subagent_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Parent with no subagent_map dir is destroyed without firing any cascades."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent_id = AgentId.generate()
-    (host_dir / "agents" / str(agent_id)).mkdir(parents=True)
+def test_cascade_destroy_recorded_children_no_op_without_map_dir(tmp_path: Path) -> None:
+    """No subagent_map dir means no destroys fired and no log file created."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
 
     calls: list[str] = []
-    monkeypatch.setattr(plugin_module, "destroy_agent_detached", lambda name, log: calls.append(name))
-
-    host = FakeHost(host_dir)
-    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("parent-no-children"))
-    _destroy(agent, host)
+    cascade_destroy_recorded_children(
+        state_dir,
+        AgentName("parent-no-children"),
+        destroy_callable=lambda name, log: calls.append(name),
+    )
 
     assert calls == []
+    assert not (state_dir / "subagent_cascade_destroy.log").exists()
 
 
 def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:
