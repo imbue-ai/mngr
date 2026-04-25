@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
+from typing import TextIO
 
 from loguru import logger
 
@@ -20,6 +22,11 @@ from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
 from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
 
 _TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})
+
+# Type aliases so tests can inject stubs without monkey-patching module-level names.
+ListAgentsCallable = Callable[[], dict[str, AgentDetails] | None]
+DestroyAgentDetachedCallable = Callable[[str, Path], None]
+SpawnBackgroundReaperCallable = Callable[[], None]
 
 
 def _map_files(state_dir: Path) -> list[Path]:
@@ -49,7 +56,12 @@ def _cleanup_tid(state_dir: Path, tid: str) -> None:
             logger.warning("reap: failed to remove {}: {}", path, e)
 
 
-def _process_map_file(state_dir: Path, map_file: Path, agents_by_name: dict[str, AgentDetails]) -> None:
+def _process_map_file(
+    state_dir: Path,
+    map_file: Path,
+    agents_by_name: dict[str, AgentDetails],
+    destroy_callable: DestroyAgentDetachedCallable,
+) -> None:
     """Inspect a single subagent_map entry and reap if its target is gone or terminal."""
     tid = map_file.stem
     if not tid:
@@ -80,17 +92,21 @@ def _process_map_file(state_dir: Path, map_file: Path, agents_by_name: dict[str,
 
     if agent_details.state in _TERMINAL_STATES:
         destroy_log = state_dir / "subagent_destroy.log"
-        destroy_agent_detached(target_name, destroy_log)
+        destroy_callable(target_name, destroy_log)
         _cleanup_tid(state_dir, tid)
 
 
-def _do_reap(state_dir: Path) -> None:
+def _do_reap(
+    state_dir: Path,
+    list_callable: ListAgentsCallable,
+    destroy_callable: DestroyAgentDetachedCallable,
+) -> None:
     """Synchronous reaper body; intended to run detached from the hook invocation."""
-    agents_map = list_agents_by_name()
+    agents_map = list_callable()
     if agents_map is None:
         return
     for map_file in _map_files(state_dir):
-        _process_map_file(state_dir, map_file, agents_map)
+        _process_map_file(state_dir, map_file, agents_map, destroy_callable)
 
 
 def spawn_background_reaper() -> None:
@@ -110,11 +126,21 @@ def spawn_background_reaper() -> None:
         logger.warning("reap: failed to launch background reaper: {}", e)
 
 
-def main() -> None:
-    """SessionStart hook entry point."""
+def run(
+    stdin: TextIO,
+    list_callable: ListAgentsCallable = list_agents_by_name,
+    destroy_callable: DestroyAgentDetachedCallable = destroy_agent_detached,
+    spawn_background_callable: SpawnBackgroundReaperCallable = spawn_background_reaper,
+) -> None:
+    """SessionStart hook core.
+
+    All side-effecting dependencies are accepted as keyword arguments with
+    production defaults so tests can pass stubs without monkey-patching
+    module-level names.
+    """
     os.umask(0o077)
     try:
-        sys.stdin.read()
+        stdin.read()
     except OSError:
         pass
 
@@ -125,7 +151,7 @@ def main() -> None:
 
     is_background_worker = os.environ.get("MNGR_SUBAGENT_REAP_BACKGROUND") == "1"
     if is_background_worker:
-        _do_reap(state_dir)
+        _do_reap(state_dir, list_callable, destroy_callable)
         return
 
     # Fast path: nothing to reap.
@@ -134,7 +160,12 @@ def main() -> None:
 
     # There is work to do; do it in a detached child so the SessionStart hook
     # returns immediately.
-    spawn_background_reaper()
+    spawn_background_callable()
+
+
+def main() -> None:
+    """SessionStart hook entry point. Wires up the real stdin and helpers."""
+    run(sys.stdin)
 
 
 if __name__ == "__main__":

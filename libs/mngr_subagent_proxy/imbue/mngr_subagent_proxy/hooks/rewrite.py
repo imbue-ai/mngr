@@ -11,20 +11,25 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from typing import Callable
+from typing import TextIO
 
 from loguru import logger
 
 from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
 
-
-def _emit(response: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+# Type alias for the detached-destroy callable, so tests can inject a stub.
+DestroyAgentDetachedCallable = Callable[[str, Path], None]
 
 
-def _read_stdin_json() -> dict[str, Any] | None:
+def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
+    stdout.write(json.dumps(response) + "\n")
+    stdout.flush()
+
+
+def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
     try:
-        raw = sys.stdin.read()
+        raw = stdin.read()
     except OSError as e:
         logger.warning("rewrite: failed to read stdin: {}", e)
         return None
@@ -49,11 +54,20 @@ def _best_effort_unlink(path: Path) -> None:
         logger.warning("rewrite: failed to remove {}: {}", path, e)
 
 
-def main() -> None:
-    """PostToolUse:Agent hook entry point."""
+def run(
+    stdin: TextIO,
+    stdout: TextIO,
+    destroy_callable: DestroyAgentDetachedCallable = destroy_agent_detached,
+) -> None:
+    """PostToolUse:Agent hook core.
+
+    Takes I/O streams and the detached-destroy callable explicitly so tests
+    can inject StringIO buffers and a stub destroy function without
+    monkey-patching module-level names.
+    """
     os.umask(0o077)
 
-    payload = _read_stdin_json()
+    payload = _read_stdin_json(stdin)
     if payload is None:
         return
 
@@ -112,15 +126,20 @@ def main() -> None:
             "updatedToolOutput": output_text,
         }
     }
-    _emit(response)
+    _emit(stdout, response)
 
     # Best-effort detached teardown of the mngr subagent.
     if target_name:
         destroy_log = state_dir / "subagent_destroy.log"
-        destroy_agent_detached(target_name, destroy_log)
+        destroy_callable(target_name, destroy_log)
 
     for path in (env_file, prompt_file, map_file, result_file, script_file, init_flag):
         _best_effort_unlink(path)
+
+
+def main() -> None:
+    """PostToolUse:Agent hook entry point. Wires up the real stdin/stdout."""
+    run(sys.stdin, sys.stdout)
 
 
 if __name__ == "__main__":

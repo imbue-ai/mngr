@@ -1,10 +1,10 @@
 """Unit tests for the subagent-proxy python hook modules.
 
-These tests drive each hook's ``main()`` entry point in-process, swapping
-``sys.stdin``/``sys.stdout`` for StringIO buffers. Subprocess-spawning
-side effects (destroy / background reap) are intercepted by patching the
-``subprocess.Popen`` call site on the module under test, so the tests
-never spawn real children.
+Each hook module exposes a ``run(stdin, stdout[, ...callables])`` core that
+takes its I/O streams and side-effecting helpers as parameters. Tests pass
+``StringIO`` buffers and stub callables directly, so subprocess-spawning
+side effects (destroy / background reap) are intercepted without
+monkey-patching module-level names.
 """
 
 from __future__ import annotations
@@ -12,10 +12,7 @@ from __future__ import annotations
 import io
 import json
 import stat
-import sys
 from pathlib import Path
-from typing import Any
-from typing import Iterator
 
 import pytest
 
@@ -36,20 +33,6 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     ):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
-
-
-def _call_hook_main(
-    hook_main: Any,
-    stdin_text: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> str:
-    """Invoke a hook module's ``main()`` with stdin=stdin_text; return stdout."""
-    stdin_buffer = io.StringIO(stdin_text)
-    stdout_buffer = io.StringIO()
-    monkeypatch.setattr(sys, "stdin", stdin_buffer)
-    monkeypatch.setattr(sys, "stdout", stdout_buffer)
-    hook_main()
-    return stdout_buffer.getvalue()
 
 
 def _mode_bits(path: Path) -> int:
@@ -76,9 +59,11 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
             "run_in_background": False,
         },
     }
-    stdout = _call_hook_main(spawn_hook.main, json.dumps(hook_input), clean_env)
+    stdin_buffer = io.StringIO(json.dumps(hook_input))
+    stdout_buffer = io.StringIO()
+    spawn_hook.run(stdin_buffer, stdout_buffer)
 
-    response = json.loads(stdout)
+    response = json.loads(stdout_buffer.getvalue())
     hook_out = response["hookSpecificOutput"]
     assert hook_out["hookEventName"] == "PreToolUse"
     assert hook_out["permissionDecision"] == "allow"
@@ -128,9 +113,11 @@ def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.
             "run_in_background": False,
         },
     }
-    stdout = _call_hook_main(spawn_hook.main, json.dumps(hook_input), clean_env)
+    stdin_buffer = io.StringIO(json.dumps(hook_input))
+    stdout_buffer = io.StringIO()
+    spawn_hook.run(stdin_buffer, stdout_buffer)
 
-    response = json.loads(stdout)
+    response = json.loads(stdout_buffer.getvalue())
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
     assert "updatedInput" not in hook_out
@@ -148,32 +135,19 @@ def test_spawn_depth_limit_denies_with_reason(tmp_path: Path, clean_env: pytest.
 def test_spawn_passes_through_without_env(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> None:
     """Missing state-dir env var causes an allow pass-through."""
     del tmp_path  # unused
-    stdout = _call_hook_main(
-        spawn_hook.main, json.dumps({"tool_use_id": "tid", "tool_input": {"prompt": "hi"}}), clean_env
-    )
-    response = json.loads(stdout)
+    del clean_env  # the fixture's job is the env cleanup
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "tid", "tool_input": {"prompt": "hi"}}))
+    stdout_buffer = io.StringIO()
+    spawn_hook.run(stdin_buffer, stdout_buffer)
+    response = json.loads(stdout_buffer.getvalue())
     hook_out = response["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "allow"
     assert "updatedInput" not in hook_out
 
 
-@pytest.fixture
-def patched_destroy_detached(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Path]]:
-    """Replace destroy_agent_detached with a recorder in rewrite and reap modules."""
-    calls: list[tuple[str, Path]] = []
-
-    def fake_destroy(target_name: str, log_path: Path) -> None:
-        calls.append((target_name, log_path))
-
-    monkeypatch.setattr(rewrite_hook, "destroy_agent_detached", fake_destroy)
-    monkeypatch.setattr(reap_hook, "destroy_agent_detached", fake_destroy)
-    return calls
-
-
 def test_rewrite_substitutes_output_and_cleans_up(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
-    patched_destroy_detached: list[tuple[str, Path]],
 ) -> None:
     """PostToolUse hook swaps the tool output with the harvested result and cleans up."""
     state_dir = tmp_path / "state"
@@ -199,13 +173,16 @@ def test_rewrite_substitutes_output_and_cleans_up(
     result_file.write_text(expected_output)
     prompt_file.write_text("original prompt")
 
-    stdout = _call_hook_main(
-        rewrite_hook.main,
-        json.dumps({"tool_use_id": tid, "tool_response": "ignored"}),
-        clean_env,
-    )
+    destroy_calls: list[tuple[str, Path]] = []
 
-    response = json.loads(stdout)
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
+
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
+    stdout_buffer = io.StringIO()
+    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
+
+    response = json.loads(stdout_buffer.getvalue())
     hook_out = response["hookSpecificOutput"]
     assert hook_out["hookEventName"] == "PostToolUse"
     assert hook_out["updatedToolOutput"] == expected_output
@@ -216,8 +193,8 @@ def test_rewrite_substitutes_output_and_cleans_up(
     assert not prompt_file.exists()
 
     # Destroy was requested exactly once with the target name.
-    assert len(patched_destroy_detached) == 1
-    target, log_path = patched_destroy_detached[0]
+    assert len(destroy_calls) == 1
+    target, log_path = destroy_calls[0]
     assert target == "foo-bar"
     assert log_path == state_dir / "subagent_destroy.log"
 
@@ -225,10 +202,8 @@ def test_rewrite_substitutes_output_and_cleans_up(
 def test_rewrite_missing_result_emits_error(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
-    patched_destroy_detached: list[tuple[str, Path]],
 ) -> None:
     """When the result file is missing, the hook emits an ERROR sentinel."""
-    del patched_destroy_detached  # unused but fixture must be active to intercept destroy
     state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -246,13 +221,11 @@ def test_rewrite_missing_result_emits_error(
         )
     )
 
-    stdout = _call_hook_main(
-        rewrite_hook.main,
-        json.dumps({"tool_use_id": tid, "tool_response": "ignored"}),
-        clean_env,
-    )
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
+    stdout_buffer = io.StringIO()
+    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=lambda _name, _log: None)
 
-    response = json.loads(stdout)
+    response = json.loads(stdout_buffer.getvalue())
     output = response["hookSpecificOutput"]["updatedToolOutput"]
     assert "ERROR" in output
     assert target_name in output
@@ -261,26 +234,27 @@ def test_rewrite_missing_result_emits_error(
 def test_rewrite_ignores_unmapped_tool_use_id(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
-    patched_destroy_detached: list[tuple[str, Path]],
 ) -> None:
     """If no map file exists for the tool_use_id, the hook is a no-op."""
     state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
-    stdout = _call_hook_main(
-        rewrite_hook.main,
-        json.dumps({"tool_use_id": "untracked_tid"}),
-        clean_env,
-    )
-    assert stdout == ""
-    assert patched_destroy_detached == []
+    destroy_calls: list[tuple[str, Path]] = []
+
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
+
+    stdin_buffer = io.StringIO(json.dumps({"tool_use_id": "untracked_tid"}))
+    stdout_buffer = io.StringIO()
+    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
+    assert stdout_buffer.getvalue() == ""
+    assert destroy_calls == []
 
 
 def test_reap_fast_path_empty_state(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reaper exits immediately when subagent_map/ is missing or empty, without dispatching."""
     spawn_calls: list[None] = []
@@ -288,26 +262,23 @@ def test_reap_fast_path_empty_state(
     def fake_spawn() -> None:
         spawn_calls.append(None)
 
-    monkeypatch.setattr(reap_hook, "spawn_background_reaper", fake_spawn)
-
     # Case 1: state dir does not exist at all.
     state_dir = tmp_path / "no-state"
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
-    _call_hook_main(reap_hook.main, "", clean_env)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
     assert spawn_calls == []
 
     # Case 2: state dir exists with an empty subagent_map/.
     state_dir2 = tmp_path / "empty-state"
     (state_dir2 / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir2))
-    _call_hook_main(reap_hook.main, "", clean_env)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
     assert spawn_calls == []
 
 
 def test_reap_with_work_spawns_background_child(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When map entries exist, the reaper dispatches a detached background child."""
     state_dir = tmp_path / "state"
@@ -328,27 +299,19 @@ def test_reap_with_work_spawns_background_child(
     def fake_spawn() -> None:
         spawn_calls.append(None)
 
-    monkeypatch.setattr(reap_hook, "spawn_background_reaper", fake_spawn)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
-    _call_hook_main(reap_hook.main, "", clean_env)
+    reap_hook.run(io.StringIO(""), spawn_background_callable=fake_spawn)
 
     assert len(spawn_calls) == 1
 
 
-@pytest.fixture
-def reap_as_background_worker(clean_env: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
-    """Run reap.main() as if it were the detached background worker."""
-    clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
-    yield clean_env
-
-
 def test_reap_background_worker_cleans_up_missing_agent(
     tmp_path: Path,
-    reap_as_background_worker: pytest.MonkeyPatch,
-    monkeypatch: pytest.MonkeyPatch,
+    clean_env: pytest.MonkeyPatch,
 ) -> None:
     """Background reaper drops side files for map entries whose target agent is gone."""
+    clean_env.setenv("MNGR_SUBAGENT_REAP_BACKGROUND", "1")
     state_dir = tmp_path / "state"
     for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
         (state_dir / sub).mkdir(parents=True)
@@ -367,14 +330,18 @@ def test_reap_background_worker_cleans_up_missing_agent(
     result_file = state_dir / "subagent_results" / f"{tid}.txt"
     result_file.write_text("leftover")
 
-    # No agents returned from mngr: simulates a vanished target.
-    monkeypatch.setattr(reap_hook, "list_agents_by_name", lambda: {})
     destroy_calls: list[tuple[str, Path]] = []
-    monkeypatch.setattr(reap_hook, "destroy_agent_detached", lambda n, p: destroy_calls.append((n, p)))
 
-    reap_as_background_worker.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
 
-    _call_hook_main(reap_hook.main, "", reap_as_background_worker)
+    clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    reap_hook.run(
+        io.StringIO(""),
+        list_callable=lambda: {},
+        destroy_callable=fake_destroy,
+    )
 
     assert not map_file.exists()
     assert not result_file.exists()

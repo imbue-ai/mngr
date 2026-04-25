@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TextIO
 
 from loguru import logger
 
@@ -31,37 +32,38 @@ _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-def _emit(response: dict[str, Any]) -> None:
+def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
     """Write a JSON response to stdout and flush."""
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+    stdout.write(json.dumps(response) + "\n")
+    stdout.flush()
 
 
-def _emit_pass_through() -> None:
-    _emit(_PASS_THROUGH_RESPONSE)
+def _emit_pass_through(stdout: TextIO) -> None:
+    _emit(stdout, _PASS_THROUGH_RESPONSE)
 
 
-def _emit_depth_limit_deny(depth: int, max_depth: int) -> None:
+def _emit_depth_limit_deny(stdout: TextIO, depth: int, max_depth: int) -> None:
     """Emit a deny decision with an explanatory reason (depth limit reached)."""
     reason = (
         f"mngr_subagent_proxy: subagent depth limit ({depth}/{max_depth}) reached. "
         "Cannot spawn nested Task tools beyond this depth."
     )
     _emit(
+        stdout,
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             }
-        }
+        },
     )
 
 
-def _read_stdin_json() -> dict[str, Any] | None:
+def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
     """Read hook JSON from stdin; return None on empty or malformed input."""
     try:
-        raw = sys.stdin.read()
+        raw = stdin.read()
     except OSError as e:
         logger.warning("spawn: failed to read stdin: {}", e)
         return None
@@ -184,31 +186,35 @@ def _write_executable_file(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-def main() -> None:
-    """PreToolUse:Agent hook entry point."""
+def run(stdin: TextIO, stdout: TextIO) -> None:
+    """PreToolUse:Agent hook core.
+
+    Pure function in terms of its dependencies: takes stdin/stdout streams
+    explicitly. Reads env vars and filesystem state directly.
+    """
     os.umask(0o077)
 
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR", "")
     parent_name = os.environ.get("MNGR_AGENT_NAME", "")
     if not state_dir_env:
         logger.warning("spawn: MNGR_AGENT_STATE_DIR unset; passing through")
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
     if not parent_name:
         logger.warning("spawn: MNGR_AGENT_NAME unset; passing through")
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     depth = _parse_int_env("MNGR_SUBAGENT_DEPTH", 0)
     max_depth = _parse_int_env("MNGR_MAX_SUBAGENT_DEPTH", _DEFAULT_MAX_DEPTH)
     if depth >= max_depth:
         logger.warning("spawn: depth {}/{} reached; denying Task", depth, max_depth)
-        _emit_depth_limit_deny(depth, max_depth)
+        _emit_depth_limit_deny(stdout, depth, max_depth)
         return
 
-    payload = _read_stdin_json()
+    payload = _read_stdin_json(stdin)
     if payload is None:
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     tool_use_id = payload.get("tool_use_id")
@@ -222,7 +228,7 @@ def main() -> None:
 
     if not isinstance(tool_use_id, str) or not tool_use_id or not isinstance(orig_prompt, str) or not orig_prompt:
         logger.warning("spawn: missing tool_use_id or prompt in hook input")
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     slug = slugify(orig_desc or "subagent") or "subagent"
@@ -242,7 +248,7 @@ def main() -> None:
             d.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.warning("spawn: failed to create state subdirs under {}: {}", state_dir, e)
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     prompt_file = prompts_dir / f"{tool_use_id}.md"
@@ -253,7 +259,7 @@ def main() -> None:
         _write_secure_file(prompt_file, orig_prompt)
     except OSError as e:
         logger.warning("spawn: failed to write prompt file {}: {}", prompt_file, e)
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     map_payload = {
@@ -266,7 +272,7 @@ def main() -> None:
         _write_secure_file(map_file, json.dumps(map_payload))
     except OSError as e:
         logger.warning("spawn: failed to write map file {}: {}", map_file, e)
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     wait_script_content = _build_wait_script(tool_use_id, target_name, parent_cwd)
@@ -274,7 +280,7 @@ def main() -> None:
         _write_executable_file(script_file, wait_script_content)
     except OSError as e:
         logger.warning("spawn: failed to write wait-script {}: {}", script_file, e)
-        _emit_pass_through()
+        _emit_pass_through(stdout)
         return
 
     new_prompt = (
@@ -296,7 +302,12 @@ def main() -> None:
             },
         }
     }
-    _emit(response)
+    _emit(stdout, response)
+
+
+def main() -> None:
+    """PreToolUse:Agent hook entry point. Wires up the real stdin/stdout."""
+    run(sys.stdin, sys.stdout)
 
 
 if __name__ == "__main__":
