@@ -129,6 +129,24 @@ def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None
 
 
 @pytest.mark.acceptance
+def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
+    """Provisioning is a no-op for agents whose config is not ClaudeAgentConfig."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    host = FakeHost(host_dir)
+    # Use a plain sentinel that is not a ClaudeAgentConfig instance.
+    agent = FakeAgent(AgentId.generate(), work_dir, object())
+
+    _provision(agent, host, None)
+
+    assert len(host.written_files) == 0
+    assert host.executed_commands == []
+    assert not (work_dir / ".claude").exists()
+
+
+@pytest.mark.acceptance
 def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> None:
     """A subagent-proxy-child agent with no pre-existing settings.local.json provisions without error."""
     host_dir = tmp_path / "host"
