@@ -570,13 +570,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--host-env-file", type=click.Path(exists=True), multiple=True, help="Load env file for host [repeatable]"
 )
-@optgroup.option(
-    "--pass-host-env",
-    multiple=True,
-    default=("EDITOR",),
-    show_default=True,
-    help="Forward variable from shell for host [repeatable]",
-)
+@optgroup.option("--pass-host-env", multiple=True, help="Forward variable from shell for host [repeatable]")
 @optgroup.group("New Host Build")
 @optgroup.option("--snapshot", help="Use existing snapshot instead of building")
 @optgroup.option(

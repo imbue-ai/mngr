@@ -145,7 +145,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | ---- | ---- | ----------- | ------- |
 | `--host-env` | text | Set environment variable KEY=VALUE for host [repeatable] | None |
 | `--host-env-file` | path | Load env file for host [repeatable] | None |
-| `--pass-host-env` | text | Forward variable from shell for host [repeatable] | `('EDITOR',)` |
+| `--pass-host-env` | text | Forward variable from shell for host [repeatable] | None |
 
 ## New Host Build
 
