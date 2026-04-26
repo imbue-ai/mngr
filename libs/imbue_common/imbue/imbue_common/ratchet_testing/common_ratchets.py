@@ -407,7 +407,7 @@ PREVENT_SILENT_DECODE_ERROR_CATCH = RatchetRuleInfo(
         "TOMLDecodeError / JSONDecodeError propagate so the user knows to fix the file. Silent-skip "
         "is fine for internal state, JSONL streams, and external input (subprocess / API output, CLI "
         "flag values); bump the ratchet count to cover those. This ratchet is a reminder, not a "
-        "strict ban. See style guide: 'Config and settings file parse errors'."
+        "strict ban. See style guide section 'Try/except'."
     ),
 )
 
