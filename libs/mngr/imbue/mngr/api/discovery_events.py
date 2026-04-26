@@ -118,7 +118,7 @@ DiscoveryEvent = Annotated[
     Discriminator("type"),
 ]
 
-_DISCOVERY_EVENT_ADAPTER: Final = TypeAdapter(DiscoveryEvent)
+_DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(DiscoveryEvent)
 
 
 # === Path Helpers ===
