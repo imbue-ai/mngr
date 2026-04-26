@@ -1280,14 +1280,11 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // Not authenticated and no saved state: show the welcome splash page.
-        // Otherwise consume the one-time code via loginUrl.
+        // Consume the one-time code to establish the local session cookie.
+        // Without this cookie, all backend endpoints (including /welcome and
+        // /_chrome) render the login page instead of their real content.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          if (savedState.length === 0) {
-            initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
-          } else {
-            initialBundle.contentView.webContents.loadURL(loginUrl);
-          }
+          initialBundle.contentView.webContents.loadURL(loginUrl);
         }
       } else if (restorable.length === 0) {
         // Authenticated, but nothing to restore -- land on the home page.
