@@ -1591,6 +1591,11 @@ def test_load_bootstrap_context_skips_plugin_section_validation(
     Regression test for the issue where ``mngr plugin add`` was emitting
     ``Unknown fields in agent_types.*`` and ``Provider ... references unknown
     backend`` warnings when the config referenced plugins not yet installed.
+
+    Includes a negative-control assertion: the same config loaded via
+    the regular non-strict ``load_config`` path *does* emit those warnings,
+    proving that the bootstrap-path suppression is what prevents them
+    (rather than the warning machinery silently being inert).
     """
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
@@ -1616,6 +1621,15 @@ def test_load_bootstrap_context_skips_plugin_section_validation(
     assert mngr_ctx.config.plugins == {}
     assert not any("Unknown fields" in msg for msg in log_warnings), log_warnings
     assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+    # Negative control: loading the same config via the regular non-strict
+    # path *does* emit both warnings. This proves the bootstrap-path
+    # suppression above is doing real work, rather than passing because
+    # the warning machinery is inert.
+    log_warnings.clear()
+    load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path, strict=False)
+    assert any("Unknown fields" in msg and "agent_types.worker" in msg for msg in log_warnings), log_warnings
+    assert any("references unknown backend" in msg for msg in log_warnings), log_warnings
 
 
 def test_load_bootstrap_context_still_loads_top_level_fields(
