@@ -307,3 +307,9 @@ apps/minds_workspace_server/package-lock.json
 # re-fetch.
 /apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
+
+# D2 diagram rendered outputs (regenerate from .d2 source)
+**/*.d2.svg
+**/*.d2.png
+apps/minds/docs/architecture.svg
+apps/minds/docs/architecture.png

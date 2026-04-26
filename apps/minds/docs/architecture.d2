@@ -7,16 +7,13 @@ classes: {
       stroke-dash: 3
     }
   }
-  process: {
-    shape: rectangle
+  grouping: {
     style: {
-      border-radius: 4
-    }
-  }
-  service: {
-    shape: rectangle
-    style: {
-      border-radius: 4
+      stroke-dash: 5
+      fill: transparent
+      border-radius: 10
+      font-size: 14
+      bold: true
     }
   }
 }
@@ -33,7 +30,7 @@ user-computer: User's Computer {
     bold: true
   }
 
-  minds-app: Minds App {
+  minds-app: Minds Electron App {
     style: {
       fill: "#e8f0fe"
       stroke: "#3b82f6"
@@ -41,15 +38,6 @@ user-computer: User's Computer {
       border-radius: 10
       font-size: 16
       bold: true
-    }
-
-    electron: Electron Browser UI {
-      style: {
-        fill: "#dbeafe"
-        stroke: "#2563eb"
-        border-radius: 6
-        font-size: 14
-      }
     }
 
     desktop-server: Python Desktop Server {
@@ -88,106 +76,135 @@ user-computer: User's Computer {
           font-size: 12
         }
       }
-    }
 
-    electron -> desktop-server: {
-      style.stroke: "#6366f1"
+      observe -> events-1: {style.opacity: 0}
+      observe -> events-2: {style.opacity: 0}
+    }
+  }
+
+  latchkey-local: latchkey / detent {
+    style: {
+      fill: "#f3e8ff"
+      stroke: "#9333ea"
+      border-radius: 4
+      font-size: 12
     }
   }
 }
 
-# -- Remote Hosts --
+# -- Compute Provider (dashed grouping containing both remote hosts) --
 
-host-1: Remote Host 1 {
+compute: Compute Provider {
+  class: grouping
   style: {
-    fill: "#fefce8"
-    stroke: "#ca8a04"
-    stroke-width: 2
-    border-radius: 12
-    font-size: 16
-    bold: true
+    stroke: "#0284c7"
   }
 
-  vps-1: VPS {
+  host-1: Remote Host 1 {
     style: {
-      fill: "#fef9c3"
-      stroke: "#eab308"
-      border-radius: 8
-      font-size: 14
+      fill: "#fefce8"
+      stroke: "#ca8a04"
+      stroke-width: 2
+      border-radius: 12
+      font-size: 16
+      bold: true
     }
 
-    docker-1: Docker Container {
-      class: container
+    vps-1: VPS {
       style: {
-        fill: "#ede9fe"
-        stroke: "#7c3aed"
-        border-radius: 6
-        font-size: 13
+        fill: "#fef9c3"
+        stroke: "#eab308"
+        border-radius: 8
+        font-size: 14
       }
 
-      agent-1: Agent (Claude Code) {
+      latchkey-1: latchkey / detent {
         style: {
-          fill: "#c4b5fd"
-          stroke: "#6d28d9"
+          fill: "#f3e8ff"
+          stroke: "#9333ea"
           border-radius: 4
           font-size: 12
-          bold: true
+        }
+      }
+
+      docker-1: Docker Container {
+        class: container
+        style: {
+          fill: "#ede9fe"
+          stroke: "#7c3aed"
+          border-radius: 6
+          font-size: 13
+        }
+
+        agent-1: Agent (Claude Code) {
+          style: {
+            fill: "#c4b5fd"
+            stroke: "#6d28d9"
+            border-radius: 4
+            font-size: 12
+            bold: true
+          }
+        }
+      }
+    }
+  }
+
+  host-2: Remote Host 2 {
+    style: {
+      fill: "#fefce8"
+      stroke: "#ca8a04"
+      stroke-width: 2
+      border-radius: 12
+      font-size: 16
+      bold: true
+    }
+
+    vps-2: VPS {
+      style: {
+        fill: "#fef9c3"
+        stroke: "#eab308"
+        border-radius: 8
+        font-size: 14
+      }
+
+      latchkey-2: latchkey / detent {
+        style: {
+          fill: "#f3e8ff"
+          stroke: "#9333ea"
+          border-radius: 4
+          font-size: 12
+        }
+      }
+
+      docker-2: Docker Container {
+        class: container
+        style: {
+          fill: "#ede9fe"
+          stroke: "#7c3aed"
+          border-radius: 6
+          font-size: 13
+        }
+
+        agent-2: Agent (Claude Code) {
+          style: {
+            fill: "#c4b5fd"
+            stroke: "#6d28d9"
+            border-radius: 4
+            font-size: 12
+            bold: true
+          }
         }
       }
     }
   }
 }
 
-host-2: Remote Host 2 {
+# -- Imbue Services --
+
+imbue-services: Imbue Services {
+  class: grouping
   style: {
-    fill: "#fefce8"
-    stroke: "#ca8a04"
-    stroke-width: 2
-    border-radius: 12
-    font-size: 16
-    bold: true
-  }
-
-  vps-2: VPS {
-    style: {
-      fill: "#fef9c3"
-      stroke: "#eab308"
-      border-radius: 8
-      font-size: 14
-    }
-
-    docker-2: Docker Container {
-      class: container
-      style: {
-        fill: "#ede9fe"
-        stroke: "#7c3aed"
-        border-radius: 6
-        font-size: 13
-      }
-
-      agent-2: Agent (Claude Code) {
-        style: {
-          fill: "#c4b5fd"
-          stroke: "#6d28d9"
-          border-radius: 4
-          font-size: 12
-          bold: true
-        }
-      }
-    }
-  }
-}
-
-# -- Remote Services --
-
-remote-services: Remote Services {
-  style: {
-    fill: "#fdf2f8"
     stroke: "#db2777"
-    stroke-width: 2
-    border-radius: 12
-    font-size: 16
-    bold: true
   }
 
   connector: Remote Connector Service {
@@ -219,36 +236,20 @@ remote-services: Remote Services {
     }
   }
 
-  compute: Compute Provider {
-    style: {
-      fill: "#e0f2fe"
-      stroke: "#0284c7"
-      border-radius: 4
-      font-size: 12
-    }
-  }
-
   connector -> supertokens: auth {
     style.stroke: "#ef4444"
   }
   connector -> litellm: virtual keys {
     style.stroke: "#f97316"
   }
-  connector -> compute: provisions VPSs {
-    style.stroke: "#0284c7"
-  }
 }
 
-# -- AI Providers --
+# -- AI Providers (dashed grouping, no background) --
 
 ai-providers: AI Providers {
+  class: grouping
   style: {
-    fill: "#f0fdf4"
     stroke: "#16a34a"
-    stroke-width: 2
-    border-radius: 12
-    font-size: 16
-    bold: true
   }
 
   anthropic: Anthropic {
@@ -273,21 +274,28 @@ ai-providers: AI Providers {
 # -- Connections --
 
 # Desktop server to remote connector
-user-computer.minds-app.desktop-server -> remote-services.connector: API calls {
+user-computer.minds-app.desktop-server -> imbue-services.connector: API calls {
   style: {
     stroke: "#db2777"
     stroke-width: 2
   }
 }
 
+# Remote connector provisions VPSs via compute provider
+imbue-services.connector -> compute: provisions VPSs {
+  style: {
+    stroke: "#0284c7"
+  }
+}
+
 # Observe watches which hosts are online
-user-computer.minds-app.desktop-server.observe -> host-1: monitors {
+user-computer.minds-app.desktop-server.observe -> compute.host-1: monitors {
   style: {
     stroke: "#d97706"
     stroke-dash: 5
   }
 }
-user-computer.minds-app.desktop-server.observe -> host-2: monitors {
+user-computer.minds-app.desktop-server.observe -> compute.host-2: monitors {
   style: {
     stroke: "#d97706"
     stroke-dash: 5
@@ -295,27 +303,49 @@ user-computer.minds-app.desktop-server.observe -> host-2: monitors {
 }
 
 # Events processes connected to agents
-user-computer.minds-app.desktop-server.events-1 -> host-1.vps-1.docker-1.agent-1: streams events {
+user-computer.minds-app.desktop-server.events-1 -> compute.host-1.vps-1.docker-1.agent-1: streams events {
   style: {
     stroke: "#059669"
     stroke-width: 2
   }
 }
-user-computer.minds-app.desktop-server.events-2 -> host-2.vps-2.docker-2.agent-2: streams events {
+user-computer.minds-app.desktop-server.events-2 -> compute.host-2.vps-2.docker-2.agent-2: streams events {
   style: {
     stroke: "#059669"
     stroke-width: 2
   }
 }
 
+# Desktop server to local latchkey
+user-computer.minds-app.desktop-server -> user-computer.latchkey-local {
+  style: {
+    stroke: "#9333ea"
+    stroke-width: 2
+  }
+}
+
+# Agents to their respective host latchkey processes
+compute.host-1.vps-1.docker-1.agent-1 -> compute.host-1.vps-1.latchkey-1 {
+  style: {
+    stroke: "#9333ea"
+    stroke-width: 2
+  }
+}
+compute.host-2.vps-2.docker-2.agent-2 -> compute.host-2.vps-2.latchkey-2 {
+  style: {
+    stroke: "#9333ea"
+    stroke-width: 2
+  }
+}
+
 # Agents talk to LiteLLM (which acts as AI gateway)
-host-1.vps-1.docker-1.agent-1 -> remote-services.litellm: inference requests {
+compute.host-1.vps-1.docker-1.agent-1 -> imbue-services.litellm: inference requests {
   style: {
     stroke: "#f97316"
     stroke-width: 2
   }
 }
-host-2.vps-2.docker-2.agent-2 -> remote-services.litellm: inference requests {
+compute.host-2.vps-2.docker-2.agent-2 -> imbue-services.litellm: inference requests {
   style: {
     stroke: "#f97316"
     stroke-width: 2
@@ -323,13 +353,13 @@ host-2.vps-2.docker-2.agent-2 -> remote-services.litellm: inference requests {
 }
 
 # LiteLLM proxies to AI providers
-remote-services.litellm -> ai-providers.anthropic: proxied requests {
+imbue-services.litellm -> ai-providers.anthropic: proxied requests {
   style: {
     stroke: "#22c55e"
     stroke-width: 2
   }
 }
-remote-services.litellm -> ai-providers.openai: proxied requests {
+imbue-services.litellm -> ai-providers.openai: proxied requests {
   style: {
     stroke: "#22c55e"
     stroke-width: 2
