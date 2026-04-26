@@ -77,6 +77,16 @@ user-computer: User's Computer {
         }
       }
 
+      events-local: "mngr events (local)" {
+        style: {
+          fill: "#d1fae5"
+          stroke: "#059669"
+          border-radius: 4
+          font-size: 12
+        }
+      }
+
+      observe -> events-local: {style.opacity: 0}
       observe -> events-1: {style.opacity: 0}
       observe -> events-2: {style.opacity: 0}
     }
@@ -301,7 +311,13 @@ imbue-services.connector -> compute: provisions VPSs {
   }
 }
 
-# Observe watches which hosts are online
+# Observe watches local and remote hosts
+user-computer.minds-app.desktop-server.observe -> user-computer.lima-vm: monitors {
+  style: {
+    stroke: "#d97706"
+    stroke-dash: 5
+  }
+}
 user-computer.minds-app.desktop-server.observe -> compute.vps-1: monitors {
   style: {
     stroke: "#d97706"
@@ -323,6 +339,14 @@ user-computer.minds-app.desktop-server.events-1 -> compute.vps-1.docker-1.agent-
   }
 }
 user-computer.minds-app.desktop-server.events-2 -> compute.vps-2.docker-2.agent-2: streams events {
+  style: {
+    stroke: "#059669"
+    stroke-width: 2
+  }
+}
+
+# Local events process connected to local agent
+user-computer.minds-app.desktop-server.events-local -> user-computer.lima-vm.agent-local: streams events {
   style: {
     stroke: "#059669"
     stroke-width: 2
@@ -371,7 +395,13 @@ compute.vps-2.latchkey-2 -> internet-services {
   }
 }
 
-# Agents talk to LiteLLM (which acts as AI gateway)
+# All agents talk to LiteLLM (which acts as AI gateway)
+user-computer.lima-vm.agent-local -> imbue-services.litellm: inference requests {
+  style: {
+    stroke: "#f97316"
+    stroke-width: 2
+  }
+}
 compute.vps-1.docker-1.agent-1 -> imbue-services.litellm: inference requests {
   style: {
     stroke: "#f97316"
