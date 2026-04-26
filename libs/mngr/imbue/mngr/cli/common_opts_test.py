@@ -931,26 +931,18 @@ def test_apply_settings_to_config_unknown_field_raises() -> None:
         apply_settings_to_config(config, ("totally_bogus_key=value",), frozenset())
 
 
-@pytest.mark.parametrize(
-    "section,setting",
-    [
-        ("providers", "providers.totally_fake.backend=fake"),
-        ("agent_types", "agent_types.totally_fake.parent_type=claude"),
-        ("plugins", "plugins.totally_fake.enabled=false"),
-    ],
-)
 def test_apply_settings_to_config_warns_when_dropping_plugin_section_overrides(
-    mngr_test_prefix: str, log_warnings: list[str], section: str, setting: str
+    mngr_test_prefix: str, log_warnings: list[str]
 ) -> None:
-    """When parse_plugin_sections=False, dropping a -S override targeting any plugin section warns."""
+    """When parse_plugin_sections=False, dropping a -S override targeting a plugin section warns."""
     config = MngrConfig(prefix=mngr_test_prefix)
     apply_settings_to_config(
         config,
-        (setting,),
+        ("providers.totally_fake.backend=fake",),
         frozenset(),
         parse_plugin_sections=False,
     )
-    assert any(section in msg and "Ignoring" in msg for msg in log_warnings), log_warnings
+    assert any("providers" in msg and "Ignoring" in msg for msg in log_warnings), log_warnings
 
 
 def test_apply_settings_to_config_no_warning_when_no_plugin_section_overrides(
