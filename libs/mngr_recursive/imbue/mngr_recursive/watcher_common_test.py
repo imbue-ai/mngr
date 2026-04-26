@@ -148,6 +148,7 @@ def test_read_event_ids_from_jsonl_skips_blank_lines(tmp_path: Path) -> None:
     assert read_event_ids_from_jsonl(jsonl_file) == {"evt-a", "evt-b"}
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="Root bypasses permission checks")
 def test_read_event_ids_from_jsonl_handles_oserror_on_open(tmp_path: Path) -> None:
     """Returns whatever was collected before the OSError without crashing."""
     jsonl_file = tmp_path / "events.jsonl"
