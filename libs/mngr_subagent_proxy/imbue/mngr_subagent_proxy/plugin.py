@@ -9,7 +9,9 @@ from typing import Callable
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -17,10 +19,43 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import merge_hooks_config
+from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
 from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+
+SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
+
+
+class SubagentProxyChildConfig(ClaudeAgentConfig):
+    """Claude config for agents spawned by the subagent-proxy hook.
+
+    Differs from ``ClaudeAgentConfig`` only in defaults: spawned subagents
+    do NOT inherit the user's ``~/.claude/{plugins,skills,agents,commands}/``,
+    so user-installed Claude Code plugins (e.g. imbue-code-guardian's
+    Stop-hook orchestrator that re-prompts agents into autofix/verify
+    cycles) don't fire inside the spawned subagent and turn it into a
+    runaway tree. mngr_claude's own readiness hooks still install (those
+    are baked into provisioning, not sourced from ``~/.claude/``), and
+    our subagent_proxy plugin still loads (Python entry-point).
+    """
+
+    sync_home_settings: bool = Field(
+        default=False,
+        description="Override: spawned subagents do not inherit user-installed Claude Code plugins.",
+    )
+
+
+@hookimpl
+def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
+    """Register the mngr-proxy-child agent type.
+
+    Same agent class (ClaudeAgent) as the ``claude`` type; only the config
+    differs (no inherited user plugins).
+    """
+    return (SUBAGENT_PROXY_CHILD_AGENT_TYPE, ClaudeAgent, SubagentProxyChildConfig)
+
 
 # Type alias so tests can inject a recording stub without monkey-patching
 # module-level names (mirrors hooks/reap.py's DI pattern).
@@ -121,21 +156,14 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
 
-_SUBAGENT_NAME_INFIX: Final[str] = "--subagent-"
-
-
 def _is_subagent_proxy_child(agent: AgentInterface) -> bool:
     """Return True if this agent was spawned by the subagent-proxy hook.
 
-    We mint proxy-child names as ``<parent>--subagent-<slug>-<tid>``; use
-    that pattern as the signal. Conservative: the user could theoretically
-    name a top-level agent with ``--subagent-`` in it and hit this by
-    accident, in which case provisioning would refuse to proceed if the
-    agent inherits user-configured Stop/SubagentStop hooks (see
-    ``_check_subagent_hooks_compat``) and would strip any other
-    non-mngr hooks from the spawned subagent's settings.
+    Proxy-spawned subagents register the ``mngr-proxy-child`` agent type
+    (whose config is a SubagentProxyChildConfig), so the isinstance check
+    is the authoritative signal.
     """
-    return _SUBAGENT_NAME_INFIX in str(agent.name)
+    return isinstance(agent.agent_config, SubagentProxyChildConfig)
 
 
 class UnsupportedSubagentHookError(NotImplementedError):

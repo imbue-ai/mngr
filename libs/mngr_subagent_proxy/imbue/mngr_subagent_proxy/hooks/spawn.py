@@ -143,7 +143,7 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
         '> "$ENV_FILE"\n'
         '    uv run mngr create "$TARGET_NAME:$PARENT_CWD" \\\n'
-        "        --type claude \\\n"
+        "        --type mngr-proxy-child \\\n"
         "        --transfer=none \\\n"
         "        --no-ensure-clean \\\n"
         "        --no-connect \\\n"

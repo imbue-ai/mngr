@@ -11,6 +11,7 @@ import pytest
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
 from imbue.mngr_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
@@ -100,7 +101,7 @@ def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(tmp_path: Pat
     agent = FakeAgent(
         agent_id,
         work_dir,
-        ClaudeAgentConfig(),
+        SubagentProxyChildConfig(),
         name=AgentName("reviewer--subagent-code-review-abcd1234"),
     )
     _seed_settings_with_stop_hooks(work_dir)
@@ -148,7 +149,7 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(tmp_path
     agent = FakeAgent(
         AgentId.generate(),
         work_dir,
-        ClaudeAgentConfig(),
+        SubagentProxyChildConfig(),
         name=AgentName("reviewer--subagent-code-review-abcd1234"),
     )
 
@@ -241,7 +242,7 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
     agent = FakeAgent(
         AgentId.generate(),
         work_dir,
-        ClaudeAgentConfig(),
+        SubagentProxyChildConfig(),
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
@@ -332,7 +333,7 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(tmp_path: Path) -> Non
     agent = FakeAgent(
         agent_id,
         work_dir,
-        ClaudeAgentConfig(),
+        SubagentProxyChildConfig(),
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
