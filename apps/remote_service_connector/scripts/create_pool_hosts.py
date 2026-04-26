@@ -47,6 +47,7 @@ _PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
 def _run_mngr_command(
     args: list[str],
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a mngr CLI command via `uv run` and return the result."""
     full_command = ["uv", "run", "mngr"] + args
@@ -56,6 +57,7 @@ def _run_mngr_command(
         capture_output=True,
         text=True,
         timeout=timeout,
+        cwd=cwd,
     )
 
 
@@ -249,6 +251,7 @@ def _create_single_pool_host(
     database_url: str,
     region: str,
     plan: str,
+    template_dir: str,
 ) -> bool:
     """Create a single pool host. Returns True on success, False on failure."""
     suffix = uuid4().hex
@@ -258,15 +261,18 @@ def _create_single_pool_host(
 
     logger.info("[{}] Creating pool host: {}", host_idx, address)
 
-    # Create the agent and host. The placeholder ANTHROPIC_API_KEY is injected
-    # so that mngr provisioning writes it into the env file and claude config.
-    # It gets sed-replaced with the real LiteLLM virtual key during lease setup.
+    # Run mngr create from the template directory so it picks up the
+    # template's .mngr/settings.toml (workspace server, services, etc.).
     create_result = _run_mngr_command(
         [
             "create",
             address,
             "--new-host",
             "--no-connect",
+            "--template",
+            "main",
+            "--template",
+            "vultr",
             "--label",
             f"pool_version={version}",
             "--label",
@@ -275,7 +281,8 @@ def _create_single_pool_host(
             f"plan={plan}",
             "--env",
             f"ANTHROPIC_API_KEY={_PLACEHOLDER_ANTHROPIC_API_KEY}",
-        ]
+        ],
+        cwd=template_dir,
     )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
@@ -409,6 +416,13 @@ def _create_single_pool_host(
     show_default=True,
     help="Vultr plan identifier",
 )
+@click.option(
+    "--template-dir",
+    required=True,
+    type=click.Path(exists=True),
+    envvar="MINDS_TEMPLATE_REPO",
+    help="Local path to the forever-claude-template repo checkout",
+)
 def create_pool_hosts(
     count: int,
     version: str,
@@ -416,6 +430,7 @@ def create_pool_hosts(
     database_url: str,
     region: str,
     plan: str,
+    template_dir: str,
 ) -> None:
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
@@ -423,11 +438,12 @@ def create_pool_hosts(
         sys.exit(1)
 
     logger.info(
-        "Creating {} pool host(s) with version={}, region={}, plan={}",
+        "Creating {} pool host(s) with version={}, region={}, plan={}, template={}",
         count,
         version,
         region,
         plan,
+        template_dir,
     )
     logger.info("Management public key: {}...", management_public_key[:40])
 
@@ -443,6 +459,7 @@ def create_pool_hosts(
                 database_url=database_url,
                 region=region,
                 plan=plan,
+                template_dir=template_dir,
             )
         except (subprocess.SubprocessError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed with error: {}", i, exc)
