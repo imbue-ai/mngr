@@ -363,8 +363,14 @@ function wireContentViewEvents(bundle, contentView) {
     }
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate', (_e, url) => {
+    console.log('[nav] did-navigate:', url);
+    onContentNavigate(url);
+  });
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('console-message', (_e, _level, message) => {
+    if (message.startsWith('[creating]')) console.log(message);
+  });
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
   // path that can drive the content view to a /forwarding/X/ URL (landing-page
