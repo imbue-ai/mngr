@@ -181,8 +181,11 @@ def setup_bootstrap_command_context(
     with three exceptions:
 
     1. The plugin-defined sections above are not parsed -- the returned
-       ``MngrContext.config`` has empty ``providers``, ``agent_types``, and
-       ``plugins`` and callers must not rely on those fields.
+       ``MngrContext.config`` has empty ``providers`` and ``agent_types``,
+       and ``plugins`` is empty except for entries injected by CLI
+       ``--plugin``/``--enable-plugin``/``--disable-plugin`` flags via
+       ``_apply_plugin_overrides``. Callers must not rely on these fields
+       reflecting the contents of any config file.
     2. Top-level fields are parsed in non-strict mode (unknown fields warn
        instead of raising), to match ``load_bootstrap_context``. There is
        therefore no ``strict`` parameter on this function.
