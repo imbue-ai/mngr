@@ -29,6 +29,7 @@ from uuid import uuid4
 
 import click
 import psycopg2
+import psycopg2.extras
 from loguru import logger
 
 _DEFAULT_REGION: Final[str] = "ewr"
@@ -223,6 +224,7 @@ def _insert_pool_host_row(
     version: str,
 ) -> UUID:
     """Insert a row into the pool_hosts table and return the row ID (UUID)."""
+    psycopg2.extras.register_uuid()
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
     try:
