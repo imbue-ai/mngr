@@ -1255,6 +1255,47 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
+
+      // Consume the one-time login code via net.request BEFORE checking
+      // chrome state. This hits /authenticate which sets the minds_session
+      // cookie in the default session (used by net.request, chromeView, and
+      // SSE). We follow the redirect so Electron processes the Set-Cookie
+      // header, then copy the cookie to the content partition.
+      await new Promise((resolve) => {
+        const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
+        console.log('[startup] Consuming one-time code via', authenticateUrl);
+        const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
+        req.on('response', async (resp) => {
+          console.log('[startup] /authenticate response status:', resp.statusCode);
+          resp.on('data', () => {});
+          resp.on('end', async () => {
+            try {
+              const defaultCookies = await session.defaultSession.cookies.get({ name: 'minds_session' });
+              console.log('[startup] Default session cookies after /authenticate:', defaultCookies.length);
+              const contentSession = session.fromPartition(CONTENT_PARTITION);
+              for (const c of defaultCookies) {
+                const domain = (c.domain || 'localhost').replace(/^\./, '');
+                await contentSession.cookies.set({
+                  url: `http://${domain}`,
+                  name: c.name, value: c.value,
+                  httpOnly: c.httpOnly, path: c.path || '/',
+                  sameSite: c.sameSite || 'lax',
+                });
+              }
+              console.log('[startup] Cookie synced to content partition');
+            } catch (err) {
+              console.warn('[startup] Failed to sync cookie to content partition:', err);
+            }
+            resolve();
+          });
+        });
+        req.on('error', (err) => {
+          console.warn('[startup] /authenticate request failed:', err);
+          resolve();
+        });
+        req.end();
+      });
+
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
 
@@ -1280,20 +1321,14 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // Consume the one-time code to establish the local session cookie.
-        // Without this cookie, all backend endpoints (including /welcome and
-        // /_chrome) render the login page instead of their real content.
+        // The one-time code was already consumed above. Both sessions now
+        // have the minds_session cookie. Show /welcome for first-time users
+        // or the home page if there was prior state.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          await initialBundle.contentView.webContents.loadURL(loginUrl);
-          // The login URL consumed the code and redirected to /. Now reload
-          // /_chrome so the sidebar picks up the authenticated state, and
-          // navigate to /welcome for first-time users (no saved state) or
-          // stay on / if there was prior state.
-          if (initialBundle.chromeView && !initialBundle.chromeView.webContents.isDestroyed()) {
-            initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-          }
           if (savedState.length === 0) {
             initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          } else {
+            initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
         }
       } else if (restorable.length === 0) {
