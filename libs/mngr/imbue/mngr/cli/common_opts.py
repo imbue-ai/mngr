@@ -178,7 +178,7 @@ def setup_bootstrap_command_context(
     spurious unknown-field and unknown-backend warnings.
 
     Behaves identically to ``setup_command_context`` in every other respect,
-    with two exceptions:
+    with three exceptions:
 
     1. The plugin-defined sections above are not parsed -- the returned
        ``MngrContext.config`` has empty ``providers``, ``agent_types``, and
@@ -186,6 +186,15 @@ def setup_bootstrap_command_context(
     2. Top-level fields are parsed in non-strict mode (unknown fields warn
        instead of raising), to match ``load_bootstrap_context``. There is
        therefore no ``strict`` parameter on this function.
+    3. ``-S`` / ``--setting`` overrides applied later in the shared finalize
+       step still go through full *strict* parsing of plugin-defined
+       sections (via ``apply_settings_to_config`` -> ``parse_config`` with
+       ``parse_plugin_sections=True, strict=True``). So ``mngr plugin add
+       foo -S providers.bar.baz=qux`` can still raise ``ConfigParseError``
+       if ``baz`` is unknown to the (potentially not-yet-installed)
+       ``bar`` provider's config class. This is a known limitation;
+       real-world bootstrap usage rarely combines ``-S`` overrides with
+       plugin-section keys.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
     mngr_ctx = load_bootstrap_context(
