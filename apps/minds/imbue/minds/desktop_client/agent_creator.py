@@ -1332,7 +1332,7 @@ class AgentCreator(MutableModel):
             try:
                 key_result = self.litellm_key_client.create_key(
                     access_token=access_token,
-                    key_alias="agent-{}".format(agent_id),
+                    key_alias=None,
                     max_budget=100.0,
                     budget_duration="1d",
                 )
