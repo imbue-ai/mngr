@@ -27,17 +27,19 @@ mngr create my-agent -t my-modal
 
 A typical Modal template includes `--dangerously-skip-permissions` since Modal sandboxes are disposable environments. This is safe for the sandbox itself, but be aware that any credentials you provide (e.g. `GH_TOKEN`) can be used by the agent without confirmation prompts.
 
-Example template:
+A typical Modal template builds the project's Dockerfile, mounts any volumes the agent needs, and points the agent at the path inside the sandbox where the source ends up:
 
 ```toml
 [create_templates.my-modal]
 provider = "modal"
+build_arg = ["file=path/to/Dockerfile", "context-dir=build/context/dir", "volume=my-cache:/cache"]
+target_path = "/code/my-project"
 agent_args = ["--dangerously-skip-permissions"]
 pass_env = ["GH_TOKEN"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/<org>/<repo>.git && gh auth setup-git'"]
 ```
 
-The `extra_window` creates a tmux window that trusts GitHub's host key, switches the remote to HTTPS (since the sandbox won't have your SSH keys), and configures git to authenticate via `gh` (which uses `GH_TOKEN`).
+`build_arg` entries are passed to the Modal sandbox builder as `key=value` pairs (see the [provider reference](../core_plugins/providers/modal.md#available-build-arguments) for the full list). `target_path` is where the agent runs commands -- if your Dockerfile copies the source to `/code/my-project`, set `target_path` to match. The `extra_window` creates a tmux window that trusts GitHub's host key, switches the remote to HTTPS (since the sandbox won't have your SSH keys), and configures git to authenticate via `gh` (which uses `GH_TOKEN`).
 
 See [Create Templates](../customization.md#create-templates) for the full set of template options.
 
@@ -49,7 +51,15 @@ Modal sandboxes have a default timeout of 15 minutes (900 seconds), after which 
 mngr create my-agent --provider modal -b timeout=3600
 ```
 
-The maximum is 86400 (24 hours).
+The maximum is 86400 (24 hours). To raise the default for every sandbox, set `default_sandbox_timeout` in your provider config:
+
+```toml
+[providers.modal]
+default_sandbox_timeout = 7200  # 2 hours
+default_cpu = 4
+default_memory = 8
+default_idle_timeout = 600
+```
 
 ## Getting changes back
 
