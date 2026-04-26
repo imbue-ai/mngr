@@ -34,7 +34,7 @@ from loguru import logger
 _DEFAULT_REGION: Final[str] = "ewr"
 _DEFAULT_PLAN: Final[str] = "vc2-2c-4gb"
 _CONTAINER_SSH_PORT: Final[int] = 2222
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 600
+_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 
 # Placeholder ANTHROPIC_API_KEY injected into pool hosts at creation time so
