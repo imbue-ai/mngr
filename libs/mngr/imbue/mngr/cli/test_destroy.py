@@ -719,10 +719,11 @@ def test_destroy_transfer_none_keeps_shared_worktree(
             catch_exceptions=False,
         )
         assert rider_destroy.exit_code == 0, f"Rider destroy failed: {rider_destroy.output}"
-        assert "Removed worktree" not in rider_destroy.output, (
-            f"Destroy of --transfer=none agent must not remove the shared worktree.\n{rider_destroy.output}"
-        )
 
+        wait_for(
+            lambda: not tmux_session_exists(rider_session),
+            error_message=f"Expected rider tmux session {rider_session} to be destroyed",
+        )
         assert worktree_path.is_dir(), (
             "shared worktree must survive destroying the --transfer=none agent that reused it"
         )
@@ -779,8 +780,10 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
             catch_exceptions=False,
         )
         assert destroy_result.exit_code == 0, f"Destroy failed: {destroy_result.output}"
-        assert "Removed worktree" not in destroy_result.output, (
-            f"Standalone --transfer=none destroy must not remove the user-owned worktree.\n{destroy_result.output}"
+
+        wait_for(
+            lambda: not tmux_session_exists(session_name),
+            error_message=f"Expected tmux session {session_name} to be destroyed",
         )
         assert user_worktree.is_dir(), "user-owned worktree must survive --transfer=none destroy"
 

@@ -52,16 +52,6 @@ def find_source_repo_of_worktree(worktree_path: Path) -> Path | None:
     return parse_worktree_git_file(content)
 
 
-def remove_worktree(worktree_path: Path, source_repo_path: Path, cg: ConcurrencyGroup) -> None:
-    """Remove a git worktree, running git from the source repository.
-
-    Raises ProcessError if the removal fails.
-    """
-    cg.run_process_to_completion(
-        ["git", "-C", str(source_repo_path), "worktree", "remove", "--force", str(worktree_path)],
-    )
-
-
 def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
     """Get the current git branch name for the repository at the given path.
 
