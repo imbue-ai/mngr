@@ -92,6 +92,51 @@ user-computer: User's Computer {
   }
 }
 
+# -- Imbue Services (declared before Compute Provider so it appears to the left) --
+
+imbue-services: Imbue Services {
+  class: grouping
+  style: {
+    stroke: "#db2777"
+  }
+
+  connector: Remote Connector Service {
+    style: {
+      fill: "#fce7f3"
+      stroke: "#ec4899"
+      stroke-width: 2
+      border-radius: 6
+      font-size: 14
+      bold: true
+    }
+  }
+
+  supertokens: SuperTokens {
+    style: {
+      fill: "#fee2e2"
+      stroke: "#ef4444"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  litellm: LiteLLM {
+    style: {
+      fill: "#ffedd5"
+      stroke: "#f97316"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  connector -> supertokens: auth {
+    style.stroke: "#ef4444"
+  }
+  connector -> litellm: virtual keys {
+    style.stroke: "#f97316"
+  }
+}
+
 # -- Compute Provider (dashed grouping containing both remote hosts) --
 
 compute: Compute Provider {
@@ -196,51 +241,6 @@ compute: Compute Provider {
         }
       }
     }
-  }
-}
-
-# -- Imbue Services --
-
-imbue-services: Imbue Services {
-  class: grouping
-  style: {
-    stroke: "#db2777"
-  }
-
-  connector: Remote Connector Service {
-    style: {
-      fill: "#fce7f3"
-      stroke: "#ec4899"
-      stroke-width: 2
-      border-radius: 6
-      font-size: 14
-      bold: true
-    }
-  }
-
-  supertokens: SuperTokens {
-    style: {
-      fill: "#fee2e2"
-      stroke: "#ef4444"
-      border-radius: 4
-      font-size: 12
-    }
-  }
-
-  litellm: LiteLLM {
-    style: {
-      fill: "#ffedd5"
-      stroke: "#f97316"
-      border-radius: 4
-      font-size: 12
-    }
-  }
-
-  connector -> supertokens: auth {
-    style.stroke: "#ef4444"
-  }
-  connector -> litellm: virtual keys {
-    style.stroke: "#f97316"
   }
 }
 
