@@ -101,9 +101,18 @@ def _auth_error_response(exc: AuthBackendError | httpx.HTTPError) -> Response:
 
 
 def _handle_auth_page(request: Request, message: str | None = None) -> HTMLResponse:
-    """Render the sign-up or sign-in page."""
-    session_store = _get_session_store(request)
-    default_to_signup = not session_store.has_signed_in_before()
+    """Render the sign-up or sign-in page.
+
+    /auth/signup always defaults to sign-up mode. /auth/login defaults
+    to sign-in mode (unless the user has never signed in before, in
+    which case it shows sign-up as a convenience).
+    """
+    is_signup_route = request.url.path.rstrip("/").endswith("/signup")
+    if is_signup_route:
+        default_to_signup = True
+    else:
+        session_store = _get_session_store(request)
+        default_to_signup = not session_store.has_signed_in_before()
     return HTMLResponse(
         render_auth_page(
             default_to_signup=default_to_signup,
@@ -477,6 +486,7 @@ def create_supertokens_router(
     router = APIRouter(prefix="/auth", tags=["auth"])
 
     router.get("/login")(_handle_auth_page)
+    router.get("/signup")(_handle_auth_page)
     router.post("/api/signup")(_handle_signup_api)
     router.post("/api/signin")(_handle_signin_api)
     router.post("/api/signout")(_handle_signout_api)
