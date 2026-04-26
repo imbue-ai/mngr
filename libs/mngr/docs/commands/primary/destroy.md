@@ -51,7 +51,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | `-f`, `--force` | boolean | Skip confirmation prompts and force destroy running agents | `False` |
 | `--gc`, `--no-gc` | boolean | Run garbage collection after destroying agents to clean up orphaned resources (default: enabled) | `True` |
 | `-b`, `--remove-created-branch` | boolean | Delete the git branch that mngr created for the agent's work directory | `False` |
-| `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow GC to remove the git worktree directory (default: enabled). Only worktrees that mngr created and that no remaining agent is still using are removed; user-owned or shared worktrees are preserved. | `True` |
+| `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow GC to remove the git worktree directory (default: enabled) | `True` |
 
 ## Common
 

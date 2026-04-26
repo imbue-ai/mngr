@@ -167,9 +167,7 @@ class DestroyCliOptions(CommonCliOptions):
 @optgroup.option(
     "--allow-worktree-removal/--no-allow-worktree-removal",
     default=True,
-    help="Allow GC to remove the git worktree directory (default: enabled). "
-    "Only worktrees that mngr created and that no remaining agent is still using "
-    "are removed; user-owned or shared worktrees are preserved.",
+    help="Allow GC to remove the git worktree directory (default: enabled)",
 )
 @add_common_options
 @click.pass_context
