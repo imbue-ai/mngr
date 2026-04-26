@@ -1,0 +1,337 @@
+direction: right
+
+classes: {
+  container: {
+    style: {
+      border-radius: 8
+      stroke-dash: 3
+    }
+  }
+  process: {
+    shape: rectangle
+    style: {
+      border-radius: 4
+    }
+  }
+  service: {
+    shape: rectangle
+    style: {
+      border-radius: 4
+    }
+  }
+}
+
+# -- User's Computer --
+
+user-computer: User's Computer {
+  style: {
+    fill: "#f0f4ff"
+    stroke: "#4a6fa5"
+    stroke-width: 2
+    border-radius: 12
+    font-size: 18
+    bold: true
+  }
+
+  minds-app: Minds App {
+    style: {
+      fill: "#e8f0fe"
+      stroke: "#3b82f6"
+      stroke-width: 2
+      border-radius: 10
+      font-size: 16
+      bold: true
+    }
+
+    electron: Electron Browser UI {
+      style: {
+        fill: "#dbeafe"
+        stroke: "#2563eb"
+        border-radius: 6
+        font-size: 14
+      }
+    }
+
+    desktop-server: Python Desktop Server {
+      style: {
+        fill: "#e0e7ff"
+        stroke: "#4f46e5"
+        stroke-width: 2
+        border-radius: 8
+        font-size: 14
+        bold: true
+      }
+
+      observe: mngr observe {
+        style: {
+          fill: "#fef3c7"
+          stroke: "#d97706"
+          border-radius: 4
+          font-size: 12
+        }
+      }
+
+      events-1: "mngr events (host 1)" {
+        style: {
+          fill: "#d1fae5"
+          stroke: "#059669"
+          border-radius: 4
+          font-size: 12
+        }
+      }
+
+      events-2: "mngr events (host 2)" {
+        style: {
+          fill: "#d1fae5"
+          stroke: "#059669"
+          border-radius: 4
+          font-size: 12
+        }
+      }
+    }
+
+    electron -> desktop-server: {
+      style.stroke: "#6366f1"
+    }
+  }
+}
+
+# -- Remote Hosts --
+
+host-1: Remote Host 1 {
+  style: {
+    fill: "#fefce8"
+    stroke: "#ca8a04"
+    stroke-width: 2
+    border-radius: 12
+    font-size: 16
+    bold: true
+  }
+
+  vps-1: VPS {
+    style: {
+      fill: "#fef9c3"
+      stroke: "#eab308"
+      border-radius: 8
+      font-size: 14
+    }
+
+    docker-1: Docker Container {
+      class: container
+      style: {
+        fill: "#ede9fe"
+        stroke: "#7c3aed"
+        border-radius: 6
+        font-size: 13
+      }
+
+      agent-1: Agent (Claude Code) {
+        style: {
+          fill: "#c4b5fd"
+          stroke: "#6d28d9"
+          border-radius: 4
+          font-size: 12
+          bold: true
+        }
+      }
+    }
+  }
+}
+
+host-2: Remote Host 2 {
+  style: {
+    fill: "#fefce8"
+    stroke: "#ca8a04"
+    stroke-width: 2
+    border-radius: 12
+    font-size: 16
+    bold: true
+  }
+
+  vps-2: VPS {
+    style: {
+      fill: "#fef9c3"
+      stroke: "#eab308"
+      border-radius: 8
+      font-size: 14
+    }
+
+    docker-2: Docker Container {
+      class: container
+      style: {
+        fill: "#ede9fe"
+        stroke: "#7c3aed"
+        border-radius: 6
+        font-size: 13
+      }
+
+      agent-2: Agent (Claude Code) {
+        style: {
+          fill: "#c4b5fd"
+          stroke: "#6d28d9"
+          border-radius: 4
+          font-size: 12
+          bold: true
+        }
+      }
+    }
+  }
+}
+
+# -- Remote Services --
+
+remote-services: Remote Services {
+  style: {
+    fill: "#fdf2f8"
+    stroke: "#db2777"
+    stroke-width: 2
+    border-radius: 12
+    font-size: 16
+    bold: true
+  }
+
+  connector: Remote Connector Service {
+    style: {
+      fill: "#fce7f3"
+      stroke: "#ec4899"
+      stroke-width: 2
+      border-radius: 6
+      font-size: 14
+      bold: true
+    }
+  }
+
+  supertokens: SuperTokens {
+    style: {
+      fill: "#fee2e2"
+      stroke: "#ef4444"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  litellm: LiteLLM {
+    style: {
+      fill: "#ffedd5"
+      stroke: "#f97316"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  compute: Compute Provider {
+    style: {
+      fill: "#e0f2fe"
+      stroke: "#0284c7"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  connector -> supertokens: auth {
+    style.stroke: "#ef4444"
+  }
+  connector -> litellm: virtual keys {
+    style.stroke: "#f97316"
+  }
+  connector -> compute: provisions VPSs {
+    style.stroke: "#0284c7"
+  }
+}
+
+# -- AI Providers --
+
+ai-providers: AI Providers {
+  style: {
+    fill: "#f0fdf4"
+    stroke: "#16a34a"
+    stroke-width: 2
+    border-radius: 12
+    font-size: 16
+    bold: true
+  }
+
+  anthropic: Anthropic {
+    style: {
+      fill: "#dcfce7"
+      stroke: "#22c55e"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+
+  openai: OpenAI {
+    style: {
+      fill: "#dcfce7"
+      stroke: "#22c55e"
+      border-radius: 4
+      font-size: 12
+    }
+  }
+}
+
+# -- Connections --
+
+# Desktop server to remote connector
+user-computer.minds-app.desktop-server -> remote-services.connector: API calls {
+  style: {
+    stroke: "#db2777"
+    stroke-width: 2
+  }
+}
+
+# Observe watches which hosts are online
+user-computer.minds-app.desktop-server.observe -> host-1: monitors {
+  style: {
+    stroke: "#d97706"
+    stroke-dash: 5
+  }
+}
+user-computer.minds-app.desktop-server.observe -> host-2: monitors {
+  style: {
+    stroke: "#d97706"
+    stroke-dash: 5
+  }
+}
+
+# Events processes connected to agents
+user-computer.minds-app.desktop-server.events-1 -> host-1.vps-1.docker-1.agent-1: streams events {
+  style: {
+    stroke: "#059669"
+    stroke-width: 2
+  }
+}
+user-computer.minds-app.desktop-server.events-2 -> host-2.vps-2.docker-2.agent-2: streams events {
+  style: {
+    stroke: "#059669"
+    stroke-width: 2
+  }
+}
+
+# Agents talk to LiteLLM (which acts as AI gateway)
+host-1.vps-1.docker-1.agent-1 -> remote-services.litellm: inference requests {
+  style: {
+    stroke: "#f97316"
+    stroke-width: 2
+  }
+}
+host-2.vps-2.docker-2.agent-2 -> remote-services.litellm: inference requests {
+  style: {
+    stroke: "#f97316"
+    stroke-width: 2
+  }
+}
+
+# LiteLLM proxies to AI providers
+remote-services.litellm -> ai-providers.anthropic: proxied requests {
+  style: {
+    stroke: "#22c55e"
+    stroke-width: 2
+  }
+}
+remote-services.litellm -> ai-providers.openai: proxied requests {
+  style: {
+    stroke: "#22c55e"
+    stroke-width: 2
+  }
+}
