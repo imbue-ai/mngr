@@ -107,31 +107,11 @@ User-supplied bind mounts (`-s -v=...`) are independent of the host volume. They
 
 ## Getting changes back
 
-Three options, roughly in order of convenience for the local-Docker case.
-
-### Option A: Read directly from the host volume
-
-When `is_host_volume_created = true` (the default), the agent's `host_dir` (and anything mngr puts under it, including worktree-mode work directories at `host_dir/worktrees/...`) lives on the shared Docker named volume. You can read it directly from the daemon host without any SSH:
-
-```bash
-# On Linux, the volume is mounted at a real path on disk:
-sudo ls /var/lib/docker/volumes/<prefix>docker-state-<user_id>/_data/volumes/
-
-# Anywhere (including Docker Desktop on macOS), use the state container:
-docker exec <prefix>docker-state-<user_id> ls /mngr-state/volumes/
-
-# Or copy out via any throwaway container that mounts the volume:
-docker run --rm -v <prefix>docker-state-<user_id>:/data alpine \
-    tar -C /data/volumes/vol-<host_hex> -cf - . | tar -C ./local-out -xf -
-```
-
-This bypasses SSH entirely and is the fastest option when the daemon is local. It only sees files mngr placed under `host_dir` -- if the agent's work dir is somewhere else (e.g. you used `target_path = /code/...` with a custom Dockerfile), use Option B or C instead.
-
-### Option B: Give the agent git credentials
+### Option A: Give the agent git credentials
 
 If the agent has `GH_TOKEN` (via `pass_env` in a template or `--pass-env` on the CLI), it can `git push` directly.
 
-### Option C: Use `mngr pull`
+### Option B: Use `mngr pull`
 
 `mngr pull` transfers changes from the agent to your local machine without needing git credentials on the agent. It supports two sync modes:
 
@@ -168,6 +148,36 @@ mngr push my-agent:config ./config
 ```
 
 See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
+
+### Option C: Fetch the branch directly from the host volume
+
+When `is_host_volume_created = true` (the default) and the agent's work directory lives under `host_dir` (the default for worktree/git-mirror transfer modes -- e.g. `/mngr/worktrees/<name>-<uuid>/`), the agent's git repo sits on the shared Docker named volume. You can git-fetch from it without involving SSH or `mngr pull`.
+
+On **Linux**, the volume is a real path on the daemon host, so you can fetch from it directly:
+
+```bash
+# Find the agent's work dir on the volume (one entry per agent):
+sudo ls /var/lib/docker/volumes/<prefix>docker-state-<user_id>/_data/volumes/vol-<host_hex>/worktrees/
+
+# Add it as a remote and fetch the agent's branch into your local checkout:
+git remote add my-agent /var/lib/docker/volumes/<prefix>docker-state-<user_id>/_data/volumes/vol-<host_hex>/worktrees/<name>-<uuid>
+git fetch my-agent
+git merge my-agent/<branch-name>     # or: git checkout my-agent/<branch-name>
+```
+
+On **macOS Docker Desktop or remote daemons**, the volume isn't mounted on your filesystem. Copy the agent's `.git` (or the whole work dir) out via the state container, then fetch from the copy:
+
+```bash
+# Copy the agent's work dir out of the volume:
+docker cp <prefix>docker-state-<user_id>:/mngr-state/volumes/vol-<host_hex>/worktrees/<name>-<uuid> /tmp/my-agent
+
+# Fetch the branch from the copy:
+git remote add my-agent /tmp/my-agent
+git fetch my-agent
+git merge my-agent/<branch-name>
+```
+
+This bypasses SSH entirely and is the fastest option when the agent has already committed. It only works when the work dir is under `host_dir` -- if you set `target_path` to a path outside `host_dir` (e.g. `/code/my-project`), the work dir is on the container's overlay filesystem instead, and you need Option A or B.
 
 ## Lifecycle and snapshots
 
