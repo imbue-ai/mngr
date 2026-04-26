@@ -9,10 +9,12 @@ For each host, this script:
   5. Inserts a row into the pool_hosts database table
 
 Usage:
+    source .minds/production/.env
+    export DATABASE_URL='postgresql://...'
     uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
         --count 3 --version v0.1.0 \
-        --management-public-key-file ./management_key/id_ed25519.pub \
-        --database-url $DATABASE_URL
+        --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
+        --template-dir ~/project/forever-claude-template
 """
 
 import json
