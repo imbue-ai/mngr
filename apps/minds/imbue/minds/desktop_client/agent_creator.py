@@ -106,13 +106,13 @@ def _build_inject_anthropic_command(
     litellm_base_url: str,
     env_path: str,
 ) -> str:
-    """Build a shell command that replaces the placeholder ANTHROPIC_API_KEY and appends ANTHROPIC_BASE_URL."""
+    """Build a shell command that sets ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL in the agent env file."""
     return (
-        "sed -i 's|{placeholder}|{real_key}|g' {path}"
+        "sed -i '/^ANTHROPIC_API_KEY=/d' {path}"
+        " && echo 'ANTHROPIC_API_KEY={real_key}' >> {path}"
         " && sed -i '/^ANTHROPIC_BASE_URL=/d' {path}"
         " && echo 'ANTHROPIC_BASE_URL={base_url}' >> {path}"
     ).format(
-        placeholder=PLACEHOLDER_ANTHROPIC_API_KEY,
         real_key=litellm_key,
         path=env_path,
         base_url=litellm_base_url,
@@ -124,12 +124,25 @@ def _build_patch_claude_config_command(
     litellm_key: str,
     agent_id: AgentId,
 ) -> str:
-    """Build a shell command that replaces the placeholder key in the agent's claude config."""
+    """Build a shell command that patches the agent's claude config to approve the LiteLLM key."""
     claude_config_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
-    return "sed -i 's|{placeholder}|{real_key}|g' {path}".format(
-        placeholder=PLACEHOLDER_ANTHROPIC_API_KEY,
-        real_key=litellm_key,
+    key_suffix = litellm_key[-20:]
+    return (
+        'python3 -c "'
+        "import json; "
+        "p='{path}'; "
+        "d=json.load(open(p)); "
+        "d['primaryApiKey']='{key}'; "
+        "a=d.setdefault('customApiKeyResponses',{{}}).setdefault('approved',[]); "
+        "s='{suffix}'; "
+        "a.append(s) if s not in a else None; "
+        "d['customApiKeyResponses']['rejected']=[]; "
+        "json.dump(d,open(p,'w'),indent=2)"
+        '"'
+    ).format(
         path=claude_config_path,
+        key=litellm_key,
+        suffix=key_suffix,
     )
 
 

@@ -1085,25 +1085,24 @@ def test_agent_creator_litellm_key_client_defaults_to_none(
     assert creator.litellm_key_client is None
 
 
-def test_build_inject_anthropic_command_replaces_placeholder_and_appends_base_url() -> None:
+def test_build_inject_anthropic_command_sets_key_and_base_url() -> None:
     cmd = _build_inject_anthropic_command(
         litellm_key="sk-litellm-real-key-abc123",
         litellm_base_url="https://proxy.modal.run/anthropic",
         env_path="/mngr/agents/test-id/env",
     )
-    assert PLACEHOLDER_ANTHROPIC_API_KEY in cmd
-    assert "sk-litellm-real-key-abc123" in cmd
+    assert "ANTHROPIC_API_KEY=sk-litellm-real-key-abc123" in cmd
     assert "ANTHROPIC_BASE_URL=https://proxy.modal.run/anthropic" in cmd
     assert "/mngr/agents/test-id/env" in cmd
 
 
-def test_build_inject_anthropic_command_uses_sed_replacement() -> None:
+def test_build_inject_anthropic_command_removes_old_values_first() -> None:
     cmd = _build_inject_anthropic_command(
         litellm_key="sk-test",
         litellm_base_url="https://example.com/anthropic",
         env_path="/tmp/env",
     )
-    assert cmd.startswith("sed -i")
+    assert "sed -i '/^ANTHROPIC_API_KEY=/d'" in cmd
     assert "sed -i '/^ANTHROPIC_BASE_URL=/d'" in cmd
 
 
@@ -1115,13 +1114,15 @@ def test_build_patch_claude_config_command_targets_correct_path() -> None:
     )
     expected_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
     assert expected_path in cmd
-    assert PLACEHOLDER_ANTHROPIC_API_KEY in cmd
     assert "sk-litellm-real-key-xyz" in cmd
 
 
-def test_build_patch_claude_config_command_uses_sed() -> None:
+def test_build_patch_claude_config_command_uses_python_json() -> None:
     cmd = _build_patch_claude_config_command(
-        litellm_key="sk-test",
+        litellm_key="sk-test-key-0123456789",
         agent_id=AgentId(),
     )
-    assert cmd.startswith("sed -i")
+    assert "python3" in cmd
+    assert "primaryApiKey" in cmd
+    assert "customApiKeyResponses" in cmd
+    assert "sk-test-key-0123456789"[-20:] in cmd
