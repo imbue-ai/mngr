@@ -29,8 +29,10 @@
       if (data._type === 'done') {
         source.close();
         flushLogs();
+        console.log('[creating] SSE done event:', JSON.stringify(data));
         if (data.status === 'DONE' && data.redirect_url) {
           statusTextEl.textContent = 'Done. Redirecting...';
+          console.log('[creating] Redirecting to:', data.redirect_url);
           window.location.href = data.redirect_url;
         } else if (data.status === 'FAILED') {
           statusTextEl.textContent = 'Failed: ' + (data.error || 'unknown error');
@@ -48,7 +50,8 @@
     }
   };
 
-  source.onerror = function () {
+  source.onerror = function (err) {
+    console.log('[creating] SSE error, readyState:', source.readyState, err);
     source.close();
   };
 })();
