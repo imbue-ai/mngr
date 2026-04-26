@@ -1455,8 +1455,7 @@ class AgentCreator(MutableModel):
         log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
 
-        port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-        redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+        redirect_url = "/goto/{}/".format(agent_id)
 
         # Set DONE before invoking on_created so the UI can redirect as soon
         # as the agent is actually usable. ``on_created`` is expected to
