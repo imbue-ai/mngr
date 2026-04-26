@@ -82,6 +82,27 @@ user-computer: User's Computer {
     }
   }
 
+  lima-vm: Lima VM 1 {
+    style: {
+      fill: "#ede9fe"
+      stroke: "#7c3aed"
+      stroke-width: 2
+      border-radius: 8
+      font-size: 14
+      bold: true
+    }
+
+    agent-local: Agent (Claude Code) {
+      style: {
+        fill: "#c4b5fd"
+        stroke: "#6d28d9"
+        border-radius: 4
+        font-size: 12
+        bold: true
+      }
+    }
+  }
+
   latchkey-local: latchkey / detent {
     style: {
       fill: "#f3e8ff"
@@ -308,8 +329,8 @@ user-computer.minds-app.desktop-server.events-2 -> compute.vps-2.docker-2.agent-
   }
 }
 
-# Desktop server to local latchkey
-user-computer.minds-app.desktop-server -> user-computer.latchkey-local {
+# Local agent to local latchkey
+user-computer.lima-vm.agent-local -> user-computer.latchkey-local {
   style: {
     stroke: "#9333ea"
     stroke-width: 2
