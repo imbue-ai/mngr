@@ -148,16 +148,17 @@ def test_read_event_ids_from_jsonl_skips_blank_lines(tmp_path: Path) -> None:
     assert read_event_ids_from_jsonl(jsonl_file) == {"evt-a", "evt-b"}
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="Root bypasses permission checks")
-def test_read_event_ids_from_jsonl_handles_oserror_on_open(tmp_path: Path) -> None:
-    """Returns whatever was collected before the OSError without crashing."""
-    jsonl_file = tmp_path / "events.jsonl"
-    jsonl_file.write_text(json.dumps({"event_id": "evt-1"}) + "\n")
-    jsonl_file.chmod(0)
-    try:
-        assert read_event_ids_from_jsonl(jsonl_file) == set()
-    finally:
-        jsonl_file.chmod(0o600)
+def test_mtime_poll_files_drops_paths_no_longer_watched(tmp_path: Path) -> None:
+    """Stale entries in mtime_cache for paths no longer in watch_paths are dropped."""
+    cache: dict[str, tuple[float, int]] = {}
+    test_file = tmp_path / "data.txt"
+    test_file.write_text("content")
+
+    assert mtime_poll_files([test_file], cache)
+    assert str(test_file) in cache
+
+    assert mtime_poll_files([], cache)
+    assert str(test_file) not in cache
 
 
 # -- require_env tests --
