@@ -51,7 +51,7 @@ Modal sandboxes have a default timeout of 15 minutes (900 seconds), after which 
 mngr create my-agent --provider modal -b timeout=3600
 ```
 
-The maximum is 86400 (24 hours). To raise the default for every sandbox, set `default_sandbox_timeout` in your provider config:
+The maximum is 86400 (24 hours). To set the default for every sandbox, use `default_sandbox_timeout` in your provider config:
 
 ```toml
 [providers.modal]
