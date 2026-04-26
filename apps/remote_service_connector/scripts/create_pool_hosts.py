@@ -273,8 +273,6 @@ def _create_single_pool_host(
             address,
             "--new-host",
             "--no-connect",
-            "--transfer",
-            "rsync",
             "--template",
             "main",
             "--template",
