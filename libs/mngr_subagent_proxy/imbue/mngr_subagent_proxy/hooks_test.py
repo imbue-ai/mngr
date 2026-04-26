@@ -70,8 +70,12 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     updated = hook_out["updatedInput"]
     assert updated["subagent_type"] == "mngr-proxy"
     assert updated["run_in_background"] is False
-    assert updated["prompt"].startswith("MNGR_PROXY_AGENT=parent-agent--subagent-")
-    assert "MNGR_PROXY_SCRIPT=" in updated["prompt"]
+    # Prompt embeds the literal absolute wait-script path (no shell variables
+    # for Haiku to interpret) and the target agent name.
+    prompt_text = updated["prompt"]
+    assert "parent-agent--subagent-" in prompt_text
+    assert f"bash {state_dir}/proxy_commands/wait-toolu_abc12345678.sh" in prompt_text
+    assert "DONE" in prompt_text
 
     tid = "toolu_abc12345678"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"

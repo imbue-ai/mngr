@@ -284,10 +284,15 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         return
 
     new_prompt = (
-        f"MNGR_PROXY_AGENT={target_name}\n"
-        f"MNGR_PROXY_SCRIPT={script_file}\n"
-        "\n"
-        "Run Bash($MNGR_PROXY_SCRIPT). See mngr-proxy agent for details."
+        f"You are an mngr-proxy dispatcher for target agent {target_name!r}. "
+        f"Run this exact Bash call: "
+        f'Bash(command="bash {script_file}", timeout=1800000). '
+        f"If its stdout contains 'NEED_PERMISSION: <name>', "
+        f"run Bash(command=\"fake_tool 'subagent <name> waiting; run in another terminal: mngr connect <name>'\", "
+        f"timeout=60000), then run the bash command above AGAIN with the same path. "
+        f"Repeat until stdout contains 'DONE'. Then reply with exactly the word 'done' "
+        f"and end your turn. Do NOT use shell variables, ask questions, or take any "
+        f"other action -- the path above is your only command."
     )
 
     response: dict[str, Any] = {
