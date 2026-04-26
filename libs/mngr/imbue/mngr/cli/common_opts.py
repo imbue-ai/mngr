@@ -302,13 +302,17 @@ def _finalize_command_setup(
     # Block plugins that were disabled via command defaults or create templates
     # (e.g. disable_plugin from [commands.create] in settings.toml). CLI
     # --disable-plugin flags are already blocked inside _load_context (via
-    # _apply_plugin_overrides) for both load paths. [plugins.<name>]
-    # enabled=false in config files is also already blocked: on the full path
-    # via _parse_plugins -> _apply_plugin_overrides, and on the bootstrap path
-    # via the lightweight read_disabled_plugins() pre-reader invoked at
-    # plugin-manager creation time (see create_plugin_manager in main.py).
-    # Command defaults are applied after the initial load and need a second
-    # blocking pass.
+    # _apply_plugin_overrides feeding block_disabled_plugins) for both load
+    # paths. [plugins.<name>] enabled=false in config files is also already
+    # blocked, but via different paths: on the full path, _parse_plugins
+    # preserves entries verbatim, _apply_plugin_overrides then filters them
+    # and emits a disabled-name set, and block_disabled_plugins (called at
+    # the end of _load_context) actually blocks them. On the bootstrap path,
+    # _parse_plugins is skipped entirely, so config-file-disabled plugins are
+    # detected via the lightweight read_disabled_plugins() pre-reader and
+    # blocked at plugin-manager creation time (see create_plugin_manager in
+    # main.py). Command defaults are applied after the initial load and need
+    # this second blocking pass.
     updated_disable_plugin = updated_params.get("disable_plugin", ())
     if updated_disable_plugin:
         block_disabled_plugins(pm, frozenset(updated_disable_plugin))
