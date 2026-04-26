@@ -1284,7 +1284,17 @@ async function startBackendWithRetry() {
         // Without this cookie, all backend endpoints (including /welcome and
         // /_chrome) render the login page instead of their real content.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(loginUrl);
+          await initialBundle.contentView.webContents.loadURL(loginUrl);
+          // The login URL consumed the code and redirected to /. Now reload
+          // /_chrome so the sidebar picks up the authenticated state, and
+          // navigate to /welcome for first-time users (no saved state) or
+          // stay on / if there was prior state.
+          if (initialBundle.chromeView && !initialBundle.chromeView.webContents.isDestroyed()) {
+            initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+          }
+          if (savedState.length === 0) {
+            initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          }
         }
       } else if (restorable.length === 0) {
         // Authenticated, but nothing to restore -- land on the home page.
