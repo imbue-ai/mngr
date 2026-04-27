@@ -49,7 +49,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -306,6 +308,27 @@ def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_
 
     events_path = get_discovery_events_path(temp_config)
     assert find_latest_full_snapshot_offset(events_path) == 0
+
+
+def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    # A valid full snapshot, then a corrupt line, then a valid agent event.
+    # The corrupt line is followed by more data, so a warning should be emitted.
+    valid_full = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    valid_agent = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    events_path.write_text(f"{valid_full}\nthis is not json {{{{\n{valid_agent}\n")
+
+    with capture_loguru(level="WARNING") as log_output:
+        offset = find_latest_full_snapshot_offset(events_path)
+
+    assert offset == 0
+    assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
 
 def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: MngrConfig) -> None:
@@ -675,10 +698,11 @@ def test_resolve_provider_names_with_no_snapshot_only_incremental(temp_config: M
 def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
 
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out.strip()
@@ -689,12 +713,13 @@ def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.Ca
 def test_discovery_stream_emit_line_deduplicates_by_event_id(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
 
     # Emit the same event twice
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
-    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     # Only one line should be emitted
@@ -705,9 +730,10 @@ def test_discovery_stream_emit_line_deduplicates_by_event_id(capsys: pytest.Capt
 def test_discovery_stream_emit_line_skips_empty_lines(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
 
-    _discovery_stream_emit_line("", emitted_ids, lock, None)
-    _discovery_stream_emit_line("   ", emitted_ids, lock, None)
+    _discovery_stream_emit_line("", warner, emitted_ids, lock, None)
+    _discovery_stream_emit_line("   ", warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -716,21 +742,38 @@ def test_discovery_stream_emit_line_skips_empty_lines(capsys: pytest.CaptureFixt
 def test_discovery_stream_emit_line_skips_invalid_json(capsys: pytest.CaptureFixture[str]) -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
 
-    _discovery_stream_emit_line("{invalid json}", emitted_ids, lock, None)
+    _discovery_stream_emit_line("{invalid json}", warner, emitted_ids, lock, None)
 
     captured = capsys.readouterr()
     assert captured.out == ""
 
 
+def test_discovery_stream_emit_line_warns_on_mid_stream_corruption() -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test stream")
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    valid_line = json.dumps(event.model_dump(mode="json"))
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Buffered: not yet flushed
+        _discovery_stream_emit_line("garbage{", warner, emitted_ids, lock, lambda _: None)
+        # Subsequent valid line proves the malformed line was not at EOF
+        _discovery_stream_emit_line(valid_line, warner, emitted_ids, lock, lambda _: None)
+    assert "Skipped corrupt JSONL line in test stream" in log_output.getvalue()
+
+
 def test_discovery_stream_emit_line_uses_callback_when_provided() -> None:
     emitted_ids: set[str] = set()
     lock = Lock()
+    warner = MalformedJsonLineWarner(source_description="test")
     event = make_agent_discovery_event(make_test_discovered_agent())
     line = json.dumps(event.model_dump(mode="json"))
     received_lines: list[str] = []
 
-    _discovery_stream_emit_line(line, emitted_ids, lock, received_lines.append)
+    _discovery_stream_emit_line(line, warner, emitted_ids, lock, received_lines.append)
 
     assert len(received_lines) == 1
     parsed = json.loads(received_lines[0])

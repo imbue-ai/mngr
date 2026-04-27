@@ -8,6 +8,7 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from threading import Lock
+from typing import Any
 from typing import Final
 
 from loguru import logger
@@ -39,6 +40,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/discovery")
 
@@ -411,19 +413,8 @@ DiscoveryEvent = (
 
 
 @pure
-def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
-    """Parse a single JSONL line into the appropriate discovery event type.
-
-    Returns None if the line cannot be parsed or is not a recognized discovery event.
-    """
-    stripped = line.strip()
-    if not stripped:
-        return None
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-
+def _discovery_event_from_data(data: dict[str, Any]) -> DiscoveryEvent | None:
+    """Build the appropriate DiscoveryEvent from already-parsed JSON data."""
     event_type = data.get("type")
     match event_type:
         case DiscoveryEventType.AGENT_DISCOVERED:
@@ -442,6 +433,26 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
             return None
 
 
+@pure
+def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
+    """Parse a single JSONL line into the appropriate discovery event type.
+
+    Returns None if the line cannot be parsed or is not a recognized discovery event.
+    Stateless and silent on malformed JSON; use MalformedJsonLineWarner alongside
+    _discovery_event_from_data when reading multiple lines so corruption is surfaced.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _discovery_event_from_data(data)
+
+
 def find_latest_full_snapshot_offset(events_path: Path) -> int:
     """Scan the events file to find the byte offset of the latest DISCOVERY_FULL event.
 
@@ -454,17 +465,17 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
     # Use f.tell() to track byte positions rather than len(line) which counts
     # characters and would be wrong for multi-byte UTF-8 content.
     last_full_offset = 0
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path, "rb") as f:
         for raw_line in f:
             line_start = f.tell() - len(raw_line)
-            stripped = raw_line.strip()
-            if stripped:
-                try:
-                    data = json.loads(stripped)
-                    if data.get("type") == DiscoveryEventType.DISCOVERY_FULL:
-                        last_full_offset = line_start
-                except json.JSONDecodeError as e:
-                    logger.trace("Skipped malformed JSONL line in discovery events: {}", e)
+            decoded = raw_line.decode("utf-8", errors="replace")
+            parsed = warner.parse(decoded)
+            if parsed is None:
+                continue
+            data, _ = parsed
+            if data.get("type") == DiscoveryEventType.DISCOVERY_FULL:
+                last_full_offset = line_start
 
     return last_full_offset
 
@@ -493,11 +504,16 @@ def resolve_provider_names_for_identifiers(
     name_by_agent_id: dict[str, str] = {}
     destroyed_agent_ids: set[str] = set()
 
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     try:
         with open(events_path) as f:
             f.seek(offset)
             for line in f:
-                event = parse_discovery_event_line(line)
+                parsed = warner.parse(line)
+                if parsed is None:
+                    continue
+                data, _ = parsed
+                event = _discovery_event_from_data(data)
                 if event is None:
                     continue
                 if isinstance(event, FullDiscoverySnapshotEvent):
@@ -579,19 +595,16 @@ _DISCOVERY_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 
 def _discovery_stream_emit_line(
     line: str,
+    warner: MalformedJsonLineWarner,
     emitted_event_ids: set[str],
     emit_lock: Lock,
     on_line: Callable[[str], None] | None,
 ) -> None:
     """Parse and emit a single JSONL line, deduplicating by event_id."""
-    stripped = line.strip()
-    if not stripped:
+    parsed = warner.parse(line)
+    if parsed is None:
         return
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        logger.trace("Skipped malformed JSONL line in discovery event stream")
-        return
+    data, stripped = parsed
     event_id = data.get("event_id")
     event_type = data.get("type", "unknown")
     with emit_lock:
@@ -617,6 +630,7 @@ def _discovery_stream_tail_events_file(
 ) -> None:
     """Poll the events file for new content written by other mngr processes."""
     current_offset = initial_offset
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     while not stop_event.is_set():
         try:
             if events_path.exists():
@@ -640,7 +654,7 @@ def _discovery_stream_tail_events_file(
                     for file_line in new_lines:
                         if stop_event.is_set():
                             break
-                        _discovery_stream_emit_line(file_line, emitted_event_ids, emit_lock, on_line)
+                        _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
         except OSError as e:
             logger.trace("OSError while tailing discovery events file: {}", e)
         stop_event.wait(timeout=1.0)
@@ -691,6 +705,7 @@ def run_discovery_stream(
     events_path = get_discovery_events_path(mngr_ctx.config)
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
+    phase_one_warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}' (initial)")
 
     # Phase 1: emit from the latest cached snapshot on disk (fast path)
     has_cached_snapshot = False
@@ -701,7 +716,7 @@ def run_discovery_stream(
             with open(events_path) as f:
                 f.seek(snapshot_offset)
                 for line in f:
-                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+                    _discovery_stream_emit_line(line, phase_one_warner, emitted_event_ids, emit_lock, on_line)
 
     # Record the current file position for tailing
     initial_offset = events_path.stat().st_size if events_path.exists() else 0
@@ -730,10 +745,13 @@ def run_discovery_stream(
         # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
+            post_sync_warner = MalformedJsonLineWarner(
+                source_description=f"discovery events file '{events_path}' (post-sync)"
+            )
             with open(events_path) as f:
                 f.seek(snapshot_offset)
                 for line in f:
-                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+                    _discovery_stream_emit_line(line, post_sync_warner, emitted_event_ids, emit_lock, on_line)
 
     # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:

@@ -42,6 +42,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.testing import capture_loguru
 
 
 @pytest.fixture
@@ -542,6 +543,49 @@ def test_read_all_historical_events_includes_rotated_files(tmp_path: Path) -> No
     events, _ = read_all_historical_events(target, sources, [], [])
 
     assert [e.event_id for e in events] == ["old1", "new1"]
+
+
+def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    (events_dir / "src").mkdir()
+    # Three lines: valid, malformed (mid-file), valid. The malformed line is followed
+    # by a valid line, proving it was not a partial write at EOF.
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
+        "this is not valid json {{{\n"
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
+    )
+    volume = LocalVolume(root_path=events_dir)
+    target = EventsTarget(volume=volume, display_name="test")
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
+
+    with capture_loguru(level="WARNING") as log_output:
+        events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["e1", "e2"]
+    output = log_output.getvalue()
+    assert "Skipped corrupt JSONL line" in output
+    assert "this is not valid json" in output
+
+
+def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    (events_dir / "src").mkdir()
+    # Last line is malformed and not newline-terminated -- treat as partial write at EOF.
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\nincomplete{'
+    )
+    volume = LocalVolume(root_path=events_dir)
+    target = EventsTarget(volume=volume, display_name="test")
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
+
+    with capture_loguru(level="WARNING") as log_output:
+        events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["e1"]
+    assert log_output.getvalue() == ""
 
 
 def test_read_all_historical_events_with_cel_filter(tmp_path: Path) -> None:

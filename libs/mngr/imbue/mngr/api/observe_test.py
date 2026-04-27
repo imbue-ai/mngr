@@ -36,6 +36,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostState
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -255,9 +256,32 @@ def test_load_base_state_from_history_handles_malformed_lines(temp_host_dir: Pat
         f.write("not valid json\n")
         f.write(event_json + "\n")
 
-    tracked = load_base_state_from_history(temp_host_dir)
+    with capture_loguru(level="WARNING") as log_output:
+        tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 1
     assert tracked[str(agent.id)].agent_state == "RUNNING"
+    # Mid-file corruption (followed by another line) should surface as a warning
+    assert "Skipped corrupt JSONL line" in log_output.getvalue()
+
+
+def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir: Path) -> None:
+    events_path = get_observe_events_path(temp_host_dir)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    agent = make_test_agent_details(state=AgentLifecycleState.RUNNING)
+    event = make_full_agent_state_event([agent])
+    event_json = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+
+    with open(events_path, "w") as f:
+        f.write(event_json + "\n")
+        # Last line: a partial write at EOF (no trailing newline, malformed JSON)
+        f.write("incomplete{")
+
+    with capture_loguru(level="WARNING") as log_output:
+        tracked = load_base_state_from_history(temp_host_dir)
+    assert len(tracked) == 1
+    assert tracked[str(agent.id)].agent_state == "RUNNING"
+    assert log_output.getvalue() == ""
 
 
 # === Lock Tests ===
