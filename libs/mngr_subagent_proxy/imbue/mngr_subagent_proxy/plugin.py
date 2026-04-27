@@ -242,16 +242,16 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     else:
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
 
-    # Also guard Stop hooks declared outside settings.local.json:
-    # - the project's settings.json (git-tracked but the wrap is env-
-    #   conditional, so adding it does not change runtime behavior for
-    #   the parent or for plain-claude users).
-    # - any plugin-installed hooks.json files under ~/.claude/plugins/.
-    #   These ride alongside Claude Code plugins like imbue-code-guardian
-    #   whose stop_hook_orchestrator.sh re-prompts the agent into
-    #   autofix/verify cycles -- exactly the behavior the proxy must
-    #   suppress on spawned subagents.
-    _guard_stop_hooks_in_file(host, work_dir / ".claude" / "settings.json")
+    # NOTE: project ``.claude/settings.json`` is git-tracked, so we
+    # deliberately do NOT mutate it -- a wrap there would dirty the
+    # working tree and (perversely) trigger user-installed
+    # "uncommitted-changes" Stop hooks like imbue-code-guardian's
+    # stop_hook_orchestrator.sh against the parent agent.
+    #
+    # Plugin-installed hooks.json files are the more impactful target.
+    # Claude Code reads from the per-agent plugin cache, not the user
+    # marketplace dir, so we walk both: the source-of-truth marketplace
+    # files plus every per-agent cache under the host's agents tree.
     for plugin_hooks in _discover_plugin_hooks_files():
         _guard_stop_hooks_in_file(host, plugin_hooks)
 
@@ -283,15 +283,32 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
 
 
 def _discover_plugin_hooks_files() -> list[Path]:
-    """Return every hooks.json under the user's Claude Code plugin install."""
-    plugins_root = get_user_claude_config_dir() / "plugins"
-    if not plugins_root.is_dir():
-        return []
-    try:
-        return sorted(plugins_root.rglob("hooks/hooks.json"))
-    except OSError as e:
-        logger.warning("Could not enumerate plugin hooks under {}: {}", plugins_root, e)
-        return []
+    """Return every plugin hooks.json that Claude Code might load.
+
+    Walks the user's marketplace install (source of truth) plus every
+    per-agent plugin cache under all known mngr host dirs. Claude Code
+    reads from the per-agent cache at session start, so the marketplace
+    file alone is not enough -- the wrap has to land in the cache too.
+    """
+    candidates: list[Path] = []
+    user_plugins = get_user_claude_config_dir() / "plugins"
+    if user_plugins.is_dir():
+        try:
+            candidates.extend(user_plugins.rglob("hooks/hooks.json"))
+        except OSError as e:
+            logger.warning("Could not enumerate user plugin hooks under {}: {}", user_plugins, e)
+
+    # Per-agent plugin caches live under <host_dir>/agents/<id>/plugin/claude/anthropic/plugins/.
+    # Default host dir is ~/.mngr; mngr can also use other dirs but
+    # for the local-host case this is the one that matters.
+    host_agents_root = Path.home() / ".mngr" / "agents"
+    if host_agents_root.is_dir():
+        try:
+            candidates.extend(host_agents_root.glob("*/plugin/claude/anthropic/plugins/**/hooks/hooks.json"))
+        except OSError as e:
+            logger.warning("Could not enumerate per-agent plugin hooks under {}: {}", host_agents_root, e)
+
+    return sorted(set(candidates))
 
 
 def _is_subagent_proxy_child(agent: AgentInterface) -> bool:
