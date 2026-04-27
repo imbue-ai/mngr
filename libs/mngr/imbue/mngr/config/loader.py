@@ -729,11 +729,15 @@ def parse_config(
     may reference plugins not yet installed).
 
     When parse_plugin_sections=False, the [agent_types], [providers], and [plugins]
-    sections are dropped from the parsed config. Use this when the caller does not
-    need plugin-defined config and the config may reference plugins not yet
-    installed (e.g. during ``mngr plugin add``). The sections are simply discarded
-    here -- callers that need the raw content (e.g. to detect disabled plugins)
-    must consult the lightweight pre-readers in ``pre_readers.py`` instead.
+    sections are dropped from the parsed config. Note this loses both the
+    validation (unknown-field/backend checks that would otherwise fire) AND the
+    actual parsed values -- ``config.providers`` / ``config.agent_types`` /
+    ``config.plugins`` will be empty dicts regardless of what is in the config
+    files, so any caller that reads from those fields will silently see nothing.
+    Use this only when the caller is known not to consume plugin-defined config
+    (e.g. ``mngr plugin add``, which only reads ``mngr_ctx.concurrency_group``).
+    Callers that need the raw content (e.g. to detect disabled plugins) must
+    consult the lightweight pre-readers in ``pre_readers.py`` instead.
     """
     # Build kwargs with None for unset scalar fields
     kwargs: dict[str, Any] = {}
@@ -757,8 +761,14 @@ def parse_config(
         )
         kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
     else:
-        # Drop plugin-defined sections without parsing/validating them. The caller
-        # is responsible for not relying on these fields.
+        # Drop plugin-defined sections entirely. Parsing these sections normally
+        # produces both validation (unknown-field/backend errors) AND the
+        # structured values that other code reads from config.providers /
+        # config.agent_types / config.plugins at runtime. The bootstrap path
+        # discards both -- the returned MngrContext will report empty dicts for
+        # these fields regardless of what the user wrote in settings.toml.
+        # Safe only when the caller is known not to read them (currently just
+        # `mngr plugin add`, which uses only mngr_ctx.concurrency_group).
         raw.pop("agent_types", None)
         raw.pop("providers", None)
         raw.pop("plugins", None)
