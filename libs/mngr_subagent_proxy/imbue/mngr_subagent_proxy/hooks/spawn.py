@@ -160,7 +160,14 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         'case "$output" in\n'
         "    END_TURN:*)\n"
         '        printf \'%s\' "${output#END_TURN:}" > "$RESULT_FILE"\n'
-        '        echo "DONE"\n'
+        # Print the subagent end-turn text as the wait-script's stdout so
+        # Haiku's Bash captures it; Haiku is instructed to echo this verbatim
+        # in its own final reply, which becomes the parent's tool_result. The
+        # END_OF_OUTPUT sentinel is the one stable signal Haiku uses to
+        # decide it's done -- the body content is opaque text from a real
+        # subagent and may contain anything (including 'DONE' literally).
+        "        printf '%s\\n' \"${output#END_TURN:}\"\n"
+        '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
         "        ;;\n"
         "    PERMISSION_REQUIRED:*)\n"
         '        echo "NEED_PERMISSION: $TARGET_NAME"\n'
@@ -288,12 +295,19 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         f"You are an mngr-proxy dispatcher for target agent {target_name!r}. "
         f"Run this exact Bash call: "
         f'Bash(command="bash {script_file}", timeout=1800000). '
-        f"If its stdout contains 'NEED_PERMISSION: <name>', "
+        f"\n\n"
+        f"Examine the Bash stdout:\n"
+        f"- If it contains a line 'NEED_PERMISSION: <name>': "
         f"run Bash(command=\"fake_tool 'subagent <name> waiting; run in another terminal: mngr connect <name>'\", "
-        f"timeout=60000), then run the bash command above AGAIN with the same path. "
-        f"Repeat until stdout contains 'DONE'. Then reply with exactly the word 'done' "
-        f"and end your turn. Do NOT use shell variables, ask questions, or take any "
-        f"other action -- the path above is your only command."
+        f"timeout=60000), then re-run the original bash command above with the same path. "
+        f"Repeat until you see the next case.\n"
+        f"- If it contains a line 'MNGR_PROXY_END_OF_OUTPUT' as the last line: "
+        f"reply with EXACTLY the stdout content with that final 'MNGR_PROXY_END_OF_OUTPUT' line removed, "
+        f"and nothing else (no preamble, no commentary, no markdown wrappers). "
+        f"Then end your turn.\n\n"
+        f"Do NOT use shell variables, ask questions, or take any other action -- "
+        f"the path above is your only command. The stdout content (minus the sentinel) "
+        f"is the real subagent's output and is what the user is waiting for."
     )
 
     response: dict[str, Any] = {

@@ -1,7 +1,13 @@
-"""PostToolUse:Agent hook. Replaces the Haiku proxy's tool output with the
-real END_TURN content harvested from the mngr subagent, then tears down the
-subagent and cleans up per-tool_use_id state files. Exits 0 on any failure
-so Claude Code keeps running.
+"""PostToolUse:Agent hook. Tears down the mngr subagent and cleans up
+per-tool_use_id state files after the Task tool returns.
+
+The subagent's actual end-turn text reaches the parent via Haiku's own
+final reply (the wait-script prints the text to Haiku's stdout and
+Haiku is instructed to echo it verbatim) -- not via this hook, because
+Claude Code's PostToolUse ``updatedToolOutput`` field is MCP-only and
+does not apply to built-in tools like Task.
+
+Exits 0 on any failure so Claude Code keeps running.
 """
 
 from __future__ import annotations
@@ -16,15 +22,10 @@ from typing import TextIO
 
 from loguru import logger
 
-from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 # Type alias for the detached-destroy callable, so tests can inject a stub.
 DestroyAgentDetachedCallable = Callable[[str, Path], None]
-
-
-def _emit(stdout: TextIO, response: dict[str, Any]) -> None:
-    stdout.write(json.dumps(response) + "\n")
-    stdout.flush()
 
 
 def _read_stdin_json(stdin: TextIO) -> dict[str, Any] | None:
@@ -101,32 +102,6 @@ def run(
     script_file = state_dir / "proxy_commands" / f"wait-{tid}.sh"
     env_file = state_dir / "proxy_commands" / f"env-{tid}.env"
     init_flag = state_dir / "proxy_commands" / f"initialized-{tid}"
-
-    output_text: str
-    try:
-        raw_result = result_file.read_text()
-    except FileNotFoundError:
-        raw_result = ""
-    except OSError as e:
-        logger.warning("rewrite: failed to read result file {}: {}", result_file, e)
-        raw_result = ""
-
-    if raw_result:
-        output_text = raw_result
-    else:
-        display_name = target_name or "<unknown>"
-        output_text = (
-            f"ERROR: mngr subagent {display_name} produced no result "
-            "(crashed or proxy failed). Check the mngr agent log."
-        )
-
-    response: dict[str, Any] = {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "updatedToolOutput": output_text,
-        }
-    }
-    _emit(stdout, response)
 
     # Best-effort detached teardown of the mngr subagent.
     if target_name:

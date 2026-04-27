@@ -18,7 +18,7 @@ from loguru import logger
 
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 from imbue.mngr_subagent_proxy.hooks.mngr_api import list_agents_by_name
 
 _TERMINAL_STATES: frozenset[AgentLifecycleState] = frozenset({AgentLifecycleState.DONE, AgentLifecycleState.STOPPED})

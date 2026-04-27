@@ -75,7 +75,7 @@ def test_spawn_rewrites_input(tmp_path: Path, clean_env: pytest.MonkeyPatch) -> 
     prompt_text = updated["prompt"]
     assert "parent-agent--subagent-" in prompt_text
     assert f"bash {state_dir}/proxy_commands/wait-toolu_abc12345678.sh" in prompt_text
-    assert "DONE" in prompt_text
+    assert "MNGR_PROXY_END_OF_OUTPUT" in prompt_text
 
     tid = "toolu_abc12345678"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
@@ -188,12 +188,14 @@ def test_rewrite_substitutes_output_and_cleans_up(
     stdout_buffer = io.StringIO()
     rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
 
-    response = json.loads(stdout_buffer.getvalue())
-    hook_out = response["hookSpecificOutput"]
-    assert hook_out["hookEventName"] == "PostToolUse"
-    assert hook_out["updatedToolOutput"] == expected_output
-
-    # Side files are cleaned up.
+    # PostToolUse on the built-in Task tool cannot override tool_result --
+    # updatedToolOutput is MCP-only. The hook now emits no JSON; the
+    # subagent end-turn text reaches the parent via Haiku's own final
+    # reply (see hooks/spawn.py wait-script + mngr-proxy.agent.md).
+    assert stdout_buffer.getvalue() == ""
+    # Result file remains on disk for diagnostics? No: the hook still
+    # cleans up side files because they are no longer needed once Haiku
+    # has captured the content from the wait-script's stdout.
     assert not map_file.exists()
     assert not result_file.exists()
     assert not prompt_file.exists()
@@ -205,11 +207,16 @@ def test_rewrite_substitutes_output_and_cleans_up(
     assert log_path == state_dir / "subagent_destroy.log"
 
 
-def test_rewrite_missing_result_emits_error(
+def test_rewrite_missing_result_is_silent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    """When the result file is missing, the hook emits an ERROR sentinel."""
+    """When the result file is missing, the hook still cleans up but emits nothing.
+
+    The subagent's actual content reaches the parent via Haiku's reply
+    (not via this hook), so a missing side file just means the side
+    file was already consumed -- no error is needed.
+    """
     state_dir = tmp_path / "state"
     (state_dir / "subagent_map").mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
@@ -231,10 +238,7 @@ def test_rewrite_missing_result_emits_error(
     stdout_buffer = io.StringIO()
     rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=lambda _name, _log: None)
 
-    response = json.loads(stdout_buffer.getvalue())
-    output = response["hookSpecificOutput"]["updatedToolOutput"]
-    assert "ERROR" in output
-    assert target_name in output
+    assert stdout_buffer.getvalue() == ""
 
 
 def test_rewrite_ignores_unmapped_tool_use_id(

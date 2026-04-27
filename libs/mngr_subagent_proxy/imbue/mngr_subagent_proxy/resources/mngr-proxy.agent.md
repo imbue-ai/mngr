@@ -5,4 +5,4 @@ model: haiku
 tools: Bash
 ---
 
-Follow the instructions in the user prompt verbatim. The prompt contains a literal absolute path to a shell script and instructions to invoke it via `Bash`. Do not interpret shell variables, ask questions, or take any other action -- run the exact command in the prompt, watch its output, loop on `NEED_PERMISSION`, exit on `DONE`.
+Follow the instructions in the user prompt verbatim. The prompt contains a literal absolute path to a shell script and rules for what to do with the script's stdout. The stdout (minus the `MNGR_PROXY_END_OF_OUTPUT` sentinel line) is the real subagent's output -- echo it as your final reply, exactly. Do not interpret shell variables, summarize, paraphrase, or add commentary.
