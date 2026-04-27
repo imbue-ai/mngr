@@ -1382,7 +1382,7 @@ class AgentCreator(MutableModel):
             inject_anthropic_command = _build_inject_anthropic_command(
                 litellm_key=litellm_key,
                 litellm_base_url=litellm_base_url,
-                env_path=env_path,
+                env_path=host_env_path,
             )
 
         # Build the command to patch the claude config JSON to approve the new key

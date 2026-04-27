@@ -18,6 +18,7 @@ Usage:
 """
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -51,6 +52,7 @@ def _run_mngr_command(
     args: list[str],
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
     cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a mngr CLI command via `uv run` and return the result."""
     full_command = ["uv", "run", "mngr"] + args
@@ -61,6 +63,7 @@ def _run_mngr_command(
         text=True,
         timeout=timeout,
         cwd=cwd,
+        env=env,
     )
 
 
@@ -265,6 +268,10 @@ def _create_single_pool_host(
 
     logger.info("[{}] Creating pool host: {}", host_idx, address)
 
+    # Set the placeholder ANTHROPIC_API_KEY in the environment so that
+    # --pass-host-env picks it up and writes it to /mngr/env on the host.
+    create_env = dict(os.environ, ANTHROPIC_API_KEY=_PLACEHOLDER_ANTHROPIC_API_KEY)
+
     # Run mngr create from the template directory so it picks up the
     # template's .mngr/settings.toml (workspace server, services, etc.).
     create_result = _run_mngr_command(
@@ -283,12 +290,13 @@ def _create_single_pool_host(
             f"pool_region={region}",
             "--host-label",
             f"plan={plan}",
-            "--env",
-            f"ANTHROPIC_API_KEY={_PLACEHOLDER_ANTHROPIC_API_KEY}",
+            "--pass-host-env",
+            "ANTHROPIC_API_KEY",
             "--idle-mode",
             "disabled",
         ],
         cwd=template_dir,
+        env=create_env,
     )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
