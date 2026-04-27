@@ -66,8 +66,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Threshold is 84 because watcher_common.load_watchers_section delegates parsing
-# to imbue.mngr.config.pre_readers.try_load_toml: the parse statements are
-# exercised by tests but counted against the mngr package, leaving this
-# package's aggregate coverage ~1 point lower than it would otherwise be.
 fail_under = 84
