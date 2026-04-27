@@ -1688,6 +1688,26 @@ def test_bootstrap_config_field_sync() -> None:
     )
 
 
+def test_bootstrap_config_field_defaults_sync() -> None:
+    """BootstrapMngrConfig field defaults must match MngrConfig field defaults.
+
+    Catches default-value drift: test_bootstrap_config_field_sync only checks
+    field NAMES, so a future change that updates a default on MngrConfig
+    (e.g. flipping ``headless`` from False to True) would silently leave the
+    duplicated default on BootstrapMngrConfig stale. ``to_bootstrap_config``
+    always sets every field via model_construct so the defaults are unused
+    in practice today, but anyone who instantiates ``BootstrapMngrConfig()``
+    directly would see the stale default.
+    """
+    mismatches: list[str] = []
+    for name in BootstrapMngrConfig.model_fields:
+        mngr_default = MngrConfig.model_fields[name].get_default(call_default_factory=True)
+        bootstrap_default = BootstrapMngrConfig.model_fields[name].get_default(call_default_factory=True)
+        if mngr_default != bootstrap_default:
+            mismatches.append(f"{name}: MngrConfig={mngr_default!r}, BootstrapMngrConfig={bootstrap_default!r}")
+    assert not mismatches, "BootstrapMngrConfig default values drifted from MngrConfig:\n  " + "\n  ".join(mismatches)
+
+
 def test_to_bootstrap_config_sets_every_bootstrap_field() -> None:
     """to_bootstrap_config must explicitly assign every BootstrapMngrConfig field.
 
