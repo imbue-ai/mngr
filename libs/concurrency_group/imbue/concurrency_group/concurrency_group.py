@@ -659,21 +659,23 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
 
 def _periodic_checker_target(process: RunningProcess, interval_seconds: float, stop_event: Event) -> None:
     wake = CompoundEvent([process.finished_event, stop_event])
-    is_finished = False
-    while not is_finished:
+    while True:
         if not wake.is_set():
             wake.wait(timeout=interval_seconds)
         # If the group is exiting or the process is being torn down, don't surface ProcessError
         # from the impending non-zero exit -- the teardown was intentional.
         if stop_event.is_set() or process.shutdown_event.is_set():
             return
-        # Either we slept the full interval (call check() to satisfy the watchdog and surface any
-        # ProcessError if the process happened to exit), or finished_event fired without an explicit
-        # teardown: the process exited on its own. Either way, call check() to surface any ProcessError.
+        # Capture wake state BEFORE check() so we always re-enter the loop at least once after
+        # wake fires. RunningProcess.run sets `_completed_process` BEFORE setting `_finished_event`,
+        # so once we observe `wake.is_set()` at the top of an iteration, the next check() call
+        # is guaranteed to see the final returncode and surface any ProcessError. Exiting based
+        # on wake-state read after check() would race: check() could see returncode=None, then
+        # the process could finish before wake is read, dropping the non-zero exit silently.
+        was_wake_set_before_check = wake.is_set()
         process.check()
-        # If wake is set after check(), the process has finished (or the group is being torn down,
-        # already handled above). Exit after this final check has had a chance to surface ProcessError.
-        is_finished = wake.is_set()
+        if was_wake_set_before_check:
+            return
 
 
 def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
