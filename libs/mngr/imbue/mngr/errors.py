@@ -373,13 +373,13 @@ class ConfigStructureError(ConfigError, TypeError):
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
 
-    def __init__(self, key: str, registered: list[str] | None = None) -> None:
-        self.key = key
+    def __init__(self, backend_name: str, registered: list[str] | None = None) -> None:
+        self.backend_name = backend_name
         self.registered = list(registered) if registered is not None else []
         registered_str = ", ".join(self.registered) or "(none)"
-        message = f"Unknown provider backend: {key}. Registered backends: {registered_str}"
+        message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
         super().__init__(message)
-        self.user_help_text = get_plugin_install_hint(key)
+        self.user_help_text = get_plugin_install_hint(backend_name)
 
 
 class NestedTmuxError(MngrError):
