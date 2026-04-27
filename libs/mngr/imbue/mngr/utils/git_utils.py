@@ -62,6 +62,26 @@ def remove_worktree(worktree_path: Path, source_repo_path: Path, cg: Concurrency
     )
 
 
+def delete_git_branch(branch_name: str, source_repo_path: Path, cg: ConcurrencyGroup) -> bool:
+    """Delete a git branch from the source repository.
+
+    Returns True on successful deletion, False otherwise. Failures are logged
+    as warnings; this never raises.
+    """
+    try:
+        result = cg.run_process_to_completion(
+            ["git", "-C", str(source_repo_path), "branch", "-D", branch_name],
+            is_checked_after=False,
+        )
+    except ProcessError as e:
+        logger.warning("Failed to delete branch {}: {}", branch_name, e)
+        return False
+    if result.returncode == 0:
+        return True
+    logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
+    return False
+
+
 def get_current_git_branch(path: Path | None, cg: ConcurrencyGroup) -> str | None:
     """Get the current git branch name for the repository at the given path.
 

@@ -476,6 +476,114 @@ def test_worktree_already_checked_out_gives_helpful_error(
 
 
 # =============================================================================
+# Branch Cleanup on Create Failure
+# =============================================================================
+
+
+class _RaiseAfterFileCopy:
+    """Plugin that raises after work_dir creation to simulate a late-stage failure."""
+
+    @hookimpl
+    def on_after_initial_file_copy(
+        self, agent_options: CreateAgentOptions, host: OnlineHostInterface, work_dir_path: Path
+    ) -> None:
+        raise RuntimeError("simulated failure after file copy")
+
+
+def _list_branches(repo: Path) -> list[str]:
+    """List local branch names in the given git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def test_worktree_branch_is_cleaned_up_when_create_fails(
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+) -> None:
+    """If create fails after we made a new worktree branch, the branch is removed.
+
+    Reuses the destroy-time safety mechanism: only the branch we created
+    (recorded in created_branch_name) is deleted; pre-existing branches are not.
+    """
+    agent_name = AgentName(f"test-cleanup-fail-{int(time.time())}")
+    leaked_branch = f"mngr/{agent_name}"
+
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
+    local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=agent_name,
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(new_branch_name=leaked_branch),
+    )
+
+    branches_before = _list_branches(temp_git_repo)
+    assert leaked_branch not in branches_before
+
+    with pytest.raises(RuntimeError, match="simulated failure after file copy"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=test_ctx,
+        )
+
+    branches_after = _list_branches(temp_git_repo)
+    assert leaked_branch not in branches_after, (
+        f"branch {leaked_branch} should have been cleaned up after create failure, "
+        f"but is still present: {branches_after}"
+    )
+
+
+def test_preexisting_branch_is_preserved_when_create_fails(
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+) -> None:
+    """When create fails on a pre-existing branch (not created by us), keep it.
+
+    Mirrors the destroy-time safety: created_branch_name is None when the user
+    reused an existing branch, so the cleanup path is a no-op.
+    """
+    existing_branch = "feature/preexisting"
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "branch", existing_branch],
+        check=True,
+    )
+
+    test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
+    local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=AgentName(f"test-preserve-{int(time.time())}"),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        # No new_branch_name -- agent attaches to the existing branch.
+        git=AgentGitOptions(base_branch=existing_branch),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated failure after file copy"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=test_ctx,
+        )
+
+    branches_after = _list_branches(temp_git_repo)
+    assert existing_branch in branches_after, (
+        f"pre-existing branch {existing_branch} must not be deleted by create cleanup"
+    )
+
+
+# =============================================================================
 # is_generated_work_dir Tests
 # =============================================================================
 

@@ -50,6 +50,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import remove_worktree
 
@@ -555,22 +556,13 @@ def _remove_created_branch(
     cg: ConcurrencyGroup,
     output_opts: OutputOptions,
 ) -> None:
-    """Delete a git branch from the source repository.
+    """Delete a git branch from the source repository, with human-facing output.
 
     Called after worktree removal, so git should allow the branch deletion.
     Failures are logged as warnings but do not fail the destroy operation.
     """
-    try:
-        result = cg.run_process_to_completion(
-            ["git", "-C", str(source_repo_path), "branch", "-D", branch_name],
-            is_checked_after=False,
-        )
-        if result.returncode == 0:
-            _output(f"Deleted branch: {branch_name}", output_opts)
-        else:
-            logger.warning("Failed to delete branch {}: {}", branch_name, result.stderr.strip())
-    except ProcessError as e:
-        logger.warning("Failed to delete branch {}: {}", branch_name, e)
+    if delete_git_branch(branch_name, source_repo_path, cg):
+        _output(f"Deleted branch: {branch_name}", output_opts)
 
 
 def _run_post_destroy_gc(mngr_ctx: MngrContext, output_opts: OutputOptions) -> None:

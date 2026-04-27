@@ -1,8 +1,10 @@
+from pathlib import Path
 from typing import Final
 from typing import cast
 
 from loguru import logger
 
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.data_types import CreateAgentResult
@@ -24,6 +26,9 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
+from imbue.mngr.utils.git_utils import delete_git_branch
+from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
+from imbue.mngr.utils.git_utils import remove_worktree
 
 _MAX_HOST_NAME_GENERATION_ATTEMPTS: Final[int] = 100
 _MAX_HOST_NAME_CONFLICT_RETRIES: Final[int] = 3
@@ -67,6 +72,32 @@ def _call_on_before_create_hooks(
         current_args.agent_options,
         current_args.create_work_dir,
     )
+
+
+def _cleanup_created_branch(
+    work_dir_path: Path,
+    created_branch_name: str,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Best-effort cleanup of a branch that we created during a failed create.
+
+    Mirrors the destroy-time cleanup safety: only deletes when a branch was
+    actually created by us (caller checks `created_branch_name is not None`),
+    and only when work_dir is a git worktree whose source repo we can locate.
+    For mirror mode the branch lives inside the work_dir's own .git, so it is
+    cleaned up alongside the work_dir by GC and needs no separate handling.
+    All errors are logged and swallowed so they cannot mask the original
+    creation failure.
+    """
+    cg = mngr_ctx.concurrency_group
+    source_repo_path = find_source_repo_of_worktree(work_dir_path)
+    if source_repo_path is None:
+        return
+    try:
+        remove_worktree(work_dir_path, source_repo_path, cg)
+    except ProcessError as e:
+        logger.warning("Failed to remove worktree {} during create cleanup: {}", work_dir_path, e)
+    delete_git_branch(created_branch_name, source_repo_path, cg)
 
 
 @log_call
@@ -139,10 +170,6 @@ def create(
                 work_dir_result = host.create_agent_work_dir(source_location.host, source_location.path, agent_options)
                 work_dir_path = work_dir_result.path
                 created_branch_name = work_dir_result.created_branch_name
-            with log_span("Calling on_after_initial_file_copy hooks"):
-                mngr_ctx.pm.hook.on_after_initial_file_copy(
-                    agent_options=agent_options, host=host, work_dir_path=work_dir_path
-                )
         else:
             # Work dir was already created (e.g. by CLI's early copy).
             # Use target_path if set (it should contain the actual work_dir path),
@@ -151,46 +178,62 @@ def create(
                 agent_options.target_path if agent_options.target_path is not None else source_location.path
             )
 
-        # Create the agent state (registers the agent with the host)
-        with log_span("Creating agent state in work directory {}", work_dir_path):
-            agent = host.create_agent_state(work_dir_path, agent_options, created_branch_name=created_branch_name)
+        # If anything below fails, the work_dir (and any branch we created for
+        # it) is orphaned. Clean up the branch on our way out so we don't leak
+        # it into the source repo. The destroy path handles work_dir cleanup
+        # via GC; we just need to mirror its safe branch-deletion logic here.
+        is_success = False
+        try:
+            if create_work_dir:
+                with log_span("Calling on_after_initial_file_copy hooks"):
+                    mngr_ctx.pm.hook.on_after_initial_file_copy(
+                        agent_options=agent_options, host=host, work_dir_path=work_dir_path
+                    )
 
-        # Run provisioning for the agent (hooks, dependency installation, etc.)
-        with log_span("Calling on_before_provisioning hooks"):
-            mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
-        with log_span("Provisioning agent {}", agent.name):
-            host.provision_agent(agent, agent_options, mngr_ctx)
-        with log_span("Calling on_after_provisioning hooks"):
-            mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+            # Create the agent state (registers the agent with the host)
+            with log_span("Creating agent state in work directory {}", work_dir_path):
+                agent = host.create_agent_state(work_dir_path, agent_options, created_branch_name=created_branch_name)
 
-        # Send initial message if one is configured
-        initial_message = agent.get_initial_message()
-        if initial_message is not None:
-            # Start agent with signal-based readiness detection
-            # Raises AgentStartError if the agent doesn't signal readiness in time
-            logger.info("Starting agent {} ...", agent.name)
-            timeout = agent_options.ready_timeout_seconds
-            agent.wait_for_ready_signal(
-                is_creating=True,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=timeout,
-            )
-            logger.info("Sending initial message...")
-            agent.send_message(initial_message)
-        else:
-            # No initial message - just start the agent
-            logger.info("Starting agent {} ...", agent.name)
-            host.start_agents([agent.id])
+            # Run provisioning for the agent (hooks, dependency installation, etc.)
+            with log_span("Calling on_before_provisioning hooks"):
+                mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+            with log_span("Provisioning agent {}", agent.name):
+                host.provision_agent(agent, agent_options, mngr_ctx)
+            with log_span("Calling on_after_provisioning hooks"):
+                mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
-        # Build and return the result
-        result = CreateAgentResult(agent=agent, host=host)
+            # Send initial message if one is configured
+            initial_message = agent.get_initial_message()
+            if initial_message is not None:
+                # Start agent with signal-based readiness detection
+                # Raises AgentStartError if the agent doesn't signal readiness in time
+                logger.info("Starting agent {} ...", agent.name)
+                timeout = agent_options.ready_timeout_seconds
+                agent.wait_for_ready_signal(
+                    is_creating=True,
+                    start_action=lambda: host.start_agents([agent.id]),
+                    timeout=timeout,
+                )
+                logger.info("Sending initial message...")
+                agent.send_message(initial_message)
+            else:
+                # No initial message - just start the agent
+                logger.info("Starting agent {} ...", agent.name)
+                host.start_agents([agent.id])
 
-        # Call on_agent_created hooks to notify plugins about the new agent
-        with log_span("Calling on_agent_created hooks"):
-            mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
+            # Build and return the result
+            result = CreateAgentResult(agent=agent, host=host)
 
-        # Emit discovery events for the host and newly created agent
-        emit_discovery_events_for_host(mngr_ctx.config, host)
+            # Call on_agent_created hooks to notify plugins about the new agent
+            with log_span("Calling on_agent_created hooks"):
+                mngr_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
+
+            # Emit discovery events for the host and newly created agent
+            emit_discovery_events_for_host(mngr_ctx.config, host)
+            is_success = True
+        finally:
+            if not is_success and created_branch_name is not None:
+                _cleanup_created_branch(work_dir_path, created_branch_name, mngr_ctx)
 
     return result
 
