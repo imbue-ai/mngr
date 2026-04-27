@@ -86,9 +86,4 @@ pythonVersion = "3.11"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Calibrated against measured offload reality. Per-package coverage drifts
-# by 1-2 percentage points between offload runs of the same code (test
-# distribution across sandboxes is not deterministic), so the threshold
-# needs a small margin below observed coverage to absorb that variance.
-# See commit 1446ad297 for the original calibration done for the same reason.
-fail_under = 88
+fail_under = 90
