@@ -201,11 +201,15 @@ def setup_bootstrap_command_context(
        step still go through full *strict* parsing of plugin-defined
        sections (via ``apply_settings_to_config`` -> ``parse_config`` with
        ``parse_plugin_sections=True, strict=True``). So ``mngr plugin add
-       foo -S providers.bar.baz=qux`` can still raise ``ConfigParseError``
-       if ``baz`` is unknown to the (potentially not-yet-installed)
-       ``bar`` provider's config class. This is a known limitation;
-       real-world bootstrap usage rarely combines ``-S`` overrides with
-       plugin-section keys.
+       foo -S providers.bar.baz=qux`` can raise ``ConfigParseError`` if
+       ``baz`` is unknown to ``bar``'s config class. This is intentional,
+       not a limitation: ``mngr plugin add`` reads only
+       ``mngr_ctx.concurrency_group`` from the loaded context and does not
+       consume any plugin-defined config, so no ``-S`` setting on a
+       plugin-defined section could meaningfully take effect during a
+       single ``add`` invocation. ``-S`` is also non-persistent; users who
+       want to seed config for the plugin they are about to install should
+       run ``mngr config set`` after the install completes.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
     mngr_ctx = load_bootstrap_context(
