@@ -108,11 +108,6 @@ def load_config(
 
     # Start with base config that has defaults based on root_name
     # Use model_construct with None to allow merging to work properly
-    # Per-command parameter defaults belong on the click options themselves,
-    # not in this baseline: putting them here injects entries into
-    # commands.<cmd>.defaults that don't exist on stand-in test commands,
-    # which the strict unknown-param check in apply_config_defaults then
-    # rejects.
     config = MngrConfig.model_construct(
         prefix=f"{root_name}-",
         default_host_dir=Path(f"~/.{root_name}"),
