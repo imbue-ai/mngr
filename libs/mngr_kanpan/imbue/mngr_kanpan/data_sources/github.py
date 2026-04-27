@@ -508,11 +508,7 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPr
         if retry.error is None and retry.prs:
             # Stable path found PRs the flaky path missed -- the data we would have
             # shown was wrong. Surface a warning so the user knows gh is flaky.
-            degradation_warning = (
-                f"GitHub search API appears flaky for {repo_path}: "
-                f"--author @me query returned 0 PRs but stable query returned {len(retry.prs)}. "
-                "Showing recovered data."
-            )
+            degradation_warning = f"gh search flaky for {repo_path}: recovered {len(retry.prs)} PRs via stable path."
             result = retry
         else:
             # Both methods agree the repo looks empty. Since we expect every repo to
