@@ -65,6 +65,7 @@ def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[RunningProcess | None]:
     write_human_line("Starting mngr observe in background...")
     process = mngr_ctx.concurrency_group.run_process_in_background(
         ["mngr", "observe", "--quiet"],
+        is_checked_by_group=False,
     )
     try:
         yield process

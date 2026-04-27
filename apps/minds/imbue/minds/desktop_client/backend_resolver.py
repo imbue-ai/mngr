@@ -509,6 +509,7 @@ class MngrStreamManager(MutableModel):
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
             cwd=Path.home(),
+            is_checked_by_group=False,
         )
 
     def stop(self) -> None:
@@ -849,6 +850,7 @@ class MngrStreamManager(MutableModel):
                 ],
                 on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
                 cwd=Path.home(),
+                is_checked_by_group=False,
             )
             self._events_processes[aid_str] = process
         except InvalidConcurrencyGroupStateError:
