@@ -327,7 +327,12 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
         assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
 
 
+# Flaky under heavy CI load: wait_for(tmux_session_exists(...)) calls a tmux
+# subprocess that can exceed the 10s pytest-timeout when sandboxes are
+# contended. Offload retries flaky tests automatically; the underlying
+# tmux-subprocess slowness should be addressed separately.
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
