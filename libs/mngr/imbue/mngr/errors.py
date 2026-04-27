@@ -373,9 +373,9 @@ class ConfigStructureError(ConfigError, TypeError):
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
 
-    def __init__(self, backend_name: str, registered: list[str] | None = None) -> None:
+    def __init__(self, backend_name: str, registered: list[str]) -> None:
         self.backend_name = backend_name
-        self.registered = list(registered) if registered is not None else []
+        self.registered = list(registered)
         registered_str = ", ".join(self.registered) or "(none)"
         message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
         super().__init__(message)
