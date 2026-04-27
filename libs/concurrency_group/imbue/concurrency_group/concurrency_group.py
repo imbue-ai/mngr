@@ -663,16 +663,18 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
 
 def _periodic_checker_target(process: RunningProcess, interval_seconds: float, stop_event: Event) -> None:
     wake = CompoundEvent([process.finished_event, stop_event])
-    while not wake.is_set():
-        woke = wake.wait(timeout=interval_seconds)
+    while True:
+        if not wake.is_set():
+            wake.wait(timeout=interval_seconds)
         # If the group is exiting or the process is being torn down, don't surface ProcessError
         # from the impending non-zero exit -- the teardown was intentional.
         if stop_event.is_set() or process.shutdown_event.is_set():
             return
-        # If `woke` is True, finished_event fired without an explicit teardown: the process
-        # exited on its own. Either way, call check() to surface any ProcessError.
+        # Either we slept the full interval (call check() to satisfy the watchdog and surface any
+        # ProcessError if the process happened to exit), or finished_event fired without an explicit
+        # teardown: the process exited on its own. Either way, call check() to surface any ProcessError.
         process.check()
-        if woke:
+        if wake.is_set():
             return
 
 
