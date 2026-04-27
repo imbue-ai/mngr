@@ -1239,7 +1239,7 @@ kill -TERM 1
         """
         host_id = host.id
 
-        host_record = self._host_store.read_host_record(host_id)
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None:
             for snap in host_record.certified_host_data.snapshots:
                 try:
