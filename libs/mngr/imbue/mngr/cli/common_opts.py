@@ -191,14 +191,15 @@ def setup_bootstrap_command_context(
     Behaves identically to ``setup_command_context`` in every other respect,
     with three exceptions:
 
-    1. The plugin-defined sections above are not parsed -- the returned
-       ``MngrContext.config`` has empty ``providers`` and ``agent_types``,
-       and ``plugins`` is empty except for entries injected by CLI
-       ``--plugin``/``--enable-plugin`` flags via ``_apply_plugin_overrides``.
-       ``--disable-plugin`` flags do not show up in ``config.plugins`` (they
-       are filtered out of the enabled-plugins dict); their names are
-       reflected in ``config.disabled_plugins`` instead. Callers must not
-       rely on any of these fields reflecting the contents of a config file.
+    1. The return type is ``BootstrapMngrContext`` (not ``MngrContext``), and
+       its ``config`` is a ``BootstrapMngrConfig`` that omits the plugin-defined
+       fields (``providers``, ``agent_types``, ``plugins``) and ``disabled_plugins``
+       entirely. Reading any of those attributes raises ``AttributeError``
+       rather than returning a silently-empty dict -- this is the whole
+       point of the narrower type. CLI ``--plugin`` / ``--enable-plugin`` /
+       ``--disable-plugin`` flags are still threaded through ``load_context``
+       internally so plugin-manager blocking still happens; they are simply
+       not surfaced on the returned ``BootstrapMngrConfig``.
     2. Top-level fields are parsed in non-strict mode (unknown fields warn
        instead of raising), to match ``load_bootstrap_context``. There is
        therefore no ``strict`` parameter on this function.
