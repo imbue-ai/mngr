@@ -145,7 +145,9 @@ def test_parse_transcript_events_skips_blank_lines() -> None:
 
 
 def test_parse_transcript_events_skips_malformed_json() -> None:
-    content = "not json\n" + json.dumps({"type": "user_message", "content": "hello"}) + "\n"
+    # Place the malformed line as the un-terminated last line so it is treated as a
+    # partial write at EOF and silently skipped (no WARNING emitted).
+    content = json.dumps({"type": "user_message", "content": "hello"}) + "\nnot json"
     events = _parse_transcript_events(content, roles=())
     assert len(events) == 1
 
