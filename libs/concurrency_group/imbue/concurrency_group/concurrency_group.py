@@ -451,7 +451,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
 
         `check_interval_seconds` enforces that callers call `process.check()` periodically (at roughly half the
         interval). If the deadline passes without a check, a watchdog terminates the process and fails the
-        concurrency group with a `MissedCheckError`. Pass `math.inf` to opt out of enforcement.
+        concurrency group with a `MissedCheckError` (regardless of `is_checked_by_group`, since the watchdog
+        thread itself is checked). Pass `math.inf` to opt out of enforcement.
         """
 
         def process_factory():
