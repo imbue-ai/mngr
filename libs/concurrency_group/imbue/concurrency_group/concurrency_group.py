@@ -436,9 +436,9 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
 
         When `is_checked_by_group` is True (the default), the process will be checked for failure when the concurrency
         group exits or whenever its methods are called -- a non-zero exit code surfaces as a ProcessError instead of
-        being silently lost. Pass `is_checked_by_group=False` only for processes the caller terminates explicitly (e.g.
-        long-running streams stopped via `.terminate()`), since termination yields a non-zero exit code that would
-        otherwise be reported as a failure.
+        being silently lost. Pass `is_checked_by_group=False` for processes the caller terminates explicitly (e.g.
+        long-running streams stopped via `.terminate()`, where SIGTERM yields a non-zero exit code) or for genuine
+        fire-and-forget commands whose exit code is not actionable.
         """
 
         def process_factory():
