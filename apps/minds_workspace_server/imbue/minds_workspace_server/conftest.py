@@ -17,10 +17,20 @@ def broadcaster() -> WebSocketBroadcaster:
 
 
 @pytest.fixture
-def agent_manager(broadcaster: WebSocketBroadcaster, monkeypatch: pytest.MonkeyPatch) -> AgentManager:
-    """Create an AgentManager without starting the observe subprocess."""
+def agent_manager(
+    broadcaster: WebSocketBroadcaster,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> AgentManager:
+    """Create an AgentManager without starting the observe subprocess.
+
+    ``MNGR_HOST_DIR`` is forced to a per-test ``tmp_path`` so the
+    activity-state marker watcher does not try to attach to the developer's
+    real ``~/.mngr/agents/<id>/`` directories.
+    """
     monkeypatch.setenv("MNGR_AGENT_ID", "test-agent-id")
     monkeypatch.setenv("MNGR_AGENT_WORK_DIR", "/tmp/test-work")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     return AgentManager.build(broadcaster)
 
 

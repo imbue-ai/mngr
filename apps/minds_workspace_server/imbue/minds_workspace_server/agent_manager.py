@@ -23,6 +23,10 @@ from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds_workspace_server.activity_state import ActivityState
+from imbue.minds_workspace_server.activity_state import derive_activity_state
+from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
+from imbue.minds_workspace_server.activity_watcher import AgentMarkerWatcher
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.models import AgentCreationError
 from imbue.minds_workspace_server.models import AgentStateItem
@@ -160,6 +164,10 @@ class AgentManager:
     _observe_process: RunningProcess | None
     _creation_cg: ConcurrencyGroup
     _mngr_binary: str
+    _host_dir: Path
+    _marker_watchers: dict[str, AgentMarkerWatcher]
+    _pending_tool_by_agent: dict[str, bool]
+    _activity_state_by_agent: dict[str, ActivityState]
 
     @classmethod
     def build(cls, broadcaster: WebSocketBroadcaster, mngr_binary: str = _DEFAULT_MNGR_BINARY) -> "AgentManager":
@@ -184,6 +192,10 @@ class AgentManager:
         manager._creation_cg = ConcurrencyGroup(name="agent-creation")
         manager._creation_cg.__enter__()
         manager._mngr_binary = mngr_binary
+        manager._host_dir = Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
+        manager._marker_watchers = {}
+        manager._pending_tool_by_agent = {}
+        manager._activity_state_by_agent = {}
         return manager
 
     def start(self) -> None:
@@ -211,6 +223,12 @@ class AgentManager:
         for observer in self._app_observers.values():
             observer.join(timeout=5)
         self._app_observers.clear()
+
+        with self._lock:
+            watchers = list(self._marker_watchers.values())
+            self._marker_watchers.clear()
+        for watcher in watchers:
+            watcher.stop()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
@@ -240,6 +258,7 @@ class AgentManager:
             self._agents.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
+        self._stop_marker_watcher(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def get_applications(self) -> list[ApplicationEntry]:
@@ -275,6 +294,7 @@ class AgentManager:
                     "state": a.state,
                     "labels": a.labels,
                     "work_dir": a.work_dir,
+                    "activity_state": a.activity_state,
                 }
                 for a in self._agents.values()
             ]
@@ -540,6 +560,7 @@ class AgentManager:
         _completion_signal_put(log_queue, None)
 
         if success:
+            self._ensure_marker_watcher(agent_id)
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
         self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
@@ -561,6 +582,7 @@ class AgentManager:
             for agent_info in agents:
                 if agent_info.id == self._own_agent_id and agent_info.work_dir:
                     self._start_app_watcher(agent_info.id, Path(agent_info.work_dir))
+                self._ensure_marker_watcher(agent_info.id)
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Initial agent discovery failed")
 
@@ -583,11 +605,13 @@ class AgentManager:
                 new_ids = set(new_agents.keys())
                 self._agents = new_agents
 
-            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
-            removed = old_ids - new_ids
-            for agent_id in removed:
+            for agent_id in new_ids:
+                self._ensure_marker_watcher(agent_id)
+            for agent_id in old_ids - new_ids:
                 self._stop_app_watcher(agent_id)
+                self._stop_marker_watcher(agent_id)
+
+            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
         except (OSError, ValueError, RuntimeError, BaseMngrError):
             _loguru_logger.exception("Agent refresh failed")
@@ -755,9 +779,11 @@ class AgentManager:
             agent = new_agents[agent_id]
             if agent_id == self._own_agent_id and agent.work_dir:
                 self._start_app_watcher(agent_id, Path(agent.work_dir))
+            self._ensure_marker_watcher(agent_id)
 
         for agent_id in old_ids - new_ids:
             self._stop_app_watcher(agent_id)
+            self._stop_marker_watcher(agent_id)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -778,6 +804,7 @@ class AgentManager:
 
         if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
+        self._ensure_marker_watcher(agent_id)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -789,6 +816,7 @@ class AgentManager:
             self._agents.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
+        self._stop_marker_watcher(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
@@ -798,6 +826,7 @@ class AgentManager:
             with self._lock:
                 self._agents.pop(aid, None)
             self._stop_app_watcher(aid)
+            self._stop_marker_watcher(aid)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -848,6 +877,115 @@ class AgentManager:
         toml_path = Path(work_dir) / _APPLICATIONS_TOML_FILENAME
         self._read_applications(toml_path)
         self._broadcaster.broadcast_applications_updated(self.get_applications_serialized())
+
+    def _get_agent_state_dir(self, agent_id: str) -> Path:
+        """Return the per-agent state directory under the local mngr host dir.
+
+        Mirrors ``server._find_agent`` so the readiness-hook marker files and
+        the activity tracker agree on the same path.
+        """
+        return self._host_dir / "agents" / agent_id
+
+    def _ensure_marker_watcher(self, agent_id: str) -> None:
+        """Start a marker watcher for ``agent_id`` if its local state dir exists.
+
+        Skips agents whose state directory is not present on this host -- those
+        are tracked on a remote host and we have no markers to watch. Idempotent:
+        a second call for the same id is a no-op.
+        """
+        state_dir = self._get_agent_state_dir(agent_id)
+        if not state_dir.exists():
+            # Remote agent or pre-creation race: nothing to track here.
+            return
+        with self._lock:
+            if agent_id in self._marker_watchers:
+                return
+            watcher = AgentMarkerWatcher.build(agent_id, state_dir, self._on_markers_changed)
+            self._marker_watchers[agent_id] = watcher
+        try:
+            watcher.start()
+        except OSError:
+            _loguru_logger.exception("Failed to start marker watcher for agent {}", agent_id)
+            with self._lock:
+                self._marker_watchers.pop(agent_id, None)
+            return
+        # Seed the cached activity state from the current marker file presence
+        # without broadcasting; the caller is expected to broadcast as part of
+        # whatever lifecycle event prompted the start (full snapshot, agent
+        # discovered, etc.).
+        self._recompute_activity_state(agent_id, broadcast_on_change=False)
+
+    def _stop_marker_watcher(self, agent_id: str) -> None:
+        """Stop the marker watcher (if any) and clear cached activity state."""
+        with self._lock:
+            watcher = self._marker_watchers.pop(agent_id, None)
+            self._pending_tool_by_agent.pop(agent_id, None)
+            self._activity_state_by_agent.pop(agent_id, None)
+        if watcher is not None:
+            watcher.stop()
+
+    def _on_markers_changed(self, agent_id: str) -> None:
+        """Marker-file watcher callback. Recomputes and broadcasts on change."""
+        self._recompute_activity_state(agent_id, broadcast_on_change=True)
+
+    def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
+        """Recompute activity state for ``agent_id`` from cached inputs and markers.
+
+        If the derived state differs from the previously cached state, the
+        ``_agents`` entry is updated and (when ``broadcast_on_change`` is True)
+        an ``agents_updated`` event is broadcast.
+
+        Called both from the marker-file watcher callback and from
+        :meth:`update_pending_tool_state`. A no-op for agents not in ``_agents``
+        (e.g. the watcher fired moments after the agent was destroyed).
+        """
+        with self._lock:
+            watcher = self._marker_watchers.get(agent_id)
+            if watcher is None:
+                return
+        active, permissions_waiting = watcher.read_markers()
+
+        with self._lock:
+            agent_state = self._agents.get(agent_id)
+            if agent_state is None:
+                return
+            has_pending_tool = self._pending_tool_by_agent.get(agent_id, False)
+            new_state = derive_activity_state(
+                active_marker_present=active,
+                permissions_waiting_marker_present=permissions_waiting,
+                has_pending_tool_use=has_pending_tool,
+            )
+            old_state = self._activity_state_by_agent.get(agent_id)
+            if old_state == new_state and agent_state.activity_state == new_state.value:
+                return
+            self._activity_state_by_agent[agent_id] = new_state
+            self._agents[agent_id] = AgentStateItem(
+                id=agent_state.id,
+                name=agent_state.name,
+                state=agent_state.state,
+                labels=agent_state.labels,
+                work_dir=agent_state.work_dir,
+                activity_state=new_state.value,
+            )
+
+        if broadcast_on_change:
+            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
+    def update_pending_tool_state(self, agent_id: str, events: list[dict[str, Any]]) -> None:
+        """Recompute pending-tool state from a sequence of session transcript events.
+
+        Called by ``server._get_or_create_watcher`` whenever the
+        :class:`AgentSessionWatcher` learns of new events. Cheap to call: short
+        circuits when the unmatched-tool-use boolean is unchanged.
+        """
+        new_pending = has_unmatched_tool_use(events)
+        with self._lock:
+            old_pending = self._pending_tool_by_agent.get(agent_id, False)
+            if old_pending == new_pending:
+                return
+            self._pending_tool_by_agent[agent_id] = new_pending
+
+        self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""

@@ -21,6 +21,7 @@ import {
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
+import { AgentActivityIndicator } from "./AgentActivityIndicator";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
@@ -423,6 +424,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           ? null
           : m("footer", { class: "app-footer" }, [
               m(EmptySlot, { name: "conversation-before-input" }),
+              isConversationNotFound(agentId) ? null : m(AgentActivityIndicator, { agentId }),
               m(MessageInput, { agentId }),
               m("div", { class: "chat-agent-terminal-link" }, [
                 m(

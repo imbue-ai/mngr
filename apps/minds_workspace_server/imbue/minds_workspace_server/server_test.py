@@ -9,9 +9,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.minds_workspace_server.activity_state import ActivityState
+from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.server import create_application
+from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
@@ -331,3 +336,80 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hitting /api/agents/{id}/events for a Claude session with an unmatched tool_use
+    seeds ``AgentManager._pending_tool_by_agent`` so the activity indicator reads
+    ``TOOL_RUNNING`` once the active marker is set.
+    """
+    agent_id = "agent-pending-tool"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", agent_id)
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path / "work"))
+
+    state_dir = tmp_path / "agents" / agent_id
+    state_dir.mkdir(parents=True)
+    (state_dir / ACTIVE_MARKER_FILENAME).touch()
+
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects" / "hash123"
+    projects_dir.mkdir(parents=True)
+    session_id = "test-session-id"
+    session_file = projects_dir / f"{session_id}.jsonl"
+    # An assistant message that includes a tool_use, with no matching tool_result.
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [
+                        {"type": "text", "text": "running a command"},
+                        {"type": "tool_use", "id": "call_a", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
+        + "\n"
+    )
+    (state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_id] = AgentStateItem(
+            id=agent_id,
+            name="seed-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_marker_watcher(agent_id)
+
+    app = create_application(agent_manager=manager)
+    agent_info = AgentInfo(
+        id=agent_id,
+        name="seed-agent",
+        state="RUNNING",
+        agent_state_dir=state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+
+    try:
+        with TestClient(app) as test_client:
+            with patch("imbue.minds_workspace_server.server._find_agent", return_value=agent_info):
+                response = test_client.get(f"/api/agents/{agent_id}/events")
+            assert response.status_code == 200
+    finally:
+        manager.stop()
+
+    # The watcher creation path seeds pending-tool state synchronously.
+    with manager._lock:
+        assert manager._pending_tool_by_agent[agent_id] is True
+        assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
