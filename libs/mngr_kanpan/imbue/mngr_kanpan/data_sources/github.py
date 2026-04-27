@@ -156,12 +156,12 @@ def _build_gh_pr_list_cmd(
 ) -> list[str]:
     """Build a gh pr list command with the given parameters.
 
-    When use_stable_path=True, drops --author @me. gh CLI 2.79+ routes queries
-    with --author through GitHub's ISSUE_ADVANCED search backend, which
-    intermittently returns empty results for valid queries (cli/cli#11702,
-    cli/cli#12198). Without --author, gh uses the stable
-    repository.pullRequests GraphQL field, which is reliable but heavier
-    (returns PRs from all authors).
+    When use_stable_path=True, drops --author @me. With --author, gh CLI 2.79+
+    routes queries through GitHub's ISSUE_ADVANCED search backend, which is
+    susceptible to GitHub-side search-index degradation (returns empty results
+    for valid queries while the index is unhealthy). Without --author, gh uses
+    the stable repository.pullRequests GraphQL field, which is unaffected --
+    but heavier, since it returns PRs from all authors.
     """
     cmd = ["gh", "pr", "list", "--state", state, "--json", fields, "--limit", str(limit)]
     if not use_stable_path:
@@ -497,9 +497,10 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPr
     """Fetch PRs for a single repo, retrying through the stable gh path on suspicious empty.
 
     Every kanpan-tracked repo has at least one PR (open, closed, or merged), so a
-    successful gh query that returns zero PRs is suspicious -- almost certainly the
-    flaky ISSUE_ADVANCED search backend that gh 2.79+ uses when --author is set.
-    On suspicious empty we retry once via the stable repository.pullRequests path.
+    successful gh query that returns zero PRs is suspicious -- a known failure
+    mode is GitHub search-index degradation hitting the ISSUE_ADVANCED backend
+    that gh 2.79+ uses when --author is set. On suspicious empty we retry once
+    via the stable repository.pullRequests path, which uses a separate index.
 
     The retry costs two extra gh calls only when the first attempt looked degraded;
     healthy repos with one or more PRs return immediately on the first attempt.
