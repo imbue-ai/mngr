@@ -150,13 +150,8 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         '        --env-file "$ENV_FILE" \\\n'
         '        --message-file "$PROMPT_FILE" \\\n'
         "        --label mngr_subagent_proxy=child \\\n"
-        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1)) \\\n"
-        # --bare tells Claude Code to skip hooks, plugin sync, LSP,
-        # auto-memory, CLAUDE.md auto-discovery, etc. -- which is
-        # exactly the set of behaviors that turn a spawned subagent
-        # into a runaway tree. The arg goes after `--` so mngr
-        # forwards it to the underlying claude command.
-        "        -- --bare\n"
+        "        --env MNGR_SUBAGENT_PROXY_CHILD=1 \\\n"
+        "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
         '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
         '    touch "$INIT_FLAG"\n'
         "fi\n"
