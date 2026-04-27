@@ -1,4 +1,4 @@
-"""Integration tests for the latchkey permission routes wired into ``app.py``.
+"""Integration tests for the permission routes wired into ``app.py``.
 
 Drives the FastAPI app via ``TestClient`` against a real catalog and a
 fake ``PermissionGrantHandler`` so the routes are exercised end-to-end
@@ -18,17 +18,14 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.latchkey.permission_flow import GrantOutcome
-from imbue.minds.desktop_client.latchkey.permission_flow import GrantResult
-from imbue.minds.desktop_client.latchkey.permission_flow import LatchkeyAuthBrowserRunner
-from imbue.minds.desktop_client.latchkey.permission_flow import LatchkeyServicesInfoProbe
-from imbue.minds.desktop_client.latchkey.permission_flow import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.permission_flow import PermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions_store import PermissionsConfig
-from imbue.minds.desktop_client.latchkey.permissions_store import permissions_path_for_agent
-from imbue.minds.desktop_client.latchkey.permissions_store import save_permissions
+from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
+from imbue.minds.desktop_client.latchkey.store import PermissionsConfig
+from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
+from imbue.minds.desktop_client.latchkey.store import save_permissions
+from imbue.minds.desktop_client.permissions import MngrMessageSender
+from imbue.minds.desktop_client.permissions import PermissionGrantHandler
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.mngr.primitives import AgentId
@@ -41,7 +38,7 @@ class _RecordingHandler(PermissionGrantHandler):
     without polluting production code with a Protocol.
     """
 
-    grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
+    was_granted_outcome: bool = Field(default=True)
     grant_message: str = Field(default="granted")
     deny_message: str = Field(default="denied")
     grant_calls: list[dict[str, object]] = Field(default_factory=list)
@@ -53,7 +50,7 @@ class _RecordingHandler(PermissionGrantHandler):
         agent_id: AgentId,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
-    ) -> GrantResult:
+    ) -> tuple[bool, str]:
         self.grant_calls.append(
             {
                 "request_event_id": request_event_id,
@@ -62,7 +59,7 @@ class _RecordingHandler(PermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
-        return GrantResult(outcome=self.grant_outcome, message=self.grant_message)
+        return self.was_granted_outcome, self.grant_message
 
     def deny(
         self,
@@ -91,16 +88,15 @@ def _get_app_request_inbox(client: TestClient) -> RequestInbox:
 
 def _make_recording_handler(
     tmp_path: Path,
-    grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
+    was_granted_outcome: bool = True,
     grant_message: str = "granted",
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     return _RecordingHandler(
         data_dir=tmp_path,
-        services_info_probe=LatchkeyServicesInfoProbe(latchkey_binary="/nonexistent"),
-        auth_browser_runner=LatchkeyAuthBrowserRunner(latchkey_binary="/nonexistent"),
+        latchkey=Latchkey(latchkey_binary="/nonexistent"),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
-        grant_outcome=grant_outcome,
+        was_granted_outcome=was_granted_outcome,
         grant_message=grant_message,
     )
 
@@ -122,8 +118,8 @@ def _build_authenticated_client(
         http_client=None,
         paths=paths,
         request_inbox=inbox,
-        latchkey_services_catalog=catalog,
-        latchkey_permission_handler=handler,
+        services_catalog=catalog,
+        permission_handler=handler,
     )
     client = TestClient(app, base_url="http://localhost")
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
@@ -203,7 +199,7 @@ def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None
     assert final_inbox.get_pending_count() == 1
 
 
-def test_post_permission_grant_with_auth_failed_does_not_resolve_inbox_as_granted(tmp_path: Path) -> None:
+def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_path: Path) -> None:
     agent_id = AgentId()
     request = create_latchkey_permission_request_event(
         agent_id=str(agent_id),
@@ -213,8 +209,8 @@ def test_post_permission_grant_with_auth_failed_does_not_resolve_inbox_as_grante
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(
         tmp_path,
-        grant_outcome=GrantOutcome.AUTH_FAILED,
-        grant_message="user cancelled the browser flow",
+        was_granted_outcome=False,
+        grant_message="Your sign-in flow did not finish. Reason: user cancelled.",
     )
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
@@ -225,7 +221,9 @@ def test_post_permission_grant_with_auth_failed_does_not_resolve_inbox_as_grante
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["outcome"] == "AUTH_FAILED"
+    # No separate AUTH_FAILED status: a failed sign-in is reported as DENIED
+    # with a distinct message so the agent can tell the user what happened.
+    assert payload["outcome"] == "DENIED"
     assert "user cancelled" in payload["message"]
 
 

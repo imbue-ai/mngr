@@ -237,23 +237,6 @@ def test_inbox_treats_different_services_as_different_requests() -> None:
     assert inbox.get_pending_count() == 2
 
 
-def test_request_response_round_trips_auth_failed_status(tmp_path: Path) -> None:
-    response = create_request_response_event(
-        request_event_id="evt-abc",
-        status=RequestStatus.AUTH_FAILED,
-        agent_id="agent-1",
-        request_type=str(RequestType.LATCHKEY_PERMISSION),
-        service_name="slack",
-    )
-    append_response_event(tmp_path, response)
-
-    loaded = load_response_events(tmp_path)
-
-    assert len(loaded) == 1
-    assert loaded[0].status == str(RequestStatus.AUTH_FAILED)
-    assert loaded[0].service_name == "slack"
-
-
 def test_inbox_response_for_latchkey_permission_removes_from_pending() -> None:
     request = create_latchkey_permission_request_event(
         agent_id="agent-1",

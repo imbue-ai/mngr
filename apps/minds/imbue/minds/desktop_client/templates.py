@@ -274,7 +274,7 @@ def render_accounts_page(
 
 
 @pure
-def render_latchkey_permission_dialog(
+def render_permission_dialog(
     agent_id: str,
     request_id: str,
     ws_name: str,
@@ -289,7 +289,7 @@ def render_latchkey_permission_dialog(
     The template only reads its ``display_name``, ``description``, and
     ``permission_schemas`` attributes.
     """
-    return JINJA_ENV.get_template("latchkey_permission.html").render(
+    return JINJA_ENV.get_template("permissions.html").render(
         agent_id=agent_id,
         request_id=request_id,
         ws_name=ws_name,

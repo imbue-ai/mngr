@@ -50,18 +50,17 @@ from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_toke
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
-from imbue.minds.desktop_client.latchkey.permission_flow import GrantOutcome
-from imbue.minds.desktop_client.latchkey.permission_flow import PermissionFlowError
-from imbue.minds.desktop_client.latchkey.permission_flow import PermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions_store import LatchkeyPermissionsStoreError
-from imbue.minds.desktop_client.latchkey.permissions_store import granted_permissions_for_service
-from imbue.minds.desktop_client.latchkey.permissions_store import load_permissions
-from imbue.minds.desktop_client.latchkey.permissions_store import permissions_path_for_agent
+from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
+from imbue.minds.desktop_client.latchkey.store import LatchkeyStoreError
+from imbue.minds.desktop_client.latchkey.store import granted_permissions_for_service
+from imbue.minds.desktop_client.latchkey.store import load_permissions
+from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.permissions import PermissionFlowError
+from imbue.minds.desktop_client.permissions import PermissionGrantHandler
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
@@ -80,9 +79,9 @@ from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_landing_page
-from imbue.minds.desktop_client.templates import render_latchkey_permission_dialog
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_permission_dialog
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
@@ -246,11 +245,11 @@ async def _managed_lifespan(
             logger.info("Stopping stream manager subprocesses...")
             stream_manager.stop()
             logger.info("Stream manager stopped.")
-        latchkey_gateway_manager: LatchkeyGatewayManager | None = inner_app.state.latchkey_gateway_manager
-        if latchkey_gateway_manager is not None:
-            logger.info("Stopping latchkey gateway manager...")
-            latchkey_gateway_manager.stop()
-            logger.info("Latchkey gateway manager stopped.")
+        latchkey: Latchkey | None = inner_app.state.latchkey
+        if latchkey is not None:
+            logger.info("Stopping Latchkey...")
+            latchkey.stop()
+            logger.info("Latchkey stopped.")
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
@@ -1336,7 +1335,7 @@ def _handle_requests_panel(
 
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    catalog = _get_latchkey_services_catalog(request)
+    catalog = _get_services_catalog(request)
     for req in pending:
         if isinstance(req, SharingRequestEvent):
             kind_label = "sharing"
@@ -1461,7 +1460,7 @@ def _handle_request_page(
         return HTMLResponse(content="<p>Request not found</p>", status_code=404)
 
     if isinstance(req_event, LatchkeyPermissionRequestEvent):
-        return _render_latchkey_permission_page(
+        return _render_permission_page(
             request_id=request_id,
             req_event=req_event,
             request=request,
@@ -1497,7 +1496,7 @@ def _handle_request_page(
     return HTMLResponse(content=html)
 
 
-def _render_latchkey_permission_page(
+def _render_permission_page(
     request_id: str,
     req_event: LatchkeyPermissionRequestEvent,
     request: Request,
@@ -1509,7 +1508,7 @@ def _render_latchkey_permission_page(
     plain explanation page with only a Deny option, since we have no
     permissions to offer the user.
     """
-    catalog = _get_latchkey_services_catalog(request)
+    catalog = _get_services_catalog(request)
     service_info = get_service_info(catalog, req_event.service_name) if catalog is not None else None
     parsed_id = AgentId(req_event.agent_id)
     ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
@@ -1532,7 +1531,7 @@ def _render_latchkey_permission_page(
     paths: WorkspacePaths = request.app.state.api_v1_paths
     pre_checked = _initial_checked_permissions(paths.data_dir, parsed_id, service_info)
 
-    rendered = render_latchkey_permission_dialog(
+    rendered = render_permission_dialog(
         agent_id=req_event.agent_id,
         request_id=request_id,
         ws_name=ws_name,
@@ -1543,10 +1542,10 @@ def _render_latchkey_permission_page(
     return HTMLResponse(content=rendered)
 
 
-def _get_latchkey_services_catalog(
+def _get_services_catalog(
     request: Request,
 ) -> Mapping[str, ServicePermissionInfo] | None:
-    catalog: Mapping[str, ServicePermissionInfo] | None = request.app.state.latchkey_services_catalog
+    catalog: Mapping[str, ServicePermissionInfo] | None = request.app.state.services_catalog
     return catalog
 
 
@@ -1565,7 +1564,7 @@ def _initial_checked_permissions(
     path = permissions_path_for_agent(data_dir, agent_id)
     try:
         config = load_permissions(path)
-    except LatchkeyPermissionsStoreError as e:
+    except LatchkeyStoreError as e:
         logger.warning("Could not load permissions for {}; using catalog defaults: {}", agent_id, e)
         return service_info.default_permissions
 
@@ -1760,7 +1759,7 @@ async def _handle_request_grant(
     return Response(status_code=303, headers={"Location": "/"})
 
 
-async def _handle_latchkey_permission_grant(
+async def _handle_permission_grant(
     request_id: str,
     request: Request,
     auth_store: AuthStoreDep,
@@ -1775,7 +1774,7 @@ async def _handle_latchkey_permission_grant(
     if not isinstance(req_event, LatchkeyPermissionRequestEvent):
         return _json_error("Request not found or not a latchkey permission request", status_code=404)
 
-    catalog = _get_latchkey_services_catalog(request)
+    catalog = _get_services_catalog(request)
     if catalog is None:
         return _json_error("Latchkey permissions not configured on this server", status_code=500)
     service_info = get_service_info(catalog, req_event.service_name)
@@ -1785,7 +1784,7 @@ async def _handle_latchkey_permission_grant(
             status_code=400,
         )
 
-    handler: PermissionGrantHandler | None = request.app.state.latchkey_permission_handler
+    handler: PermissionGrantHandler | None = request.app.state.permission_handler
     if handler is None:
         return _json_error("Latchkey permission handler not configured", status_code=500)
 
@@ -1799,7 +1798,7 @@ async def _handle_latchkey_permission_grant(
 
     parsed_agent_id = AgentId(req_event.agent_id)
     try:
-        result = await asyncio.get_running_loop().run_in_executor(
+        was_granted, message = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: handler.grant(
                 request_event_id=request_id,
@@ -1811,9 +1810,11 @@ async def _handle_latchkey_permission_grant(
     except PermissionFlowError as e:
         return _json_error(str(e), status_code=400)
 
+    # A failed sign-in is reported as a deny: there is no separate
+    # AUTH_FAILED status; the explanatory message carries the nuance.
     response_event = create_request_response_event(
         request_event_id=request_id,
-        status=RequestStatus.GRANTED if result.outcome == GrantOutcome.GRANTED else RequestStatus.AUTH_FAILED,
+        status=RequestStatus.GRANTED if was_granted else RequestStatus.DENIED,
         agent_id=req_event.agent_id,
         request_type=req_event.request_type,
         service_name=req_event.service_name,
@@ -1821,12 +1822,17 @@ async def _handle_latchkey_permission_grant(
     request.app.state.request_inbox = inbox.add_response(response_event)
 
     return Response(
-        content=json.dumps({"outcome": str(result.outcome), "message": result.message}),
+        content=json.dumps(
+            {
+                "outcome": "GRANTED" if was_granted else "DENIED",
+                "message": message,
+            }
+        ),
         media_type="application/json",
     )
 
 
-async def _handle_latchkey_permission_deny(
+async def _handle_permission_deny(
     request_id: str,
     request: Request,
     auth_store: AuthStoreDep,
@@ -1841,7 +1847,7 @@ async def _handle_latchkey_permission_deny(
     if not isinstance(req_event, LatchkeyPermissionRequestEvent):
         return _json_error("Request not found or not a latchkey permission request", status_code=404)
 
-    catalog = _get_latchkey_services_catalog(request)
+    catalog = _get_services_catalog(request)
     if catalog is None:
         return _json_error("Latchkey permissions not configured on this server", status_code=500)
     service_info = get_service_info(catalog, req_event.service_name)
@@ -1851,7 +1857,7 @@ async def _handle_latchkey_permission_deny(
             status_code=400,
         )
 
-    handler: PermissionGrantHandler | None = request.app.state.latchkey_permission_handler
+    handler: PermissionGrantHandler | None = request.app.state.permission_handler
     if handler is None:
         return _json_error("Latchkey permission handler not configured", status_code=500)
 
@@ -2039,7 +2045,7 @@ def create_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
-    latchkey_gateway_manager: LatchkeyGatewayManager | None = None,
+    latchkey: Latchkey | None = None,
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
@@ -2050,8 +2056,8 @@ def create_desktop_client(
     session_store: MultiAccountSessionStore | None = None,
     auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
-    latchkey_services_catalog: Mapping[str, ServicePermissionInfo] | None = None,
-    latchkey_permission_handler: PermissionGrantHandler | None = None,
+    services_catalog: Mapping[str, ServicePermissionInfo] | None = None,
+    permission_handler: PermissionGrantHandler | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
 ) -> FastAPI:
@@ -2104,7 +2110,7 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
-    app.state.latchkey_gateway_manager = latchkey_gateway_manager
+    app.state.latchkey = latchkey
     app.state.stream_manager = stream_manager
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
@@ -2114,8 +2120,8 @@ def create_desktop_client(
     app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
-    app.state.latchkey_services_catalog = latchkey_services_catalog
-    app.state.latchkey_permission_handler = latchkey_permission_handler
+    app.state.services_catalog = services_catalog
+    app.state.permission_handler = permission_handler
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     # Populated with the running loop by _managed_lifespan on startup. Defined
@@ -2189,8 +2195,8 @@ def create_desktop_client(
     app.get("/requests/{request_id}")(_handle_request_page)
     app.post("/requests/{request_id}/grant")(_handle_request_grant)
     app.post("/requests/{request_id}/deny")(_handle_request_deny)
-    app.post("/requests/{request_id}/permission/grant")(_handle_latchkey_permission_grant)
-    app.post("/requests/{request_id}/permission/deny")(_handle_latchkey_permission_deny)
+    app.post("/requests/{request_id}/permission/grant")(_handle_permission_grant)
+    app.post("/requests/{request_id}/permission/deny")(_handle_permission_deny)
 
     # Sharing editor routes (used by both request approval and direct editing)
     app.get("/sharing/{agent_id}/{service_name}")(_handle_sharing_page)

@@ -49,7 +49,6 @@ class RequestStatus(UpperCaseStrEnum):
 
     GRANTED = auto()
     DENIED = auto()
-    AUTH_FAILED = auto()
 
 
 def _generate_event_id() -> EventId:

@@ -1,26 +1,33 @@
-"""Per-agent Latchkey gateway processes for locally-reachable agents.
+"""Single wrapper around all interactions with the latchkey CLI.
 
-For each workspace agent, the desktop client spawns a dedicated ``latchkey
-gateway`` subprocess bound to a free port on 127.0.0.1. Outside of the `dev`
-launch mode, gateway is exposed to the agent via an SSH reverse tunnel.
+The ``Latchkey`` class consolidates three responsibilities that all
+ultimately shell out to the same upstream binary:
 
-Gateways are intentionally *detached* from the desktop client: once spawned
-they keep running even if the desktop client exits. On the next desktop-client
-launch we reconcile persisted state with the set of live processes and the
-set of currently known agents:
+1. Spawning, adopting, and tracking per-agent ``latchkey gateway``
+   subprocesses (the lifecycle work that used to live in a separate
+   ``LatchkeyGatewayManager``).
+2. Probing credential status for a service via ``latchkey services info``.
+3. Launching the interactive ``latchkey auth browser`` flow when the user
+   needs to authenticate.
 
-- Persisted records whose subprocess is still running and still matches
-  our expected command line + port are adopted as-is.
-- Persisted records whose subprocess is dead are dropped.
-- After the initial ``mngr observe`` snapshot has arrived, gateways whose
-  agent is no longer discovered are terminated and their records deleted.
+Keeping these in one class means there is exactly one place that knows
+about the binary path, the shared ``LATCHKEY_DIRECTORY``, and the global
+locking concerns, and exactly one place to mock or replace when something
+needs to change.
+
+The mngr-stream discovery callbacks (``LatchkeyDiscoveryHandler`` etc.)
+also live here because they exist purely to wire ``Latchkey`` into the
+agent-lifecycle event flow.
 """
 
+import json
+import os
 import shutil
 import socket
 import threading
 from datetime import datetime
 from datetime import timezone
+from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -30,19 +37,21 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.minds.desktop_client.latchkey._spawn import spawn_detached_latchkey_gateway
-from imbue.minds.desktop_client.latchkey.permissions_store import delete_permissions_for_agent
-from imbue.minds.desktop_client.latchkey.permissions_store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
 from imbue.minds.desktop_client.latchkey.store import delete_gateway_info
+from imbue.minds.desktop_client.latchkey.store import delete_permissions_for_agent
 from imbue.minds.desktop_client.latchkey.store import ensure_browser_log_path
 from imbue.minds.desktop_client.latchkey.store import gateway_log_path
 from imbue.minds.desktop_client.latchkey.store import list_gateway_infos
+from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_gateway_info
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
@@ -57,6 +66,11 @@ _LIVENESS_CONNECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
 
+# Generous timeouts: the browser auth flow can wait on a real human to
+# log in; services-info is normally instant but can stall on slow keychains.
+_SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
+_AUTH_BROWSER_TIMEOUT_SECONDS: Final[float] = 600.0
+
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
 # this to the dynamic per-agent gateway port on the desktop host, so the
@@ -66,16 +80,37 @@ _TERMINATE_GRACE_SECONDS: Final[float] = 5.0
 AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
 
 
-class LatchkeyGatewayError(Exception):
-    """Raised when a Latchkey gateway subprocess cannot be managed."""
+class LatchkeyError(Exception):
+    """Base exception for all latchkey wrapper failures."""
 
 
-class LatchkeyBinaryNotFoundError(LatchkeyGatewayError, FileNotFoundError):
+class LatchkeyBinaryNotFoundError(LatchkeyError, FileNotFoundError):
     """Raised when the ``latchkey`` binary is not available on PATH."""
 
 
-class LatchkeyGatewayManagerNotStartedError(LatchkeyGatewayError, RuntimeError):
-    """Raised when the manager is used before ``start()`` has been called."""
+class LatchkeyNotStartedError(LatchkeyError, RuntimeError):
+    """Raised when ``Latchkey`` is used before ``start()`` has been called."""
+
+
+class CredentialStatus(UpperCaseStrEnum):
+    """Latchkey-reported credential state for a service.
+
+    Mirrors detent's ``ApiCredentialStatus`` enum (``missing``, ``valid``,
+    ``invalid``, ``unknown``) but normalized to the project's enum convention.
+    """
+
+    MISSING = auto()
+    VALID = auto()
+    INVALID = auto()
+    UNKNOWN = auto()
+
+
+_CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
+    "missing": CredentialStatus.MISSING,
+    "valid": CredentialStatus.VALID,
+    "invalid": CredentialStatus.INVALID,
+    "unknown": CredentialStatus.UNKNOWN,
+}
 
 
 def _allocate_free_port(host: str) -> int:
@@ -184,12 +219,28 @@ def _terminate_pid(pid: int) -> None:
         logger.debug("Could not terminate pid {}: {}", pid, e)
 
 
-class LatchkeyGatewayManager(MutableModel):
-    """Spawns, adopts, and tracks per-agent ``latchkey gateway`` subprocesses.
+def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
+    """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
 
-    Gateways are spawned detached (``start_new_session=True`` inside
-    :func:`spawn_detached_latchkey_gateway`) so they survive desktop-client
-    restarts. Lifecycle is reconciled against persisted records on start.
+    Returns ``None`` when no override is requested so the child inherits
+    the parent environment unchanged.
+    """
+    if latchkey_directory is None:
+        return None
+    env = dict(os.environ)
+    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    return env
+
+
+class Latchkey(MutableModel):
+    """Wraps every interaction with the upstream ``latchkey`` CLI.
+
+    Spawns, adopts, and tracks per-agent ``latchkey gateway`` subprocesses;
+    exposes ``services_info`` to query credential state; and ``auth_browser``
+    to launch the interactive sign-in flow. Gateways are spawned detached
+    (``start_new_session=True`` inside :func:`spawn_detached_latchkey_gateway`)
+    so they survive desktop-client restarts; lifecycle is reconciled against
+    persisted records on ``start()``.
     """
 
     latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
@@ -202,8 +253,9 @@ class LatchkeyGatewayManager(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Value to pass through as ``LATCHKEY_DIRECTORY`` to each spawned gateway. "
-            "When set, all minds-managed gateways share this credential/config directory "
+            "Value to pass through as ``LATCHKEY_DIRECTORY`` to every spawned subprocess "
+            "(gateway, services-info, auth-browser, ensure-browser). When set, all "
+            "minds-managed latchkey calls share this credential/config directory "
             "instead of falling back to the default ``~/.latchkey``. When ``None``, "
             "latchkey uses its own default."
         ),
@@ -215,8 +267,10 @@ class LatchkeyGatewayManager(MutableModel):
     _is_started: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
+    # -- Gateway lifecycle ---------------------------------------------------
+
     def start(self, data_dir: Path) -> None:
-        """Load persisted infos from ``data_dir``, adopting still-alive gateways.
+        """Load persisted gateway infos from ``data_dir``, adopting still-alive ones.
 
         Dead records are removed from disk. Gateways that are still running
         and still look like ours are tracked internally so subsequent calls
@@ -224,9 +278,8 @@ class LatchkeyGatewayManager(MutableModel):
 
         Liveness probes include a TCP connect per info (up to
         ``_LIVENESS_CONNECT_TIMEOUT_SECONDS`` each), which is why they run
-        outside the manager lock. ``start()`` is only expected to be called
-        once before any concurrent use of the manager, so there is no real
-        contention to worry about here.
+        outside the lock. ``start()`` is only expected to be called once
+        before any concurrent use, so there is no real contention here.
         """
         adopted: list[LatchkeyGatewayInfo] = []
         stale: list[LatchkeyGatewayInfo] = []
@@ -260,7 +313,7 @@ class LatchkeyGatewayManager(MutableModel):
             self._is_started = True
 
     def stop(self) -> None:
-        """Release manager state without terminating running gateways.
+        """Release in-memory state without terminating running gateways.
 
         Gateways must survive desktop-client exit. This method only drops
         the in-memory tracking; the persisted records and the subprocesses
@@ -278,8 +331,8 @@ class LatchkeyGatewayManager(MutableModel):
         allocated free port and persists a record.
 
         The slow steps -- liveness probe of an existing info and subprocess
-        spawn -- run outside the manager lock; committing the result to
-        ``_infos`` and the on-disk record is done atomically under the lock.
+        spawn -- run outside the lock; committing the result to ``_infos``
+        and the on-disk record is done atomically under the lock.
         """
         aid_str = str(agent_id)
         with self._lock:
@@ -295,13 +348,13 @@ class LatchkeyGatewayManager(MutableModel):
         return info
 
     def stop_gateway_for_agent(self, agent_id: AgentId) -> None:
-        """Terminate the gateway for ``agent_id`` and delete its record.
+        """Terminate the gateway for ``agent_id`` and delete its records.
 
         The in-memory entry and the on-disk record are removed atomically
-        under the manager lock so no other caller can observe a half-torn-down
+        under the lock so no other caller can observe a half-torn-down
         state. ``_terminate_pid`` is deliberately called outside the lock
         because it can wait up to ``_TERMINATE_GRACE_SECONDS`` for the child
-        to exit. The per-agent permissions file is also removed so a
+        to exit. The per-agent ``permissions.json`` is also removed so a
         future agent reusing the same id starts with a clean slate.
         """
         aid_str = str(agent_id)
@@ -341,10 +394,100 @@ class LatchkeyGatewayManager(MutableModel):
         with self._lock:
             return tuple(self._infos.values())
 
+    # -- Service introspection -----------------------------------------------
+
+    def services_info(self, service_name: str) -> CredentialStatus:
+        """Run ``latchkey services info <service>`` and return the credential state.
+
+        Latchkey emits pretty-printed JSON to stdout; we parse it and pull
+        out ``credentialStatus``. Any failure (process error, malformed
+        output, unrecognized status string) yields ``CredentialStatus.UNKNOWN``
+        so the caller falls back to launching the browser flow rather than
+        wrongly assuming credentials are valid.
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-services-info")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[self.latchkey_binary, "services", "info", service_name],
+                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=env,
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "latchkey services info {} exited {}: {}",
+                service_name,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return CredentialStatus.UNKNOWN
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse 'latchkey services info {}' output as JSON: {}", service_name, e)
+            return CredentialStatus.UNKNOWN
+
+        if not isinstance(payload, dict):
+            logger.warning("'latchkey services info {}' returned non-object JSON", service_name)
+            return CredentialStatus.UNKNOWN
+
+        raw_status = payload.get("credentialStatus")
+        if not isinstance(raw_status, str):
+            logger.warning(
+                "'latchkey services info {}' did not include a credentialStatus string",
+                service_name,
+            )
+            return CredentialStatus.UNKNOWN
+
+        status = _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE.get(raw_status)
+        if status is None:
+            logger.warning(
+                "Unrecognized credentialStatus {!r} from 'latchkey services info {}'",
+                raw_status,
+                service_name,
+            )
+            return CredentialStatus.UNKNOWN
+        return status
+
+    # -- Interactive auth ----------------------------------------------------
+
+    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+        """Run ``latchkey auth browser <service>`` and report success or failure.
+
+        Returns ``(True, "")`` on a clean exit. Any non-zero exit -- whether
+        from a cancelled browser flow, network failure, or something else --
+        returns ``(False, message)`` where ``message`` carries the latchkey
+        stderr (or stdout, or a generic fallback).
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        cg = ConcurrencyGroup(name="latchkey-auth-browser")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[self.latchkey_binary, "auth", "browser", service_name],
+                timeout=_AUTH_BROWSER_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=env,
+            )
+        if result.returncode == 0:
+            logger.info("latchkey auth browser {} succeeded", service_name)
+            return True, ""
+        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser failed"
+        logger.warning(
+            "latchkey auth browser {} exited {}: {}",
+            service_name,
+            result.returncode,
+            message,
+        )
+        return False, message
+
+    # -- Internals -----------------------------------------------------------
+
     def _require_started_locked(self) -> Path:
         if not self._is_started or self._data_dir is None:
-            raise LatchkeyGatewayManagerNotStartedError(
-                "LatchkeyGatewayManager.start(data_dir=...) must be called before use"
+            raise LatchkeyNotStartedError(
+                "Latchkey.start(data_dir=...) must be called before use",
             )
         return self._data_dir
 
@@ -352,7 +495,7 @@ class LatchkeyGatewayManager(MutableModel):
         """Build a fresh ``LatchkeyGatewayInfo`` by spawning a detached gateway.
 
         Does not mutate ``_infos`` or persist the info -- the caller is
-        responsible for committing both under the manager lock.
+        responsible for committing both under the lock.
         """
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
@@ -382,7 +525,7 @@ class LatchkeyGatewayManager(MutableModel):
                     permissions_config_path=permissions_path,
                 )
             except OSError as e:
-                raise LatchkeyGatewayError(f"Failed to spawn Latchkey gateway for agent {agent_id}: {e}") from e
+                raise LatchkeyError(f"Failed to spawn Latchkey gateway for agent {agent_id}: {e}") from e
 
         return LatchkeyGatewayInfo(
             agent_id=agent_id,
@@ -393,7 +536,7 @@ class LatchkeyGatewayManager(MutableModel):
         )
 
     def _ensure_browser_once(self, data_dir: Path) -> None:
-        """Spawn ``latchkey ensure-browser`` the first time we're asked to, per manager lifetime.
+        """Spawn ``latchkey ensure-browser`` the first time we're asked to, per Latchkey lifetime.
 
         ``ensure-browser`` discovers or downloads a Playwright-compatible
         browser into the shared latchkey directory. It only needs to succeed
@@ -419,7 +562,10 @@ class LatchkeyGatewayManager(MutableModel):
         logger.info("Spawned ``latchkey ensure-browser`` (pid={}, log={})", pid, log_path)
 
 
-class LatchkeyGatewayDiscoveryHandler(FrozenModel):
+# -- mngr-stream discovery callbacks ------------------------------------------
+
+
+class LatchkeyDiscoveryHandler(FrozenModel):
     """Discovery callback that spawns a Latchkey gateway for each agent and tunnels it in.
 
     Intended to be registered via ``MngrStreamManager.add_on_agent_discovered_callback``.
@@ -432,7 +578,7 @@ class LatchkeyGatewayDiscoveryHandler(FrozenModel):
     env var points directly at the dynamic host port.
     """
 
-    gateway_manager: LatchkeyGatewayManager = Field(description="Manager that owns the gateway subprocesses")
+    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
     tunnel_manager: SSHTunnelManager = Field(
         description="SSH tunnel manager used to reverse-forward the host-side gateway into remote agents"
     )
@@ -440,8 +586,8 @@ class LatchkeyGatewayDiscoveryHandler(FrozenModel):
     def __call__(self, agent_id: AgentId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         del provider_name
         try:
-            info = self.gateway_manager.ensure_gateway_started(agent_id)
-        except LatchkeyGatewayError as e:
+            info = self.latchkey.ensure_gateway_started(agent_id)
+        except LatchkeyError as e:
             logger.warning("Failed to start Latchkey gateway for agent {}: {}", agent_id, e)
             return
 
@@ -465,25 +611,25 @@ class LatchkeyGatewayDiscoveryHandler(FrozenModel):
             )
 
 
-class LatchkeyGatewayDestructionHandler(FrozenModel):
+class LatchkeyDestructionHandler(FrozenModel):
     """Discovery callback that tears down the gateway when an agent is destroyed."""
 
-    gateway_manager: LatchkeyGatewayManager = Field(description="Manager that owns the gateway subprocesses")
+    latchkey: Latchkey = Field(description="Latchkey wrapper that owns the gateway subprocesses")
 
     def __call__(self, agent_id: AgentId) -> None:
-        self.gateway_manager.stop_gateway_for_agent(agent_id)
+        self.latchkey.stop_gateway_for_agent(agent_id)
 
 
-class LatchkeyGatewayReconcileCallback(MutableModel):
+class LatchkeyReconcileCallback(MutableModel):
     """Resolver change callback that reconciles gateways once initial discovery completes.
 
     Registered against ``MngrCliBackendResolver.add_on_change_callback`` by the
-    desktop client startup. Fires once (the first time ``has_completed_initial_discovery``
-    returns True), terminates any gateways whose agent is no longer known, then
-    unregisters itself.
+    desktop client startup. Fires once (the first time
+    ``has_completed_initial_discovery`` returns True), terminates any gateways
+    whose agent is no longer known, then unregisters itself.
     """
 
-    gateway_manager: LatchkeyGatewayManager = Field(frozen=True, description="Manager to reconcile")
+    latchkey: Latchkey = Field(frozen=True, description="Latchkey wrapper to reconcile")
     resolver: MngrCliBackendResolver = Field(
         frozen=True, description="Backend resolver whose discovery status we watch"
     )
@@ -499,5 +645,5 @@ class LatchkeyGatewayReconcileCallback(MutableModel):
                 return
             self._has_fired = True
         known_agent_ids = frozenset(self.resolver.list_known_agent_ids())
-        self.gateway_manager.reconcile_with_known_agents(known_agent_ids)
+        self.latchkey.reconcile_with_known_agents(known_agent_ids)
         self.resolver.remove_on_change_callback(self)
