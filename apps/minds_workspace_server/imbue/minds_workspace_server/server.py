@@ -140,18 +140,6 @@ def _stop_all_watchers(application: FastAPI) -> None:
     watchers.clear()
 
 
-def _broadcast_session_events(event_queues: AgentEventQueues, agent_id: str, events: list[dict[str, Any]]) -> None:
-    """Broadcast session events to subscribers without populating the replay buffer.
-
-    Session events are persisted on disk in JSONL files and recoverable via the
-    REST ``/events`` endpoint. Storing them in the in-memory replay buffer
-    would cause unbounded growth for the lifetime of the agent. Reconnecting
-    SSE clients re-snapshot via REST instead of relying on a buffer replay.
-    """
-    for event in events:
-        event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
-
-
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
     """Get an existing watcher for an agent, or create one."""
     watchers: dict[str, AgentSessionWatcher] = request.app.state.watchers
@@ -161,7 +149,11 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         return watchers[agent_info.id]
 
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
-        _broadcast_session_events(event_queues, agent_id, events)
+        # IGNORE: session events are persisted in JSONL and recoverable via
+        # the REST /events endpoint; storing them in the in-memory replay
+        # buffer would grow unboundedly for the agent's lifetime.
+        for event in events:
+            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,

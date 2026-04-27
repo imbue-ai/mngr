@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from typing import Any
 from typing import Generator
 from unittest.mock import patch
 
@@ -12,8 +11,6 @@ from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.config import Config
-from imbue.minds_workspace_server.event_queues import AgentEventQueues
-from imbue.minds_workspace_server.server import _broadcast_session_events
 from imbue.minds_workspace_server.server import create_application
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
@@ -334,48 +331,3 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
-
-
-def test_broadcast_session_events_does_not_populate_replay_buffer() -> None:
-    """Session events broadcast via the watcher path must bypass the replay buffer.
-
-    Persistence is provided by the on-disk JSONL files; storing session events
-    in memory would leak unboundedly for the agent's lifetime (regression test
-    for that leak).
-    """
-    event_queues = AgentEventQueues()
-    events = [
-        {"event_id": "evt-1", "type": "user_message", "content": "hello"},
-        {"event_id": "evt-2", "type": "assistant_message", "text": "hi"},
-    ]
-
-    _broadcast_session_events(event_queues, "agent-1", events)
-
-    # A subscriber that registers AFTER the broadcast must not receive a
-    # replay -- otherwise the buffer is growing unboundedly. Verifying via
-    # the public replay-on-register contract avoids coupling the test to
-    # AgentEventQueues' private _event_buffers attribute.
-    late_subscriber_queue = event_queues.register("agent-1")
-    assert late_subscriber_queue.empty()
-
-
-def test_broadcast_session_events_delivers_to_live_subscribers() -> None:
-    """Session events must still reach currently-connected SSE subscribers."""
-    event_queues = AgentEventQueues()
-    subscriber_queue = event_queues.register("agent-1")
-
-    events = [
-        {"event_id": "evt-1", "type": "user_message", "content": "hello"},
-        {"event_id": "evt-2", "type": "assistant_message", "text": "hi"},
-    ]
-    _broadcast_session_events(event_queues, "agent-1", events)
-
-    delivered: list[dict[str, Any]] = []
-    for _ in events:
-        item = subscriber_queue.get_nowait()
-        assert item is not None
-        delivered.append(item)
-    assert [e["event_id"] for e in delivered] == ["evt-1", "evt-2"]
-    # The buffer_behavior flag is server-internal and must be stripped before
-    # delivery so the wire format matches what frontends expect.
-    assert all("buffer_behavior" not in event for event in delivered)

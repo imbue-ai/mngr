@@ -10,15 +10,11 @@ import { apiUrl } from "../base-path";
 import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
 
 const activeStreams = new Map<string, EventSource>();
-// Tombstones for agents whose streams were explicitly closed via
-// disconnectFromStream. Used by pending error-triggered reconnect timeouts
-// to distinguish an intentional shutdown from a transient error.
+// Set so an error-triggered reconnect timeout can tell an intentional close
+// from a transient error.
 const explicitlyDisconnectedAgents = new Set<string>();
-// Per-agent buffer that captures SSE events arriving while a reconnect-time
-// snapshot fetch is in flight. The fetch's response REPLACES
-// eventsByAgent[agentId]; without buffering, deltas that landed during the
-// fetch would be lost. Drained via appendEvents (which dedups) once the
-// fetch settles.
+// Holds SSE deltas that arrive while a reconnect-time snapshot fetch is in
+// flight, so fetchEvents replacing eventsByAgent[agentId] does not drop them.
 const inFlightSnapshotBuffersByAgent = new Map<string, TranscriptEvent[]>();
 
 export interface StreamingMessage {
@@ -52,10 +48,6 @@ export function connectToStream(agentId: string): void {
   };
 
   eventSource.onerror = () => {
-    // Close this specific stream and schedule a reconnect. Reconnect is
-    // skipped if another caller already reconnected this agent, or if the
-    // agent was explicitly disconnected (e.g. its panel was unmounted) while
-    // this timeout was pending.
     if (activeStreams.get(agentId) === eventSource) {
       eventSource.close();
       activeStreams.delete(agentId);
@@ -70,45 +62,22 @@ export function connectToStream(agentId: string): void {
 }
 
 async function reconnectWithSnapshot(agentId: string): Promise<void> {
-  // The server no longer keeps an unbounded in-memory replay buffer of
-  // session events (those are persisted in JSONL on disk). On a transient
-  // SSE reconnect, refetch the JSONL snapshot so events that occurred
-  // during the disconnect window are recovered from the source of truth,
-  // then resubscribe to live deltas.
-  //
-  // Subscribe to SSE first (and buffer arriving events) so deltas that land
-  // between the snapshot read and the EventSource being registered on the
-  // server are not lost. Once the fetch settles, the buffered events are
-  // re-applied via appendEvents, which dedups by event_id.
-  //
-  // We capture the buffer array by reference (rather than re-reading from
-  // the map in `finally`) so a concurrent reconnectWithSnapshot for the
-  // same agent -- which can happen if the new EventSource also errors and
-  // triggers its own 3s reconnect while this fetch is still in flight --
-  // cannot orphan and silently discard our buffered events. Each
-  // invocation drains its own buffer; appendEvents dedups by event_id.
+  // Subscribe to SSE before the snapshot fetch so deltas that arrive
+  // between the snapshot read and the EventSource being registered land in
+  // `buffer` instead of being dropped. Hold `buffer` by reference (not via
+  // map lookup in `finally`) so a concurrent reconnect that replaces the
+  // map slot cannot orphan our buffered events.
   const buffer: TranscriptEvent[] = [];
   inFlightSnapshotBuffersByAgent.set(agentId, buffer);
   connectToStream(agentId);
   try {
     await fetchEvents(agentId);
   } catch (error) {
-    // Fetch failure is non-fatal; the next SSE error will trigger another
-    // reconnect attempt. Log so the failure is still visible in devtools.
     console.warn(`Snapshot refetch failed for agent ${agentId} during SSE reconnect`, error);
   } finally {
-    // Only clear the map slot if it still points at our buffer; a later
-    // reconnectWithSnapshot may have replaced it, and that newer
-    // invocation owns the slot now.
     if (inFlightSnapshotBuffersByAgent.get(agentId) === buffer) {
       inFlightSnapshotBuffersByAgent.delete(agentId);
     }
-    // If the agent was explicitly disconnected (e.g. its panel was
-    // unmounted) while the snapshot fetch was in flight, do not drain
-    // buffered deltas into the global event store -- the user has moved
-    // on and applying them would mutate state for a torn-down view.
-    // Mirrors the guard that the onerror reconnect timeout already
-    // applies before reviving a stream.
     if (buffer.length > 0 && !explicitlyDisconnectedAgents.has(agentId)) {
       appendEvents(agentId, buffer);
     }
@@ -116,9 +85,8 @@ async function reconnectWithSnapshot(agentId: string): Promise<void> {
 }
 
 export function disconnectFromStream(agentId: string): void {
-  // Always record the intent, even if no stream is currently active. A
-  // pending error-triggered reconnect timeout for this agent must see the
-  // tombstone so it does not revive the stream.
+  // Always record the intent, even with no active stream, so a pending
+  // error-triggered reconnect timeout sees the tombstone and stays down.
   explicitlyDisconnectedAgents.add(agentId);
   const eventSource = activeStreams.get(agentId);
   if (eventSource !== undefined) {
