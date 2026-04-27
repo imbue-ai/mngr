@@ -425,7 +425,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         self,
         command: Sequence[str],
         timeout: float | None = None,
-        is_checked_by_group: bool = False,
+        is_checked_by_group: bool = True,
         on_output: Callable[[str, bool], None] | None = None,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
