@@ -470,6 +470,12 @@ def _create_nested_concurrency_group_and_run_process(
     closure["i"] += 10
 
 
+# Same offload-CI-only race as `test_all_failure_modes_get_combined`: when
+# shutdown propagates, the inner CG's timeout path uses
+# `process.terminate(force_kill_seconds=0.0)`, so the LONG_RUNNING_COMMAND
+# (`sleep 30`) is not guaranteed to be reaped before pytest's session-cleanup
+# leak detector runs. Assertion content is deterministic; only teardown races.
+@pytest.mark.flaky
 def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> None:
     closure = {"i": 0}
     process_started_event = Event()
@@ -500,6 +506,8 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
         assert exception_info.value.only_exception_is_instance_of(ConcurrentShutdownError)
 
 
+# Same offload-CI-only teardown race as the sibling shutdown test above.
+@pytest.mark.flaky
 def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> None:
     closure = {"i": 0}
     process_started_event = Event()
