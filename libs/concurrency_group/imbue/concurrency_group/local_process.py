@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextvars
+import math
+import time
 from pathlib import Path
 from queue import Empty
 from queue import Queue
@@ -29,11 +31,15 @@ class RunningProcess:
         output_queue: Queue[tuple[str, bool]] | None,
         shutdown_event: MutableEvent,
         is_checked: bool = False,
+        check_interval: float = math.inf,
     ) -> None:
         self._command = command
         self._output_queue = output_queue
         self._shutdown_event = shutdown_event
         self._is_checked = is_checked
+        self._check_interval = check_interval
+        self._last_check_time = time.monotonic()
+        self._finished_event = Event()
         self._completed_process: FinishedProcess | None = None
         self._thread: ObservableThread | None = None
         self._stdout_lines: list[str] = []
@@ -100,9 +106,27 @@ class RunningProcess:
         return result
 
     def check(self) -> None:
+        self._last_check_time = time.monotonic()
         if self.returncode is not None and self.returncode != 0:
             stdout, stderr = self.read_stdout(), self.read_stderr()
             raise ProcessError(tuple(self._command), stdout, stderr, self.returncode)
+
+    @property
+    def check_interval(self) -> float:
+        return self._check_interval
+
+    @property
+    def finished_event(self) -> Event:
+        return self._finished_event
+
+    @property
+    def shutdown_event(self) -> MutableEvent:
+        return self._shutdown_event
+
+    def seconds_until_check_overdue(self) -> float:
+        if math.isinf(self._check_interval):
+            return math.inf
+        return (self._last_check_time + self._check_interval) - time.monotonic()
 
     def poll(self) -> int | None:
         thread = self._thread
@@ -128,6 +152,8 @@ class RunningProcess:
 
     def terminate(self, force_kill_seconds: float = 5.0) -> None:
         self._shutdown_event.set()
+        # Wake any check-watchdog immediately; we're done with this process.
+        self._finished_event.set()
         thread = self._thread
         assert thread is not None
         thread.join(timeout=force_kill_seconds)
@@ -157,7 +183,10 @@ class RunningProcess:
         return f"RunningProcess: {' '.join(self._command)}"
 
     def run(self, kwargs: dict) -> None:
-        self._completed_process = run_local_command_modern_version(**kwargs)
+        try:
+            self._completed_process = run_local_command_modern_version(**kwargs)
+        finally:
+            self._finished_event.set()
 
     def get_timed_out(self) -> bool:
         if self._completed_process is None:
@@ -187,6 +216,7 @@ def run_background(
     env: Mapping[str, str] | None = None,
     process_class: type[ProcessClassType] = RunningProcess,  # type: ignore[assignment]
     process_class_kwargs: Mapping[str, object] | None = None,
+    check_interval: float = math.inf,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
@@ -204,6 +234,7 @@ def run_background(
         shutdown_event=true_shutdown_event,
         command=command,
         is_checked=is_checked,
+        check_interval=check_interval,
         **(process_class_kwargs or {}),
     )
     process.start(

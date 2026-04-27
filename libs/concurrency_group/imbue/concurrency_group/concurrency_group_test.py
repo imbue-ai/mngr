@@ -1,4 +1,5 @@
 import contextlib
+import math
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -15,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.concurrency_group.concurrency_group import ConcurrentShutdownError
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.concurrency_group import StrandTimedOutError
+from imbue.concurrency_group.errors import MissedCheckError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.test_utils import poll_until
@@ -514,6 +516,75 @@ def test_processes_get_cleaned_up() -> None:
             cg.run_process_in_background(["echo", "foo"]).wait()
         cg.run_process_in_background(["echo", "foo"])
         assert len(cg._processes) <= 1
+
+
+# check_interval / watchdog tests
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_missed_check_terminates_process_and_fails_group(tmp_path: Path) -> None:
+    # Long-running process that the caller never check()s; watchdog must fire.
+    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+        with ConcurrencyGroup(name="outer") as cg:
+            cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=0.1)
+            # Sleep long enough for the watchdog deadline to pass.
+            Event().wait(timeout=0.5)
+            cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
+    assert any(isinstance(e, MissedCheckError) for e in exception_info.value.exceptions)
+
+
+def test_check_resets_watchdog_deadline(tmp_path: Path) -> None:
+    # Caller checks at half the interval; watchdog must not fire.
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=0.2)
+        for _ in range(5):
+            Event().wait(timeout=0.1)
+            process.check()
+        process.terminate(force_kill_seconds=1.0)
+
+
+def test_check_interval_inf_disables_watchdog(tmp_path: Path) -> None:
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=math.inf)
+        # Wait longer than any reasonable default; watchdog must not fire.
+        Event().wait(timeout=0.3)
+        cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
+        process.terminate(force_kill_seconds=1.0)
+
+
+def test_watchdog_exits_cleanly_when_process_finishes(tmp_path: Path) -> None:
+    # Process exits well before deadline; watchdog should clean up without firing.
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_in_background(INSTANT_SUCCESS_COMMAND, check_interval=10.0)
+        process.wait()
+    assert process.returncode == 0
+
+
+def test_periodic_checker_satisfies_watchdog(tmp_path: Path) -> None:
+    # Long-running process with a short check_interval; periodic checker should keep watchdog happy.
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=0.2)
+        cg.start_periodic_checker(process)
+        Event().wait(timeout=0.5)
+        cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
+        process.terminate(force_kill_seconds=1.0)
+
+
+def test_periodic_checker_rejects_inf_check_interval(tmp_path: Path) -> None:
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=math.inf)
+        with pytest.raises(ValueError):
+            cg.start_periodic_checker(process)
+        process.terminate(force_kill_seconds=1.0)
+
+
+def test_watchdog_does_not_fire_during_group_exit(tmp_path: Path) -> None:
+    # Group exits with a long-running unchecked process; the exit should report only
+    # the StrandTimedOutError from the process timeout, not a MissedCheckError from the watchdog.
+    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+        with ConcurrencyGroup(name="outer", exit_timeout_seconds=0.05) as cg:
+            cg.run_process_in_background(LONG_RUNNING_COMMAND, check_interval=10.0)
+    assert all(not isinstance(e, MissedCheckError) for e in exception_info.value.exceptions)
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")

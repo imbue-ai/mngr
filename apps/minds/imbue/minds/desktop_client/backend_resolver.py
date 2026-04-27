@@ -510,6 +510,7 @@ class MngrStreamManager(MutableModel):
             on_output=self._on_discovery_stream_output,
             cwd=Path.home(),
         )
+        self._cg.start_periodic_checker(self._observe_process)
 
     def stop(self) -> None:
         """Stop all streaming subprocesses.
@@ -851,5 +852,6 @@ class MngrStreamManager(MutableModel):
                 cwd=Path.home(),
             )
             self._events_processes[aid_str] = process
+            self._cg.start_periodic_checker(process)
         except InvalidConcurrencyGroupStateError:
             logger.debug("Cannot start events stream for {} -- concurrency group is no longer active", agent_id)

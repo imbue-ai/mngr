@@ -1,3 +1,4 @@
+import math
 import platform
 import shlex
 from abc import ABC
@@ -49,7 +50,7 @@ class MacOSNotifier(Notifier):
         try:
             result = cg.run_process_to_completion(cmd, timeout=_ALERTER_TIMEOUT + 5, is_checked_after=False)
             if result.stdout.strip() in _ALERTER_CLICKED_RESPONSES:
-                cg.run_process_in_background(["sh", "-c", execute_command])
+                cg.run_process_in_background(["sh", "-c", execute_command], check_interval=math.inf)
         except FileNotFoundError:
             logger.warning("alerter not found; install with: brew install vjeantet/tap/alerter")
 

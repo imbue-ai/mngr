@@ -1,3 +1,5 @@
+import contextlib
+import math
 import time
 from collections import defaultdict
 from contextlib import AbstractContextManager
@@ -21,8 +23,10 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.concurrency_group.errors import MissedCheckError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
@@ -37,6 +41,9 @@ T = TypeVar("T")
 
 DEFAULT_EXIT_TIMEOUT_SECONDS: Final[float] = 10.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 10.0
+# If a background process is not check()'d for this long, the watchdog terminates it and fails the
+# concurrency group. Callers should call check() at roughly half this interval. Pass math.inf to opt out.
+DEFAULT_CHECK_INTERVAL_SECONDS: Final[float] = 60.0
 
 # Increase this if cleanup becomes a performance bottleneck.
 CLEANUP_INTERVAL_TICKS: Final[int] = 1
@@ -113,6 +120,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
     _lock: Lock = PrivateAttr(default_factory=Lock)
     _children: list["ConcurrencyGroup"] = PrivateAttr(default_factory=list)
     _exited_event: Event = PrivateAttr(default_factory=Event)
+    # Set when the group is winding down so check-watchdogs stop enforcing.
+    _stop_watchdogs_event: Event = PrivateAttr(default_factory=Event)
 
     # Did the concurrency group already exit with an exception?
     _exit_exception: BaseException | None = PrivateAttr(default=None)
@@ -137,6 +146,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         try:
             with self._lock:
                 self._state = ConcurrencyGroupState.EXITING
+            # Wake check-watchdogs so they don't fire while the group is winding down.
+            self._stop_watchdogs_event.set()
             self._exit(exc_value)
         except BaseException as exit_exception:
             self._exit_exception = exit_exception
@@ -430,12 +441,17 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         shutdown_event: ReadOnlyEvent | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL_SECONDS,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
 
         When `is_checked_by_group` is True, the process will be checked for failure when the concurrency group exits
         or whenever its methods are called.
+
+        `check_interval` enforces that callers call `process.check()` periodically (at roughly half the
+        interval). If the deadline passes without a check, a watchdog terminates the process and fails the
+        concurrency group with a `MissedCheckError`. Pass `math.inf` to opt out of enforcement.
         """
 
         def process_factory():
@@ -448,9 +464,45 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
+                check_interval=check_interval,
             )
 
-        return self.start_background_process_from_factory(process_factory)
+        process = self.start_background_process_from_factory(process_factory)
+        if not math.isinf(check_interval):
+            self._start_check_watchdog(process)
+        return process
+
+    def start_periodic_checker(
+        self, process: RunningProcess, interval_seconds: float | None = None
+    ) -> ObservableThread:
+        """
+        Spawn a thread that calls `process.check()` periodically, satisfying the watchdog.
+
+        Use this when there is no natural place in caller code to call `check()` (e.g. for long-running
+        background streams). The default `interval_seconds` is half the process's `check_interval`.
+        Raises if the process has `check_interval=math.inf` (no point in periodic checking).
+        """
+        if math.isinf(process.check_interval):
+            raise ValueError("Cannot periodically check a process with check_interval=math.inf.")
+        actual_interval = interval_seconds if interval_seconds is not None else process.check_interval / 2
+        return self.start_new_thread(
+            target=_periodic_checker_target,
+            args=(process, actual_interval, self._stop_watchdogs_event),
+            name=f"periodic-checker: {' '.join(process.command)}",
+            is_checked=True,
+        )
+
+    def _start_check_watchdog(self, process: RunningProcess) -> None:
+        watchdog = ObservableThread(
+            target=_check_watchdog_target,
+            args=(process, self._stop_watchdogs_event),
+            name=f"check-watchdog: {' '.join(process.command)}",
+            daemon=True,
+        )
+        with self._lock:
+            self._raise_if_not_active()
+            watchdog.start()
+            self._threads.append(_TrackedThread(thread=watchdog, is_checked=True))
 
     def run_process_to_completion(
         self,
@@ -476,6 +528,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             shutdown_event=shutdown_event,
             on_output=on_output,
             is_checked_by_group=False,
+            check_interval=math.inf,
         )
         process.wait()
         if is_checked_after:
@@ -566,6 +619,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         for child in self._children:
             child.shutdown()
         self.shutdown_event.set()
+        self._stop_watchdogs_event.set()
 
 
 class RunningProcessWithOnLineCallback(RunningProcess):
@@ -605,6 +659,36 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
         else:
             deduplicated_process_errors.append(bucket[0])
     return tuple(other_exceptions + deduplicated_process_errors)
+
+
+def _periodic_checker_target(process: RunningProcess, interval_seconds: float, stop_event: Event) -> None:
+    wake = CompoundEvent([process.finished_event, stop_event])
+    while not wake.is_set():
+        woke = wake.wait(timeout=interval_seconds)
+        # If the group is exiting or the process is being torn down, don't surface ProcessError
+        # from the impending non-zero exit -- the teardown was intentional.
+        if stop_event.is_set() or process.shutdown_event.is_set():
+            return
+        # If `woke` is True, finished_event fired without an explicit teardown: the process
+        # exited on its own. Either way, call check() to surface any ProcessError.
+        process.check()
+        if woke:
+            return
+
+
+def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
+    wake = CompoundEvent([process.finished_event, stop_event])
+    check_interval = process.check_interval
+    while not wake.is_set():
+        remaining = process.seconds_until_check_overdue()
+        if remaining <= 0:
+            # Re-check before acting; the group may be exiting or the process may have just finished.
+            if stop_event.is_set() or process.finished_event.is_set():
+                return
+            with contextlib.suppress(Exception):
+                process.terminate(force_kill_seconds=0.0)
+            raise MissedCheckError(tuple(process.command), check_interval)
+        wake.wait(timeout=remaining)
 
 
 class StrandTimedOutError(ConcurrencyGroupError): ...

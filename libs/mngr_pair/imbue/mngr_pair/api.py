@@ -1,3 +1,4 @@
+import math
 import platform
 import threading
 from contextlib import contextmanager
@@ -143,9 +144,13 @@ class UnisonSyncer(MutableModel):
         cmd = self._build_unison_command()
         logger.debug("Starting unison with command: {}", " ".join(cmd))
 
+        # check_interval=math.inf: callers detect unison crashes via `is_running` (which polls
+        # process state); the periodic-check watchdog would duplicate that path and surface
+        # crashes as CG failures rather than letting the syncer report them.
         self._running_process = self.cg.run_process_in_background(
             cmd,
             on_output=self._on_output,
+            check_interval=math.inf,
         )
 
         logger.info("Started continuous sync between {} and {}", self.source_path, self.target_path)

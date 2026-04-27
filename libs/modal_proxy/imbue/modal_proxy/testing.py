@@ -4,6 +4,7 @@
 # via ConcurrencyGroup (which handles process tracking and cleanup).
 # Images are lightweight no-ops. Apps and environments are thin metadata.
 
+import math
 import shutil
 import uuid
 from collections.abc import Generator
@@ -227,6 +228,7 @@ class TestingSandbox(SandboxInterface):
             running = self._cg.run_process_in_background(
                 list(args),
                 is_checked_by_group=False,
+                check_interval=math.inf,
             )
             exec_proc = TestingExecProcess()
             exec_proc._running_process = running

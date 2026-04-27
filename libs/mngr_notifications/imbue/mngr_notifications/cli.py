@@ -66,6 +66,7 @@ def _ensure_observe(mngr_ctx: MngrContext) -> Iterator[RunningProcess | None]:
     process = mngr_ctx.concurrency_group.run_process_in_background(
         ["mngr", "observe", "--quiet"],
     )
+    mngr_ctx.concurrency_group.start_periodic_checker(process)
     try:
         yield process
     finally:

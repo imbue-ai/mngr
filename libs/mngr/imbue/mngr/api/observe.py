@@ -405,6 +405,7 @@ class AgentObserver(MutableModel):
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error", "continue"],
             on_output=self._on_discovery_stream_output,
         )
+        self._concurrency_group.start_periodic_checker(self._discovery_stream_process)
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
         """Handle a line of output from 'mngr observe --discovery-only'."""
@@ -482,6 +483,7 @@ class AgentObserver(MutableModel):
                 ],
                 on_output=lambda line, is_stdout: self._on_activity_event(line, is_stdout, host_id_str),
             )
+            self._concurrency_group.start_periodic_checker(process)
             with self._lock:
                 self._events_processes[host_id_str] = process
         except (BaseMngrError, OSError) as e:

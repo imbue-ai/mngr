@@ -82,3 +82,17 @@ class EnvironmentStoppedError(ConcurrencyGroupError):
     """Raised when the environment is stopped."""
 
     ...
+
+
+class MissedCheckError(ConcurrencyGroupError):
+    """Raised when a background process was not checked within its check_interval."""
+
+    def __init__(self, command: tuple[str, ...], check_interval: float) -> None:
+        self.command = command
+        self.check_interval = check_interval
+        super().__init__(
+            f"Background process was not checked within {check_interval}s and was terminated. "
+            f"command=`{' '.join(command)}`. "
+            f"Call check() periodically (recommended cadence: check_interval / 2), "
+            f"or pass check_interval=math.inf to opt out."
+        )

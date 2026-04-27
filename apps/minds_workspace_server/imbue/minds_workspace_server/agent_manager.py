@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import queue
 import shlex
@@ -654,11 +655,14 @@ class AgentManager:
             # which in turn prevents periodic DISCOVERY_FULL snapshots from
             # being written, so the workspace server's agent list drifts out
             # of sync with reality whenever an individual event is missed.
+            # check_interval=math.inf: _watch_observe_process below already detects subprocess
+            # exit (it calls process.wait() and logs); a periodic checker would duplicate that.
             process = self._observe_cg.run_process_in_background(
                 command=cmd,
                 cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
+                check_interval=math.inf,
             )
         except (OSError, InvalidConcurrencyGroupStateError):
             _loguru_logger.warning(
