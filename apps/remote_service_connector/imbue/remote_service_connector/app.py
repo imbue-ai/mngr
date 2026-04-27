@@ -1592,7 +1592,7 @@ def _litellm_request(
 
 def _litellm_base_url_for_agents() -> str:
     """Return the base URL agents should use as ANTHROPIC_BASE_URL."""
-    return _litellm_proxy_url() + "/anthropic"
+    return _litellm_proxy_url()
 
 
 # ---------------------------------------------------------------------------
