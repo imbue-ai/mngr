@@ -26,6 +26,7 @@ class ActivityState(UpperCaseStrEnum):
     WAITING_ON_PERMISSION = auto()
 
 
+@pure
 def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
     """True iff the transcript has at least one ``tool_use`` without a matching ``tool_result``.
 
