@@ -685,7 +685,10 @@ def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
             # Re-check before acting; the group may be exiting or the process may have just finished.
             if stop_event.is_set() or process.finished_event.is_set():
                 return
-            with contextlib.suppress(Exception):
+            # `terminate()` raises TimeoutExpired if the underlying thread doesn't join within
+            # force_kill_seconds. We swallow that here because we're about to raise MissedCheckError
+            # to surface the original problem, and we don't want a teardown-timeout to mask it.
+            with contextlib.suppress(TimeoutExpired):
                 process.terminate(force_kill_seconds=0.0)
             raise MissedCheckError(tuple(process.command), check_interval)
         wake.wait(timeout=remaining)
