@@ -1059,3 +1059,57 @@ def test_handle_agent_destroyed_stops_marker_watcher(
     with agent_manager._lock:
         assert str_id not in agent_manager._marker_watchers
         assert str_id not in agent_manager._activity_state_by_agent
+
+
+def test_full_snapshot_preserves_activity_state_for_existing_watcher(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A FullDiscoverySnapshot must not wipe the activity_state of agents that
+    already have a marker watcher.
+
+    Regression test: ``_handle_full_snapshot`` rebuilds ``_agents`` from the
+    raw discovery payload (which has no ``activity_state`` field), then calls
+    ``_ensure_marker_watcher`` per agent. Previously, the watcher-already-
+    exists branch returned early and skipped the recompute, so the broadcast
+    that follows the snapshot emitted ``activity_state=None`` for every
+    previously-tracked agent and the chat panel indicator briefly disappeared.
+    """
+    test_agent_id = MngrAgentId()
+    str_id = str(test_agent_id)
+
+    state_dir = tmp_path / "agents" / str_id
+    state_dir.mkdir(parents=True)
+    (state_dir / ACTIVE_MARKER_FILENAME).touch()
+
+    # First, simulate the agent already being tracked with a live watcher.
+    discovered = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("snapshot-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(discovered))
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
+        assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
+
+    # Now drain prior broadcasts so the snapshot's broadcast is the only one
+    # we read.
+    listener = broadcaster.register()
+    try:
+        snapshot_event = make_full_discovery_snapshot_event([discovered], [])
+        agent_manager._handle_full_snapshot(snapshot_event)
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        # The broadcast must carry the cached activity_state, not None.
+        assert agents[0]["id"] == str_id
+        assert agents[0]["activity_state"] == ActivityState.THINKING.value
+
+        with agent_manager._lock:
+            assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
+    finally:
+        agent_manager.stop()

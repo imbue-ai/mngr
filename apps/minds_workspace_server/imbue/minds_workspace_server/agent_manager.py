@@ -890,25 +890,36 @@ class AgentManager:
         """Start a marker watcher for ``agent_id`` if its local state dir exists.
 
         Skips agents whose state directory is not present on this host -- those
-        are tracked on a remote host and we have no markers to watch. Idempotent:
-        a second call for the same id is a no-op.
+        are tracked on a remote host and we have no markers to watch. Idempotent
+        for the watcher itself: a second call does not start a duplicate
+        observer. The cached activity state is re-applied to ``_agents`` on
+        every call, which matters because the lifecycle handlers
+        (``_handle_full_snapshot``, ``_refresh_agents``, ``_handle_agent_discovered``)
+        rebuild ``_agents`` entries from raw discovery data with
+        ``activity_state=None`` and rely on this method to repopulate it.
         """
         state_dir = self._get_agent_state_dir(agent_id)
         if not state_dir.exists():
             # Remote agent or pre-creation race: nothing to track here.
             return
         with self._lock:
-            if agent_id in self._marker_watchers:
-                return
-            watcher = AgentMarkerWatcher.build(agent_id, state_dir, self._on_markers_changed)
-            self._marker_watchers[agent_id] = watcher
-        # ``AgentMarkerWatcher.start`` handles its own OSError logging and
-        # never raises, so we don't need an outer try/except here.
-        watcher.start()
-        # Seed the cached activity state from the current marker file presence
-        # without broadcasting; the caller is expected to broadcast as part of
-        # whatever lifecycle event prompted the start (full snapshot, agent
-        # discovered, etc.).
+            already_existed = agent_id in self._marker_watchers
+            if already_existed:
+                watcher = None
+            else:
+                watcher = AgentMarkerWatcher.build(agent_id, state_dir, self._on_markers_changed)
+                self._marker_watchers[agent_id] = watcher
+        if watcher is not None:
+            # ``AgentMarkerWatcher.start`` handles its own OSError logging and
+            # never raises, so we don't need an outer try/except here.
+            watcher.start()
+        # Seed (or re-apply) the cached activity state from the current marker
+        # file presence without broadcasting; the caller is expected to
+        # broadcast as part of whatever lifecycle event prompted the start
+        # (full snapshot, agent discovered, etc.). We always recompute -- even
+        # when the watcher already existed -- so that a fresh ``AgentStateItem``
+        # built upstream (which defaults ``activity_state`` to ``None``)
+        # picks up the cached state before that broadcast goes out.
         self._recompute_activity_state(agent_id, broadcast_on_change=False)
 
     def _stop_marker_watcher(self, agent_id: str) -> None:
