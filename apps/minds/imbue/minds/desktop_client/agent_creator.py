@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Final
 from typing import assert_never
 
+import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -34,6 +35,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
@@ -45,11 +47,17 @@ from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.polling import poll_until
 
 OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
+
+# Name of the agent-side service that serves the per-workspace UI. Shared with
+# app.py (subdomain forwarder) so that one place owns the contract.
+WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
 
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
@@ -359,6 +367,21 @@ def _remote_host_env_flags() -> list[str]:
     ]
 
 
+def build_post_creation_redirect_url(agent_id: AgentId) -> str:
+    """Return the URL the creating-progress page should navigate to on success.
+
+    The browser is already on the bare origin (``localhost:PORT``), where the
+    signed session cookie lives. We send it through the same-origin
+    ``/goto/<id>/`` auth bridge, which mints a subdomain-auth token and 302s
+    to ``<id>.localhost:PORT`` -- installing the host-only subdomain cookie
+    before the workspace loads. A direct absolute URL to the subdomain would
+    fail auth (Chromium treats ``localhost`` as a public suffix, so the
+    ``Domain=localhost`` cookie does not carry across) and the user would be
+    bounced back to the homepage.
+    """
+    return "/goto/{}/".format(agent_id)
+
+
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path,
@@ -416,14 +439,13 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
-    server_port: int = Field(
-        default=0,
+    backend_resolver: BackendResolverInterface = Field(
         frozen=True,
         description=(
-            "Port the desktop client is listening on. Used to build the absolute "
-            "http://<agent-id>.localhost:<port>/ redirect URL after agent creation. "
-            "The default of 0 is only appropriate for tests that never exercise the "
-            "happy-path redirect."
+            "Resolver used to poll for workspace-server readiness after ``mngr create`` returns. "
+            "The creating-progress page stays on its log-streaming view until the workspace "
+            "server registers its URL, giving the user visible progress instead of the bare "
+            "auto-refresh retry page on the target subdomain."
         ),
     )
     latchkey_gateway_manager: LatchkeyGatewayManager | None = Field(
@@ -438,6 +460,24 @@ class AgentCreator(MutableModel):
             "bridges back via an SSH reverse tunnel once the agent is discovered."
         ),
     )
+    # Upper bound on how long to wait for the workspace server to register and
+    # start serving HTTP after mngr create returns. On timeout, creation still
+    # completes and the user is redirected -- the subdomain forwarder's
+    # auto-refresh retry page covers the remaining gap. Configurable so tests
+    # can lower it.
+    workspace_ready_timeout_seconds: float = Field(default=60.0, frozen=True)
+    workspace_ready_poll_interval_seconds: float = Field(default=0.2, frozen=True)
+    # HTTP probe timeout per attempt. The resolver learns about the workspace
+    # URL when the agent writes a line to its services/events.jsonl -- which
+    # happens around server-socket bind, before the ASGI app is fully up. A
+    # fast probe per poll lets us notice the server has actually started
+    # answering HTTP, rather than redirecting the browser into a dead page
+    # that just happens to have a registered URL.
+    workspace_ready_probe_timeout_seconds: float = Field(default=2.0, frozen=True)
+    # When False, skip the HTTP probe and treat "URL registered" as ready.
+    # Used by tests that exercise the resolver-polling path with a stub URL
+    # that isn't actually reachable.
+    workspace_ready_probe_enabled: bool = Field(default=True, frozen=True)
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -445,6 +485,11 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # HTTP client used by _probe_workspace_http. Reused across polls so we
+    # don't pay the connection-pool setup cost on every tick. Tests may
+    # replace it with an ``httpx.Client(transport=httpx.MockTransport(...))``
+    # to inject a programmed response without binding a real port.
+    _probe_http_client: httpx.Client = PrivateAttr(default_factory=httpx.Client)
 
     def start_creation(
         self,
@@ -508,6 +553,71 @@ class AgentCreator(MutableModel):
         """Get the log queue for an agent creation, or None if not tracked."""
         with self._lock:
             return self._log_queues.get(str(agent_id))
+
+    def _probe_workspace_http(self, url: str) -> bool:
+        """Return True iff a GET against ``url`` gets any HTTP response.
+
+        Any status code counts as "up" -- we're only trying to distinguish
+        "server is answering HTTP" from "TCP-only / still booting". Transport
+        errors (ConnectError, RemoteProtocolError, ReadError, timeouts, etc.)
+        mean the server hasn't finished coming up yet; the caller should keep
+        polling.
+
+        For remote agents whose service URL isn't directly reachable from the
+        desktop client without an SSH tunnel, the probe will always fail and
+        the outer poll will fall through to the timeout. The subdomain
+        forwarder's auto-refresh retry page (which does set up the tunnel)
+        handles those cases.
+        """
+        try:
+            self._probe_http_client.get(url, timeout=self.workspace_ready_probe_timeout_seconds)
+        except httpx.TransportError:
+            return False
+        return True
+
+    def _is_workspace_ready_once(self, agent_id: AgentId) -> bool:
+        """One-shot check used by ``_wait_for_workspace_ready``'s poll loop."""
+        url = self.backend_resolver.get_backend_url(agent_id, WORKSPACE_SERVER_SERVICE_NAME)
+        if url is None:
+            return False
+        if not self.workspace_ready_probe_enabled:
+            return True
+        return self._probe_workspace_http(url)
+
+    def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> bool:
+        """Block until the agent's workspace server is serving HTTP.
+
+        Two-stage readiness check:
+
+        1. Poll the resolver until a backend URL is registered for the
+           workspace service. This happens around the time the agent writes
+           to its services/events.jsonl.
+        2. HTTP-probe that URL each poll until a response arrives. The agent
+           typically writes the URL before uvicorn has finished starting, so
+           the URL can exist for a brief window while the server still isn't
+           answering -- without the probe, we'd redirect the browser straight
+           into that gap.
+
+        Returns True once both signals pass. Returns False if the timeout
+        elapses first -- callers should still mark creation complete in that
+        case, since the subdomain forwarder's auto-refresh retry page covers
+        the remaining window.
+
+        Polls synchronously from the caller's thread (typically the creation
+        background thread) so that status stays in CREATING and the
+        creating-progress page keeps streaming logs until the server is up.
+        """
+        if poll_until(
+            lambda: self._is_workspace_ready_once(agent_id),
+            timeout=self.workspace_ready_timeout_seconds,
+            poll_interval=self.workspace_ready_poll_interval_seconds,
+        ):
+            return True
+        log_queue.put(
+            "[minds] Workspace server did not register within {:.0f}s; "
+            "loading the workspace anyway (page will auto-retry).".format(self.workspace_ready_timeout_seconds)
+        )
+        return False
 
     def _create_agent_background(
         self,
@@ -599,15 +709,18 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
+                # mngr create returning doesn't mean the in-agent workspace
+                # server is answering yet (container still booting, services
+                # still registering). Wait synchronously so the user stays on
+                # the log-streaming progress page until the workspace is
+                # actually reachable.
+                log_queue.put("[minds] Waiting for workspace server to come online...")
+                if self._wait_for_workspace_ready(agent_id, log_queue):
+                    log_queue.put("[minds] Workspace server is ready.")
+
                 log_queue.put("[minds] Agent created successfully.")
 
-                # After phase 6 deleted the legacy /forwarding/ routes the new
-                # workspace entry point is http://<agent-id>.localhost:<port>/,
-                # which the desktop client's subdomain middleware forwards to the
-                # per-agent minds_workspace_server. Construct the absolute URL
-                # here because the browser uses it verbatim in window.location.
-                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+                redirect_url = build_post_creation_redirect_url(agent_id)
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE

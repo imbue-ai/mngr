@@ -53,7 +53,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
     resolver = MngrCliBackendResolver()
-    creator = AgentCreator(paths=paths)
+    creator = AgentCreator(paths=paths, backend_resolver=resolver)
 
     # Manually set up a fake agent creation that completes immediately
     agent_id = AgentId()

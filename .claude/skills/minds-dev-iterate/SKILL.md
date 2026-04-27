@@ -55,8 +55,10 @@ This is the same rsync that `propagate_changes` does as step 1, but it must happ
 
 ### 3. Install Electron dependencies
 
+`apps/minds/` is pnpm-managed (`pnpm-lock.yaml` is the authoritative lockfile; `pnpm-workspace.yaml` is present). Use pnpm:
+
 ```bash
-cd apps/minds && npm install && cd ../..
+cd apps/minds && pnpm install && cd ../..
 ```
 
 ### 4. Find your Docker SSH key
@@ -93,7 +95,7 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
   export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
-  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && npm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
+  python3 -c "import subprocess; subprocess.Popen(['bash','-c','cd apps/minds && pnpm start'], start_new_session=True, stdout=open('/tmp/minds-electron.log','a'), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)"
 )
 ```
 
