@@ -174,7 +174,7 @@ def test_create_latchkey_permission_request_event_populates_all_fields() -> None
     event = create_latchkey_permission_request_event(
         agent_id="agent-abc",
         service_name="slack",
-        rationale="I need to read the team's #general channel to summarize today's discussion.",
+        rationale="I need to read the team channel to summarize today's discussion.",
     )
 
     assert event.agent_id == "agent-abc"

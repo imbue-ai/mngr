@@ -136,7 +136,7 @@ def test_get_permission_request_page_renders_dialog_with_default_checks(tmp_path
     request = create_latchkey_permission_request_event(
         agent_id=str(agent_id),
         service_name="slack",
-        rationale="I need to read #general to summarize today's discussion.",
+        rationale="I need to read the team channel to summarize today's discussion.",
     )
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(tmp_path)
