@@ -684,9 +684,11 @@ def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
     while not wake.is_set():
         remaining = process.seconds_until_check_overdue()
         if remaining <= 0:
-            # Re-check before acting; the group may be exiting or the process may have just finished.
-            if stop_event.is_set() or process.finished_event.is_set():
-                return
+            # Re-check before acting; the group may be exiting, the process may have just finished,
+            # or another thread may have called check() since we last looked (which would push the
+            # deadline back into the future).
+            if stop_event.is_set() or process.finished_event.is_set() or process.seconds_until_check_overdue() > 0:
+                continue
             # `terminate()` raises TimeoutExpired if the underlying thread doesn't join within
             # force_kill_seconds. We swallow that here because we're about to raise MissedCheckError
             # to surface the original problem, and we don't want a teardown-timeout to mask it.
