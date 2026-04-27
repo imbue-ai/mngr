@@ -902,13 +902,9 @@ class AgentManager:
                 return
             watcher = AgentMarkerWatcher.build(agent_id, state_dir, self._on_markers_changed)
             self._marker_watchers[agent_id] = watcher
-        try:
-            watcher.start()
-        except OSError:
-            _loguru_logger.exception("Failed to start marker watcher for agent {}", agent_id)
-            with self._lock:
-                self._marker_watchers.pop(agent_id, None)
-            return
+        # ``AgentMarkerWatcher.start`` handles its own OSError logging and
+        # never raises, so we don't need an outer try/except here.
+        watcher.start()
         # Seed the cached activity state from the current marker file presence
         # without broadcasting; the caller is expected to broadcast as part of
         # whatever lifecycle event prompted the start (full snapshot, agent
