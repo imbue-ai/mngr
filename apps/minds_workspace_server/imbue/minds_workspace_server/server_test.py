@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 from typing import Generator
 from unittest.mock import patch
 
@@ -14,7 +15,9 @@ from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.event_queues import AgentEventQueues
 from imbue.minds_workspace_server.models import AgentStateItem
+from imbue.minds_workspace_server.server import _broadcast_session_events
 from imbue.minds_workspace_server.server import create_application
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
@@ -413,3 +416,45 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
     with manager._lock:
         assert manager._pending_tool_by_agent[agent_id] is True
         assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
+
+
+def test_broadcast_session_events_does_not_populate_replay_buffer() -> None:
+    """Session events broadcast via the watcher path must bypass the replay buffer.
+
+    Persistence is provided by the on-disk JSONL files; storing session events
+    in memory would leak unboundedly for the agent's lifetime (regression test
+    for that leak).
+    """
+    event_queues = AgentEventQueues()
+    events = [
+        {"event_id": "evt-1", "type": "user_message", "content": "hello"},
+        {"event_id": "evt-2", "type": "assistant_message", "text": "hi"},
+    ]
+
+    _broadcast_session_events(event_queues, "agent-1", events)
+
+    # Buffer must remain empty: a late-joining subscriber would otherwise
+    # receive a replay of every session event for the entire agent lifetime.
+    assert event_queues._event_buffers.get("agent-1", []) == []
+
+
+def test_broadcast_session_events_delivers_to_live_subscribers() -> None:
+    """Session events must still reach currently-connected SSE subscribers."""
+    event_queues = AgentEventQueues()
+    subscriber_queue = event_queues.register("agent-1")
+
+    events = [
+        {"event_id": "evt-1", "type": "user_message", "content": "hello"},
+        {"event_id": "evt-2", "type": "assistant_message", "text": "hi"},
+    ]
+    _broadcast_session_events(event_queues, "agent-1", events)
+
+    delivered: list[dict[str, Any]] = []
+    for _ in events:
+        item = subscriber_queue.get_nowait()
+        assert item is not None
+        delivered.append(item)
+    assert [e["event_id"] for e in delivered] == ["evt-1", "evt-2"]
+    # The buffer_behavior flag is server-internal and must be stripped before
+    # delivery so the wire format matches what frontends expect.
+    assert all("buffer_behavior" not in event for event in delivered)
