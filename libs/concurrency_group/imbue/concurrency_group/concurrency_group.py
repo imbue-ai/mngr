@@ -492,17 +492,13 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             is_checked=True,
         )
 
-    def _start_check_watchdog(self, process: RunningProcess) -> None:
-        watchdog = ObservableThread(
+    def _start_check_watchdog(self, process: RunningProcess) -> ObservableThread:
+        return self.start_new_thread(
             target=_check_watchdog_target,
             args=(process, self._stop_watchdogs_event),
             name=f"check-watchdog: {' '.join(process.command)}",
-            daemon=True,
+            is_checked=True,
         )
-        with self._lock:
-            self._raise_if_not_active()
-            watchdog.start()
-            self._threads.append(_TrackedThread(thread=watchdog, is_checked=True))
 
     def run_process_to_completion(
         self,
