@@ -376,7 +376,7 @@ def test_parse_agent_types_unknown_field_hints_at_missing_plugin() -> None:
             _parse_agent_types(raw, disabled_plugins=frozenset())
         msg = str(exc_info.value)
         assert "is_fast" in msg
-        assert "imbue-mngr-claude" in msg
+        assert "plugin package that provides agent type 'claude' may not be installed" in msg
     finally:
         reset_agent_config_registry()
 
@@ -410,7 +410,6 @@ def test_parse_agent_types_no_plugin_hint_when_type_is_registered() -> None:
         msg = str(exc_info.value)
         assert "bogus_option" in msg
         assert "not installed" not in msg
-        assert "imbue-mngr-" not in msg
     finally:
         reset_agent_config_registry()
 

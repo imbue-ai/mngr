@@ -483,15 +483,13 @@ def _parse_agent_types(
                 f"If '{effective_type}' is provided by a disabled plugin, enable it. "
                 f"Currently disabled plugins: {', '.join(sorted(disabled_plugins))}. "
                 "Otherwise the plugin package that provides this agent type may not be "
-                f"installed (try reinstalling mngr with --with 'imbue-mngr-{effective_type}'), "
-                "or one or more field names are misspelled."
+                "installed, or one or more field names are misspelled."
             )
         else:
             extra_hint = (
                 f"The plugin package that provides agent type '{effective_type}' may not be "
-                f"installed. If you installed mngr as a tool, try reinstalling with the "
-                f"plugin package (e.g. --with 'imbue-mngr-{effective_type}'). "
-                "Otherwise the agent type name or one of the field names may be misspelled."
+                "installed. Otherwise the agent type name or one of the field names may be "
+                "misspelled."
             )
         _check_unknown_fields(
             raw_config,
