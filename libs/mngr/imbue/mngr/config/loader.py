@@ -715,8 +715,11 @@ def parse_config(
     Uses model_construct to bypass defaults and explicitly set None for unset fields.
 
     When strict=True (default), raises ConfigParseError for unknown fields.
-    When strict=False, logs a warning and ignores unknown fields (used when
-    MNGR_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
+    When strict=False, logs a warning and ignores unknown fields. ``strict=False``
+    is used in two situations: by ``load_config`` when ``MNGR_ALLOW_UNKNOWN_CONFIG``
+    is set (to allow forward-compatible config files), and unconditionally by
+    ``load_bootstrap_context`` (used during ``mngr plugin add``, where the config
+    may reference plugins not yet installed).
 
     When parse_plugin_sections=False, the [agent_types], [providers], and [plugins]
     sections are dropped from the parsed config. Use this when the caller does not
