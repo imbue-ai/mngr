@@ -290,6 +290,34 @@ class SSHTunnelManager(MutableModel):
 
             return assigned_remote_port
 
+    def exec_remote_command(
+        self,
+        ssh_info: RemoteSSHInfo,
+        command: str,
+        timeout: float = 10.0,
+    ) -> tuple[int, str]:
+        """Run a shell command on a remote host via SSH.
+
+        Returns (exit_status, stderr_output). Raises SSHTunnelError on transport
+        failures. The caller is responsible for interpreting non-zero exit codes.
+        """
+        with self._lock:
+            client = self._get_or_create_connection(ssh_info)
+
+        try:
+            _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+            _stdin.close()
+            try:
+                exit_status = stdout.channel.recv_exit_status()
+                error_output = stderr.read().decode().strip()
+                return exit_status, error_output
+            finally:
+                stdout.channel.close()
+                stdout.close()
+                stderr.close()
+        except (paramiko.SSHException, OSError) as e:
+            raise SSHTunnelError(f"SSH exec failed on {ssh_info.host}: {e}") from e
+
     def write_api_url_to_remote(
         self,
         ssh_info: RemoteSSHInfo,
@@ -297,31 +325,21 @@ class SSHTunnelManager(MutableModel):
         url: str,
     ) -> None:
         """Write the minds API URL to a file on the remote host via SSH."""
-        with self._lock:
-            client = self._get_or_create_connection(ssh_info)
-
         shell_dir = _shell_quote_remote_path(agent_state_dir)
         quoted_url = shlex.quote(url)
         command = f"mkdir -p {shell_dir} && printf '%s' {quoted_url} > {shell_dir}/minds_api_url"
         try:
-            _stdin, stdout, stderr = client.exec_command(command, timeout=10.0)
-            _stdin.close()
-            try:
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode().strip()
-                    logger.warning(
-                        "Failed to write API URL to remote {}: exit={}, stderr={}",
-                        ssh_info.host,
-                        exit_status,
-                        error_output,
-                    )
-            finally:
-                stdout.channel.close()
-                stdout.close()
-                stderr.close()
-        except (paramiko.SSHException, OSError) as e:
-            logger.warning("Failed to write API URL to remote {}: {}", ssh_info.host, e)
+            exit_status, error_output = self.exec_remote_command(ssh_info, command)
+        except SSHTunnelError as e:
+            logger.warning("{}", e)
+            return
+        if exit_status != 0:
+            logger.warning(
+                "Failed to write API URL to remote {}: exit={}, stderr={}",
+                ssh_info.host,
+                exit_status,
+                error_output,
+            )
 
     @staticmethod
     def write_api_url_to_local(
