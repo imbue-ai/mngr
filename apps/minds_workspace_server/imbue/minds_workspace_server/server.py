@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import queue
@@ -64,6 +65,12 @@ _FRONTEND_NOT_BUILT_HTML = (
 
 # Default number of events for tail-first loading
 _DEFAULT_TAIL_COUNT = 50
+
+# Upper bound for how long a single websocket send may legitimately take. A hung
+# TCP connection (eg. a half-dead SSH tunnel) can leave ``send_text`` waiting
+# forever, which would prevent the broadcaster's per-client queue from ever
+# being drained and unregistered.
+_WS_SEND_TIMEOUT_SECONDS = 10.0
 
 
 @asynccontextmanager
@@ -560,43 +567,76 @@ async def _ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     ws_broadcaster: WebSocketBroadcaster = websocket.app.state.broadcaster
+    await _run_ws_broadcast_loop(
+        websocket=websocket,
+        agent_manager=agent_manager,
+        ws_broadcaster=ws_broadcaster,
+        send_timeout_seconds=_WS_SEND_TIMEOUT_SECONDS,
+    )
 
+
+async def _run_ws_broadcast_loop(
+    websocket: WebSocket,
+    agent_manager: AgentManager,
+    ws_broadcaster: WebSocketBroadcaster,
+    send_timeout_seconds: float,
+) -> None:
+    """Stream broadcaster messages to ``websocket`` until the client disconnects or a send hangs."""
     client_queue = ws_broadcaster.register()
     try:
-        await websocket.send_text(
+        await _send_text_with_timeout(
+            websocket,
             json.dumps(
                 {
                     "type": "agents_updated",
                     "agents": agent_manager.get_agents_serialized(),
                 }
-            )
+            ),
+            send_timeout_seconds,
         )
-        await websocket.send_text(
+        await _send_text_with_timeout(
+            websocket,
             json.dumps(
                 {
                     "type": "applications_updated",
                     "applications": agent_manager.get_applications_serialized(),
                 }
-            )
+            ),
+            send_timeout_seconds,
         )
 
         for proto in agent_manager.get_proto_agents():
-            await websocket.send_text(json.dumps({"type": "proto_agent_created", **proto}))
+            await _send_text_with_timeout(
+                websocket, json.dumps({"type": "proto_agent_created", **proto}), send_timeout_seconds
+            )
 
         shutdown = False
         while not shutdown:
             try:
                 message = await run_in_threadpool(client_queue.get, timeout=1.0)
-                if message is None:
-                    shutdown = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                shutdown = True
+            else:
+                await _send_text_with_timeout(websocket, message, send_timeout_seconds)
     except WebSocketDisconnect:
         pass
+    except asyncio.TimeoutError:
+        # The underlying TCP send hung. Stop trying to talk to this client; the
+        # finally block unregisters its queue so broadcasts no longer pile up.
+        logger.warning("WebSocket send timed out; closing connection")
+        try:
+            await websocket.close(code=1011)
+        except (RuntimeError, asyncio.TimeoutError):
+            pass
     finally:
         ws_broadcaster.unregister(client_queue)
+
+
+async def _send_text_with_timeout(websocket: WebSocket, text: str, timeout_seconds: float) -> None:
+    """Send ``text`` over ``websocket``, raising ``asyncio.TimeoutError`` if the socket hangs."""
+    await asyncio.wait_for(websocket.send_text(text), timeout=timeout_seconds)
 
 
 async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:

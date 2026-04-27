@@ -9,6 +9,16 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.mutable_model import MutableModel
 
 
+def _drain_queue(client_queue: queue.Queue[str | None]) -> None:
+    """Remove all pending items from ``client_queue`` so a sentinel can be enqueued."""
+    is_drained = False
+    while not is_drained:
+        try:
+            client_queue.get_nowait()
+        except queue.Empty:
+            is_drained = True
+
+
 class WebSocketBroadcaster(MutableModel):
     """Manages WebSocket clients and broadcasts state updates.
 
@@ -40,11 +50,27 @@ class WebSocketBroadcaster(MutableModel):
         """Serialize and send a message to all connected clients. Thread-safe."""
         text = json.dumps(message)
         with self._lock:
+            dead_queues: list[queue.Queue[str | None]] = []
             for q in self._client_queues:
                 try:
                     q.put_nowait(text)
                 except queue.Full:
-                    _loguru_logger.warning("WebSocket client queue full, dropping message")
+                    dead_queues.append(q)
+            for dead_queue in dead_queues:
+                self._disconnect_locked(dead_queue)
+
+    def _disconnect_locked(self, dead_queue: queue.Queue[str | None]) -> None:
+        """Drain ``dead_queue``, signal shutdown, and remove it. Caller must hold ``self._lock``."""
+        _drain_queue(dead_queue)
+        try:
+            dead_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self._client_queues.remove(dead_queue)
+        except ValueError:
+            pass
+        _loguru_logger.warning("Disconnected unresponsive WebSocket client (queue full)")
 
     def broadcast_agents_updated(self, agents: list[dict[str, Any]]) -> None:
         """Broadcast an agents_updated event."""
@@ -91,6 +117,7 @@ class WebSocketBroadcaster(MutableModel):
         """Signal all clients to disconnect by sending None sentinel."""
         with self._lock:
             for q in self._client_queues:
+                _drain_queue(q)
                 try:
                     q.put_nowait(None)
                 except queue.Full:

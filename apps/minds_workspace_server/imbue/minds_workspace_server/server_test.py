@@ -1,5 +1,6 @@
 """Tests for the FastAPI server."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Generator
@@ -10,8 +11,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
+from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.server import _run_ws_broadcast_loop
 from imbue.minds_workspace_server.server import create_application
+from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
@@ -331,3 +335,57 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+class _HangingWebSocket:
+    """Test double for ``WebSocket`` whose ``send_text`` never returns and tracks ``close`` calls."""
+
+    def __init__(self) -> None:
+        self.send_attempt_count = 0
+        self.close_call_count = 0
+        self.close_codes: list[int] = []
+
+    async def send_text(self, text: str) -> None:
+        self.send_attempt_count += 1
+        # Hang indefinitely; callers must use asyncio.wait_for to bail out.
+        await asyncio.Event().wait()
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.close_call_count += 1
+        self.close_codes.append(code)
+
+
+@pytest.mark.timeout(5)
+def test_run_ws_broadcast_loop_aborts_when_send_hangs(
+    broadcaster: WebSocketBroadcaster,
+    agent_manager: AgentManager,
+) -> None:
+    """A hung ``send_text`` triggers the timeout path, closes the socket, and unregisters the queue."""
+    fake_websocket = _HangingWebSocket()
+
+    # The fake websocket is intentionally not a starlette ``WebSocket`` -- the type
+    # ignore is needed because we are passing a duck-typed test double.
+    asyncio.run(
+        _run_ws_broadcast_loop(
+            websocket=fake_websocket,  # type: ignore[arg-type]
+            agent_manager=agent_manager,
+            ws_broadcaster=broadcaster,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # Only the first send was attempted (it hung) and the socket was explicitly
+    # closed with an internal-error code.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+    assert fake_websocket.close_codes == [1011]
+
+    # The handler's ``finally`` block must have unregistered its queue. We verify
+    # behaviorally: a freshly-registered queue receives any subsequent broadcast
+    # exactly once -- no zombie queue is also receiving.
+    fresh_queue = broadcaster.register()
+    broadcaster.broadcast({"type": "after_timeout"})
+    received = fresh_queue.get_nowait()
+    assert received is not None
+    assert json.loads(received) == {"type": "after_timeout"}
+    assert fresh_queue.empty()

@@ -106,7 +106,13 @@ def test_prevent_asyncio_import() -> None:
     # cancellation-aware gather; the spirit of the ratchet is "prefer the
     # project's concurrency_group for threads/procs", which doesn't apply
     # to pure asyncio tasks.
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # +1 for server.py's asyncio.wait_for around websocket.send_text -- needed
+    # to bound the time spent in a single send so a hung TCP connection cannot
+    # pin the broadcaster's per-client queue. Same exception applies: this is
+    # pure asyncio cancellation, not threads/procs.
+    # +1 for server_test.py's asyncio.run, which drives _run_ws_broadcast_loop
+    # under a fake hanging websocket to verify the timeout path.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
@@ -140,7 +146,11 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(5))
+    # +1 for server_test.py's pyright-suppression trailing comment on a
+    # duck-typed fake websocket. Pyright's strict mode requires the
+    # suppression to live on the offending line; cast() is forbidden by the
+    # cast ratchet.
+    rc.check_trailing_comments(_DIR, snapshot(6))
 
 
 def test_prevent_init_docstrings() -> None:

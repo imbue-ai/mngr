@@ -121,15 +121,91 @@ def test_shutdown_sends_none_sentinel() -> None:
     assert q.get_nowait() is None
 
 
-def test_broadcast_drops_when_queue_full() -> None:
+def test_broadcast_disconnects_client_when_queue_fills() -> None:
+    """A client whose queue fills is disconnected, not silently spammed forever."""
     broadcaster = WebSocketBroadcaster()
-    q = broadcaster.register()
+    stuck_queue = broadcaster.register()
+    live_queue = broadcaster.register()
 
-    for i in range(1001):
-        broadcaster.broadcast({"index": i})
+    # Push more messages than the stuck queue's maxsize (1000) without anyone
+    # draining it. The live client drains as it goes -- mimicking a healthy
+    # WebSocket handler -- so only the stuck queue ever overflows.
+    received_by_live_client: list[dict[str, int]] = []
+    for index in range(1001):
+        broadcaster.broadcast({"index": index})
+        received_by_live_client.append(json.loads(_get_message(live_queue)))
 
-    count = 0
-    while not q.empty():
-        q.get_nowait()
-        count += 1
-    assert count == 1000
+    # The stuck client receives a None sentinel telling its handler to exit;
+    # its previously-buffered messages are dropped to make room.
+    drained_messages: list[str | None] = []
+    while not stuck_queue.empty():
+        drained_messages.append(stuck_queue.get_nowait())
+    assert drained_messages == [None]
+
+    # The live client got every broadcast -- the eviction did not interrupt it.
+    assert len(received_by_live_client) == 1001
+    assert received_by_live_client[-1] == {"index": 1000}
+
+
+def test_broadcast_after_disconnect_does_not_touch_dead_queue() -> None:
+    """Once a stuck client is disconnected, further broadcasts skip its queue entirely."""
+    broadcaster = WebSocketBroadcaster()
+    stuck_queue = broadcaster.register()
+
+    for index in range(1001):
+        broadcaster.broadcast({"index": index})
+
+    # Drain the sentinel so we can see whether subsequent broadcasts add anything.
+    assert stuck_queue.get_nowait() is None
+    assert stuck_queue.empty()
+
+    broadcaster.broadcast({"after": "disconnect"})
+    assert stuck_queue.empty()
+
+
+def test_broadcast_warns_once_per_disconnect_not_per_dropped_message(
+    loguru_records: list[str],
+) -> None:
+    """The flood-prevention fix: at most one warning per stuck client, not per drop."""
+    broadcaster = WebSocketBroadcaster()
+    broadcaster.register()
+
+    # Filling and then over-pushing many times: only the first overflow disconnects;
+    # later broadcasts have no client at all (the queue was removed) so nothing is logged.
+    for index in range(2000):
+        broadcaster.broadcast({"index": index})
+
+    queue_full_warnings = [r for r in loguru_records if "Disconnected unresponsive" in r]
+    assert len(queue_full_warnings) == 1
+
+
+def test_broadcast_disconnect_unregisters_queue_so_unregister_is_idempotent() -> None:
+    """After the broadcaster evicts a stuck client, the WS handler's later unregister is a noop."""
+    broadcaster = WebSocketBroadcaster()
+    stuck_queue = broadcaster.register()
+
+    for index in range(1001):
+        broadcaster.broadcast({"index": index})
+
+    # Calling unregister (which the WS handler's finally does) must not raise even
+    # though the broadcaster already removed the queue when it evicted the client.
+    broadcaster.unregister(stuck_queue)
+    broadcaster.unregister(stuck_queue)
+
+
+def test_shutdown_delivers_sentinel_even_to_full_queue() -> None:
+    """Shutdown must signal even clients whose queues happen to be full."""
+    broadcaster = WebSocketBroadcaster()
+    stuck_queue = broadcaster.register()
+    for index in range(1000):
+        # Bypass the broadcaster's full-handling so we can prepopulate the queue
+        # exactly to capacity without triggering the disconnect path.
+        stuck_queue.put_nowait(json.dumps({"index": index}))
+
+    broadcaster.shutdown()
+
+    # Drain everything; the very last value must be the None sentinel.
+    drained: list[str | None] = []
+    while not stuck_queue.empty():
+        drained.append(stuck_queue.get_nowait())
+    assert drained[-1] is None
