@@ -93,8 +93,10 @@ LOG_SENTINEL: Final[str] = "__DONE__"
 
 # Placeholder ANTHROPIC_API_KEY set on pre-created pool hosts. Must look like
 # a real Anthropic key (correct prefix, correct length ~108 chars) so that
-# Claude Code validation accepts it during provisioning. Replaced with the
-# real LiteLLM virtual key via sed during lease setup.
+# Claude Code validation accepts it during provisioning. The real LiteLLM
+# virtual key is written into the agent env file and claude config during
+# lease setup (see _build_inject_anthropic_command and
+# _build_patch_claude_config_command).
 PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
     "sk-ant-api03-PLACEHOLDER000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
