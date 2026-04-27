@@ -894,15 +894,6 @@ def to_bootstrap_config(config: MngrConfig) -> BootstrapMngrConfig:
     )
 
 
-# Fields on MngrContext that are intentionally NOT exposed on BootstrapMngrContext.
-# Currently empty -- BootstrapMngrContext exposes the same set of attribute names
-# as MngrContext, with the only difference being that ``config`` is narrowed from
-# MngrConfig to BootstrapMngrConfig. The set exists so that
-# ``test_bootstrap_context_field_sync`` can catch future divergence the same way
-# ``test_bootstrap_config_field_sync`` does for the Config pair.
-BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS: frozenset[str] = frozenset()
-
-
 class BootstrapMngrContext(FrozenModel):
     """Context returned by ``load_bootstrap_context`` / ``setup_bootstrap_command_context``.
 
@@ -915,10 +906,12 @@ class BootstrapMngrContext(FrozenModel):
     instead.
 
     A ratchet test (``test_bootstrap_context_field_sync``) asserts that the
-    field set here equals MngrContext's fields minus
-    ``BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS``, so adding a new field to
-    MngrContext forces a deliberate decision about whether to surface it
-    here (and ``to_bootstrap_context`` to copy it).
+    field set here equals MngrContext's, so adding a new field to MngrContext
+    forces a deliberate decision about whether to surface it here (and
+    ``to_bootstrap_context`` to copy it). If a future field on MngrContext
+    should be intentionally excluded from the bootstrap shape, mirror the
+    BOOTSTRAP_EXCLUDED_CONFIG_FIELDS pattern: add a constant here and
+    subtract it in the sync test.
     """
 
     model_config = {"arbitrary_types_allowed": True}

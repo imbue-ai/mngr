@@ -12,7 +12,6 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
-from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS
 from imbue.mngr.config.data_types import BootstrapMngrConfig
 from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommandDefaults
@@ -1752,22 +1751,24 @@ def test_to_bootstrap_context_sets_every_bootstrap_field(cg: ConcurrencyGroup, t
 
 
 def test_bootstrap_context_field_sync() -> None:
-    """BootstrapMngrContext must mirror MngrContext minus the documented exclusions.
+    """BootstrapMngrContext must mirror MngrContext's field set.
 
     Parallel of test_bootstrap_config_field_sync, but for the Context pair: a new
     field added to MngrContext must either be surfaced on BootstrapMngrContext
-    (and copied through ``to_bootstrap_context``) or added to
-    BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS. Without this guard, MngrContext could
-    grow a new field without BootstrapMngrContext gaining it, recreating the
-    silent-incompleteness footgun the bootstrap types were designed to
-    eliminate.
+    (and copied through ``to_bootstrap_context``) or intentionally excluded.
+    Without this guard, MngrContext could grow a new field without
+    BootstrapMngrContext gaining it, recreating the silent-incompleteness
+    footgun the bootstrap types were designed to eliminate. If a future field
+    on MngrContext should be intentionally excluded, mirror the
+    BOOTSTRAP_EXCLUDED_CONFIG_FIELDS pattern: introduce an exclusion set
+    constant in data_types.py and subtract it from `expected` here.
     """
-    expected = set(MngrContext.model_fields) - BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS
+    expected = set(MngrContext.model_fields)
     actual = set(BootstrapMngrContext.model_fields)
     assert actual == expected, (
         f"BootstrapMngrContext fields drifted from MngrContext. "
         f"In MngrContext but missing here: {expected - actual}. "
         f"In here but not in MngrContext: {actual - expected}. "
         f"Either add the field to BootstrapMngrContext (if bootstrap callers should see it) "
-        f"or add it to BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS (if not)."
+        f"or introduce a BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS constant to declare it intentionally excluded."
     )
