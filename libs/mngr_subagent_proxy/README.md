@@ -15,20 +15,34 @@ The plugin contributes:
 - A `mngr-proxy` Claude subagent definition at `.claude/agents/mngr-proxy.md`.
 - Per-tool-use wait-scripts at `$MNGR_AGENT_STATE_DIR/proxy_commands/wait-<tool_use_id>.sh`, generated on demand by the spawn hook for the Haiku proxy agent's Bash tool.
 
-## Stop hooks fire inside spawned subagents
+## Stop-hook handling in spawned subagents
 
-Project-level hooks defined in `.claude/settings.json` (and any
-plugin-installed hooks) inherit into spawned subagents because the
-subagent shares the parent's worktree (`--transfer=none`) and
+Project-level hooks defined in `.claude/settings.json` and
+`.claude/settings.local.json` inherit into spawned subagents because
+the subagent shares the parent's worktree (`--transfer=none`) and
 Claude Code merges hook arrays across all settings scopes. There is
-currently no Claude Code mechanism to disable a project-level hook
-from a higher-precedence scope. `claude --bare` disables hooks but
-also disables mngr's own readiness hooks, so we don't use it.
+no Claude Code-side knob to disable a project-level hook from a
+higher-precedence scope (`disabledPlugins` does not exist;
+`disableAllHooks` does not override the project scope; `--bare`
+disables every hook including mngr's own readiness hooks).
 
-To prevent your own Stop hooks from re-prompting a spawned subagent
-into autofix/verify cycles (the most common breakage), guard them
-on the env var `MNGR_SUBAGENT_PROXY_CHILD`, which the proxy sets to
-`1` for spawned subagents:
+The plugin handles this at provisioning time by walking every
+existing Stop / SubagentStop command in `settings.local.json` and
+prepending the env-conditional guard:
+
+    [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>
+
+The wait-script sets `MNGR_SUBAGENT_PROXY_CHILD=1` in the spawned
+subagent's env, so user-defined Stop hooks no-op there. The parent's
+env does not have the var set, so the guard falls through and the
+original hook runs normally. Wrapping is idempotent (re-runs detect
+the prefix) and skips hooks already recognized as mngr-managed.
+
+This does not catch hooks installed via a Claude Code plugin's
+own `hooks/hooks.json` (e.g. `imbue-code-guardian`), since those
+are loaded by the plugin runtime and not visible in
+`settings.local.json`. To self-guard a plugin's Stop hook, edit the
+plugin's `hooks/hooks.json` upstream to start each Stop command with:
 
     [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0
     # ... rest of your Stop hook ...

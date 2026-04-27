@@ -150,8 +150,77 @@ def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> 
     host.write_text_file(agents_dir / "mngr-proxy.md", content)
 
 
+_PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; '
+
+
+def _wrap_with_proxy_child_guard(command: str) -> str:
+    """Prepend the guard so the command no-ops inside spawned subagents.
+
+    The wait-script sets MNGR_SUBAGENT_PROXY_CHILD=1 in the spawned
+    subagent's env. Wrapping every non-mngr Stop/SubagentStop command
+    with this guard means: in the parent (env unset) the command runs
+    normally; in a spawned subagent (env set) it exits 0 immediately.
+    Already-wrapped commands are left alone (idempotent).
+    """
+    if _PROXY_CHILD_GUARD_PREFIX in command:
+        return command
+    return _PROXY_CHILD_GUARD_PREFIX + command
+
+
+def _guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bool:
+    """Wrap each non-mngr Stop/SubagentStop command with the proxy-child guard.
+
+    Returns True if any command was modified. Idempotent: re-running on
+    already-wrapped commands is a no-op. Mngr-managed commands (recognized
+    via _MNGR_MANAGED_HOOK_MARKERS) are left alone -- they already key off
+    MAIN_CLAUDE_SESSION_ID via _SESSION_GUARD and serve different purposes.
+    """
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event_name in ("Stop", "SubagentStop"):
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            for cmd_entry in inner:
+                if not isinstance(cmd_entry, dict):
+                    continue
+                command = cmd_entry.get("command")
+                if not isinstance(command, str) or not command:
+                    continue
+                # Don't double-guard mngr-managed hooks; they already
+                # handle scope appropriately via _SESSION_GUARD.
+                if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
+                    continue
+                wrapped = _wrap_with_proxy_child_guard(command)
+                if wrapped != command:
+                    cmd_entry["command"] = wrapped
+                    changed = True
+    return changed
+
+
 def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Merge the subagent-proxy hooks into the agent's .claude/settings.local.json."""
+    """Merge the subagent-proxy hooks into the agent's .claude/settings.local.json.
+
+    Also rewrites every existing user-defined Stop/SubagentStop command
+    in that file to no-op when MNGR_SUBAGENT_PROXY_CHILD=1 is set in the
+    env. This is what stops user-installed Stop hooks (imbue-code-guardian's
+    stop_hook_orchestrator.sh, project-specific cleanup hooks, etc.) from
+    re-prompting spawned subagents into autofix/verify cycles.
+
+    The wrap is env-conditional so it is safe for the parent agent too:
+    the parent's MNGR_SUBAGENT_PROXY_CHILD is unset, the guard falls
+    through, and the original command runs normally. Only the spawned
+    proxy children, which we explicitly set the env var on at create
+    time, see the no-op.
+    """
     settings_path = work_dir / ".claude" / "settings.local.json"
     existing_settings: dict[str, Any] = {}
     try:
@@ -163,6 +232,11 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     hooks_config = build_subagent_proxy_hooks_config()
     merged = merge_hooks_config(existing_settings, hooks_config)
     if merged is None:
+        merged = existing_settings
+
+    guard_changed = _guard_user_stop_hooks_against_proxy_children(merged)
+
+    if merged is existing_settings and not guard_changed:
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
         return
     host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
