@@ -8,6 +8,10 @@ const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
 todesktop.init();
 
+// Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
+// and production installs are fully isolated (cookies, sessions, caches, etc.).
+app.setPath('userData', paths.getDataDir());
+
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
 const SIDEBAR_WIDTH = 260;
@@ -359,8 +363,14 @@ function wireContentViewEvents(bundle, contentView) {
     }
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate', (_e, url) => {
+    console.log('[nav] did-navigate:', url);
+    onContentNavigate(url);
+  });
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('console-message', (_e, _level, message) => {
+    if (message.startsWith('[creating]')) console.log(message);
+  });
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
   // path that can drive the content view to a /forwarding/X/ URL (landing-page
@@ -413,11 +423,9 @@ function registerShortcutsFor(bundle, wc) {
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
     // them here too would double-fire (e.g. two new windows per cmd+N).
     if (appMenuInstalled) return;
-    if (modifier && !input.shift && !input.alt && key === 'w') {
-      event.preventDefault();
-      if (!bundle.window.isDestroyed()) bundle.window.close();
-      return;
-    }
+    // Ctrl+W on non-macOS: do NOT close the window. The keystroke should
+    // reach the web content (terminal, editor) where it means "delete word"
+    // or "close tab" depending on the app.
     if (modifier && !input.shift && !input.alt && key === 'q') {
       event.preventDefault();
       initiateFullQuit();
@@ -1021,7 +1029,7 @@ function fetchInitialChromeState(timeoutMs = 4000) {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
               clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces });
+              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
               return;
             }
             if (parsed.type === 'auth_required') {
@@ -1251,6 +1259,47 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
+
+      // Consume the one-time login code via net.request BEFORE checking
+      // chrome state. This hits /authenticate which sets the minds_session
+      // cookie in the default session (used by net.request, chromeView, and
+      // SSE). We follow the redirect so Electron processes the Set-Cookie
+      // header, then copy the cookie to the content partition.
+      await new Promise((resolve) => {
+        const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
+        console.log('[startup] Consuming one-time code via', authenticateUrl);
+        const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
+        req.on('response', async (resp) => {
+          console.log('[startup] /authenticate response status:', resp.statusCode);
+          resp.on('data', () => {});
+          resp.on('end', async () => {
+            try {
+              const defaultCookies = await session.defaultSession.cookies.get({ name: 'minds_session' });
+              console.log('[startup] Default session cookies after /authenticate:', defaultCookies.length);
+              const contentSession = session.fromPartition(CONTENT_PARTITION);
+              for (const c of defaultCookies) {
+                const domain = (c.domain || 'localhost').replace(/^\./, '');
+                await contentSession.cookies.set({
+                  url: `http://${domain}`,
+                  name: c.name, value: c.value,
+                  httpOnly: c.httpOnly, path: c.path || '/',
+                  sameSite: c.sameSite || 'lax',
+                });
+              }
+              console.log('[startup] Cookie synced to content partition');
+            } catch (err) {
+              console.warn('[startup] Failed to sync cookie to content partition:', err);
+            }
+            resolve();
+          });
+        });
+        req.on('error', (err) => {
+          console.warn('[startup] /authenticate request failed:', err);
+          resolve();
+        });
+        req.end();
+      });
+
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
 
@@ -1276,17 +1325,19 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // Not authenticated and no saved state: show the welcome splash page.
-        // Otherwise consume the one-time code via loginUrl.
+        // The one-time code was already consumed above but fetchInitialChromeState
+        // still returned unauthenticated (should not happen, but handle gracefully).
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          if (savedState.length === 0) {
-            initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
-          } else {
-            initialBundle.contentView.webContents.loadURL(loginUrl);
-          }
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+        }
+      } else if (!chromeState.hasAccounts && restorable.length === 0) {
+        // Locally authenticated but user has never signed in with SuperTokens
+        // and has no saved windows -- show the welcome/onboarding page.
+        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
         }
       } else if (restorable.length === 0) {
-        // Authenticated, but nothing to restore -- land on the home page.
+        // Has accounts but nothing to restore -- land on the create page.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }

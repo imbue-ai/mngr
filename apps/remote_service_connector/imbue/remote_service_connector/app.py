@@ -306,6 +306,44 @@ class LeasedHostInfo(BaseModel):
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
 
 
+# -- LiteLLM key management models --
+
+
+class CreateKeyRequest(BaseModel):
+    key_alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
+    max_budget: float | None = Field(default=None, description="Optional max budget in USD (no limit if unset)")
+    budget_duration: str | None = Field(
+        default=None, description="Optional budget reset duration (e.g. '1d', '1h', '1w', '1M')"
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Optional metadata (e.g. agent_id, host_id) for resource tracking"
+    )
+
+
+class CreateKeyResponse(BaseModel):
+    key: str = Field(description="The generated LiteLLM virtual key")
+    base_url: str = Field(description="The LiteLLM proxy base URL for ANTHROPIC_BASE_URL")
+
+
+class KeyInfo(BaseModel):
+    token: str = Field(description="Hashed key token identifier")
+    key_alias: str | None = Field(default=None, description="Human-readable alias")
+    key_name: str | None = Field(default=None, description="Key name")
+    spend: float = Field(default=0.0, description="Total spend in USD")
+    max_budget: float | None = Field(default=None, description="Max budget in USD")
+    budget_duration: str | None = Field(default=None, description="Budget reset duration")
+    user_id: str | None = Field(default=None, description="User ID the key belongs to")
+
+
+class UpdateBudgetRequest(BaseModel):
+    max_budget: float | None = Field(default=None, description="New max budget in USD (null to remove limit)")
+    budget_duration: str | None = Field(default=None, description="New budget reset duration (null to remove)")
+
+
+class DeleteKeyResponse(BaseModel):
+    status: str = Field(description="Deletion status")
+
+
 # ---------------------------------------------------------------------------
 # Cloudflare API client (pure functions)
 # ---------------------------------------------------------------------------
@@ -1508,6 +1546,192 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
 
 
 # ---------------------------------------------------------------------------
+# LiteLLM key management helpers
+# ---------------------------------------------------------------------------
+
+
+def _litellm_proxy_url() -> str:
+    """Return the LiteLLM proxy URL from environment. Raises 503 if not configured."""
+    url = os.environ.get("LITELLM_PROXY_URL")
+    if not url:
+        raise HTTPException(status_code=503, detail="LiteLLM proxy not configured")
+    return url.rstrip("/")
+
+
+def _litellm_master_key() -> str:
+    """Return the LiteLLM master key from environment. Raises 503 if not configured."""
+    key = os.environ.get("LITELLM_MASTER_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="LiteLLM master key not configured")
+    return key
+
+
+def _litellm_request(
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Make an authenticated request to the LiteLLM proxy admin API."""
+    url = _litellm_proxy_url() + path
+    headers = {"Authorization": "Bearer {}".format(_litellm_master_key())}
+    response = httpx.request(
+        method=method,
+        url=url,
+        headers=headers,
+        json=json_body,
+        params=params,
+        timeout=60.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        logger.warning("LiteLLM API error: %s %s -> %s %s", method, path, response.status_code, detail)
+        raise HTTPException(status_code=response.status_code, detail="LiteLLM error: {}".format(detail))
+    return response
+
+
+def _litellm_base_url_for_agents() -> str:
+    """Return the base URL agents should use as ANTHROPIC_BASE_URL."""
+    return _litellm_proxy_url()
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM key management endpoints
+# ---------------------------------------------------------------------------
+
+
+@web_app.post("/keys/create")
+def create_litellm_key(request: Request, body: CreateKeyRequest) -> dict[str, object]:
+    """Create a new LiteLLM virtual key for the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        litellm_body: dict[str, object] = {"user_id": user_id}
+        if body.key_alias is not None:
+            litellm_body["key_alias"] = body.key_alias
+        if body.max_budget is not None:
+            litellm_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            litellm_body["budget_duration"] = body.budget_duration
+        if body.metadata is not None:
+            litellm_body["metadata"] = body.metadata
+
+        resp = _litellm_request("POST", "/key/generate", json_body=litellm_body)
+        data = resp.json()
+
+        return CreateKeyResponse(
+            key=data["key"],
+            base_url=_litellm_base_url_for_agents(),
+        ).model_dump()
+
+
+@web_app.get("/keys")
+def list_litellm_keys(request: Request) -> list[dict[str, object]]:
+    """List all LiteLLM virtual keys owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        resp = _litellm_request("GET", "/key/list", params={"user_id": user_id})
+        data = resp.json()
+
+        keys_raw = data if isinstance(data, list) else data.get("keys", [])
+        result: list[dict[str, object]] = []
+        for entry in keys_raw:
+            result.append(
+                KeyInfo(
+                    token=entry.get("token", ""),
+                    key_alias=entry.get("key_alias"),
+                    key_name=entry.get("key_name"),
+                    spend=entry.get("spend", 0.0),
+                    max_budget=entry.get("max_budget"),
+                    budget_duration=entry.get("budget_duration"),
+                    user_id=entry.get("user_id"),
+                ).model_dump()
+            )
+        return result
+
+
+@web_app.get("/keys/{key_id}")
+def get_litellm_key_info(request: Request, key_id: str) -> dict[str, object]:
+    """Get info (including spend and budget) for a specific LiteLLM key."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        data = resp.json()
+
+        info = data.get("info", data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        return KeyInfo(
+            token=info.get("token", ""),
+            key_alias=info.get("key_alias"),
+            key_name=info.get("key_name"),
+            spend=info.get("spend", 0.0),
+            max_budget=info.get("max_budget"),
+            budget_duration=info.get("budget_duration"),
+            user_id=info.get("user_id"),
+        ).model_dump()
+
+
+@web_app.put("/keys/{key_id}/budget")
+def update_litellm_key_budget(request: Request, key_id: str, body: UpdateBudgetRequest) -> dict[str, object]:
+    """Update the budget for a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        update_body: dict[str, object] = {"key": key_id}
+        update_body["max_budget"] = body.max_budget
+        if body.budget_duration is not None:
+            update_body["budget_duration"] = body.budget_duration
+
+        _litellm_request("POST", "/key/update", json_body=update_body)
+
+        return {"status": "updated"}
+
+
+@web_app.delete("/keys/{key_id}")
+def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
+    """Delete a LiteLLM key owned by the authenticated user."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        require_admin(auth)
+        token = request.headers.get("authorization", "")[7:]
+        user_id = _get_user_id_from_access_token(token)
+
+        # Verify ownership
+        info_resp = _litellm_request("GET", "/key/info", params={"key": key_id})
+        info_data = info_resp.json()
+        info = info_data.get("info", info_data)
+        if info.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Key does not belong to this user")
+
+        _litellm_request("POST", "/key/delete", json_body={"keys": [key_id]})
+
+        return DeleteKeyResponse(status="deleted").model_dump()
+
+
+# ---------------------------------------------------------------------------
 # SuperTokens auth proxy endpoints
 #
 # These endpoints front the SuperTokens core so that clients (e.g. the minds
@@ -2076,6 +2300,7 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ]
 )

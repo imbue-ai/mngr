@@ -9,13 +9,16 @@ For each host, this script:
   5. Inserts a row into the pool_hosts database table
 
 Usage:
+    source .minds/production/.env
+    export DATABASE_URL='postgresql://...'
     uv run python apps/remote_service_connector/scripts/create_pool_hosts.py \
         --count 3 --version v0.1.0 \
-        --management-public-key-file ./management_key/id_ed25519.pub \
-        --database-url $DATABASE_URL
+        --management-public-key-file .minds/production/pool_management_key/id_ed25519.pub \
+        --template-dir ~/project/forever-claude-template
 """
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -27,18 +30,29 @@ from uuid import uuid4
 
 import click
 import psycopg2
+import psycopg2.extras
 from loguru import logger
 
 _DEFAULT_REGION: Final[str] = "ewr"
 _DEFAULT_PLAN: Final[str] = "vc2-2c-4gb"
 _CONTAINER_SSH_PORT: Final[int] = 2222
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 600
+_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
+
+# Placeholder ANTHROPIC_API_KEY injected into pool hosts at creation time so
+# that mngr provisioning writes it into the agent env file and claude config.
+# During lease setup the placeholder is sed-replaced with the real LiteLLM
+# virtual key.
+_PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
+    "sk-ant-api03-PLACEHOLDER000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+)
 
 
 def _run_mngr_command(
     args: list[str],
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a mngr CLI command via `uv run` and return the result."""
     full_command = ["uv", "run", "mngr"] + args
@@ -48,6 +62,8 @@ def _run_mngr_command(
         capture_output=True,
         text=True,
         timeout=timeout,
+        cwd=cwd,
+        env=env,
     )
 
 
@@ -211,6 +227,7 @@ def _insert_pool_host_row(
     version: str,
 ) -> UUID:
     """Insert a row into the pool_hosts table and return the row ID (UUID)."""
+    psycopg2.extras.register_uuid()
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
     try:
@@ -241,6 +258,7 @@ def _create_single_pool_host(
     database_url: str,
     region: str,
     plan: str,
+    template_dir: str,
 ) -> bool:
     """Create a single pool host. Returns True on success, False on failure."""
     suffix = uuid4().hex
@@ -250,20 +268,35 @@ def _create_single_pool_host(
 
     logger.info("[{}] Creating pool host: {}", host_idx, address)
 
-    # Create the agent and host
+    # Set the placeholder ANTHROPIC_API_KEY in the environment so that
+    # --pass-host-env picks it up and writes it to /mngr/env on the host.
+    create_env = dict(os.environ, ANTHROPIC_API_KEY=_PLACEHOLDER_ANTHROPIC_API_KEY)
+
+    # Run mngr create from the template directory so it picks up the
+    # template's .mngr/settings.toml (workspace server, services, etc.).
     create_result = _run_mngr_command(
         [
             "create",
             address,
             "--new-host",
             "--no-connect",
+            "--template",
+            "main",
+            "--template",
+            "vultr",
             "--label",
             f"pool_version={version}",
             "--label",
             f"pool_region={region}",
             "--host-label",
             f"plan={plan}",
-        ]
+            "--pass-host-env",
+            "ANTHROPIC_API_KEY",
+            "--idle-mode",
+            "disabled",
+        ],
+        cwd=template_dir,
+        env=create_env,
     )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
@@ -271,15 +304,19 @@ def _create_single_pool_host(
 
     logger.info("  Created agent: {}", agent_name)
 
-    # Stop the agent process but keep the container running (sshd must stay
-    # accessible for the lease flow to inject user SSH keys via the management key).
-    stop_result = _run_mngr_command(["stop", agent_name])
+    # Stop the agent process inside the container but keep the container
+    # itself running. `mngr stop` would kill the container entirely (since the
+    # container entrypoint IS the agent process). Instead, kill just the tmux
+    # session that holds the agent. The container stays alive because its
+    # entrypoint is a `trap ... wait` wrapper, and sshd keeps it useful.
+    tmux_session = f"mngr-{agent_name}"
+    logger.info("  Stopping agent tmux session (keeping container alive)")
+    stop_result = _run_mngr_command(
+        ["exec", agent_name, f"tmux kill-session -t {tmux_session}"],
+        timeout=30,
+    )
     if stop_result.returncode != 0:
-        logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
-
-    # Ensure sshd is running in the container (it may not auto-start after stop)
-    logger.info("  Ensuring sshd is running in the container")
-    _run_mngr_command(["exec", agent_name, "/usr/sbin/sshd"], timeout=30)
+        logger.warning("tmux kill-session failed (continuing): {}", stop_result.stderr)
 
     # Get agent info from mngr list
     agent_info = _get_agent_info(agent_name)
@@ -393,6 +430,13 @@ def _create_single_pool_host(
     show_default=True,
     help="Vultr plan identifier",
 )
+@click.option(
+    "--template-dir",
+    required=True,
+    type=click.Path(exists=True),
+    envvar="MINDS_TEMPLATE_REPO",
+    help="Local path to the forever-claude-template repo checkout",
+)
 def create_pool_hosts(
     count: int,
     version: str,
@@ -400,6 +444,7 @@ def create_pool_hosts(
     database_url: str,
     region: str,
     plan: str,
+    template_dir: str,
 ) -> None:
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
@@ -407,11 +452,12 @@ def create_pool_hosts(
         sys.exit(1)
 
     logger.info(
-        "Creating {} pool host(s) with version={}, region={}, plan={}",
+        "Creating {} pool host(s) with version={}, region={}, plan={}, template={}",
         count,
         version,
         region,
         plan,
+        template_dir,
     )
     logger.info("Management public key: {}...", management_public_key[:40])
 
@@ -427,6 +473,7 @@ def create_pool_hosts(
                 database_url=database_url,
                 region=region,
                 plan=plan,
+                template_dir=template_dir,
             )
         except (subprocess.SubprocessError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed with error: {}", i, exc)

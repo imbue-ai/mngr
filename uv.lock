@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -9,7 +9,6 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "bifrost-service",
     "concurrency-group",
     "flexmux",
     "imbue",
@@ -357,29 +356,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/f6/688d2cd64bfd0b14d805ddb8a565e11ca1fb0fd6817175d58b10052b6d88/bcrypt-5.0.0-cp39-abi3-win32.whl", hash = "sha256:64d7ce196203e468c457c37ec22390f1a61c85c6f0b8160fd752940ccfb3a683", size = 153725, upload-time = "2025-09-25T19:50:34.384Z" },
     { url = "https://files.pythonhosted.org/packages/9f/b9/9d9a641194a730bda138b3dfe53f584d61c58cd5230e37566e83ec2ffa0d/bcrypt-5.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:64ee8434b0da054d830fa8e89e1c8bf30061d539044a39524ff7dec90481e5c2", size = 150912, upload-time = "2025-09-25T19:50:35.69Z" },
     { url = "https://files.pythonhosted.org/packages/27/44/d2ef5e87509158ad2187f4dd0852df80695bb1ee0cfe0a684727b01a69e0/bcrypt-5.0.0-cp39-abi3-win_arm64.whl", hash = "sha256:f2347d3534e76bf50bca5500989d6c1d05ed64b440408057a37673282c654927", size = 144953, upload-time = "2025-09-25T19:50:37.32Z" },
-]
-
-[[package]]
-name = "bifrost-service"
-version = "0.1.0"
-source = { editable = "apps/bifrost_service" }
-dependencies = [
-    { name = "fastapi", extra = ["standard"] },
-    { name = "httpx" },
-    { name = "imbue-common" },
-    { name = "modal" },
-    { name = "pydantic" },
-    { name = "supertokens-python" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "imbue-common", editable = "libs/imbue_common" },
-    { name = "modal", specifier = ">=1.3.1" },
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "supertokens-python", specifier = ">=0.27.0" },
 ]
 
 [[package]]

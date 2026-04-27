@@ -4,6 +4,7 @@ import queue
 import signal
 import socket
 import threading
+import traceback
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
@@ -343,7 +344,7 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
 
     success = send_message(agent_info.name, send_message_request.message)
     if not success:
-        error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}'")
+        error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
@@ -732,6 +733,16 @@ def create_application(
     agent_manager: AgentManager | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
+
+    @application.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        logger.error("Unhandled exception on {} {}: {}\n{}", request.method, request.url.path, exc, "".join(tb))
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {exc}"},
+        )
+
     application.state.preconfigured_agent_manager = agent_manager
     application.state.config = config or Config()
     application.state.provider_names = provider_names

@@ -35,6 +35,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
@@ -47,6 +48,8 @@ from imbue.minds.desktop_client.latchkey.gateway import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayError
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.store import LatchkeyGatewayInfo
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyClient
+from imbue.minds.desktop_client.litellm_key_client import LiteLLMKeyError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -87,6 +90,60 @@ def _leased_agent_address(agent_id: AgentId) -> str:
 OutputCallback = Callable[[str, bool], None]
 
 LOG_SENTINEL: Final[str] = "__DONE__"
+
+# Placeholder ANTHROPIC_API_KEY set on pre-created pool hosts. Must look like
+# a real Anthropic key (correct prefix, correct length ~108 chars) so that
+# Claude Code validation accepts it during provisioning. Replaced with the
+# real LiteLLM virtual key via sed during lease setup.
+PLACEHOLDER_ANTHROPIC_API_KEY: Final[str] = (
+    "sk-ant-api03-PLACEHOLDER000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+)
+
+
+@pure
+def _build_inject_anthropic_command(
+    litellm_key: str,
+    litellm_base_url: str,
+    env_path: str,
+) -> str:
+    """Build a shell command that sets ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL in the agent env file."""
+    return (
+        "sed -i '/^ANTHROPIC_API_KEY=/d' {path}"
+        " && echo 'ANTHROPIC_API_KEY={real_key}' >> {path}"
+        " && sed -i '/^ANTHROPIC_BASE_URL=/d' {path}"
+        " && echo 'ANTHROPIC_BASE_URL={base_url}' >> {path}"
+    ).format(
+        real_key=litellm_key,
+        path=env_path,
+        base_url=litellm_base_url,
+    )
+
+
+@pure
+def _build_patch_claude_config_command(
+    litellm_key: str,
+    agent_id: AgentId,
+) -> str:
+    """Build a shell command that patches the agent's claude config to approve the LiteLLM key."""
+    claude_config_path = "/mngr/agents/{}/plugin/claude/anthropic/.claude.json".format(agent_id)
+    key_suffix = litellm_key[-20:]
+    return (
+        'python3 -c "'
+        "import json; "
+        "p='{path}'; "
+        "d=json.load(open(p)); "
+        "d['primaryApiKey']='{key}'; "
+        "a=d.setdefault('customApiKeyResponses',{{}}).setdefault('approved',[]); "
+        "s='{suffix}'; "
+        "a.append(s) if s not in a else None; "
+        "d['customApiKeyResponses']['rejected']=[]; "
+        "json.dump(d,open(p,'w'),indent=2)"
+        '"'
+    ).format(
+        path=claude_config_path,
+        key=litellm_key,
+        suffix=key_suffix,
+    )
 
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
@@ -665,6 +722,11 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Client for leasing pre-provisioned hosts from the Vultr host pool",
     )
+    litellm_key_client: LiteLLMKeyClient | None = Field(
+        default=None,
+        frozen=True,
+        description="Client for creating LiteLLM virtual keys via the remote connector",
+    )
     latchkey_gateway_manager: LatchkeyGatewayManager | None = Field(
         default=None,
         frozen=True,
@@ -1131,8 +1193,7 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-                redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+                redirect_url = "/goto/{}/".format(agent_id)
 
                 # Set DONE before invoking on_created so the UI can redirect as
                 # soon as the agent is usable. ``on_created`` is expected to
@@ -1235,10 +1296,11 @@ class AgentCreator(MutableModel):
                     agent_name=agent_name,
                     log_queue=log_queue,
                     emit_log=emit_log,
+                    access_token=access_token,
                     lease_result=lease_result,
                     on_created=on_created,
                 )
-            except (MngrCommandError, HostPoolError, ValueError, OSError):
+            except (MngrCommandError, HostPoolError, LiteLLMKeyError, ValueError, OSError):
                 self._cleanup_failed_lease(
                     agent_id=agent_id,
                     access_token=access_token,
@@ -1256,41 +1318,85 @@ class AgentCreator(MutableModel):
         agent_name: str,
         log_queue: queue.Queue[str],
         emit_log: OutputCallback,
+        access_token: str,
         lease_result: LeaseHostResult,
         on_created: Callable[[AgentId], None] | None = None,
     ) -> None:
-        """Rename, apply labels, inject the API key, and start the leased agent.
+        """Create a LiteLLM key, rename, apply labels, inject credentials, and start the leased agent.
 
         Sequence:
+          0. Create a LiteLLM virtual key via the remote connector (network call).
           1. ``mngr rename`` (sequential).
-          2. ``mngr label`` + ``mngr exec sed ... MINDS_API_KEY`` (parallel).
+          2. ``mngr label`` + inject MINDS_API_KEY + replace ANTHROPIC_API_KEY
+             placeholder + append ANTHROPIC_BASE_URL + patch claude config (parallel).
           3. ``mngr start`` (sequential).
 
-        All four subprocesses share a single ``ConcurrencyGroup`` child of
-        ``self.root_concurrency_group``. Every mngr invocation addresses the
-        agent via ``_leased_agent_address(agent_id)`` so mngr only queries the
-        SSH provider (skipping name/ID resolution across every other provider).
-
-        Raises ``MngrCommandError`` on any failure; the parallel step uses
-        ``is_checked_by_group=True`` so a failure in either sibling aborts the
-        other and propagates through the shared group.
+        Raises ``MngrCommandError`` on any failure.
         """
         parsed_name = AgentName(agent_name)
         address = _leased_agent_address(agent_id)
 
-        # Generate the API key up front so the parallel inject step has it
-        # ready; ``generate_api_key`` / ``hash_api_key`` are in-process and
-        # cheap. The on-disk hash is persisted after the agent starts so that
-        # a failure in the setup flow does not leave an orphan hash file.
+        # Step 0: create a LiteLLM virtual key for this agent
+        litellm_key: str | None = None
+        litellm_base_url: str | None = None
+        if self.litellm_key_client is not None:
+            log_queue.put("[minds] Creating LiteLLM virtual key...")
+            try:
+                key_result = self.litellm_key_client.create_key(
+                    access_token=access_token,
+                    key_alias=None,
+                    max_budget=100.0,
+                    budget_duration="1d",
+                    metadata={
+                        "agent_id": str(agent_id),
+                        "host_id": lease_result.host_id,
+                    },
+                )
+                litellm_key = key_result.key
+                litellm_base_url = key_result.base_url
+                log_queue.put("[minds] LiteLLM virtual key created.")
+            except LiteLLMKeyError as e:
+                raise MngrCommandError("Failed to create LiteLLM key: {}".format(e)) from e
+
         api_key = generate_api_key()
         env_path = "/mngr/agents/{}/env".format(agent_id)
-        inject_command = ("sed -i '/^MINDS_API_KEY=/d' {path} && echo 'MINDS_API_KEY={key}' >> {path}").format(
-            path=env_path, key=api_key
-        )
+        host_env_path = "/mngr/env"
+
+        # Build the inject command for MINDS_API_KEY
+        inject_minds_key_command = (
+            "sed -i '/^MINDS_API_KEY=/d' {path} && echo 'MINDS_API_KEY={key}' >> {path}"
+        ).format(path=env_path, key=api_key)
+
+        # Inject MNGR_PREFIX into the host env so the workspace server
+        # and all services inside the container use the correct prefix
+        mngr_prefix = os.environ.get("MNGR_PREFIX", "")
+        inject_prefix_command: str | None = None
+        if mngr_prefix:
+            inject_prefix_command = (
+                "sed -i '/^MNGR_PREFIX=/d' {path} && echo 'MNGR_PREFIX={prefix}' >> {path}"
+            ).format(path=host_env_path, prefix=mngr_prefix)
+
+        # Build the inject command for ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL
+        inject_anthropic_command: str | None = None
+        if litellm_key is not None and litellm_base_url is not None:
+            inject_anthropic_command = _build_inject_anthropic_command(
+                litellm_key=litellm_key,
+                litellm_base_url=litellm_base_url,
+                env_path=host_env_path,
+            )
+
+        # Build the command to patch the claude config JSON to approve the new key
+        patch_claude_config_command: str | None = None
+        if litellm_key is not None:
+            patch_claude_config_command = _build_patch_claude_config_command(
+                litellm_key=litellm_key,
+                agent_id=agent_id,
+            )
 
         cg = _make_child_cg("mngr-leased-setup", self.root_concurrency_group)
         try:
             with cg:
+                # Step 1: rename
                 log_queue.put("[minds] Renaming agent to '{}'...".format(parsed_name))
                 cg.run_process_to_completion(
                     command=[MNGR_BINARY, "rename", address, str(parsed_name)],
@@ -1298,7 +1404,8 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                 )
 
-                log_queue.put("[minds] Applying labels and injecting MINDS_API_KEY in parallel...")
+                # Step 2: parallel label + inject keys
+                log_queue.put("[minds] Applying labels and injecting credentials in parallel...")
                 label_proc = cg.run_process_in_background(
                     command=[
                         MNGR_BINARY,
@@ -1314,14 +1421,46 @@ class AgentCreator(MutableModel):
                     is_checked_by_group=True,
                     on_output=emit_log,
                 )
-                apikey_proc = cg.run_process_in_background(
-                    command=[MNGR_BINARY, "exec", address, inject_command],
+                minds_key_proc = cg.run_process_in_background(
+                    command=[MNGR_BINARY, "exec", address, inject_minds_key_command],
                     is_checked_by_group=True,
                     on_output=emit_log,
                 )
-                label_proc.wait()
-                apikey_proc.wait()
 
+                anthropic_proc = None
+                if inject_anthropic_command is not None:
+                    anthropic_proc = cg.run_process_in_background(
+                        command=[MNGR_BINARY, "exec", address, inject_anthropic_command],
+                        is_checked_by_group=True,
+                        on_output=emit_log,
+                    )
+
+                claude_config_proc = None
+                if patch_claude_config_command is not None:
+                    claude_config_proc = cg.run_process_in_background(
+                        command=[MNGR_BINARY, "exec", address, patch_claude_config_command],
+                        is_checked_by_group=True,
+                        on_output=emit_log,
+                    )
+
+                prefix_proc = None
+                if inject_prefix_command is not None:
+                    prefix_proc = cg.run_process_in_background(
+                        command=[MNGR_BINARY, "exec", address, inject_prefix_command],
+                        is_checked_by_group=True,
+                        on_output=emit_log,
+                    )
+
+                label_proc.wait()
+                minds_key_proc.wait()
+                if anthropic_proc is not None:
+                    anthropic_proc.wait()
+                if claude_config_proc is not None:
+                    claude_config_proc.wait()
+                if prefix_proc is not None:
+                    prefix_proc.wait()
+
+                # Step 3: start
                 log_queue.put("[minds] Starting agent '{}'...".format(parsed_name))
                 cg.run_process_to_completion(
                     command=[MNGR_BINARY, "start", address],
@@ -1329,10 +1468,6 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                 )
         except (ProcessError, ConcurrencyExceptionGroup) as e:
-            # Convert CG exceptions into MngrCommandError so the caller's
-            # existing except clause (MngrCommandError, HostPoolError, ...)
-            # triggers lease cleanup. Preserve the original exception chain
-            # for debuggability.
             raise MngrCommandError("Leased agent setup failed: {}".format(e)) from e
 
         key_hash = hash_api_key(api_key)
@@ -1340,8 +1475,7 @@ class AgentCreator(MutableModel):
         log_queue.put("[minds] API key hash stored.")
         log_queue.put("[minds] Leased agent started successfully.")
 
-        port_suffix = ":{}".format(self.server_port) if self.server_port else ""
-        redirect_url = "http://{}.localhost{}/".format(agent_id, port_suffix)
+        redirect_url = "/goto/{}/".format(agent_id)
 
         # Set DONE before invoking on_created so the UI can redirect as soon
         # as the agent is actually usable. ``on_created`` is expected to
