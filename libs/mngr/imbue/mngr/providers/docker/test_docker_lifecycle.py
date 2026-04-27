@@ -131,8 +131,9 @@ def test_destroy_host_removes_container(docker_provider: DockerProviderInstance)
     # Container is removed but host record persists in DESTROYED state
     # so that gc_snapshots can age-gate snapshot cleanup. delete_host
     # purges the record fully.
-    assert isinstance(docker_provider.get_host(host_id), OfflineHost)
-    docker_provider.delete_host(docker_provider.get_host(host_id))
+    offline = docker_provider.get_host(host_id)
+    assert isinstance(offline, OfflineHost)
+    docker_provider.delete_host(offline)
     with pytest.raises(HostNotFoundError):
         docker_provider.get_host(host_id)
 
