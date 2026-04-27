@@ -6,10 +6,7 @@ invocation never crashes on transient mngr failures.
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Iterator
 
 from loguru import logger
@@ -25,6 +22,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached as destroy_agent_detached
 
 
 @contextmanager
@@ -70,30 +68,3 @@ def destroy_agent_sync(target_name: str) -> None:
             )
     except MngrError as e:
         logger.warning("destroy_agent_sync: destroy of {} failed: {}", target_name, e)
-
-
-def destroy_agent_detached(target_name: str, log_path: Path) -> None:
-    """Fire-and-forget detached destroy using a child Python process.
-
-    Spawns a ``python -m imbue.mngr_subagent_proxy.hooks.destroy_worker``
-    child whose lifetime is independent of the caller. Stderr is appended
-    to ``log_path``.
-    """
-    log_handle = None
-    try:
-        log_handle = log_path.open("ab")
-    except OSError as e:
-        logger.warning("destroy_agent_detached: failed to open log {}: {}", log_path, e)
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "imbue.mngr_subagent_proxy.hooks.destroy_worker", target_name],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log_handle if log_handle is not None else subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as e:
-        logger.warning("destroy_agent_detached: failed to launch destroy worker: {}", e)
-    finally:
-        if log_handle is not None:
-            log_handle.close()

@@ -23,7 +23,7 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy import hookimpl
 from imbue.mngr_subagent_proxy import resources as _subagent_proxy_resources
-from imbue.mngr_subagent_proxy.hooks.mngr_api import destroy_agent_detached
+from imbue.mngr_subagent_proxy.hooks.destroy_detached import destroy_agent_detached
 
 SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 
