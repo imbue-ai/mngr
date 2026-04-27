@@ -15,13 +15,6 @@ from imbue.minds_workspace_server.activity_state import ActivityState
 from imbue.minds_workspace_server.activity_watcher import ACTIVE_MARKER_FILENAME
 from imbue.minds_workspace_server.activity_watcher import PERMISSIONS_WAITING_MARKER_FILENAME
 from imbue.minds_workspace_server.agent_manager import AgentManager
-
-# Several tests in this module spin up real watchdog FSEvents observers
-# (via ``_ensure_marker_watcher`` and ``_start_app_watcher``). On macOS the
-# FSEvents emitter thread occasionally stalls during shutdown, tripping
-# pytest-timeout. Mark the whole file as flaky so offload retries it
-# automatically -- mirrors ``ws_broadcaster_test.py``.
-pytestmark = pytest.mark.flaky
 from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
 from imbue.minds_workspace_server.agent_manager import _make_applications_file_handler
 from imbue.minds_workspace_server.models import AgentCreationError
@@ -39,6 +32,13 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+
+# Several tests in this module spin up real watchdog FSEvents observers
+# (via ``_ensure_marker_watcher`` and ``_start_app_watcher``). On macOS the
+# FSEvents emitter thread occasionally stalls during shutdown, tripping
+# pytest-timeout. Mark the whole file as flaky so offload retries it
+# automatically -- mirrors ``ws_broadcaster_test.py``.
+pytestmark = pytest.mark.flaky
 
 
 def _seed_agent(manager: AgentManager, agent_id: str, work_dir: str | None = None) -> None:
