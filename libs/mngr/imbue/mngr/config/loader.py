@@ -115,10 +115,14 @@ def load_bootstrap_context(
     """Load a lightweight context for ``mngr plugin add``.
 
     Identical to ``load_config`` except that the [agent_types], [providers], and
-    [plugins] config sections are not parsed. These sections often reference
-    the plugin about to be installed (the typical case during ``mngr plugin
-    add``), so validating them would emit confusing warnings about unknown
-    fields and unknown backends.
+    [plugins] config sections are not parsed. ``mngr plugin add`` is the one
+    command where it is expected and supported for these sections to reference
+    a plugin that is not yet installed (e.g. a user pre-declares
+    ``[providers.modal]`` and then runs ``mngr plugin add imbue-mngr-modal``);
+    skipping the parse avoids confusing unknown-field and unknown-backend
+    warnings in that workflow. The more common ordering -- install the plugin
+    first, then edit the config -- is also supported, since the parse is
+    skipped either way.
 
     Top-level config fields (logging, retry, headless, etc.) are still validated
     in non-strict mode.

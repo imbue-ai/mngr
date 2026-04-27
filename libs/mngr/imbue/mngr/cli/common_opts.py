@@ -138,9 +138,9 @@ def setup_command_context(
     Plugin-registered CLI option values are stored in ctx.meta["plugin_cli_params"]
     as a dict, accessible by plugins via their hooks.
 
-    For ``mngr plugin add`` (where the config typically references the
-    plugin about to be installed), use ``setup_bootstrap_command_context``
-    instead.
+    For ``mngr plugin add`` (which supports running against a config that
+    references a not-yet-installed plugin), use
+    ``setup_bootstrap_command_context`` instead.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
     mngr_ctx = load_config(
@@ -171,17 +171,20 @@ def setup_bootstrap_command_context(
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for ``mngr plugin add``.
 
-    Sibling of ``setup_command_context`` used by ``mngr plugin add``: the
-    typical workflow is to declare ``[providers.X]`` / ``[agent_types.X]``
-    blocks in the config and then run ``add`` to install the plugin those
-    blocks reference. At that moment the plugin is not yet installed, so the
-    plugin-defined config sections ([agent_types], [providers], [plugins])
-    are skipped to avoid spurious unknown-field and unknown-backend warnings.
+    Sibling of ``setup_command_context`` used by ``mngr plugin add``: ``add``
+    is the one command where it is expected and supported for the config to
+    reference a plugin that is not yet installed (e.g. a user pre-declares
+    ``[providers.modal]`` and then runs ``mngr plugin add imbue-mngr-modal``
+    to install it). The plugin-defined config sections ([agent_types],
+    [providers], [plugins]) are skipped to avoid spurious unknown-field and
+    unknown-backend warnings in that workflow. The reverse ordering --
+    install first, then edit the config -- is also fine, since these
+    sections are skipped either way.
 
     Other ``mngr plugin`` subcommands (``remove``/``enable``/``disable``)
-    deliberately do *not* use this path: they don't structurally create the
-    "config references not-yet-installed plugin" condition the way ``add``
-    does, so they should validate the config normally to catch real typos.
+    deliberately do *not* use this path: they don't structurally support
+    the "config references not-yet-installed plugin" condition the way
+    ``add`` does, so they validate the config normally to catch real typos.
 
     Behaves identically to ``setup_command_context`` in every other respect,
     with three exceptions:
