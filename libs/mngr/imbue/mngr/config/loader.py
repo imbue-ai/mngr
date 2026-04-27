@@ -39,6 +39,7 @@ from imbue.mngr.config.provider_config_registry import list_registered_provider_
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -358,12 +359,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += (
-                    f" The plugin package that provides the"
-                    f" '{backend}' backend may not be installed. If you installed mngr"
-                    f" as a tool, try reinstalling with the plugin package"
-                    f" (e.g. --with 'imbue-mngr-{backend}')."
-                )
+                msg += f" {get_plugin_install_hint(backend)}"
             if strict:
                 raise ConfigParseError(msg) from e
             else:
