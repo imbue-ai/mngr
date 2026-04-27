@@ -12,7 +12,6 @@ Marker semantics live in ``mngr_claude.claude_config.build_readiness_hooks_confi
 from collections.abc import Sequence
 from enum import auto
 from typing import Any
-from typing import assert_never
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.pure import pure
@@ -72,19 +71,3 @@ def derive_activity_state(
     if has_pending_tool_use:
         return ActivityState.TOOL_RUNNING
     return ActivityState.THINKING
-
-
-@pure
-def activity_state_label(state: ActivityState) -> str | None:
-    """Human-readable label for an ``ActivityState``, or ``None`` to hide the indicator."""
-    match state:
-        case ActivityState.IDLE:
-            return None
-        case ActivityState.THINKING:
-            return "Thinking…"
-        case ActivityState.TOOL_RUNNING:
-            return "Running tool…"
-        case ActivityState.WAITING_ON_PERMISSION:
-            return "Waiting for permission"
-        case _ as unreachable:
-            assert_never(unreachable)

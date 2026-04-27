@@ -1,7 +1,6 @@
 from typing import Any
 
 from imbue.minds_workspace_server.activity_state import ActivityState
-from imbue.minds_workspace_server.activity_state import activity_state_label
 from imbue.minds_workspace_server.activity_state import derive_activity_state
 from imbue.minds_workspace_server.activity_state import has_unmatched_tool_use
 
@@ -100,10 +99,3 @@ def test_derive_tool_running_when_active_and_pending_tool() -> None:
         has_pending_tool_use=True,
     )
     assert state == ActivityState.TOOL_RUNNING
-
-
-def test_activity_state_labels() -> None:
-    assert activity_state_label(ActivityState.IDLE) is None
-    assert activity_state_label(ActivityState.THINKING) == "Thinking…"
-    assert activity_state_label(ActivityState.TOOL_RUNNING) == "Running tool…"
-    assert activity_state_label(ActivityState.WAITING_ON_PERMISSION) == "Waiting for permission"
