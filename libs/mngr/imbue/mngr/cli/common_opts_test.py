@@ -1031,15 +1031,20 @@ def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
     tmp_path: Path,
     log_warnings: list[str],
 ) -> None:
-    """End-to-end check that lifecycle commands skip plugin-section validation.
+    """End-to-end check that ``mngr plugin add`` skips plugin-section validation.
 
     Regression guard for the branch's stated purpose: ``mngr plugin add``
-    and friends must not emit ``Unknown fields in providers.*`` or
-    ``references unknown backend`` warnings when the project config
-    references plugins not yet installed. This wires together
-    setup_bootstrap_command_context with a real project config file via
-    MNGR_PROJECT_DIR (mirroring the way the actual plugin lifecycle
-    commands invoke it).
+    must not emit ``Unknown fields in providers.*`` or ``references
+    unknown backend`` warnings when the project config references plugins
+    not yet installed. This wires together setup_bootstrap_command_context
+    with a real project config file via MNGR_PROJECT_DIR (mirroring the
+    way ``mngr plugin add`` invokes it).
+
+    Note: only ``add`` uses setup_bootstrap_command_context; the other
+    plugin subcommands (``remove``/``enable``/``disable``) deliberately
+    stay on the strict setup_command_context path -- they don't
+    structurally produce the not-yet-installed condition that ``add``
+    does, so they should validate the config normally to catch real typos.
     """
     # MNGR_PROJECT_DIR points at the directory that directly contains
     # settings.toml (no .{root_name}/ subdirectory needed). Top-level keys
