@@ -31,19 +31,35 @@ SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 class SubagentProxyChildConfig(ClaudeAgentConfig):
     """Claude config for agents spawned by the subagent-proxy hook.
 
-    Differs from ``ClaudeAgentConfig`` only in defaults: spawned subagents
-    do NOT inherit the user's ``~/.claude/{plugins,skills,agents,commands}/``,
-    so user-installed Claude Code plugins (e.g. imbue-code-guardian's
-    Stop-hook orchestrator that re-prompts agents into autofix/verify
-    cycles) don't fire inside the spawned subagent and turn it into a
-    runaway tree. mngr_claude's own readiness hooks still install (those
-    are baked into provisioning, not sourced from ``~/.claude/``), and
-    our subagent_proxy plugin still loads (Python entry-point).
+    Differs from ``ClaudeAgentConfig`` in two defaults:
+
+    1. ``sync_home_settings=False`` -- mngr_claude does not copy the
+       user's ``~/.claude/{plugins,skills,agents,commands}/`` into the
+       child's per-agent config dir.
+    2. ``settings_overrides`` adds ``enabledPlugins: {}`` so Claude
+       Code itself loads no plugins inside the spawned subagent. Without
+       this, Claude Code can still discover plugins via inherited env
+       (CLAUDE_CONFIG_DIR -> parent's per-agent dir -> known_marketplaces)
+       and auto-install them at session start. The setting is
+       documented in the Claude Code plugins reference: a plugin runs
+       only if its name appears in ``enabledPlugins`` in the resolved
+       settings, so an empty map disables all of them.
+
+    Together these stop user-installed Claude Code plugins (e.g.
+    imbue-code-guardian's Stop-hook orchestrator) from re-prompting the
+    spawned subagent into autofix/verify cycles. mngr_claude's own
+    readiness hooks still install (those are baked into provisioning,
+    not sourced from ``~/.claude/``), and our subagent_proxy plugin
+    still loads (Python entry-point, not a Claude Code plugin).
     """
 
     sync_home_settings: bool = Field(
         default=False,
-        description="Override: spawned subagents do not inherit user-installed Claude Code plugins.",
+        description="Override: spawned subagents do not inherit user-installed Claude Code plugins via filesystem sync.",
+    )
+    settings_overrides: dict[str, Any] = Field(
+        default_factory=lambda: {"enabledPlugins": {}},
+        description="Override: spawned subagents disable all Claude Code plugins via settings.json.",
     )
 
 

@@ -139,14 +139,8 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         'RESULT_FILE="$STATE_DIR/subagent_results/$TID.txt"\n'
         "\n"
         'if [ ! -f "$INIT_FLAG" ]; then\n'
-        # Scrub env vars that would otherwise let the spawned subagent
-        # find the parent's per-agent state, the user's ~/.claude
-        # plugins (which include the user-installed Stop-hook
-        # orchestrator and would re-prompt the subagent into autofix
-        # cycles), or running tmux session.
         "    env | grep -Ev "
-        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR"
-        "|CLAUDE_CONFIG_DIR|ORIGINAL_CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_ROOT|CLAUDECODE|TMUX|TMUX_PANE)=' "
+        "'^(MNGR_AGENT_STATE_DIR|MNGR_AGENT_NAME|MAIN_CLAUDE_SESSION_ID|MNGR_HOST_DIR)=' "
         '> "$ENV_FILE"\n'
         '    uv run mngr create "$TARGET_NAME:$PARENT_CWD" \\\n'
         "        --type mngr-proxy-child \\\n"
