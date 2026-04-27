@@ -836,7 +836,7 @@ class BootstrapMngrConfig(FrozenModel):
 
     A ratchet test (``test_bootstrap_config_field_sync``) asserts that the
     set of fields here equals MngrConfig's fields minus
-    ``_BOOTSTRAP_EXCLUDED_CONFIG_FIELDS``, so adding a new top-level field
+    ``BOOTSTRAP_EXCLUDED_CONFIG_FIELDS``, so adding a new top-level field
     to MngrConfig forces a deliberate decision about whether to surface it
     here.
     """
