@@ -1335,7 +1335,7 @@ def _handle_requests_panel(
 
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    catalog = _get_services_catalog(request)
+    catalog = _get_latchkey_services_catalog(request)
     for req in pending:
         if isinstance(req, SharingRequestEvent):
             kind_label = "sharing"
@@ -1508,7 +1508,7 @@ def _render_permission_page(
     plain explanation page with only a Deny option, since we have no
     permissions to offer the user.
     """
-    catalog = _get_services_catalog(request)
+    catalog = _get_latchkey_services_catalog(request)
     service_info = get_service_info(catalog, req_event.service_name) if catalog is not None else None
     parsed_id = AgentId(req_event.agent_id)
     ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
@@ -1542,10 +1542,10 @@ def _render_permission_page(
     return HTMLResponse(content=rendered)
 
 
-def _get_services_catalog(
+def _get_latchkey_services_catalog(
     request: Request,
 ) -> Mapping[str, ServicePermissionInfo] | None:
-    catalog: Mapping[str, ServicePermissionInfo] | None = request.app.state.services_catalog
+    catalog: Mapping[str, ServicePermissionInfo] | None = request.app.state.latchkey_services_catalog
     return catalog
 
 
@@ -1774,7 +1774,7 @@ async def _handle_permission_grant(
     if not isinstance(req_event, LatchkeyPermissionRequestEvent):
         return _json_error("Request not found or not a latchkey permission request", status_code=404)
 
-    catalog = _get_services_catalog(request)
+    catalog = _get_latchkey_services_catalog(request)
     if catalog is None:
         return _json_error("Latchkey permissions not configured on this server", status_code=500)
     service_info = get_service_info(catalog, req_event.service_name)
@@ -1847,7 +1847,7 @@ async def _handle_permission_deny(
     if not isinstance(req_event, LatchkeyPermissionRequestEvent):
         return _json_error("Request not found or not a latchkey permission request", status_code=404)
 
-    catalog = _get_services_catalog(request)
+    catalog = _get_latchkey_services_catalog(request)
     if catalog is None:
         return _json_error("Latchkey permissions not configured on this server", status_code=500)
     service_info = get_service_info(catalog, req_event.service_name)
@@ -2056,7 +2056,7 @@ def create_desktop_client(
     session_store: MultiAccountSessionStore | None = None,
     auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
-    services_catalog: Mapping[str, ServicePermissionInfo] | None = None,
+    latchkey_services_catalog: Mapping[str, ServicePermissionInfo] | None = None,
     permission_handler: PermissionGrantHandler | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
@@ -2120,7 +2120,7 @@ def create_desktop_client(
     app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
     app.state.request_inbox = request_inbox
-    app.state.services_catalog = services_catalog
+    app.state.latchkey_services_catalog = latchkey_services_catalog
     app.state.permission_handler = permission_handler
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL

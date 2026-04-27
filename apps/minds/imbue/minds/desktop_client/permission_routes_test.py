@@ -118,7 +118,7 @@ def _build_authenticated_client(
         http_client=None,
         paths=paths,
         request_inbox=inbox,
-        services_catalog=catalog,
+        latchkey_services_catalog=catalog,
         permission_handler=handler,
     )
     client = TestClient(app, base_url="http://localhost")

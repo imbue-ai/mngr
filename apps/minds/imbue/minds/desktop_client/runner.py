@@ -143,7 +143,7 @@ def start_desktop_client(
     latchkey.start(data_dir=data_directory)
 
     minds_config = MindsConfig(data_dir=data_directory)
-    services_catalog = _try_load_latchkey_services_catalog()
+    latchkey_services_catalog = _try_load_latchkey_services_catalog()
     permission_handler = PermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
@@ -245,7 +245,7 @@ def start_desktop_client(
         auth_backend_client=auth_backend_client,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        services_catalog=services_catalog,
+        latchkey_services_catalog=latchkey_services_catalog,
         permission_handler=permission_handler,
         server_port=port,
         output_format=output_format,
