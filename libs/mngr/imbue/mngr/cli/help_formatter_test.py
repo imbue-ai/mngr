@@ -20,9 +20,27 @@ from imbue.mngr.cli.help_formatter import is_interactive_terminal
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
+
+
+def _all_builtin_commands() -> list[click.Command]:
+    """Force-load every built-in command and return the list.
+
+    Built-ins are loaded lazily by the AliasAwareGroup; this helper triggers
+    the imports so tests can iterate the full set. Plugin-registered commands
+    are excluded to mirror the previous ``BUILTIN_COMMANDS`` constant.
+    """
+    ctx = click.Context(cli)
+    plugin_names = set(cli.commands.keys())
+    commands: list[click.Command] = []
+    for name in cli.list_commands(ctx):
+        if name in plugin_names:
+            continue
+        cmd = cli.get_command(ctx, name)
+        if cmd is not None:
+            commands.append(cmd)
+    return commands
 
 
 def test_is_interactive_terminal_returns_bool() -> None:
@@ -529,7 +547,7 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
     This ensures users see the alias directly in the synopsis rather than
     needing to look elsewhere in the help output.
     """
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _all_builtin_commands():
         if cmd.name is None:
             continue
         metadata = get_help_metadata(cmd.name)
@@ -555,7 +573,7 @@ def test_all_subcommands_have_git_style_help() -> None:
     Tests that invoke subgroups directly will get wrong help output.
     """
     runner = CliRunner()
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _all_builtin_commands():
         if not isinstance(cmd, click.Group) or not cmd.commands:
             continue
         for subcmd_name in cmd.commands:
@@ -670,7 +688,7 @@ def test_all_non_hidden_commands_have_generated_docs() -> None:
     all_doc_files = {p.stem for p in docs_dir.rglob("*.md")}
 
     missing = []
-    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
+    for cmd in _all_builtin_commands() + list(PLUGIN_COMMANDS):
         if cmd.name is None or cmd.hidden:
             continue
         if cmd.name not in all_doc_files:

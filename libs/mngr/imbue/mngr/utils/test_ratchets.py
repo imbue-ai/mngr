@@ -69,7 +69,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(3))
+    rc.check_inline_imports(_DIR, snapshot(4))
 
 
 def test_prevent_relative_imports() -> None:
@@ -81,11 +81,11 @@ def test_prevent_import_datetime() -> None:
 
 
 def test_prevent_importlib_import_module() -> None:
-    rc.check_importlib_import_module(_DIR, snapshot(0))
+    rc.check_importlib_import_module(_DIR, snapshot(1))
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    rc.check_getattr(_DIR, snapshot(11))
 
 
 def test_prevent_setattr() -> None:

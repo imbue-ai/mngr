@@ -32,7 +32,6 @@ from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
-from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
 
@@ -679,7 +678,9 @@ def main() -> None:
     # Generate CLI command docs
     base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
 
-    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
+    ctx = click.Context(cli)
+    builtin_commands = [cmd for name in cli.list_commands(ctx) if (cmd := cli.get_command(ctx, name)) is not None]
+    for cmd in builtin_commands + list(PLUGIN_COMMANDS):
         if cmd.name is not None:
             generate_command_doc(cmd.name, base_dir)
 

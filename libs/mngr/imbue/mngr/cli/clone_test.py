@@ -12,12 +12,14 @@ from imbue.mngr.main import cli
 
 def test_clone_command_exists() -> None:
     """The 'clone' command should be registered on the CLI group."""
-    assert "clone" in cli.commands
+    ctx = click.Context(cli)
+    assert cli.get_command(ctx, "clone") is not None
 
 
 def test_clone_is_not_create() -> None:
     """Clone should be a distinct command object from create."""
-    assert cli.commands["clone"] is not cli.commands["create"]
+    ctx = click.Context(cli)
+    assert cli.get_command(ctx, "clone") is not cli.get_command(ctx, "create")
 
 
 def test_clone_requires_source_agent(

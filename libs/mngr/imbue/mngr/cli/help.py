@@ -284,6 +284,13 @@ def _show_help_overview(ctx: click.Context) -> None:
     output.write("       'mngr <command> --help'. Command aliases are supported.\n")
     output.write("\n")
 
+    # Force lazy-loaded built-ins to import so their help metadata gets registered.
+    root_ctx = ctx.find_root()
+    root_cmd = root_ctx.command
+    if isinstance(root_cmd, click.Group):
+        for name in root_cmd.list_commands(root_ctx):
+            root_cmd.get_command(root_ctx, name)
+
     all_metadata = get_all_help_metadata()
     if all_metadata:
         output.write("COMMANDS\n")

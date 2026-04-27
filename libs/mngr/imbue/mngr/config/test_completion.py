@@ -30,12 +30,15 @@ def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
     option_name = parts[-1]
     assert option_name.startswith("--"), f"Unexpected key format in {label}: {dotted_key}"
 
-    cmd = cli
+    cmd: click.Command = cli
+    ctx = click.Context(cli)
     for part in parts[:-1]:
-        assert isinstance(cmd, click.Group) and part in cmd.commands, (
+        assert isinstance(cmd, click.Group), (
             f"{label} key {dotted_key!r} references command {part!r} which does not exist"
         )
-        cmd = cmd.commands[part]
+        sub_cmd = cmd.get_command(ctx, part)
+        assert sub_cmd is not None, f"{label} key {dotted_key!r} references command {part!r} which does not exist"
+        cmd = sub_cmd
 
     option_names = set()
     for param in cmd.params:
