@@ -173,8 +173,11 @@ def _load_context(
     # Get/create profile directory first (needed for user config
     profile_dir = get_or_create_profile_dir(base_dir)
 
-    # Pre-compute disabled plugins so _parse_providers can skip them.
-    # This uses the same lightweight pre-reader that create_plugin_manager() uses.
+    # Pre-compute disabled plugins so _parse_providers/_parse_agent_types can skip
+    # them on the full load path. This uses the same lightweight pre-reader that
+    # create_plugin_manager() uses. On the bootstrap path (parse_plugin_sections=
+    # False) this value is passed to parse_config() but unused, since the
+    # plugin-defined sections are skipped entirely there.
     config_disabled_plugins = read_disabled_plugins()
 
     # Start with base config that has defaults based on root_name
