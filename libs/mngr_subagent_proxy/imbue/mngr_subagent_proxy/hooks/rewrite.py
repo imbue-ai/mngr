@@ -103,13 +103,23 @@ def run(
     env_file = state_dir / "proxy_commands" / f"env-{tid}.env"
     init_flag = state_dir / "proxy_commands" / f"initialized-{tid}"
 
-    # Best-effort detached teardown of the mngr subagent.
+    # Destroy the actual subagent FIRST -- it's the heavy/slow piece and
+    # we want it kicked off before we touch any of the local files. The
+    # destroy is fire-and-forget so this returns instantly.
     if target_name:
         destroy_log = state_dir / "subagent_destroy.log"
         destroy_callable(target_name, destroy_log)
 
-    for path in (env_file, prompt_file, map_file, result_file, script_file, init_flag):
+    # Clean up state-dir-internal artifacts. Leave the wait-script and
+    # init_flag in place so a stray re-invocation by Haiku (which can
+    # happen if Haiku ignores the MNGR_PROXY_END_OF_OUTPUT sentinel and
+    # loops on its Bash tool) finds an idempotent script that emits just
+    # the sentinel and exits 0, rather than a missing-file error that
+    # keeps Haiku looping. The SessionStart reaper sweeps stale
+    # wait-script + init_flag pairs on the next parent boot.
+    for path in (env_file, prompt_file, map_file, result_file):
         _best_effort_unlink(path)
+    del script_file, init_flag  # intentionally retained
 
 
 def main() -> None:

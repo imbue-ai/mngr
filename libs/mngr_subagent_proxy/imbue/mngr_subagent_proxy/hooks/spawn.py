@@ -157,6 +157,16 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         "fi\n"
         "\n"
         'mkdir -p "$(dirname "$RESULT_FILE")"\n'
+        # Idempotent re-entry: if PostToolUse has already cleaned up
+        # the result file but Haiku ignored the sentinel and is calling
+        # us a second time, just emit the sentinel and exit 0 so Haiku
+        # can end its turn instead of error-looping.
+        'if [ -f "$INIT_FLAG" ] && [ ! -f "$RESULT_FILE" ]; then\n'
+        '    if [ ! -d "$STATE_DIR/subagent_map" ] || [ ! -f "$STATE_DIR/subagent_map/$TID.json" ]; then\n'
+        '        echo "MNGR_PROXY_END_OF_OUTPUT"\n'
+        "        exit 0\n"
+        "    fi\n"
+        "fi\n"
         'output=$(uv run python -m imbue.mngr_subagent_proxy.subagent_wait "$TARGET_NAME")\n'
         'case "$output" in\n'
         "    END_TURN:*)\n"
