@@ -650,8 +650,18 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
 
     log_queue = agent_manager.get_log_queue(agent_id)
     if log_queue is None:
-        await websocket.send_text(json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}))
-        await websocket.close()
+        try:
+            await _send_text_with_timeout(
+                websocket,
+                json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}),
+                _WS_SEND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pass
+        try:
+            await asyncio.wait_for(websocket.close(), timeout=_WS_SEND_TIMEOUT_SECONDS)
+        except (RuntimeError, asyncio.TimeoutError):
+            pass
         return
 
     try:
@@ -659,14 +669,22 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
         while not finished:
             try:
                 message = await run_in_threadpool(log_queue.get, timeout=1.0)
-                if message is None:
-                    finished = True
-                else:
-                    await websocket.send_text(message)
             except queue.Empty:
                 continue
+            if message is None:
+                finished = True
+            else:
+                await _send_text_with_timeout(websocket, message, _WS_SEND_TIMEOUT_SECONDS)
     except WebSocketDisconnect:
         pass
+    except asyncio.TimeoutError:
+        # Same hung-send protection as _ws_endpoint: a half-dead TCP connection
+        # could otherwise leave this handler blocked on send_text forever.
+        logger.warning("Proto-agent log WebSocket send timed out; closing connection")
+        try:
+            await asyncio.wait_for(websocket.close(code=1011), timeout=_WS_SEND_TIMEOUT_SECONDS)
+        except (RuntimeError, asyncio.TimeoutError):
+            pass
 
 
 async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
