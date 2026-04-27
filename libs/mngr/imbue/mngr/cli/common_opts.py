@@ -22,14 +22,16 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.loader import block_disabled_plugins
-from imbue.mngr.config.loader import load_bootstrap_context
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.config.loader import load_context
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
@@ -168,7 +170,7 @@ def setup_bootstrap_command_context(
     command_name: str,
     command_class: type[TCommandOptions],
     is_format_template_supported: bool = False,
-) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
+) -> tuple[BootstrapMngrContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for ``mngr plugin add``.
 
     Sibling of ``setup_command_context`` used by ``mngr plugin add``: ``add``
@@ -215,14 +217,21 @@ def setup_bootstrap_command_context(
        run ``mngr config set`` after the install completes.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
-    mngr_ctx = load_bootstrap_context(
-        pm,
-        cg,
+    # Use the internal load_context (returns full MngrContext) so the shared
+    # _finalize_command_setup can operate on the same shape both paths use.
+    # The conversion to BootstrapMngrContext happens at the very end -- only
+    # at the public boundary -- so internal pipeline code stays uniform.
+    mngr_ctx = load_context(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=None,
         enabled_plugins=initial_opts.plugin,
         disabled_plugins=initial_opts.disable_plugin,
         is_interactive=False,
+        strict=False,
+        parse_plugin_sections=False,
     )
-    return _finalize_command_setup(
+    full_ctx, output_opts, opts = _finalize_command_setup(
         ctx,
         command_name,
         command_class,
@@ -232,6 +241,7 @@ def setup_bootstrap_command_context(
         initial_opts=initial_opts,
         mngr_ctx=mngr_ctx,
     )
+    return to_bootstrap_context(full_ctx), output_opts, opts
 
 
 def _acquire_command_resources(
@@ -316,13 +326,13 @@ def _finalize_command_setup(
 
     # Block plugins that were disabled via command defaults or create templates
     # (e.g. disable_plugin from [commands.create] in settings.toml). CLI
-    # --disable-plugin flags are already blocked inside _load_context (via
+    # --disable-plugin flags are already blocked inside load_context (via
     # _apply_plugin_overrides feeding block_disabled_plugins) for both load
     # paths. [plugins.<name>] enabled=false in config files is also already
     # blocked, but via different paths: on the full path, _parse_plugins
     # preserves entries verbatim, _apply_plugin_overrides then filters them
     # and emits a disabled-name set, and block_disabled_plugins (called at
-    # the end of _load_context) actually blocks them. On the bootstrap path,
+    # the end of load_context) actually blocks them. On the bootstrap path,
     # _parse_plugins is skipped entirely, so config-file-disabled plugins are
     # detected via the lightweight read_disabled_plugins() pre-reader and
     # blocked at plugin-manager creation time (see create_plugin_manager in

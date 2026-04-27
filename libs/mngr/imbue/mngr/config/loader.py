@@ -17,6 +17,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
@@ -27,6 +28,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -92,7 +94,7 @@ def load_config(
 
     Returns MngrContext containing both the final MngrConfig and a reference to the plugin manager.
     """
-    return _load_context(
+    return load_context(
         pm=pm,
         concurrency_group=concurrency_group,
         context_dir=context_dir,
@@ -111,7 +113,7 @@ def load_bootstrap_context(
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
-) -> MngrContext:
+) -> BootstrapMngrContext:
     """Load a lightweight context for ``mngr plugin add``.
 
     Identical to ``load_config`` except that the [agent_types], [providers], and
@@ -127,18 +129,13 @@ def load_bootstrap_context(
     Top-level config fields (logging, retry, headless, etc.) are still validated
     in non-strict mode.
 
-    Returns a MngrContext whose ``config.providers`` and ``config.agent_types``
-    are empty dicts. ``config.plugins`` is also empty *except* for entries
-    injected by CLI ``--plugin``/``--enable-plugin`` flags, which are still
-    applied via ``_apply_plugin_overrides``. ``config.disabled_plugins``
-    reflects only CLI-level ``--disable-plugin`` flags; plugins disabled via
-    ``[plugins.<name>] enabled = false`` in a config file remain blocked at
-    plugin-manager creation time (via the lightweight pre-reader in
-    ``pre_readers.py``) but will not appear in ``config.disabled_plugins``.
-    Callers that depend on any of these fields must use ``load_config``
-    instead.
+    Returns a ``BootstrapMngrContext`` rather than a ``MngrContext``: the
+    plugin-defined fields (``providers``, ``agent_types``, ``plugins``) and
+    ``disabled_plugins`` are not exposed at all, so any future caller of
+    this function gets a type error instead of silently reading empty dicts.
+    Callers that need those fields must use ``load_config`` instead.
     """
-    return _load_context(
+    mngr_ctx = load_context(
         pm=pm,
         concurrency_group=concurrency_group,
         context_dir=context_dir,
@@ -148,9 +145,10 @@ def load_bootstrap_context(
         strict=False,
         parse_plugin_sections=False,
     )
+    return to_bootstrap_context(mngr_ctx)
 
 
-def _load_context(
+def load_context(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
     context_dir: Path | None,
@@ -161,10 +159,18 @@ def _load_context(
     strict: bool | None,
     parse_plugin_sections: bool,
 ) -> MngrContext:
-    """Shared implementation of ``load_config`` and ``load_bootstrap_context``.
+    """Shared implementation underlying ``load_config`` and ``load_bootstrap_context``.
 
-    See those public wrappers for the user-facing semantics. The
-    ``parse_plugin_sections`` flag toggles whether the plugin-defined config
+    Returns the full ``MngrContext`` regardless of ``parse_plugin_sections``;
+    public wrappers convert to a narrower type when appropriate (e.g.
+    ``load_bootstrap_context`` projects the result through ``to_bootstrap_context``).
+    Most callers should use one of those wrappers; the only reason to call
+    ``load_context`` directly is to share the full ``MngrContext`` shape with
+    code paths that need to call ``_finalize_command_setup`` -- see
+    ``setup_bootstrap_command_context`` in ``cli/common_opts.py`` for the one
+    such caller today.
+
+    The ``parse_plugin_sections`` flag toggles whether the plugin-defined config
     sections are parsed and validated; everything else is identical.
     """
 

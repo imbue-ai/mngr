@@ -1058,18 +1058,18 @@ def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
         '[agent_types.worker]\nparent_type = "claude"\nnonexistent_field = true\n'
     )
 
-    captured: list[tuple[Any, Any, bool]] = []
+    captured: list[tuple[set[str], bool]] = []
 
     @click.command()
     @add_common_options
     @click.pass_context
     def test_command(ctx: click.Context, **kwargs: Any) -> None:
-        mngr_ctx, _output_opts, _opts = setup_bootstrap_command_context(
+        bootstrap_ctx, _output_opts, _opts = setup_bootstrap_command_context(
             ctx=ctx,
             command_name="plugin",
             command_class=CommonCliOptions,
         )
-        captured.append((mngr_ctx.config.providers, mngr_ctx.config.agent_types, mngr_ctx.config.headless))
+        captured.append((set(type(bootstrap_ctx.config).model_fields), bootstrap_ctx.config.headless))
 
     result = cli_runner.invoke(
         test_command,
@@ -1080,10 +1080,13 @@ def test_setup_bootstrap_command_context_suppresses_unknown_plugin_warnings(
     )
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
-    providers, agent_types, headless = captured[0]
-    # Plugin-defined sections must be empty under the bootstrap path.
-    assert providers == {}
-    assert agent_types == {}
+    field_names, headless = captured[0]
+    # Bootstrap context must use BootstrapMngrConfig, which omits the
+    # plugin-defined sections so reading them is a type error rather than
+    # a silently-empty dict.
+    assert "providers" not in field_names
+    assert "agent_types" not in field_names
+    assert "plugins" not in field_names
     # Top-level fields must still be loaded.
     assert headless is True
     # No spurious warnings about plugin-defined sections.

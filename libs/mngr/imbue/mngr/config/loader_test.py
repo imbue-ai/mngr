@@ -11,6 +11,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
+from imbue.mngr.config.data_types import BootstrapMngrConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
@@ -1614,11 +1616,17 @@ def test_load_bootstrap_context_skips_plugin_section_validation(
         '[agent_types.worker]\nparent_type = "claude"\nnonexistent_field = true\n'
     )
 
-    mngr_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+    bootstrap_ctx = load_bootstrap_context(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
-    assert mngr_ctx.config.providers == {}
-    assert mngr_ctx.config.agent_types == {}
-    assert mngr_ctx.config.plugins == {}
+    # The plugin-defined fields aren't on BootstrapMngrConfig at all, so reading
+    # them raises AttributeError -- that's the type-system enforcement and the
+    # whole point of the bootstrap context type. Just make sure the field set
+    # really excludes them.
+    bootstrap_field_names = set(BootstrapMngrConfig.model_fields)
+    assert "providers" not in bootstrap_field_names
+    assert "agent_types" not in bootstrap_field_names
+    assert "plugins" not in bootstrap_field_names
+    assert isinstance(bootstrap_ctx.config, BootstrapMngrConfig)
     assert not any("Unknown fields" in msg for msg in log_warnings), log_warnings
     assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
 
@@ -1654,3 +1662,22 @@ def test_load_bootstrap_context_still_loads_top_level_fields(
 
     assert mngr_ctx.config.prefix == "custom-"
     assert mngr_ctx.config.headless is True
+
+
+def test_bootstrap_config_field_sync() -> None:
+    """BootstrapMngrConfig must mirror MngrConfig minus the documented exclusions.
+
+    Catches drift: if someone adds a top-level field to MngrConfig and forgets
+    to add it to BootstrapMngrConfig (or to the exclusion set), this test fails
+    so they have to make a deliberate decision about whether bootstrap callers
+    should see the new field.
+    """
+    expected = set(MngrConfig.model_fields) - BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
+    actual = set(BootstrapMngrConfig.model_fields)
+    assert actual == expected, (
+        f"BootstrapMngrConfig fields drifted from MngrConfig. "
+        f"In MngrConfig but missing here: {expected - actual}. "
+        f"In here but not in MngrConfig: {actual - expected}. "
+        f"Either add the field to BootstrapMngrConfig (if bootstrap callers should see it) "
+        f"or add it to BOOTSTRAP_EXCLUDED_CONFIG_FIELDS (if not)."
+    )
