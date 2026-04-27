@@ -372,6 +372,19 @@ class ConfigStructureError(ConfigError, TypeError):
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
 
+    def __init__(self, key: str, registered: list[str] | None = None) -> None:
+        self.key = key
+        self.registered = list(registered) if registered is not None else []
+        registered_str = ", ".join(self.registered) or "(none)"
+        message = f"Unknown provider backend: {key}. Registered backends: {registered_str}"
+        super().__init__(message)
+        self.user_help_text = (
+            f"If '{key}' is provided by a plugin, install the package that"
+            f" registers it (e.g. 'imbue-mngr-{key}') and ensure the plugin is"
+            " enabled. If you installed mngr as a uv tool, reinstall it with"
+            f" '--with imbue-mngr-{key}'."
+        )
+
 
 class NestedTmuxError(MngrError):
     """Cannot attach to tmux session from inside another tmux session."""

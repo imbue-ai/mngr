@@ -24,8 +24,8 @@ def get_provider_config_class(backend_name: str) -> type[ProviderInstanceConfig]
     """
     key = ProviderBackendName(backend_name)
     if key not in _provider_config_registry:
-        registered = ", ".join(sorted(str(k) for k in _provider_config_registry.keys()))
-        raise UnknownBackendError(f"Unknown provider backend: {key}. Registered backends: {registered or '(none)'}")
+        registered = sorted(str(k) for k in _provider_config_registry.keys())
+        raise UnknownBackendError(str(key), registered)
     return _provider_config_registry[key]
 
 

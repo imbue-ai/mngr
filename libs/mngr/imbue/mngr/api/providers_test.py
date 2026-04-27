@@ -37,6 +37,15 @@ def test_get_unknown_backend_raises() -> None:
     assert "nonexistent" in str(exc_info.value)
 
 
+def test_get_unknown_backend_includes_plugin_install_hint() -> None:
+    """Unknown backend errors should suggest installing the matching plugin."""
+    with pytest.raises(UnknownBackendError) as exc_info:
+        get_backend("lima")
+    formatted = exc_info.value.format_message()
+    assert "imbue-mngr-lima" in formatted
+    assert "plugin" in formatted
+
+
 def test_get_local_provider_instance(temp_mngr_ctx: MngrContext) -> None:
     """Test getting a local provider instance."""
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, temp_mngr_ctx)

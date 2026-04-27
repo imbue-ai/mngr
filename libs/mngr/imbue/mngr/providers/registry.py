@@ -97,9 +97,7 @@ def get_backend(name: str | ProviderBackendName) -> type[ProviderBackendInterfac
     key = ProviderBackendName(name) if isinstance(name, str) else name
     if key not in _backend_registry:
         available = sorted(str(k) for k in _backend_registry.keys())
-        raise UnknownBackendError(
-            f"Unknown provider backend: {key}. Registered backends: {', '.join(available) or '(none)'}"
-        )
+        raise UnknownBackendError(str(key), available)
     return _backend_registry[key]
 
 
