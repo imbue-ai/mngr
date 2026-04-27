@@ -494,16 +494,10 @@ def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]],
 
 
 def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPrsResult]:
-    """Fetch PRs for a single repo, retrying through the stable gh path on suspicious empty.
+    """Fetch PRs for a single repo, retrying via the stable gh path on suspicious empty.
 
-    Every kanpan-tracked repo has at least one PR (open, closed, or merged), so a
-    successful gh query that returns zero PRs is suspicious -- a known failure
-    mode is GitHub search-index degradation hitting the ISSUE_ADVANCED backend
-    that gh 2.79+ uses when --author is set. On suspicious empty we retry once
-    via the stable repository.pullRequests path, which uses a separate index.
-
-    The retry costs two extra gh calls only when the first attempt looked degraded;
-    healthy repos with one or more PRs return immediately on the first attempt.
+    Every kanpan-tracked repo has at least one PR, so a clean empty result is
+    suspicious; we retry once with use_stable_path=True before trusting it.
     """
     result = fetch_all_prs(cg, repo=repo_path)
 
