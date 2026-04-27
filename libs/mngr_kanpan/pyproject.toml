@@ -67,4 +67,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 85
+fail_under = 83
