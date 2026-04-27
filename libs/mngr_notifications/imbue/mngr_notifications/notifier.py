@@ -40,7 +40,7 @@ class MacOSNotifier(Notifier):
         if execute_command is None:
             # No action needed on click -- fire and forget
             try:
-                cg.run_process_in_background(cmd, check_interval=math.inf)
+                cg.run_process_in_background(cmd, check_interval_seconds=math.inf)
             except FileNotFoundError:
                 logger.warning("alerter not found; install with: brew install vjeantet/tap/alerter")
             return
@@ -50,7 +50,7 @@ class MacOSNotifier(Notifier):
         try:
             result = cg.run_process_to_completion(cmd, timeout=_ALERTER_TIMEOUT + 5, is_checked_after=False)
             if result.stdout.strip() in _ALERTER_CLICKED_RESPONSES:
-                cg.run_process_in_background(["sh", "-c", execute_command], check_interval=math.inf)
+                cg.run_process_in_background(["sh", "-c", execute_command], check_interval_seconds=math.inf)
         except FileNotFoundError:
             logger.warning("alerter not found; install with: brew install vjeantet/tap/alerter")
 

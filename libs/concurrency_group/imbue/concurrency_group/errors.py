@@ -85,14 +85,14 @@ class EnvironmentStoppedError(ConcurrencyGroupError):
 
 
 class MissedCheckError(ConcurrencyGroupError):
-    """Raised when a background process was not checked within its check_interval."""
+    """Raised when a background process was not checked within its check_interval_seconds."""
 
-    def __init__(self, command: tuple[str, ...], check_interval: float) -> None:
+    def __init__(self, command: tuple[str, ...], check_interval_seconds: float) -> None:
         self.command = command
-        self.check_interval = check_interval
+        self.check_interval_seconds = check_interval_seconds
         super().__init__(
-            f"Background process was not checked within {check_interval}s and was terminated. "
+            f"Background process was not checked within {check_interval_seconds}s and was terminated. "
             f"command=`{' '.join(command)}`. "
-            f"Call check() periodically (recommended cadence: check_interval / 2), "
-            f"or pass check_interval=math.inf to opt out."
+            f"Call check() periodically (recommended cadence: check_interval_seconds / 2), "
+            f"or pass check_interval_seconds=math.inf to opt out."
         )

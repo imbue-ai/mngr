@@ -441,7 +441,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         shutdown_event: ReadOnlyEvent | None = None,
-        check_interval: float = DEFAULT_CHECK_INTERVAL_SECONDS,
+        check_interval_seconds: float = DEFAULT_CHECK_INTERVAL_SECONDS,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -449,7 +449,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         When `is_checked_by_group` is True, the process will be checked for failure when the concurrency group exits
         or whenever its methods are called.
 
-        `check_interval` enforces that callers call `process.check()` periodically (at roughly half the
+        `check_interval_seconds` enforces that callers call `process.check()` periodically (at roughly half the
         interval). If the deadline passes without a check, a watchdog terminates the process and fails the
         concurrency group with a `MissedCheckError`. Pass `math.inf` to opt out of enforcement.
         """
@@ -464,11 +464,11 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
-                check_interval=check_interval,
+                check_interval_seconds=check_interval_seconds,
             )
 
         process = self.start_background_process_from_factory(process_factory)
-        if not math.isinf(check_interval):
+        if not math.isinf(check_interval_seconds):
             self._start_check_watchdog(process)
         return process
 
@@ -479,12 +479,12 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         Spawn a thread that calls `process.check()` periodically, satisfying the watchdog.
 
         Use this when there is no natural place in caller code to call `check()` (e.g. for long-running
-        background streams). The default `interval_seconds` is half the process's `check_interval`.
-        Raises if the process has `check_interval=math.inf` (no point in periodic checking).
+        background streams). The default `interval_seconds` is half the process's `check_interval_seconds`.
+        Raises if the process has `check_interval_seconds=math.inf` (no point in periodic checking).
         """
-        if math.isinf(process.check_interval):
-            raise ValueError("Cannot periodically check a process with check_interval=math.inf.")
-        actual_interval = interval_seconds if interval_seconds is not None else process.check_interval / 2
+        if math.isinf(process.check_interval_seconds):
+            raise ValueError("Cannot periodically check a process with check_interval_seconds=math.inf.")
+        actual_interval = interval_seconds if interval_seconds is not None else process.check_interval_seconds / 2
         return self.start_new_thread(
             target=_periodic_checker_target,
             args=(process, actual_interval, self._stop_watchdogs_event),
@@ -528,7 +528,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             shutdown_event=shutdown_event,
             on_output=on_output,
             is_checked_by_group=False,
-            check_interval=math.inf,
+            check_interval_seconds=math.inf,
         )
         process.wait()
         if is_checked_after:
@@ -678,7 +678,7 @@ def _periodic_checker_target(process: RunningProcess, interval_seconds: float, s
 
 def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
     wake = CompoundEvent([process.finished_event, stop_event])
-    check_interval = process.check_interval
+    check_interval_seconds = process.check_interval_seconds
     while not wake.is_set():
         remaining = process.seconds_until_check_overdue()
         if remaining <= 0:
@@ -690,7 +690,7 @@ def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
             # to surface the original problem, and we don't want a teardown-timeout to mask it.
             with contextlib.suppress(TimeoutExpired):
                 process.terminate(force_kill_seconds=0.0)
-            raise MissedCheckError(tuple(process.command), check_interval)
+            raise MissedCheckError(tuple(process.command), check_interval_seconds)
         wake.wait(timeout=remaining)
 
 

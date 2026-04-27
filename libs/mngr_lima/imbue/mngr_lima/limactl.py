@@ -83,7 +83,7 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
         ["tail", "--follow=name", "--retry", serial_log_path],
         is_checked_by_group=False,
         on_output=_log_boot_output,
-        check_interval=math.inf,
+        check_interval_seconds=math.inf,
     )
 
 

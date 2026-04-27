@@ -228,7 +228,7 @@ class TestingSandbox(SandboxInterface):
             running = self._cg.run_process_in_background(
                 list(args),
                 is_checked_by_group=False,
-                check_interval=math.inf,
+                check_interval_seconds=math.inf,
             )
             exec_proc = TestingExecProcess()
             exec_proc._running_process = running

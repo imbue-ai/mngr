@@ -31,13 +31,13 @@ class RunningProcess:
         output_queue: Queue[tuple[str, bool]] | None,
         shutdown_event: MutableEvent,
         is_checked: bool = False,
-        check_interval: float = math.inf,
+        check_interval_seconds: float = math.inf,
     ) -> None:
         self._command = command
         self._output_queue = output_queue
         self._shutdown_event = shutdown_event
         self._is_checked = is_checked
-        self._check_interval = check_interval
+        self._check_interval_seconds = check_interval_seconds
         self._last_check_time = time.monotonic()
         self._finished_event = Event()
         self._completed_process: FinishedProcess | None = None
@@ -112,8 +112,8 @@ class RunningProcess:
             raise ProcessError(tuple(self._command), stdout, stderr, self.returncode)
 
     @property
-    def check_interval(self) -> float:
-        return self._check_interval
+    def check_interval_seconds(self) -> float:
+        return self._check_interval_seconds
 
     @property
     def finished_event(self) -> Event:
@@ -124,9 +124,9 @@ class RunningProcess:
         return self._shutdown_event
 
     def seconds_until_check_overdue(self) -> float:
-        if math.isinf(self._check_interval):
+        if math.isinf(self._check_interval_seconds):
             return math.inf
-        return (self._last_check_time + self._check_interval) - time.monotonic()
+        return (self._last_check_time + self._check_interval_seconds) - time.monotonic()
 
     def poll(self) -> int | None:
         thread = self._thread
@@ -216,7 +216,7 @@ def run_background(
     env: Mapping[str, str] | None = None,
     process_class: type[ProcessClassType] = RunningProcess,  # type: ignore[assignment]
     process_class_kwargs: Mapping[str, object] | None = None,
-    check_interval: float = math.inf,
+    check_interval_seconds: float = math.inf,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
@@ -234,7 +234,7 @@ def run_background(
         shutdown_event=true_shutdown_event,
         command=command,
         is_checked=is_checked,
-        check_interval=check_interval,
+        check_interval_seconds=check_interval_seconds,
         **(process_class_kwargs or {}),
     )
     process.start(
