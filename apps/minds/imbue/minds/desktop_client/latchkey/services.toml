@@ -1,0 +1,517 @@
+# Mapping of latchkey service names to detent permission schemas.
+#
+# Each table entry corresponds to a service exposed by latchkey. The keys are:
+#
+#   display_name        Human-readable label shown in the permission dialog.
+#   description         One-sentence summary shown in the dialog header.
+#   scope_schemas       Detent scope schemas this service owns. Used as rule
+#                       keys in the agent's permissions.json.
+#   permission_schemas  Detent permission schemas the user can grant. Used as
+#                       rule values. Order is reflected in the dialog.
+#   default_permissions Optional override for which permissions are
+#                       pre-checked when the dialog opens. When omitted, the
+#                       runtime heuristic pre-checks any schema name ending
+#                       in "-read-all" or "-write-all", falling back to all
+#                       available permissions if neither suffix is present.
+#
+# All schema names below come from detent's built-in catalog
+# (imbue-ai/detent docs/builtin-schemas.md). Keep this file in sync with
+# upstream detent and latchkey.
+
+[services.slack]
+display_name = "Slack"
+description = "Send and receive Slack messages on the user's behalf."
+scope_schemas = ["slack-api"]
+permission_schemas = [
+  "slack-read-all",
+  "slack-write-all",
+  "slack-chat-read",
+  "slack-chat-write",
+  "slack-conversations-read",
+  "slack-conversations-write",
+  "slack-users-read",
+  "slack-users-write",
+  "slack-files-read",
+  "slack-files-write",
+  "slack-reactions-read",
+  "slack-reactions-write",
+  "slack-search",
+  "slack-pins-read",
+  "slack-pins-write",
+  "slack-bookmarks-read",
+  "slack-bookmarks-write",
+  "slack-reminders-read",
+  "slack-reminders-write",
+]
+
+[services.discord]
+display_name = "Discord"
+description = "Read and write Discord messages, channels, and guilds."
+scope_schemas = ["discord-api"]
+permission_schemas = [
+  "discord-read-all",
+  "discord-write-all",
+  "discord-read-messages",
+  "discord-write-messages",
+  "discord-read-channels",
+  "discord-write-channels",
+  "discord-read-guilds",
+  "discord-write-guilds",
+  "discord-read-users",
+]
+
+[services.github]
+display_name = "GitHub"
+description = "Read and write GitHub repositories, issues, pull requests, and more."
+scope_schemas = ["github-rest-api"]
+permission_schemas = [
+  "github-read-all",
+  "github-write-all",
+  "github-read-repos",
+  "github-write-repos",
+  "github-read-issues",
+  "github-write-issues",
+  "github-read-pulls",
+  "github-write-pulls",
+  "github-read-gists",
+  "github-write-gists",
+  "github-read-user",
+  "github-search",
+  "github-read-notifications",
+  "github-write-notifications",
+]
+
+[services.gitlab]
+display_name = "GitLab"
+description = "Read and write GitLab projects, merge requests, and issues."
+scope_schemas = ["gitlab-api"]
+permission_schemas = [
+  "gitlab-read-all",
+  "gitlab-write-all",
+  "gitlab-read-projects",
+  "gitlab-write-projects",
+  "gitlab-read-repository",
+  "gitlab-write-repository",
+  "gitlab-read-merge-requests",
+  "gitlab-write-merge-requests",
+  "gitlab-read-issues",
+  "gitlab-write-issues",
+  "gitlab-read-pipelines",
+  "gitlab-write-pipelines",
+  "gitlab-read-users",
+  "gitlab-read-groups",
+  "gitlab-write-groups",
+]
+
+[services.dropbox]
+display_name = "Dropbox"
+description = "Read and write files, sharing settings, and account metadata in Dropbox."
+scope_schemas = ["dropbox-api"]
+permission_schemas = [
+  "dropbox-files",
+  "dropbox-files-read",
+  "dropbox-files-write",
+  "dropbox-sharing",
+  "dropbox-sharing-read",
+  "dropbox-sharing-write",
+  "dropbox-account",
+  "dropbox-file-requests",
+  "dropbox-contacts",
+]
+# Dropbox has no -all suffix; default to read access only.
+default_permissions = ["dropbox-files-read", "dropbox-sharing-read", "dropbox-account"]
+
+[services.linear]
+display_name = "Linear"
+description = "Access the Linear API for issue tracking."
+scope_schemas = ["linear-api"]
+# Linear has no granular permission schemas in detent; "any" matches all
+# requests, which inside the linear-api scope means "all linear access".
+permission_schemas = ["any"]
+default_permissions = ["any"]
+
+[services.notion]
+display_name = "Notion"
+description = "Read and write Notion pages, databases, and comments."
+scope_schemas = ["notion-api"]
+permission_schemas = [
+  "notion-read-all",
+  "notion-write-all",
+  "notion-read-pages",
+  "notion-write-pages",
+  "notion-read-blocks",
+  "notion-write-blocks",
+  "notion-read-databases",
+  "notion-write-databases",
+  "notion-query-databases",
+  "notion-read-users",
+  "notion-read-comments",
+  "notion-write-comments",
+  "notion-search",
+]
+
+[services.mailchimp]
+display_name = "Mailchimp"
+description = "Read and write Mailchimp campaigns, lists, templates, and reports."
+scope_schemas = ["mailchimp-api"]
+permission_schemas = [
+  "mailchimp-read-all",
+  "mailchimp-write-all",
+  "mailchimp-read-campaigns",
+  "mailchimp-write-campaigns",
+  "mailchimp-read-lists",
+  "mailchimp-write-lists",
+  "mailchimp-read-templates",
+  "mailchimp-write-templates",
+  "mailchimp-read-automations",
+  "mailchimp-write-automations",
+  "mailchimp-read-reports",
+  "mailchimp-read-file-manager",
+  "mailchimp-write-file-manager",
+  "mailchimp-read-ecommerce",
+  "mailchimp-write-ecommerce",
+]
+
+[services.zoom]
+display_name = "Zoom"
+description = "Read and manage Zoom meetings, webinars, recordings, and users."
+scope_schemas = ["zoom-api"]
+permission_schemas = [
+  "zoom-read-all",
+  "zoom-write-all",
+  "zoom-read-meetings",
+  "zoom-write-meetings",
+  "zoom-read-webinars",
+  "zoom-write-webinars",
+  "zoom-read-recordings",
+  "zoom-write-recordings",
+  "zoom-read-reports",
+  "zoom-read-users",
+  "zoom-write-users",
+]
+
+[services.telegram]
+display_name = "Telegram"
+description = "Send messages and manage chats and bots through the Telegram API."
+scope_schemas = ["telegram-api"]
+# Telegram has no -read-all / -write-all; choose the bare-minimum send-only
+# default and let the user opt in to broader scopes deliberately.
+permission_schemas = [
+  "telegram-send-messages",
+  "telegram-manage-messages",
+  "telegram-updates",
+  "telegram-manage-chats",
+  "telegram-bot-info",
+  "telegram-stickers",
+  "telegram-payments",
+]
+default_permissions = ["telegram-send-messages", "telegram-updates", "telegram-bot-info"]
+
+[services.sentry]
+display_name = "Sentry"
+description = "Read and write Sentry issues, projects, organizations, and releases."
+scope_schemas = ["sentry-api"]
+permission_schemas = [
+  "sentry-read-all",
+  "sentry-write-all",
+  "sentry-read-issues",
+  "sentry-write-issues",
+  "sentry-read-projects",
+  "sentry-write-projects",
+  "sentry-read-organizations",
+  "sentry-read-teams",
+  "sentry-read-releases",
+  "sentry-write-releases",
+]
+
+[services.aws]
+display_name = "AWS"
+description = "Access AWS APIs (S3, EC2, Lambda, and many more)."
+scope_schemas = ["aws"]
+permission_schemas = [
+  "aws-s3",
+  "aws-s3-read",
+  "aws-s3-write",
+  "aws-ec2",
+  "aws-iam",
+  "aws-sts",
+  "aws-lambda",
+  "aws-dynamodb",
+  "aws-cloudformation",
+  "aws-logs",
+  "aws-cloudwatch",
+  "aws-sns",
+  "aws-sqs",
+  "aws-ssm",
+  "aws-secretsmanager",
+  "aws-route53",
+  "aws-ecs",
+  "aws-ecr",
+  "aws-eks",
+  "aws-bedrock",
+  "aws-cloudfront",
+  "aws-rds",
+  "aws-kms",
+  "aws-elb",
+  "aws-cloudtrail",
+  "aws-eventbridge",
+  "aws-kinesis",
+]
+# AWS sub-service schemas only match domain, not read/write split, so the
+# heuristic would pick nothing. Default to read-only S3 as the safest choice.
+default_permissions = ["aws-s3-read"]
+
+[services.stripe]
+display_name = "Stripe"
+description = "Read and write Stripe customers, payments, subscriptions, and more."
+scope_schemas = ["stripe-api"]
+permission_schemas = [
+  "stripe-read-all",
+  "stripe-write-all",
+  "stripe-read-customers",
+  "stripe-write-customers",
+  "stripe-read-payments",
+  "stripe-write-payments",
+  "stripe-read-subscriptions",
+  "stripe-write-subscriptions",
+  "stripe-read-invoices",
+  "stripe-write-invoices",
+  "stripe-read-products",
+  "stripe-write-products",
+  "stripe-read-balance",
+  "stripe-read-refunds",
+  "stripe-write-refunds",
+  "stripe-read-disputes",
+  "stripe-write-disputes",
+  "stripe-read-payouts",
+  "stripe-write-payouts",
+  "stripe-read-events",
+]
+# Default to read-only because Stripe is money-handling.
+default_permissions = ["stripe-read-all"]
+
+[services.figma]
+display_name = "Figma"
+description = "Read Figma files, components, comments, and webhooks."
+scope_schemas = ["figma-api"]
+permission_schemas = [
+  "figma-read-all",
+  "figma-write-all",
+  "figma-read-files",
+  "figma-read-comments",
+  "figma-write-comments",
+  "figma-read-projects",
+  "figma-read-components",
+  "figma-read-webhooks",
+  "figma-write-webhooks",
+  "figma-read-variables",
+  "figma-write-variables",
+  "figma-read-dev-resources",
+  "figma-write-dev-resources",
+  "figma-read-library-analytics",
+]
+
+[services.calendly]
+display_name = "Calendly"
+description = "Read and write Calendly events, availability, and webhooks."
+scope_schemas = ["calendly-api"]
+permission_schemas = [
+  "calendly-read-all",
+  "calendly-write-all",
+  "calendly-read-scheduled-events",
+  "calendly-write-scheduled-events",
+  "calendly-read-event-types",
+  "calendly-write-event-types",
+  "calendly-read-availability",
+  "calendly-write-availability",
+  "calendly-read-users",
+  "calendly-read-organizations",
+  "calendly-write-organizations",
+  "calendly-read-webhooks",
+  "calendly-write-webhooks",
+  "calendly-read-routing-forms",
+  "calendly-write-scheduling-links",
+  "calendly-write-shares",
+  "calendly-write-data-compliance",
+]
+
+[services.yelp]
+display_name = "Yelp"
+description = "Search Yelp businesses, reviews, events, and categories."
+scope_schemas = ["yelp-api"]
+permission_schemas = [
+  "yelp-read-all",
+  "yelp-write-all",
+  "yelp-read-businesses",
+  "yelp-write-businesses",
+  "yelp-read-reviews",
+  "yelp-read-events",
+  "yelp-read-categories",
+  "yelp-autocomplete",
+  "yelp-ai-chat",
+]
+
+[services.coolify]
+display_name = "Coolify"
+description = "Read and manage Coolify applications, databases, services, and projects."
+scope_schemas = ["coolify-api"]
+permission_schemas = [
+  "coolify-read-all",
+  "coolify-write-all",
+  "coolify-read-applications",
+  "coolify-write-applications",
+  "coolify-deployments",
+  "coolify-read-databases",
+  "coolify-write-databases",
+  "coolify-read-servers",
+  "coolify-write-servers",
+  "coolify-read-services",
+  "coolify-write-services",
+  "coolify-read-projects",
+  "coolify-write-projects",
+  "coolify-read-teams",
+]
+
+[services.umami]
+display_name = "Umami"
+description = "Read and write Umami analytics websites, stats, reports, and teams."
+scope_schemas = ["umami-api"]
+permission_schemas = [
+  "umami-read-all",
+  "umami-write-all",
+  "umami-read-websites",
+  "umami-write-websites",
+  "umami-read-stats",
+  "umami-read-reports",
+  "umami-write-reports",
+  "umami-read-teams",
+  "umami-write-teams",
+  "umami-read-me",
+]
+
+[services.google-gmail]
+display_name = "Gmail"
+description = "Read and send Gmail messages, drafts, threads, and labels."
+scope_schemas = ["google-gmail-api"]
+permission_schemas = [
+  "google-gmail-read-all",
+  "google-gmail-write-all",
+  "google-gmail-read-messages",
+  "google-gmail-write-messages",
+  "google-gmail-send-messages",
+  "google-gmail-read-threads",
+  "google-gmail-write-threads",
+  "google-gmail-read-labels",
+  "google-gmail-write-labels",
+  "google-gmail-read-drafts",
+  "google-gmail-write-drafts",
+  "google-gmail-read-settings",
+  "google-gmail-write-settings",
+  "google-gmail-read-history",
+  "google-gmail-read-profile",
+]
+
+[services.google-calendar]
+display_name = "Google Calendar"
+description = "Read and write Google Calendar events, calendars, and ACLs."
+scope_schemas = ["google-calendar-api"]
+permission_schemas = [
+  "google-calendar-read-all",
+  "google-calendar-write-all",
+  "google-calendar-read-events",
+  "google-calendar-write-events",
+  "google-calendar-read-calendars",
+  "google-calendar-write-calendars",
+  "google-calendar-read-calendar-list",
+  "google-calendar-write-calendar-list",
+  "google-calendar-read-settings",
+  "google-calendar-read-acl",
+  "google-calendar-write-acl",
+  "google-calendar-query-freebusy",
+  "google-calendar-read-colors",
+]
+
+[services.google-drive]
+display_name = "Google Drive"
+description = "Read and write Google Drive files, permissions, and comments."
+scope_schemas = ["google-drive-api"]
+permission_schemas = [
+  "google-drive-read-all",
+  "google-drive-write-all",
+  "google-drive-read-files",
+  "google-drive-write-files",
+  "google-drive-read-permissions",
+  "google-drive-write-permissions",
+  "google-drive-read-comments",
+  "google-drive-write-comments",
+  "google-drive-read-about",
+]
+
+[services.google-docs]
+display_name = "Google Docs"
+description = "Read, create, and update Google Docs documents."
+scope_schemas = ["google-docs-api"]
+permission_schemas = [
+  "google-docs-read-all",
+  "google-docs-write-all",
+  "google-docs-read-documents",
+  "google-docs-write-documents",
+  "google-docs-create-documents",
+  "google-docs-update-documents",
+]
+
+[services.google-sheets]
+display_name = "Google Sheets"
+description = "Read, create, and update Google Sheets spreadsheets and values."
+scope_schemas = ["google-sheets-api"]
+permission_schemas = [
+  "google-sheets-read-all",
+  "google-sheets-write-all",
+  "google-sheets-read-spreadsheets",
+  "google-sheets-create-spreadsheets",
+  "google-sheets-update-spreadsheets",
+  "google-sheets-read-values",
+  "google-sheets-write-values",
+]
+
+[services.google-people]
+display_name = "Google Contacts"
+description = "Read and write Google contacts and contact groups."
+scope_schemas = ["google-people-api"]
+permission_schemas = [
+  "google-people-read-all",
+  "google-people-write-all",
+  "google-people-read-contacts",
+  "google-people-write-contacts",
+  "google-people-read-contact-groups",
+  "google-people-write-contact-groups",
+  "google-people-read-other-contacts",
+  "google-people-write-other-contacts",
+]
+
+[services.google-analytics]
+display_name = "Google Analytics"
+description = "Read Google Analytics accounts, properties, data streams, and reports."
+scope_schemas = ["google-analytics-api"]
+permission_schemas = [
+  "google-analytics-read-all",
+  "google-analytics-write-all",
+  "google-analytics-run-reports",
+  "google-analytics-read-metadata",
+  "google-analytics-read-accounts",
+  "google-analytics-read-properties",
+  "google-analytics-write-properties",
+  "google-analytics-read-data-streams",
+  "google-analytics-write-data-streams",
+]
+
+[services.google-directions]
+display_name = "Google Directions"
+description = "Compute Google Maps routes and route matrices."
+scope_schemas = ["google-directions-api"]
+permission_schemas = [
+  "google-directions-read-all",
+  "google-directions-write-all",
+  "google-directions-compute-routes",
+  "google-directions-compute-route-matrix",
+]

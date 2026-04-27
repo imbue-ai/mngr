@@ -1,12 +1,14 @@
 import json
 from pathlib import Path
 
+from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
 from imbue.minds.desktop_client.request_events import SharingStatusSnapshot
 from imbue.minds.desktop_client.request_events import append_response_event
+from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import create_sharing_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
@@ -166,3 +168,106 @@ def test_load_response_events_missing_file(tmp_path: Path) -> None:
     """Loading from a nonexistent file returns an empty list."""
     loaded = load_response_events(tmp_path)
     assert loaded == []
+
+
+def test_create_latchkey_permission_request_event_populates_all_fields() -> None:
+    event = create_latchkey_permission_request_event(
+        agent_id="agent-abc",
+        service_name="slack",
+        rationale="I need to read the team's #general channel to summarize today's discussion.",
+    )
+
+    assert event.agent_id == "agent-abc"
+    assert event.service_name == "slack"
+    assert event.rationale.startswith("I need to read")
+    assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
+    assert str(event.event_id).startswith("evt-")
+    assert str(event.source) == "requests"
+
+
+def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
+    event = create_latchkey_permission_request_event(
+        agent_id="agent-xyz",
+        service_name="github",
+        rationale="Need to open a PR.",
+    )
+
+    line = json.dumps(event.model_dump(mode="json"))
+    parsed = parse_request_event(line)
+
+    assert isinstance(parsed, LatchkeyPermissionRequestEvent)
+    assert parsed.service_name == "github"
+    assert parsed.rationale == "Need to open a PR."
+
+
+def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
+    first = create_latchkey_permission_request_event(
+        agent_id="agent-1",
+        service_name="slack",
+        rationale="first",
+    )
+    second = create_latchkey_permission_request_event(
+        agent_id="agent-1",
+        service_name="slack",
+        rationale="second",
+    )
+
+    inbox = RequestInbox().add_request(first).add_request(second)
+    pending = inbox.get_pending_requests()
+
+    assert len(pending) == 1
+    assert isinstance(pending[0], LatchkeyPermissionRequestEvent)
+    assert pending[0].rationale == "second"
+
+
+def test_inbox_treats_different_services_as_different_requests() -> None:
+    slack_request = create_latchkey_permission_request_event(
+        agent_id="agent-1",
+        service_name="slack",
+        rationale="slack",
+    )
+    github_request = create_latchkey_permission_request_event(
+        agent_id="agent-1",
+        service_name="github",
+        rationale="github",
+    )
+
+    inbox = RequestInbox().add_request(slack_request).add_request(github_request)
+
+    assert inbox.get_pending_count() == 2
+
+
+def test_request_response_round_trips_auth_failed_status(tmp_path: Path) -> None:
+    response = create_request_response_event(
+        request_event_id="evt-abc",
+        status=RequestStatus.AUTH_FAILED,
+        agent_id="agent-1",
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
+        service_name="slack",
+    )
+    append_response_event(tmp_path, response)
+
+    loaded = load_response_events(tmp_path)
+
+    assert len(loaded) == 1
+    assert loaded[0].status == str(RequestStatus.AUTH_FAILED)
+    assert loaded[0].service_name == "slack"
+
+
+def test_inbox_response_for_latchkey_permission_removes_from_pending() -> None:
+    request = create_latchkey_permission_request_event(
+        agent_id="agent-1",
+        service_name="slack",
+        rationale="summary",
+    )
+    response = create_request_response_event(
+        request_event_id=str(request.event_id),
+        status=RequestStatus.GRANTED,
+        agent_id="agent-1",
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
+        service_name="slack",
+    )
+
+    inbox = RequestInbox().add_request(request).add_response(response)
+
+    assert inbox.get_pending_count() == 0
