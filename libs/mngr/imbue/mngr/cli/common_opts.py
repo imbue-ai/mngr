@@ -138,9 +138,9 @@ def setup_command_context(
     Plugin-registered CLI option values are stored in ctx.meta["plugin_cli_params"]
     as a dict, accessible by plugins via their hooks.
 
-    For plugin lifecycle commands (``mngr plugin add`` etc.) where the loaded
-    config may reference plugins not yet installed, use
-    ``setup_bootstrap_command_context`` instead.
+    For ``mngr plugin add`` (where the config typically references the
+    plugin about to be installed), use ``setup_bootstrap_command_context``
+    instead.
     """
     initial_opts, cg, pm = _acquire_command_resources(ctx, command_name, command_class)
     mngr_ctx = load_config(
@@ -169,13 +169,19 @@ def setup_bootstrap_command_context(
     command_class: type[TCommandOptions],
     is_format_template_supported: bool = False,
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
-    """Set up config and logging for a plugin lifecycle command.
+    """Set up config and logging for ``mngr plugin add``.
 
-    Sibling of ``setup_command_context`` for commands that operate on the
-    plugin set itself (``mngr plugin add``/``remove``/``enable``/``disable``).
-    The loaded config may reference plugins that are not yet installed, so the
-    [agent_types], [providers], and [plugins] sections are skipped to avoid
-    spurious unknown-field and unknown-backend warnings.
+    Sibling of ``setup_command_context`` used by ``mngr plugin add``: the
+    typical workflow is to declare ``[providers.X]`` / ``[agent_types.X]``
+    blocks in the config and then run ``add`` to install the plugin those
+    blocks reference. At that moment the plugin is not yet installed, so the
+    plugin-defined config sections ([agent_types], [providers], [plugins])
+    are skipped to avoid spurious unknown-field and unknown-backend warnings.
+
+    Other ``mngr plugin`` subcommands (``remove``/``enable``/``disable``)
+    deliberately do *not* use this path: they don't structurally create the
+    "config references not-yet-installed plugin" condition the way ``add``
+    does, so they should validate the config normally to catch real typos.
 
     Behaves identically to ``setup_command_context`` in every other respect,
     with three exceptions:

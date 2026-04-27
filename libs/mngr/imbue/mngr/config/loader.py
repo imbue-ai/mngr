@@ -112,11 +112,11 @@ def load_bootstrap_context(
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
 ) -> MngrContext:
-    """Load a lightweight context for plugin lifecycle commands.
+    """Load a lightweight context for ``mngr plugin add``.
 
     Identical to ``load_config`` except that the [agent_types], [providers], and
-    [plugins] config sections are not parsed. These sections may reference
-    plugins that are not yet installed (the typical case during ``mngr plugin
+    [plugins] config sections are not parsed. These sections often reference
+    the plugin about to be installed (the typical case during ``mngr plugin
     add``), so validating them would emit confusing warnings about unknown
     fields and unknown backends.
 
