@@ -146,7 +146,10 @@ def test_parse_transcript_events_skips_blank_lines() -> None:
 
 def test_parse_transcript_events_skips_malformed_json() -> None:
     content = "not json\n" + json.dumps({"type": "user_message", "content": "hello"}) + "\n"
-    events = _parse_transcript_events(content, roles=())
+    # Mid-file malformed lines now emit a logger.warning; absorb it so it doesn't
+    # leak to uncaptured output. The dedicated mid-file warning test asserts on it.
+    with capture_loguru(level="WARNING"):
+        events = _parse_transcript_events(content, roles=())
     assert len(events) == 1
 
 
