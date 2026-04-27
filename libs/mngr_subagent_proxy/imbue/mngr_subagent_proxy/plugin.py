@@ -57,10 +57,6 @@ class SubagentProxyChildConfig(ClaudeAgentConfig):
         default=False,
         description="Override: spawned subagents do not inherit user-installed Claude Code plugins via filesystem sync.",
     )
-    settings_overrides: dict[str, Any] = Field(
-        default_factory=lambda: {"enabledPlugins": {}},
-        description="Override: spawned subagents disable all Claude Code plugins via settings.json.",
-    )
 
 
 @hookimpl
