@@ -198,8 +198,7 @@ def test_unchecked_failed_processes_do_not_raise(tmp_path: Path) -> None:
 
 
 def test_failed_background_processes_raise_by_default(tmp_path: Path) -> None:
-    # Pins down that is_checked_by_group defaults to True so silent process failures
-    # don't slip through (see issue #1087).
+    """Pins down that is_checked_by_group defaults to True so silent process failures don't slip through."""
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer") as cg:
