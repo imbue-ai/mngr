@@ -21,6 +21,8 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.data_types import to_bootstrap_config
+from imbue.mngr.config.data_types import to_bootstrap_context
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _merge_command_defaults
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
@@ -1686,17 +1688,59 @@ def test_bootstrap_config_field_sync() -> None:
     )
 
 
+def test_to_bootstrap_config_sets_every_bootstrap_field() -> None:
+    """to_bootstrap_config must explicitly assign every BootstrapMngrConfig field.
+
+    pydantic's model_construct silently leaves omitted fields at their model
+    default, so a missing kwarg in the projection helper would not raise --
+    the result would just hold default values for the dropped field. This test
+    constructs a source MngrConfig with arbitrary non-default values, projects
+    it, and asserts that every BootstrapMngrConfig field appears in the result's
+    model_fields_set. Together with test_bootstrap_config_field_sync this means
+    a field added to BootstrapMngrConfig must be wired into to_bootstrap_config
+    or this test fails.
+    """
+    source = MngrConfig.model_construct(prefix="proj-test")
+    projected = to_bootstrap_config(source)
+    missing = set(BootstrapMngrConfig.model_fields) - projected.model_fields_set
+    assert not missing, (
+        f"to_bootstrap_config did not set these BootstrapMngrConfig fields: {sorted(missing)}. "
+        f"Add a kwarg for each missing field in to_bootstrap_config()."
+    )
+
+
+def test_to_bootstrap_context_sets_every_bootstrap_field(cg: ConcurrencyGroup, tmp_path: Path) -> None:
+    """to_bootstrap_context must explicitly assign every BootstrapMngrContext field.
+
+    Parallel of test_to_bootstrap_config_sets_every_bootstrap_field for the
+    Context pair, with the same model_construct caveat: an omitted kwarg would
+    silently leave the field at its model default rather than failing.
+    """
+    pm = pluggy.PluginManager("mngr")
+    source = MngrContext(
+        config=MngrConfig.model_construct(),
+        pm=pm,
+        profile_dir=tmp_path,
+        concurrency_group=cg,
+    )
+    projected = to_bootstrap_context(source)
+    missing = set(BootstrapMngrContext.model_fields) - projected.model_fields_set
+    assert not missing, (
+        f"to_bootstrap_context did not set these BootstrapMngrContext fields: {sorted(missing)}. "
+        f"Add a kwarg for each missing field in to_bootstrap_context()."
+    )
+
+
 def test_bootstrap_context_field_sync() -> None:
     """BootstrapMngrContext must mirror MngrContext minus the documented exclusions.
 
     Parallel of test_bootstrap_config_field_sync, but for the Context pair: a new
     field added to MngrContext must either be surfaced on BootstrapMngrContext
-    (so to_bootstrap_context copies it -- the projection helper iterates over
-    BootstrapMngrContext.model_fields) or added to
-    BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS. Without this test the projection helper
-    would silently leave the new field at its model default on the bootstrap
-    side, recreating the silent-incompleteness footgun the bootstrap types
-    were designed to eliminate.
+    (and copied through ``to_bootstrap_context``) or added to
+    BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS. Without this guard, MngrContext could
+    grow a new field without BootstrapMngrContext gaining it, recreating the
+    silent-incompleteness footgun the bootstrap types were designed to
+    eliminate.
     """
     expected = set(MngrContext.model_fields) - BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS
     actual = set(BootstrapMngrContext.model_fields)
