@@ -149,6 +149,7 @@ def _build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> s
         "        --no-connect \\\n"
         '        --env-file "$ENV_FILE" \\\n'
         '        --message-file "$PROMPT_FILE" \\\n'
+        "        --label mngr_subagent_proxy=child \\\n"
         "        --env MNGR_SUBAGENT_DEPTH=$((${MNGR_SUBAGENT_DEPTH:-0}+1))\n"
         '    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"\n'
         '    touch "$INIT_FLAG"\n'
