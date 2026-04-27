@@ -51,7 +51,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
   "*/utils/testing.py",
 ]
 

@@ -753,20 +753,19 @@ class VpsDockerProvider(BaseProviderInstance):
         """Create the Host object, configure activity watching, and persist state."""
         host = self._create_host_object(host_id, vps_ip, docker_ssh)
 
-        idle_timeout = self.config.default_idle_timeout
-        activity_sources = self.config.default_activity_sources
-        if lifecycle is not None:
-            if lifecycle.idle_timeout_seconds is not None:
-                idle_timeout = lifecycle.idle_timeout_seconds
-            if lifecycle.activity_sources is not None:
-                activity_sources = lifecycle.activity_sources
+        lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
+        activity_config = lifecycle_options.to_activity_config(
+            default_idle_timeout_seconds=self.config.default_idle_timeout,
+            default_idle_mode=self.config.default_idle_mode,
+            default_activity_sources=self.config.default_activity_sources,
+        )
 
         now = datetime.now(timezone.utc)
         host_data = CertifiedHostData(
             host_id=str(host_id),
             host_name=str(name),
-            idle_timeout_seconds=idle_timeout,
-            activity_sources=activity_sources,
+            idle_timeout_seconds=activity_config.idle_timeout_seconds,
+            activity_sources=activity_config.activity_sources,
             image=base_image,
             user_tags=dict(tags) if tags else {},
             created_at=now,

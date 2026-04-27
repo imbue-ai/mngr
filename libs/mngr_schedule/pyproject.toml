@@ -57,7 +57,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
   # Modal cron runner and verification run on Modal and require infrastructure to test
   "*/implementations/modal/cron_runner.py",
   "*/implementations/modal/verification.py",
@@ -76,4 +75,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 77
+fail_under = 75

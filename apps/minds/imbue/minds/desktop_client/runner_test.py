@@ -1,11 +1,14 @@
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import PrivateAttr
 
+from imbue.minds.desktop_client.latchkey.gateway import LATCHKEY_BINARY
 from imbue.minds.desktop_client.runner import AgentDiscoveryHandler
 from imbue.minds.desktop_client.runner import _DEFAULT_MNGR_HOST_DIR
 from imbue.minds.desktop_client.runner import _build_cloudflare_client
+from imbue.minds.desktop_client.runner import _build_latchkey_gateway_manager
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
@@ -83,7 +86,7 @@ class _FakeTunnelManager(SSHTunnelManager):
 
     _fake_remote_port: int = PrivateAttr(default=55000)
     _fake_fail: bool = PrivateAttr(default=False)
-    _reverse_tunnel_calls: list[tuple[RemoteSSHInfo, int, str]] = PrivateAttr(default_factory=list)
+    _reverse_tunnel_calls: list[tuple[RemoteSSHInfo, int, str | None, int]] = PrivateAttr(default_factory=list)
     _write_remote_calls: list[tuple[RemoteSSHInfo, str, str]] = PrivateAttr(default_factory=list)
 
     @classmethod
@@ -97,9 +100,10 @@ class _FakeTunnelManager(SSHTunnelManager):
         self,
         ssh_info: RemoteSSHInfo,
         local_port: int,
-        agent_state_dir: str,
+        agent_state_dir: str | None = None,
+        remote_port: int = 0,
     ) -> int:
-        self._reverse_tunnel_calls.append((ssh_info, local_port, agent_state_dir))
+        self._reverse_tunnel_calls.append((ssh_info, local_port, agent_state_dir, remote_port))
         if self._fake_fail:
             raise SSHTunnelError("simulated failure")
         return self._fake_remote_port
@@ -131,9 +135,11 @@ def test_agent_discovery_handler_handles_remote_agent(tmp_path: Path) -> None:
     handler(agent_id, ssh_info, "docker")
 
     assert len(fake_manager._reverse_tunnel_calls) == 1
-    _, local_port, agent_state_dir = fake_manager._reverse_tunnel_calls[0]
+    _, local_port, agent_state_dir, remote_port = fake_manager._reverse_tunnel_calls[0]
     assert local_port == 8420
     assert agent_state_dir == f"/mngr/agents/{agent_id}"
+    # The minds API tunnel uses a dynamically assigned remote port.
+    assert remote_port == 0
 
     assert len(fake_manager._write_remote_calls) == 1
     _, _, url = fake_manager._write_remote_calls[0]
@@ -160,3 +166,34 @@ def test_agent_discovery_handler_handles_remote_agent_tunnel_error(tmp_path: Pat
     handler(agent_id, ssh_info, "docker")
     assert len(fake_manager._write_remote_calls) == 0
     fake_manager.cleanup()
+
+
+def test_build_latchkey_gateway_manager_uses_defaults_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MINDS_LATCHKEY_BINARY", raising=False)
+    monkeypatch.delenv("MINDS_LATCHKEY_DIRECTORY", raising=False)
+
+    manager = _build_latchkey_gateway_manager(data_directory=tmp_path)
+    assert manager.latchkey_binary == LATCHKEY_BINARY
+    assert manager.latchkey_directory == tmp_path / "latchkey"
+
+
+def test_build_latchkey_gateway_manager_honors_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_LATCHKEY_BINARY", "/custom/bin/latchkey")
+    monkeypatch.setenv("MINDS_LATCHKEY_DIRECTORY", str(tmp_path / "shared"))
+
+    manager = _build_latchkey_gateway_manager(data_directory=tmp_path)
+    assert manager.latchkey_binary == "/custom/bin/latchkey"
+    assert manager.latchkey_directory == tmp_path / "shared"
+
+
+def test_build_latchkey_gateway_manager_expands_home_in_directory_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MINDS_LATCHKEY_BINARY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MINDS_LATCHKEY_DIRECTORY", "~/shared_latchkey")
+
+    manager = _build_latchkey_gateway_manager(data_directory=tmp_path)
+    assert manager.latchkey_directory == tmp_path / "shared_latchkey"

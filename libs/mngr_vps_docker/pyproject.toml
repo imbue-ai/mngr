@@ -41,7 +41,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
 ]
 
 [tool.coverage.report]
@@ -53,7 +52,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
 ]
 
 [tool.inline-snapshot]

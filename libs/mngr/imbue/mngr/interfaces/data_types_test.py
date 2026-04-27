@@ -12,10 +12,12 @@ from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.data_types import SSHInfo
 from imbue.mngr.interfaces.data_types import get_activity_sources_for_idle_mode
+from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
@@ -398,3 +400,59 @@ def test_certified_host_data_timestamps_are_utc() -> None:
     )
     assert data.created_at.tzinfo is not None
     assert data.updated_at.tzinfo is not None
+
+
+# =============================================================================
+# HostLifecycleOptions.to_activity_config Tests
+# =============================================================================
+
+
+def test_to_activity_config_disabled_idle_mode_produces_empty_activity_sources() -> None:
+    """Setting idle_mode=DISABLED must produce empty activity_sources, even when default_activity_sources is non-empty."""
+    lifecycle = HostLifecycleOptions(idle_mode=IdleMode.DISABLED)
+    activity_config = lifecycle.to_activity_config(
+        default_idle_timeout_seconds=800,
+        default_idle_mode=IdleMode.IO,
+        default_activity_sources=tuple(ActivitySource),
+    )
+    assert activity_config.activity_sources == ()
+    assert activity_config.idle_mode == IdleMode.DISABLED
+
+
+def test_to_activity_config_idle_mode_derives_activity_sources() -> None:
+    """When idle_mode is set but activity_sources is not, sources should be derived from the mode."""
+    lifecycle = HostLifecycleOptions(idle_mode=IdleMode.BOOT)
+    activity_config = lifecycle.to_activity_config(
+        default_idle_timeout_seconds=800,
+        default_idle_mode=IdleMode.IO,
+        default_activity_sources=tuple(ActivitySource),
+    )
+    assert activity_config.activity_sources == (ActivitySource.BOOT,)
+    assert activity_config.idle_mode == IdleMode.BOOT
+
+
+def test_to_activity_config_explicit_activity_sources_override_idle_mode() -> None:
+    """Explicit activity_sources should take precedence over idle_mode derivation."""
+    lifecycle = HostLifecycleOptions(
+        idle_mode=IdleMode.DISABLED,
+        activity_sources=(ActivitySource.SSH,),
+    )
+    activity_config = lifecycle.to_activity_config(
+        default_idle_timeout_seconds=800,
+        default_idle_mode=IdleMode.IO,
+        default_activity_sources=tuple(ActivitySource),
+    )
+    assert activity_config.activity_sources == (ActivitySource.SSH,)
+    assert activity_config.idle_mode == IdleMode.CUSTOM
+
+
+def test_to_activity_config_defaults_when_nothing_set() -> None:
+    """When nothing is set, should use default idle mode to derive activity sources."""
+    lifecycle = HostLifecycleOptions()
+    activity_config = lifecycle.to_activity_config(
+        default_idle_timeout_seconds=800,
+        default_idle_mode=IdleMode.IO,
+        default_activity_sources=tuple(ActivitySource),
+    )
+    assert activity_config.idle_mode == IdleMode.IO
+    assert activity_config.idle_timeout_seconds == 800

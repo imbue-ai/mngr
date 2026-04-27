@@ -44,12 +44,15 @@ from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
+from imbue.minds_workspace_server.request_writer import write_refresh_request
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
 from imbue.minds_workspace_server.sharing_proxy import SharingProxyError
 from imbue.minds_workspace_server.sharing_proxy import get_sharing_status
 from imbue.minds_workspace_server.sharing_proxy import request_sharing_edit
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+
+_LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 logger = _loguru_logger
 
@@ -680,6 +683,40 @@ async def _request_sharing_edit_endpoint(service_name: str) -> JSONResponse:
         return JSONResponse(content=error.model_dump(), status_code=502)
 
 
+async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
+    """Append a refresh-service event to the agent's refresh events file.
+
+    Called by agents inside the container to tell the minds desktop client
+    that an open web-service tab should reload. The desktop client picks the
+    event up via ``mngr events --follow`` and POSTs back to the broadcast
+    endpoint below.
+    """
+    try:
+        await run_in_threadpool(write_refresh_request, service_name)
+        return JSONResponse(content={"ok": True})
+    except (RuntimeError, OSError) as e:
+        error = ErrorResponse(detail=str(e))
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+
+async def _refresh_service_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
+    """Broadcast a refresh_service WebSocket message for the given service_name.
+
+    Called by the desktop client after it observes a refresh event on the
+    mngr events stream. Locked to loopback clients since no authentication
+    exists between the desktop client and the workspace server inside the
+    container.
+    """
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in _LOOPBACK_CLIENT_HOSTS:
+        error = ErrorResponse(detail="refresh-service broadcast is only callable from loopback")
+        return JSONResponse(content=error.model_dump(), status_code=403)
+
+    broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
+    broadcaster.broadcast_refresh_service(service_name)
+    return JSONResponse(content={"ok": True})
+
+
 def _inject_agent_id_meta_tag(html_content: str) -> str:
     """Inject the primary agent ID as a meta tag for the frontend."""
     agent_id = os.environ.get("MNGR_AGENT_ID", "")
@@ -719,6 +756,12 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/sharing/{service_name}", _get_sharing_status_endpoint, methods=["GET"])
     application.add_api_route("/api/sharing/{service_name}/request", _request_sharing_edit_endpoint, methods=["POST"])
+    application.add_api_route(
+        "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
+    )
+    application.add_api_route(
+        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
+    )
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )
