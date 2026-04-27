@@ -663,7 +663,8 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
 
 def _periodic_checker_target(process: RunningProcess, interval_seconds: float, stop_event: Event) -> None:
     wake = CompoundEvent([process.finished_event, stop_event])
-    while True:
+    is_finished = False
+    while not is_finished:
         if not wake.is_set():
             wake.wait(timeout=interval_seconds)
         # If the group is exiting or the process is being torn down, don't surface ProcessError
@@ -674,8 +675,9 @@ def _periodic_checker_target(process: RunningProcess, interval_seconds: float, s
         # ProcessError if the process happened to exit), or finished_event fired without an explicit
         # teardown: the process exited on its own. Either way, call check() to surface any ProcessError.
         process.check()
-        if wake.is_set():
-            return
+        # If wake is set after check(), the process has finished (or the group is being torn down,
+        # already handled above). Exit after this final check has had a chance to surface ProcessError.
+        is_finished = wake.is_set()
 
 
 def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
