@@ -660,7 +660,10 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
 
 def _periodic_checker_target(process: RunningProcess, interval_seconds: float, stop_event: Event) -> None:
     wake = CompoundEvent([process.finished_event, stop_event])
-    while True:
+    # The loop terminates via early return (teardown) or by setting `should_exit_after_final_check`
+    # so that the final iteration calls check() exactly once with `wake` already set.
+    should_exit_after_final_check = False
+    while not should_exit_after_final_check:
         if not wake.is_set():
             wake.wait(timeout=interval_seconds)
         # If the group is exiting or the process is being torn down, don't surface ProcessError
@@ -673,10 +676,8 @@ def _periodic_checker_target(process: RunningProcess, interval_seconds: float, s
         # is guaranteed to see the final returncode and surface any ProcessError. Exiting based
         # on wake-state read after check() would race: check() could see returncode=None, then
         # the process could finish before wake is read, dropping the non-zero exit silently.
-        was_wake_set_before_check = wake.is_set()
+        should_exit_after_final_check = wake.is_set()
         process.check()
-        if was_wake_set_before_check:
-            return
 
 
 def _check_watchdog_target(process: RunningProcess, stop_event: Event) -> None:
