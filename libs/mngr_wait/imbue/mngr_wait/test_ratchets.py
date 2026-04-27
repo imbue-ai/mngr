@@ -264,6 +264,10 @@ def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
 
 
+# Flaky under heavy CI load: the type checker subprocess can exceed the 10s
+# pytest-timeout when sandboxes are contended. Offload retries flaky tests
+# automatically; the underlying flake should be addressed separately.
+@pytest.mark.flaky
 def test_no_type_errors() -> None:
     """Ensure the codebase has zero type errors."""
     check_no_type_errors(_DIR)
