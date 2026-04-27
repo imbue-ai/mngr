@@ -17,6 +17,7 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
 from imbue.mngr_kanpan.data_sources.github import _PrFieldInternal
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
+from imbue.mngr_kanpan.data_sources.github import _build_gh_pr_list_cmd
 from imbue.mngr_kanpan.data_sources.github import _build_pr_branch_index
 from imbue.mngr_kanpan.data_sources.github import _build_unresolved_query
 from imbue.mngr_kanpan.data_sources.github import _fetch_repo_prs
@@ -350,6 +351,69 @@ def test_fetch_repo_prs_error() -> None:
     assert result.error is not None
 
 
+def test_fetch_repo_prs_success_does_not_retry() -> None:
+    """Healthy fetch path uses exactly two gh calls -- no retry latency."""
+    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
+    _, result = _fetch_repo_prs(cg, "org/repo")
+    assert result.is_confirmed is True
+    assert result.degradation_warning is None
+    assert cg.run_process_in_background.call_count == 2
+
+
+def test_fetch_repo_prs_retry_recovers_data_and_warns() -> None:
+    """Empty original + non-empty retry -> use retry data, warn user that gh looked flaky."""
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+    ]
+    _, result = _fetch_repo_prs(cg, "org/repo")
+    assert len(result.prs) == 1
+    assert result.prs[0].head_branch == "branch-1"
+    assert result.is_confirmed is True
+    assert result.degradation_warning is not None
+    assert cg.run_process_in_background.call_count == 4
+
+
+def test_fetch_repo_prs_retry_still_empty_marks_unconfirmed_no_warning() -> None:
+    """Empty original + empty retry -> both methods agree, no warning, but unconfirmed.
+
+    Both methods agreeing means the data we'd display is consistent regardless of
+    which path we trust, so per the design we don't warn. We still mark unconfirmed
+    so callers don't render '+PR' for agents whose repo we expect has at least one PR.
+    """
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    _, result = _fetch_repo_prs(cg, "org/repo")
+    assert result.prs == ()
+    assert result.is_confirmed is False
+    assert result.degradation_warning is None
+
+
+def test_fetch_repo_prs_retry_uses_stable_path() -> None:
+    """Retry call must drop --author to route around the flaky search backend."""
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    _fetch_repo_prs(cg, "org/repo")
+    cmds = [call[0][0] for call in cg.run_process_in_background.call_args_list]
+    assert cmds[0].count("--author") == 1
+    assert cmds[1].count("--author") == 1
+    assert "--author" not in cmds[2]
+    assert "--author" not in cmds[3]
+
+
+def test_fetch_repo_prs_no_retry_when_initial_errored() -> None:
+    """If first attempt errored (not just empty), don't retry -- error path handles it."""
+    cg = MagicMock()
+    fail = _make_mock_proc("", returncode=1, stderr="HTTP 504")
+    cg.run_process_in_background.side_effect = [fail, fail]
+    _, result = _fetch_repo_prs(cg, "org/repo")
+    assert result.error is not None
+    assert cg.run_process_in_background.call_count == 2
+
+
 # === GitHubDataSource.compute ===
 
 
@@ -389,13 +453,14 @@ def test_compute_agents_with_cached_repo_path() -> None:
 
 
 def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
-    """When no PR found, CreatePrUrlField should be placed in the 'pr' slot."""
+    """When no PR found for branch but repo PR data is confirmed, place CreatePrUrlField in 'pr' slot."""
     ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=False, unresolved=False))
     agent = make_agent_details(
         name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
     )
-    # Return empty PR list so no PRs exist for branch
-    cg = _make_fetch_cg("[]", "[]")
+    # Return PR for a different branch so repo data is confirmed but agent's branch has no match.
+    other_branch = _make_open_pr_json(1, "different-branch")
+    cg = _make_fetch_cg(other_branch, other_branch)
     ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name in fields
@@ -460,6 +525,51 @@ def test_compute_with_conflicts_and_unresolved() -> None:
     assert FIELD_UNRESOLVED in fields[agent.name]
     assert isinstance(fields[agent.name][FIELD_CONFLICTS], ConflictsField)
     assert isinstance(fields[agent.name][FIELD_UNRESOLVED], UnresolvedField)
+
+
+def test_compute_unconfirmed_repo_leaves_pr_field_unset() -> None:
+    """When both gh queries return empty (suspicious), don't render '+PR' for agents.
+
+    Every kanpan repo has at least one PR, so an empty gh result is degraded data.
+    Leaving FIELD_PR unset makes the TUI render the same way as a network failure,
+    not a confirmed 'no PR yet' state.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="b", labels={"remote": "git@github.com:org/repo.git"})
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert FIELD_PR not in fields.get(agent.name, {})
+
+
+def test_compute_unconfirmed_no_warning_when_methods_agree() -> None:
+    """Both empty -> no warning surfaced (the data we'd display is the same either way)."""
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="b", labels={"remote": "git@github.com:org/repo.git"})
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    ctx = make_mngr_ctx_with_cg(cg)
+    _fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert errors == []
+
+
+def test_compute_recovered_data_surfaces_warning() -> None:
+    """When retry recovers PRs the original missed, surface a warning so user sees gh is flaky."""
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = [
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+    ]
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert agent.name in fields
+    assert FIELD_PR in fields[agent.name]
+    assert any("flaky" in e.lower() for e in errors)
 
 
 def test_compute_disabled_pr_and_ci() -> None:
@@ -816,3 +926,30 @@ def test_fetch_all_prs_passes_repo() -> None:
         cmd = call[0][0]
         assert "--repo" in cmd
         assert cmd[cmd.index("--repo") + 1] == "org/repo"
+
+
+def test_fetch_all_prs_use_stable_path_drops_author() -> None:
+    cg = _make_mock_cg("[]", "[]")
+    fetch_all_prs(cg, repo="org/repo", use_stable_path=True)
+    for call in cg.run_process_in_background.call_args_list:
+        cmd = call[0][0]
+        assert "--author" not in cmd
+
+
+# === _build_gh_pr_list_cmd ===
+
+
+def test_build_gh_pr_list_cmd_default_includes_author_me() -> None:
+    cmd = _build_gh_pr_list_cmd("open", "number", 100, "org/repo")
+    assert "--author" in cmd
+    assert cmd[cmd.index("--author") + 1] == "@me"
+
+
+def test_build_gh_pr_list_cmd_use_stable_path_drops_author() -> None:
+    cmd = _build_gh_pr_list_cmd("open", "number", 100, "org/repo", use_stable_path=True)
+    assert "--author" not in cmd
+    # Other flags preserved.
+    assert "--state" in cmd
+    assert cmd[cmd.index("--state") + 1] == "open"
+    assert "--repo" in cmd
+    assert cmd[cmd.index("--repo") + 1] == "org/repo"

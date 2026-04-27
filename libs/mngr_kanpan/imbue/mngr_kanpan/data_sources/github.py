@@ -151,15 +151,33 @@ def _build_gh_pr_list_cmd(
     fields: str,
     limit: int,
     repo: str | None,
+    *,
+    use_stable_path: bool = False,
 ) -> list[str]:
-    """Build a gh pr list command with the given parameters."""
-    cmd = ["gh", "pr", "list", "--author", "@me", "--state", state, "--json", fields, "--limit", str(limit)]
+    """Build a gh pr list command with the given parameters.
+
+    When use_stable_path=True, drops --author @me. gh CLI 2.79+ routes queries
+    with --author through GitHub's ISSUE_ADVANCED search backend, which
+    intermittently returns empty results for valid queries (cli/cli#11702,
+    cli/cli#12198). Without --author, gh uses the stable
+    repository.pullRequests GraphQL field, which is reliable but heavier
+    (returns PRs from all authors).
+    """
+    cmd = ["gh", "pr", "list", "--state", state, "--json", fields, "--limit", str(limit)]
+    if not use_stable_path:
+        cmd.extend(["--author", "@me"])
     if repo is not None:
         cmd.extend(["--repo", repo])
     return cmd
 
 
-def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
+def fetch_all_prs(
+    cg: ConcurrencyGroup,
+    cwd: Path | None = None,
+    repo: str | None = None,
+    *,
+    use_stable_path: bool = False,
+) -> FetchPrsResult:
     """Fetch PRs from a repo using gh CLI, in two parallel passes.
 
     Repo is identified by repo ('owner/repo' string passed via --repo) or
@@ -172,16 +190,19 @@ def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | Non
     Pass 2: all PRs without statusCheckRollup (lightweight metadata only). This
     provides branch matching for closed/merged PRs without the expensive CI
     status resolution that causes GitHub API 504 timeouts.
+
+    use_stable_path=True drops --author to route around the flaky gh
+    ISSUE_ADVANCED search backend. See _build_gh_pr_list_cmd for details.
     """
     try:
         open_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("open", _OPEN_FIELDS, 100, repo),
+            _build_gh_pr_list_cmd("open", _OPEN_FIELDS, 100, repo, use_stable_path=use_stable_path),
             timeout=30,
             cwd=cwd,
             is_checked_by_group=False,
         )
         all_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("all", _BASE_FIELDS, 500, repo),
+            _build_gh_pr_list_cmd("all", _BASE_FIELDS, 500, repo, use_stable_path=use_stable_path),
             timeout=30,
             cwd=cwd,
             is_checked_by_group=False,
@@ -378,6 +399,7 @@ class GitHubDataSource(FrozenModel):
         # Fetch PRs for all unique repos in parallel
         pr_by_repo_branch: dict[str, dict[str, _PrFieldInternal]] = {}
         repo_pr_loaded: dict[str, bool] = {}
+        repo_pr_confirmed: dict[str, bool] = {}
 
         with ThreadPoolExecutor(max_workers=min(len(all_repos), 8)) as executor:
             for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp), all_repos):
@@ -386,8 +408,12 @@ class GitHubDataSource(FrozenModel):
                     if repo_index:
                         pr_by_repo_branch[repo_path] = repo_index
                     repo_pr_loaded[repo_path] = True
+                    repo_pr_confirmed[repo_path] = pr_result.is_confirmed
+                    if pr_result.degradation_warning is not None:
+                        errors.append(pr_result.degradation_warning)
                 else:
                     repo_pr_loaded[repo_path] = False
+                    repo_pr_confirmed[repo_path] = False
                     errors.append(pr_result.error)
 
         # Build agent fields
@@ -400,6 +426,7 @@ class GitHubDataSource(FrozenModel):
             if agent_repo is not None and branch is not None:
                 pr = _lookup_pr(pr_by_repo_branch, agent_repo, branch)
                 agent_prs_loaded = repo_pr_loaded.get(agent_repo) is True
+                agent_prs_confirmed = repo_pr_confirmed.get(agent_repo) is True
 
                 if pr is not None:
                     if self.config.pr:
@@ -407,7 +434,12 @@ class GitHubDataSource(FrozenModel):
                     if self.config.ci:
                         agent_fields[FIELD_CI] = CiField(status=pr.internal_check_status)
                 else:
-                    if agent_prs_loaded:
+                    # Only render "+PR" when we are confident the repo really has no
+                    # matching PR for this branch. If unconfirmed (gh returned empty
+                    # but we expected at least one PR), leave FIELD_PR unset so the
+                    # TUI shows the same "data not yet available" rendering as a
+                    # network failure -- not a confirmed "no PR yet".
+                    if agent_prs_loaded and agent_prs_confirmed:
                         agent_fields[FIELD_PR] = CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch))
 
             if agent_fields:
@@ -437,6 +469,17 @@ class _FetchPrsResult(FrozenModel):
 
     prs: tuple[_PrFieldInternal, ...] = Field(description="Fetched PRs as PrField objects")
     error: str | None = Field(default=None, description="Error message if fetch failed")
+    is_confirmed: bool = Field(
+        default=True,
+        description="False when both gh queries returned empty for a repo we expect to have PRs. "
+        "Callers should not show 'no PR yet' for agents on this repo, since we cannot tell whether "
+        "they truly have no PR or whether the gh search backend silently dropped results.",
+    )
+    degradation_warning: str | None = Field(
+        default=None,
+        description="Set when the retry recovered PRs that the original gh query missed -- "
+        "evidence the gh search backend is currently flaky.",
+    )
 
 
 def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName) -> str | None:
@@ -451,9 +494,35 @@ def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]],
 
 
 def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPrsResult]:
-    """Fetch PRs for a single repo."""
+    """Fetch PRs for a single repo, retrying through the stable gh path on suspicious empty.
+
+    Every kanpan-tracked repo has at least one PR (open, closed, or merged), so a
+    successful gh query that returns zero PRs is suspicious -- almost certainly the
+    flaky ISSUE_ADVANCED search backend that gh 2.79+ uses when --author is set.
+    On suspicious empty we retry once via the stable repository.pullRequests path.
+
+    The retry costs two extra gh calls only when the first attempt looked degraded;
+    healthy repos with one or more PRs return immediately on the first attempt.
+    """
     result = fetch_all_prs(cg, repo=repo_path)
-    # Convert PrInfo objects to PrField objects
+
+    is_confirmed = True
+    degradation_warning: str | None = None
+    if result.error is None and not result.prs:
+        retry = fetch_all_prs(cg, repo=repo_path, use_stable_path=True)
+        if retry.error is None and retry.prs:
+            # Stable path found PRs the flaky path missed -- the data we would have
+            # shown was wrong. Surface a warning so the user knows gh is flaky.
+            degradation_warning = (
+                f"GitHub search API appears flaky for {repo_path}: "
+                f"--author @me query returned 0 PRs but stable query returned {len(retry.prs)}. "
+                "Showing recovered data."
+            )
+            result = retry
+        else:
+            # Both methods agree the repo looks empty. Since we expect every repo to
+            # have at least one PR, mark unconfirmed so callers don't render "no PR yet".
+            is_confirmed = False
     pr_fields: list[_PrFieldInternal] = []
     for pr_info in result.prs:
         pr_fields.append(
@@ -467,7 +536,12 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPr
                 internal_check_status=CiStatus(str(pr_info.check_status)),
             )
         )
-    return repo_path, _FetchPrsResult(prs=tuple(pr_fields), error=result.error)
+    return repo_path, _FetchPrsResult(
+        prs=tuple(pr_fields),
+        error=result.error,
+        is_confirmed=is_confirmed,
+        degradation_warning=degradation_warning,
+    )
 
 
 @pure
