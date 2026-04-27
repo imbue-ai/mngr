@@ -470,7 +470,7 @@ def _parse_agent_types(
         config_class = get_agent_config_class(effective_type)
         # If no specific config class is registered for this type, the field
         # set we'll validate against is the bare base AgentTypeConfig -- which
-        # will reject any plugin-specific fields (e.g. claude's `is_fast`).
+        # will reject any plugin-specific fields (e.g. claude's `sync_home_settings`).
         # Mirror the hint shape used by _parse_providers so users learn whether
         # the cause is a missing plugin (or a typo) rather than thinking they
         # mistyped a field name. The "type name matches a disabled plugin"
