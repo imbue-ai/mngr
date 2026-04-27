@@ -66,10 +66,26 @@ def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, std
     return script
 
 
-def _read_recording(report_path: Path) -> list[dict[str, object]]:
+def _read_recording(report_path: Path) -> list[dict[str, list[str] | str]]:
+    """Parse the JSONL recording emitted by ``_make_recording_binary``.
+
+    Each entry has ``argv`` (list of strings) and ``env_LATCHKEY_DIRECTORY``
+    (string). The narrow return type avoids subscripting ``object`` in tests.
+    """
     if not report_path.exists():
         return []
-    return [json.loads(line) for line in report_path.read_text().splitlines() if line.strip()]
+    parsed: list[dict[str, list[str] | str]] = []
+    for line in report_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        argv_raw = raw["argv"]
+        env_raw = raw["env_LATCHKEY_DIRECTORY"]
+        assert isinstance(argv_raw, list)
+        assert all(isinstance(a, str) for a in argv_raw)
+        assert isinstance(env_raw, str)
+        parsed.append({"argv": [str(a) for a in argv_raw], "env_LATCHKEY_DIRECTORY": env_raw})
+    return parsed
 
 
 _SLACK_SERVICE_INFO = ServicePermissionInfo(
@@ -267,7 +283,9 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     assert responses[0].status == str(RequestStatus.GRANTED)
     mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
     assert len(mngr_recording) == 1
-    assert mngr_recording[0]["argv"][0] == "message"
+    argv = mngr_recording[0]["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == "message"
 
 
 def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> None:
@@ -440,4 +458,6 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
 
     mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
     assert len(mngr_recording) == 1
-    assert "denied" in mngr_recording[0]["argv"][2].lower()
+    argv = mngr_recording[0]["argv"]
+    assert isinstance(argv, list)
+    assert "denied" in argv[2].lower()

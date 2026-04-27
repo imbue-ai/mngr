@@ -28,6 +28,13 @@ from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDestructi
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayDiscoveryHandler
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayReconcileCallback
+from imbue.minds.desktop_client.latchkey.permission_flow import LatchkeyAuthBrowserRunner
+from imbue.minds.desktop_client.latchkey.permission_flow import LatchkeyServicesInfoProbe
+from imbue.minds.desktop_client.latchkey.permission_flow import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permission_flow import PermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
+from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -138,6 +145,13 @@ def start_desktop_client(
     latchkey_gateway_manager.start(data_dir=data_directory)
 
     minds_config = MindsConfig(data_dir=data_directory)
+    latchkey_services_catalog = _try_load_latchkey_services_catalog()
+    latchkey_permission_handler = PermissionGrantHandler(
+        data_dir=data_directory,
+        services_info_probe=LatchkeyServicesInfoProbe(latchkey_binary=LATCHKEY_BINARY),
+        auth_browser_runner=LatchkeyAuthBrowserRunner(latchkey_binary=LATCHKEY_BINARY),
+        mngr_message_sender=MngrMessageSender(),
+    )
     cloudflare_client = _build_cloudflare_client(minds_config.remote_service_connector_url)
     auth_backend_client = AuthBackendClient(base_url=minds_config.remote_service_connector_url)
     agent_creator = AgentCreator(
@@ -234,6 +248,8 @@ def start_desktop_client(
         auth_backend_client=auth_backend_client,
         minds_config=minds_config,
         request_inbox=request_inbox,
+        latchkey_services_catalog=latchkey_services_catalog,
+        latchkey_permission_handler=latchkey_permission_handler,
         server_port=port,
         output_format=output_format,
     )
@@ -253,6 +269,20 @@ def start_desktop_client(
     # quickly, giving the lifespan shutdown hook time to run within
     # electron's 5-second SIGKILL window.
     uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+
+
+def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo] | None:
+    """Load the latchkey services catalog, downgrading failures to a logged warning.
+
+    A missing or malformed catalog must not prevent the desktop client from
+    starting -- agents that don't try to use latchkey are unaffected. The
+    permission dialog falls back to a deny-only page when the catalog is None.
+    """
+    try:
+        return load_services_catalog()
+    except LatchkeyServicesCatalogError as e:
+        logger.warning("Could not load latchkey services catalog; permission dialogs disabled: {}", e)
+        return None
 
 
 def _build_cloudflare_client(connector_url: AnyUrl) -> CloudflareClient:

@@ -23,6 +23,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 
 _PERMISSIONS_FILENAME: Final[str] = "permissions.json"
@@ -106,7 +107,7 @@ def load_permissions(path: Path) -> PermissionsConfig:
                 raise MalformedPermissionsConfigError(
                     f"Rule values must be lists of permission schema names in {path}"
                 )
-            normalized[scope_name] = list(permissions)
+            normalized[scope_name] = [str(p) for p in permissions]
         rules.append(normalized)
 
     schemas = data.get("schemas")
@@ -204,7 +205,9 @@ def set_permissions_for_service(
             new_rules.append({scope: list(permissions_list)})
             seen_scopes.add(scope)
 
-    return config.model_copy(update={"rules": tuple(new_rules)})
+    return config.model_copy_update(
+        to_update(config.field_ref().rules, tuple(new_rules)),
+    )
 
 
 def delete_permissions_for_agent(data_dir: Path, agent_id: AgentId) -> None:

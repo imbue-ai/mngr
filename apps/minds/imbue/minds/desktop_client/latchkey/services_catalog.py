@@ -100,12 +100,13 @@ def _build_service_info(name: str, raw: Mapping[str, object]) -> ServicePermissi
     if not permission_schemas_raw:
         raise MalformedServicesCatalogError(f"Service '{name}' permission_schemas must be non-empty")
 
-    permission_schemas = tuple(permission_schemas_raw)
+    scope_schemas: tuple[str, ...] = tuple(str(s) for s in scope_schemas_raw)
+    permission_schemas: tuple[str, ...] = tuple(str(s) for s in permission_schemas_raw)
 
     if default_permissions_raw is None:
-        default_permissions = _default_permissions_heuristic(permission_schemas)
+        default_permissions: tuple[str, ...] = _default_permissions_heuristic(permission_schemas)
     elif isinstance(default_permissions_raw, list) and all(isinstance(s, str) for s in default_permissions_raw):
-        default_permissions = tuple(default_permissions_raw)
+        default_permissions = tuple(str(s) for s in default_permissions_raw)
     else:
         raise MalformedServicesCatalogError(
             f"Service '{name}' default_permissions must be a list of strings if specified",
@@ -122,7 +123,7 @@ def _build_service_info(name: str, raw: Mapping[str, object]) -> ServicePermissi
         name=name,
         display_name=display_name,
         description=description,
-        scope_schemas=tuple(scope_schemas_raw),
+        scope_schemas=scope_schemas,
         permission_schemas=permission_schemas,
         default_permissions=default_permissions,
     )

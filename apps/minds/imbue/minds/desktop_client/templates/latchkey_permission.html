@@ -1,0 +1,154 @@
+{#
+  Latchkey permission request dialog.
+
+  Renders the permission_schemas for a single service as checkboxes,
+  with the service's default_permissions pre-checked (or, if the service
+  has previously been granted some permissions for this agent, those
+  are pre-checked instead so the dialog also acts as a revocation UI).
+  The Approve button is disabled until at least one checkbox is ticked.
+#}
+{% extends 'base.html' %}
+{% import '_macros.html' as ui %}
+{% block title %}Permission Request: {{ service.display_name }}{% endblock %}
+{% block body_class %}bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace{% endblock %}
+{% block body_style %}--workspace-accent: {{ accent }};{% endblock %}
+{% block content %}
+  {% call ui.page_container() %}
+    <h1 class="text-2xl font-semibold text-zinc-900 leading-tight">
+      Permission request:
+      <code class="bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]">{{ service.display_name }}</code>
+    </h1>
+    <p class="text-sm text-zinc-600 mt-1">
+      Workspace:
+      <a href="/goto/{{ agent_id }}/" class="text-blue-600 hover:underline">{{ ws_name or agent_id }}</a>
+    </p>
+
+    {% call ui.card(extra='mt-6') %}
+      <p class="text-sm text-zinc-600">{{ service.description }}</p>
+
+      <div class="mt-4">
+        <p class="text-xs font-medium uppercase tracking-wide text-zinc-500 mb-1">
+          Reason given by the agent
+        </p>
+        <p class="text-sm whitespace-pre-wrap">{{ rationale }}</p>
+      </div>
+    {% endcall %}
+
+    <form id="latchkey-permission-form" method="POST"
+          action="/requests/{{ request_id }}/permission/grant"
+          class="mt-6">
+      <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
+      <p class="text-xs text-zinc-500 mb-3">
+        Select which permissions the agent may use for {{ service.display_name }}.
+        Existing grants for this service are checked; uncheck to revoke them.
+      </p>
+      <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
+        {% for permission in service.permission_schemas %}
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" name="permissions" value="{{ permission }}"
+                   class="latchkey-perm-checkbox mt-0.5"
+                   {% if permission in checked_permissions %}checked{% endif %}>
+            <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+          </label>
+        {% endfor %}
+      </div>
+
+      <div class="flex gap-2 mt-5 justify-end">
+        <button type="button"
+                onclick="submitLatchkeyDeny()"
+                class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors cursor-pointer no-underline whitespace-nowrap bg-red-50 text-red-600 border border-red-200 hover:bg-red-100">
+          Deny
+        </button>
+        <button type="submit"
+                id="latchkey-approve-btn"
+                disabled
+                class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md font-medium text-sm leading-tight transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer no-underline whitespace-nowrap bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900">
+          Approve
+        </button>
+      </div>
+    </form>
+
+    <div id="latchkey-progress" class="hidden mt-4">
+      {% call ui.notice(variant='info') %}
+        <span class="font-medium">Authenticating...</span>
+        Latchkey is opening a browser window for you to sign in to {{ service.display_name }}.
+        This dialog will close automatically when the flow completes.
+      {% endcall %}
+    </div>
+
+    <div id="latchkey-error" class="hidden mt-4">
+      {% call ui.notice(variant='error') %}
+        <p class="font-medium">Authorization failed</p>
+        <p id="latchkey-error-message"></p>
+      {% endcall %}
+    </div>
+  {% endcall %}
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    const form = document.getElementById("latchkey-permission-form");
+    const approveBtn = document.getElementById("latchkey-approve-btn");
+    const progress = document.getElementById("latchkey-progress");
+    const errorBox = document.getElementById("latchkey-error");
+    const errorMsg = document.getElementById("latchkey-error-message");
+
+    function updateApproveState() {
+      const anyChecked = !!form.querySelector(".latchkey-perm-checkbox:checked");
+      approveBtn.disabled = !anyChecked;
+    }
+    form.querySelectorAll(".latchkey-perm-checkbox").forEach(function (cb) {
+      cb.addEventListener("change", updateApproveState);
+    });
+    updateApproveState();
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      approveBtn.disabled = true;
+      errorBox.classList.add("hidden");
+      progress.classList.remove("hidden");
+
+      const formData = new FormData(form);
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || ("HTTP " + response.status));
+        }
+        const data = await response.json();
+        if (data.outcome === "GRANTED") {
+          window.location.href = "/";
+          return;
+        }
+        progress.classList.add("hidden");
+        errorMsg.textContent = data.message || "Authorization failed.";
+        errorBox.classList.remove("hidden");
+        approveBtn.disabled = false;
+      } catch (err) {
+        progress.classList.add("hidden");
+        errorMsg.textContent = err && err.message ? err.message : String(err);
+        errorBox.classList.remove("hidden");
+        approveBtn.disabled = false;
+      }
+    });
+
+    window.submitLatchkeyDeny = async function () {
+      approveBtn.disabled = true;
+      try {
+        await fetch("/requests/{{ request_id }}/permission/deny", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+      } catch (err) {
+        // Best-effort: the response event may have failed to write,
+        // but the dialog should still close so the user is unblocked.
+      }
+      window.location.href = "/";
+    };
+  })();
+</script>
+{% endblock %}

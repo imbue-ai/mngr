@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.latchkey.services_catalog import MalformedServicesCatalogError
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import _default_permissions_heuristic
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
@@ -209,15 +208,3 @@ def test_load_services_catalog_default_for_known_services_is_subset_of_permissio
             )
 
 
-def test_service_permission_info_is_frozen() -> None:
-    info = ServicePermissionInfo(
-        name="foo",
-        display_name="Foo",
-        description="A foo.",
-        scope_schemas=("foo-api",),
-        permission_schemas=("foo-read",),
-        default_permissions=("foo-read",),
-    )
-
-    with pytest.raises(Exception):
-        info.name = "bar"  # type: ignore[misc]

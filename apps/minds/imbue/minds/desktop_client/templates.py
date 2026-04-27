@@ -271,3 +271,30 @@ def render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id or "",
     )
+
+
+@pure
+def render_latchkey_permission_dialog(
+    agent_id: str,
+    request_id: str,
+    ws_name: str,
+    rationale: str,
+    service: object,
+    checked_permissions: Sequence[str],
+) -> str:
+    """Render the latchkey permission approval dialog.
+
+    ``service`` is a ``ServicePermissionInfo``; passed as ``object`` to keep
+    this module free of a downstream dependency on the latchkey package.
+    The template only reads its ``display_name``, ``description``, and
+    ``permission_schemas`` attributes.
+    """
+    return JINJA_ENV.get_template("latchkey_permission.html").render(
+        agent_id=agent_id,
+        request_id=request_id,
+        ws_name=ws_name,
+        rationale=rationale,
+        service=service,
+        checked_permissions=set(checked_permissions),
+        accent=workspace_accent(agent_id),
+    )
