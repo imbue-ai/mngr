@@ -578,6 +578,20 @@ def test_periodic_checker_rejects_inf_check_interval_seconds(tmp_path: Path) -> 
         process.terminate(force_kill_seconds=1.0)
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_periodic_checker_surfaces_process_failure(tmp_path: Path) -> None:
+    # Process exits with non-zero on its own; periodic checker should surface ProcessError
+    # (rather than silently keeping the watchdog happy).
+    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+        with ConcurrencyGroup(name="outer") as cg:
+            process = cg.run_process_in_background(["bash", "-c", "exit 1"], check_interval_seconds=0.2)
+            cg.start_periodic_checker(process)
+            assert poll_until(lambda: process.poll() is not None, timeout=5.0)
+            # Give the periodic checker a chance to run after the process exits.
+            Event().wait(timeout=0.3)
+    assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
+
+
 def test_watchdog_does_not_fire_during_group_exit(tmp_path: Path) -> None:
     # Group exits with a long-running unchecked process; the exit should report only
     # the StrandTimedOutError from the process timeout, not a MissedCheckError from the watchdog.
