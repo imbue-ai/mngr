@@ -12,10 +12,13 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONFIG_FIELDS
+from imbue.mngr.config.data_types import BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS
 from imbue.mngr.config.data_types import BootstrapMngrConfig
+from imbue.mngr.config.data_types import BootstrapMngrContext
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _apply_plugin_overrides
@@ -1680,4 +1683,27 @@ def test_bootstrap_config_field_sync() -> None:
         f"In here but not in MngrConfig: {actual - expected}. "
         f"Either add the field to BootstrapMngrConfig (if bootstrap callers should see it) "
         f"or add it to BOOTSTRAP_EXCLUDED_CONFIG_FIELDS (if not)."
+    )
+
+
+def test_bootstrap_context_field_sync() -> None:
+    """BootstrapMngrContext must mirror MngrContext minus the documented exclusions.
+
+    Parallel of test_bootstrap_config_field_sync, but for the Context pair: a new
+    field added to MngrContext must either be surfaced on BootstrapMngrContext
+    (so to_bootstrap_context copies it -- the projection helper iterates over
+    BootstrapMngrContext.model_fields) or added to
+    BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS. Without this test the projection helper
+    would silently leave the new field at its model default on the bootstrap
+    side, recreating the silent-incompleteness footgun the bootstrap types
+    were designed to eliminate.
+    """
+    expected = set(MngrContext.model_fields) - BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS
+    actual = set(BootstrapMngrContext.model_fields)
+    assert actual == expected, (
+        f"BootstrapMngrContext fields drifted from MngrContext. "
+        f"In MngrContext but missing here: {expected - actual}. "
+        f"In here but not in MngrContext: {actual - expected}. "
+        f"Either add the field to BootstrapMngrContext (if bootstrap callers should see it) "
+        f"or add it to BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS (if not)."
     )

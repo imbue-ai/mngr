@@ -863,28 +863,25 @@ class BootstrapMngrConfig(FrozenModel):
 
 
 def to_bootstrap_config(config: MngrConfig) -> BootstrapMngrConfig:
-    """Project a full MngrConfig down to the fields safe for the bootstrap path."""
+    """Project a full MngrConfig down to the fields safe for the bootstrap path.
+
+    Iterates over ``BootstrapMngrConfig.model_fields`` so adding a new field to
+    the bootstrap config doesn't require updating this helper. Every field on
+    BootstrapMngrConfig must also exist on MngrConfig (enforced by
+    ``test_bootstrap_config_field_sync``), so the ``getattr`` lookup is safe.
+    """
     return BootstrapMngrConfig.model_construct(
-        prefix=config.prefix,
-        default_host_dir=config.default_host_dir,
-        unset_vars=config.unset_vars,
-        work_dir_extra_paths=config.work_dir_extra_paths,
-        pager=config.pager,
-        enabled_backends=config.enabled_backends,
-        commands=config.commands,
-        create_templates=config.create_templates,
-        pre_command_scripts=config.pre_command_scripts,
-        retry=config.retry,
-        logging=config.logging,
-        is_remote_agent_installation_allowed=config.is_remote_agent_installation_allowed,
-        connect_command=config.connect_command,
-        is_nested_tmux_allowed=config.is_nested_tmux_allowed,
-        headless=config.headless,
-        is_error_reporting_enabled=config.is_error_reporting_enabled,
-        is_allowed_in_pytest=config.is_allowed_in_pytest,
-        default_destroyed_host_persisted_seconds=config.default_destroyed_host_persisted_seconds,
-        default_min_online_host_age_seconds=config.default_min_online_host_age_seconds,
+        **{name: getattr(config, name) for name in BootstrapMngrConfig.model_fields}
     )
+
+
+# Fields on MngrContext that are intentionally NOT exposed on BootstrapMngrContext.
+# Currently empty -- BootstrapMngrContext exposes the same set of attribute names
+# as MngrContext, with the only difference being that ``config`` is narrowed from
+# MngrConfig to BootstrapMngrConfig. The set exists so that
+# ``test_bootstrap_context_field_sync`` can catch future divergence the same way
+# ``test_bootstrap_config_field_sync`` does for the Config pair.
+BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS: frozenset[str] = frozenset()
 
 
 class BootstrapMngrContext(FrozenModel):
@@ -897,6 +894,12 @@ class BootstrapMngrContext(FrozenModel):
     were never parsed and would silently be empty dicts on a regular
     MngrContext. This type makes that silently-empty case a type error
     instead.
+
+    A ratchet test (``test_bootstrap_context_field_sync``) asserts that the
+    field set here equals MngrContext's fields minus
+    ``BOOTSTRAP_EXCLUDED_CONTEXT_FIELDS``, so adding a new field to
+    MngrContext forces a deliberate decision about whether to surface it
+    here (and ``to_bootstrap_context`` to copy it).
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -921,17 +924,20 @@ class BootstrapMngrContext(FrozenModel):
 
 
 def to_bootstrap_context(mngr_ctx: MngrContext) -> BootstrapMngrContext:
-    """Project a full MngrContext down to the fields safe for the bootstrap path."""
-    return BootstrapMngrContext.model_construct(
-        config=to_bootstrap_config(mngr_ctx.config),
-        pm=mngr_ctx.pm,
-        is_interactive=mngr_ctx.is_interactive,
-        is_auto_approve=mngr_ctx.is_auto_approve,
-        profile_dir=mngr_ctx.profile_dir,
-        concurrency_group=mngr_ctx.concurrency_group,
-        is_full_discovery=mngr_ctx.is_full_discovery,
-        project_root=mngr_ctx.project_root,
-    )
+    """Project a full MngrContext down to the fields safe for the bootstrap path.
+
+    Iterates over ``BootstrapMngrContext.model_fields`` to stay self-maintaining
+    when fields are added (see ``to_bootstrap_config`` for the same pattern and
+    its drift catcher). The ``config`` field is special-cased because it has a
+    different storage type (BootstrapMngrConfig vs MngrConfig); every other
+    field is copied verbatim from the source attribute of the same name.
+    """
+    kwargs: dict[str, Any] = {"config": to_bootstrap_config(mngr_ctx.config)}
+    for name in BootstrapMngrContext.model_fields:
+        if name == "config":
+            continue
+        kwargs[name] = getattr(mngr_ctx, name)
+    return BootstrapMngrContext.model_construct(**kwargs)
 
 
 class OutputOptions(FrozenModel):
