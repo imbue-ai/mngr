@@ -18,6 +18,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
+from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
@@ -236,10 +237,61 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
 
     guard_changed = _guard_user_stop_hooks_against_proxy_children(merged)
 
-    if merged is existing_settings and not guard_changed:
+    if merged is not existing_settings or guard_changed:
+        host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+    else:
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
+
+    # Also guard Stop hooks declared outside settings.local.json:
+    # - the project's settings.json (git-tracked but the wrap is env-
+    #   conditional, so adding it does not change runtime behavior for
+    #   the parent or for plain-claude users).
+    # - any plugin-installed hooks.json files under ~/.claude/plugins/.
+    #   These ride alongside Claude Code plugins like imbue-code-guardian
+    #   whose stop_hook_orchestrator.sh re-prompts the agent into
+    #   autofix/verify cycles -- exactly the behavior the proxy must
+    #   suppress on spawned subagents.
+    _guard_stop_hooks_in_file(host, work_dir / ".claude" / "settings.json")
+    for plugin_hooks in _discover_plugin_hooks_files():
+        _guard_stop_hooks_in_file(host, plugin_hooks)
+
+
+def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
+    """Apply the proxy-child guard to every Stop/SubagentStop command in a JSON hooks file.
+
+    Reads the file, walks its ``hooks`` dict (matching the schema both
+    settings.json and plugin hooks.json files use), wraps each non-mngr
+    Stop/SubagentStop command with the proxy-child guard, and writes the
+    file back. No-op if the file is missing, malformed, or already fully
+    guarded.
+    """
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
         return
-    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Could not parse {}; skipping Stop-hook guard pass", path)
+        return
+    if not isinstance(data, dict):
+        return
+    if not _guard_user_stop_hooks_against_proxy_children(data):
+        return
+    logger.info("Wrapped Stop hooks in {} with MNGR_SUBAGENT_PROXY_CHILD guard", path)
+    host.write_text_file(path, json.dumps(data, indent=2) + "\n")
+
+
+def _discover_plugin_hooks_files() -> list[Path]:
+    """Return every hooks.json under the user's Claude Code plugin install."""
+    plugins_root = get_user_claude_config_dir() / "plugins"
+    if not plugins_root.is_dir():
+        return []
+    try:
+        return sorted(plugins_root.rglob("hooks/hooks.json"))
+    except OSError as e:
+        logger.warning("Could not enumerate plugin hooks under {}: {}", plugins_root, e)
+        return []
 
 
 def _is_subagent_proxy_child(agent: AgentInterface) -> bool:
