@@ -197,6 +197,20 @@ def test_unchecked_failed_processes_do_not_raise(tmp_path: Path) -> None:
     assert i == 1
 
 
+def test_failed_background_processes_raise_by_default(tmp_path: Path) -> None:
+    # Pins down that is_checked_by_group defaults to True so silent process failures
+    # don't slip through (see issue #1087).
+    i = 0
+    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+        with ConcurrencyGroup(name="outer") as cg:
+            process = cg.run_process_in_background(["bash", "-c", "exit 1"])
+            process.wait()
+            i += 1
+        assert process.poll() == 1
+    assert exception_info.value.only_exception_is_instance_of(ProcessError)
+    assert i == 0
+
+
 def test_unchecked_failed_foreground_process_setup_does_not_raise(tmp_path: Path) -> None:
     with ConcurrencyGroup(name="group") as cg:
         with contextlib.suppress(ProcessError):
