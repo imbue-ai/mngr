@@ -30,6 +30,16 @@ from imbue.mngr_kanpan.data_types import DataSourceConfig
 
 _BASE_FIELDS = "number,title,state,headRefName,url,isDraft"
 _OPEN_FIELDS = f"{_BASE_FIELDS},statusCheckRollup"
+# When use_stable_path is True we also need the author field so we can filter
+# client-side back to the viewer (the stable path doesn't accept --author).
+_STABLE_BASE_FIELDS = f"{_BASE_FIELDS},author"
+_STABLE_OPEN_FIELDS = f"{_OPEN_FIELDS},author"
+
+# Cached gh-authenticated username, populated lazily on first stable-path retry.
+# Module-level so it persists across the per-repo ThreadPoolExecutor without
+# re-fetching from gh on each repo. Benign race: concurrent first-callers race
+# to the same value, never to different values.
+_VIEWER_LOGIN: str | None = None
 
 
 class PrState(UpperCaseStrEnum):
@@ -171,12 +181,34 @@ def _build_gh_pr_list_cmd(
     return cmd
 
 
+def _get_viewer_login(cg: ConcurrencyGroup) -> str | None:
+    """Return the gh-authenticated username, cached after first call."""
+    global _VIEWER_LOGIN
+    if _VIEWER_LOGIN is not None:
+        return _VIEWER_LOGIN
+    try:
+        proc = cg.run_process_in_background(
+            ["gh", "api", "user", "--jq", ".login"],
+            timeout=10,
+            is_checked_by_group=False,
+        )
+        proc.wait()
+        if proc.returncode == 0:
+            login = proc.read_stdout().strip()
+            if login:
+                _VIEWER_LOGIN = login
+    except (ProcessError, OSError) as e:
+        logger.debug("Failed to get gh viewer login: {}", e)
+    return _VIEWER_LOGIN
+
+
 def fetch_all_prs(
     cg: ConcurrencyGroup,
     cwd: Path | None = None,
     repo: str | None = None,
     *,
     use_stable_path: bool = False,
+    filter_author: str | None = None,
 ) -> FetchPrsResult:
     """Fetch PRs from a repo using gh CLI, in two parallel passes.
 
@@ -193,16 +225,21 @@ def fetch_all_prs(
 
     use_stable_path=True drops --author to route around the flaky gh
     ISSUE_ADVANCED search backend. See _build_gh_pr_list_cmd for details.
+    Pass filter_author (a gh login) alongside use_stable_path to filter
+    out PRs from other authors that the unfiltered query would otherwise
+    return.
     """
+    open_fields = _STABLE_OPEN_FIELDS if use_stable_path else _OPEN_FIELDS
+    all_fields = _STABLE_BASE_FIELDS if use_stable_path else _BASE_FIELDS
     try:
         open_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("open", _OPEN_FIELDS, 100, repo, use_stable_path=use_stable_path),
+            _build_gh_pr_list_cmd("open", open_fields, 100, repo, use_stable_path=use_stable_path),
             timeout=30,
             cwd=cwd,
             is_checked_by_group=False,
         )
         all_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("all", _BASE_FIELDS, 500, repo, use_stable_path=use_stable_path),
+            _build_gh_pr_list_cmd("all", all_fields, 500, repo, use_stable_path=use_stable_path),
             timeout=30,
             cwd=cwd,
             is_checked_by_group=False,
@@ -228,6 +265,8 @@ def fetch_all_prs(
             errors.append(f"open: {err}")
         case list(raw_prs):
             for raw in raw_prs:
+                if not _matches_author(raw, filter_author):
+                    continue
                 pr = _parse_pr(raw)
                 prs_by_number[pr.number] = pr
 
@@ -242,6 +281,8 @@ def fetch_all_prs(
             errors.append(f"all: {err}")
         case list(raw_prs):
             for raw in raw_prs:
+                if not _matches_author(raw, filter_author):
+                    continue
                 pr = _parse_pr(raw)
                 if pr.number not in prs_by_number:
                     prs_by_number[pr.number] = pr
@@ -250,6 +291,15 @@ def fetch_all_prs(
         return FetchPrsResult(prs=(), error=f"gh pr list failed ({'; '.join(errors)})")
 
     return FetchPrsResult(prs=tuple(prs_by_number.values()), error=None)
+
+
+@pure
+def _matches_author(raw: dict[str, Any], filter_author: str | None) -> bool:
+    """True if filter_author is None or the raw PR's author login matches it."""
+    if filter_author is None:
+        return True
+    author = raw.get("author") or {}
+    return author.get("login") == filter_author
 
 
 def _parse_gh_output(
@@ -409,8 +459,6 @@ class GitHubDataSource(FrozenModel):
                         pr_by_repo_branch[repo_path] = repo_index
                     repo_pr_loaded[repo_path] = True
                     repo_pr_confirmed[repo_path] = pr_result.is_confirmed
-                    if pr_result.degradation_warning is not None:
-                        errors.append(pr_result.degradation_warning)
                 else:
                     repo_pr_loaded[repo_path] = False
                     repo_pr_confirmed[repo_path] = False
@@ -475,11 +523,6 @@ class _FetchPrsResult(FrozenModel):
         "Callers should not show 'no PR yet' for agents on this repo, since we cannot tell whether "
         "they truly have no PR or whether the gh search backend silently dropped results.",
     )
-    degradation_warning: str | None = Field(
-        default=None,
-        description="Set when the retry recovered PRs that the original gh query missed -- "
-        "evidence the gh search backend is currently flaky.",
-    )
 
 
 def _get_cached_repo_path(cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName) -> str | None:
@@ -502,13 +545,10 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPr
     result = fetch_all_prs(cg, repo=repo_path)
 
     is_confirmed = True
-    degradation_warning: str | None = None
     if result.error is None and not result.prs:
-        retry = fetch_all_prs(cg, repo=repo_path, use_stable_path=True)
+        viewer = _get_viewer_login(cg)
+        retry = fetch_all_prs(cg, repo=repo_path, use_stable_path=True, filter_author=viewer)
         if retry.error is None and retry.prs:
-            # Stable path found PRs the flaky path missed -- the data we would have
-            # shown was wrong. Surface a warning so the user knows gh is flaky.
-            degradation_warning = f"gh search flaky for {repo_path}: recovered {len(retry.prs)} PRs via stable path."
             result = retry
         else:
             # Both methods agree the repo looks empty. Since we expect every repo to
@@ -531,7 +571,6 @@ def _fetch_repo_prs(cg: ConcurrencyGroup, repo_path: str) -> tuple[str, _FetchPr
         prs=tuple(pr_fields),
         error=result.error,
         is_confirmed=is_confirmed,
-        degradation_warning=degradation_warning,
     )
 
 

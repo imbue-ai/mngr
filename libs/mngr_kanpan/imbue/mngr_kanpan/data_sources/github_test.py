@@ -8,6 +8,7 @@ from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_sources import github as github_module
 from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import ConflictsField
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
@@ -313,20 +314,24 @@ def _make_fetch_cg(open_json: str, all_json: str) -> MagicMock:
     return cg
 
 
-def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
-    return json.dumps(
-        [
-            {
-                "number": number,
-                "title": f"PR {number}",
-                "state": "OPEN",
-                "url": f"https://github.com/org/repo/pull/{number}",
-                "headRefName": branch,
-                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
-                "isDraft": False,
-            }
-        ]
-    )
+def _make_open_pr_json(number: int = 1, branch: str = "test-branch", *, author: str | None = None) -> str:
+    pr: dict[str, object] = {
+        "number": number,
+        "title": f"PR {number}",
+        "state": "OPEN",
+        "url": f"https://github.com/org/repo/pull/{number}",
+        "headRefName": branch,
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+    }
+    if author is not None:
+        pr["author"] = {"login": author}
+    return json.dumps([pr])
+
+
+def _reset_viewer_login_cache() -> None:
+    """Tests that exercise the retry path must reset the module-level viewer cache."""
+    github_module._VIEWER_LOGIN = None
 
 
 def test_fetch_repo_prs_success() -> None:
@@ -356,52 +361,98 @@ def test_fetch_repo_prs_success_does_not_retry() -> None:
     cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
     _, result = _fetch_repo_prs(cg, "org/repo")
     assert result.is_confirmed is True
-    assert result.degradation_warning is None
     assert cg.run_process_in_background.call_count == 2
 
 
-def test_fetch_repo_prs_retry_recovers_data_and_warns() -> None:
-    """Empty original + non-empty retry -> use retry data, warn user that gh looked flaky."""
+def test_fetch_repo_prs_retry_recovers_data() -> None:
+    """Empty original + non-empty retry -> use retry data, mark confirmed."""
     cg = MagicMock()
+    # Original gets 2 procs, then viewer-login lookup, then retry's 2 procs.
     cg.run_process_in_background.side_effect = [
         _make_mock_proc("[]"),
         _make_mock_proc("[]"),
-        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
-        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1", author="evgunter")),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1", author="evgunter")),
     ]
+    _reset_viewer_login_cache()
     _, result = _fetch_repo_prs(cg, "org/repo")
     assert len(result.prs) == 1
     assert result.prs[0].head_branch == "branch-1"
     assert result.is_confirmed is True
-    assert result.degradation_warning is not None
-    assert cg.run_process_in_background.call_count == 4
 
 
-def test_fetch_repo_prs_retry_still_empty_marks_unconfirmed_no_warning() -> None:
-    """Empty original + empty retry -> both methods agree, no warning, but unconfirmed.
-
-    Both methods agreeing means the data we'd display is consistent regardless of
-    which path we trust, so per the design we don't warn. We still mark unconfirmed
-    so callers don't render '+PR' for agents whose repo we expect has at least one PR.
-    """
+def test_fetch_repo_prs_retry_filters_other_authors() -> None:
+    """Retry response contains other users' PRs; client-side filter drops them."""
     cg = MagicMock()
-    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    open_payload = json.dumps(
+        [
+            {
+                "number": 1,
+                "title": "mine",
+                "state": "OPEN",
+                "url": "https://github.com/org/repo/pull/1",
+                "headRefName": "branch-1",
+                "statusCheckRollup": [],
+                "isDraft": False,
+                "author": {"login": "evgunter"},
+            },
+            {
+                "number": 2,
+                "title": "theirs",
+                "state": "OPEN",
+                "url": "https://github.com/org/repo/pull/2",
+                "headRefName": "branch-1",
+                "statusCheckRollup": [],
+                "isDraft": False,
+                "author": {"login": "someoneelse"},
+            },
+        ]
+    )
+    cg.run_process_in_background.side_effect = [
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc(open_payload),
+        _make_mock_proc("[]"),
+    ]
+    _reset_viewer_login_cache()
+    _, result = _fetch_repo_prs(cg, "org/repo")
+    assert [pr.number for pr in result.prs] == [1]
+
+
+def test_fetch_repo_prs_retry_still_empty_marks_unconfirmed() -> None:
+    """Empty original + empty retry -> mark unconfirmed."""
+    cg = MagicMock()
+    # 2 original + 1 viewer + 2 retry
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(2)] + [
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+    ]
+    _reset_viewer_login_cache()
     _, result = _fetch_repo_prs(cg, "org/repo")
     assert result.prs == ()
     assert result.is_confirmed is False
-    assert result.degradation_warning is None
 
 
 def test_fetch_repo_prs_retry_uses_stable_path() -> None:
     """Retry call must drop --author to route around the flaky search backend."""
     cg = MagicMock()
-    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(2)] + [
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+    ]
+    _reset_viewer_login_cache()
     _fetch_repo_prs(cg, "org/repo")
     cmds = [call[0][0] for call in cg.run_process_in_background.call_args_list]
+    # Original two pr-list calls keep --author; retry pair (after the viewer lookup) drops it.
     assert cmds[0].count("--author") == 1
     assert cmds[1].count("--author") == 1
-    assert "--author" not in cmds[2]
+    assert cmds[2][:3] == ["gh", "api", "user"]
     assert "--author" not in cmds[3]
+    assert "--author" not in cmds[4]
 
 
 def test_fetch_repo_prs_no_retry_when_initial_errored() -> None:
@@ -537,39 +588,34 @@ def test_compute_unconfirmed_repo_leaves_pr_field_unset() -> None:
     ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="b", labels={"remote": "git@github.com:org/repo.git"})
     cg = MagicMock()
-    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
+    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(2)] + [
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc("[]"),
+        _make_mock_proc("[]"),
+    ]
+    _reset_viewer_login_cache()
     ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert FIELD_PR not in fields.get(agent.name, {})
 
 
-def test_compute_unconfirmed_no_warning_when_methods_agree() -> None:
-    """Both empty -> no warning surfaced (the data we'd display is the same either way)."""
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="b", labels={"remote": "git@github.com:org/repo.git"})
-    cg = MagicMock()
-    cg.run_process_in_background.side_effect = [_make_mock_proc("[]") for _ in range(4)]
-    ctx = make_mngr_ctx_with_cg(cg)
-    _fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert errors == []
-
-
-def test_compute_recovered_data_surfaces_warning() -> None:
-    """When retry recovers PRs the original missed, surface a warning so user sees gh is flaky."""
+def test_compute_recovered_data_populates_pr_field() -> None:
+    """When retry recovers PRs the original missed, agent fields are populated normally."""
     ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=False, conflicts=False, unresolved=False))
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     cg = MagicMock()
     cg.run_process_in_background.side_effect = [
         _make_mock_proc("[]"),
         _make_mock_proc("[]"),
-        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
-        _make_mock_proc(_make_open_pr_json(1, "branch-1")),
+        _make_mock_proc("evgunter\n"),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1", author="evgunter")),
+        _make_mock_proc(_make_open_pr_json(1, "branch-1", author="evgunter")),
     ]
+    _reset_viewer_login_cache()
     ctx = make_mngr_ctx_with_cg(cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert agent.name in fields
     assert FIELD_PR in fields[agent.name]
-    assert any("flaky" in e.lower() for e in errors)
 
 
 def test_compute_disabled_pr_and_ci() -> None:
