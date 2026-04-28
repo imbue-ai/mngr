@@ -761,6 +761,29 @@ def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
+# Per-process depth counter for the autouse "no unexpected loguru warnings"
+# check. Wrapped in a one-element list so contextmanagers can rebind without
+# `global`. The autouse sink in conftest.py only records WARNING-or-higher
+# records when this is 0; capture_loguru and allow_warnings increment it.
+_WARNINGS_ALLOWED_DEPTH: list[int] = [0]
+
+
+@contextmanager
+def allow_warnings() -> Generator[None, None, None]:
+    """Suppress the autouse "no unexpected loguru warnings" check inside this scope.
+
+    The autouse fixture in libs/mngr/conftest.py fails any test that emits a
+    loguru WARNING-level (or higher) record. Wrap code that intentionally emits
+    such records in this context manager. For whole-test opt-out use
+    ``@pytest.mark.allow_warnings`` instead.
+    """
+    _WARNINGS_ALLOWED_DEPTH[0] += 1
+    try:
+        yield
+    finally:
+        _WARNINGS_ALLOWED_DEPTH[0] -= 1
+
+
 @contextmanager
 def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     """Capture loguru output at the given level into a StringIO buffer.
@@ -768,11 +791,16 @@ def capture_loguru(level: str = "WARNING") -> Generator[StringIO, None, None]:
     Loguru's handlers don't follow CliRunner's sys.stderr replacement, so
     tests that need to verify logged messages should use this context manager
     instead of checking result.output.
+
+    Implicitly opts out of the autouse "no unexpected loguru warnings" check
+    while the context is active, since tests using ``capture_loguru`` are
+    inspecting warnings on purpose.
     """
     log_output = StringIO()
     sink_id = logger.add(log_output, level=level, format="{message}")
     try:
-        yield log_output
+        with allow_warnings():
+            yield log_output
     finally:
         logger.remove(sink_id)
 
