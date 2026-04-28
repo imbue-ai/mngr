@@ -53,11 +53,15 @@ def _unexpected_warning_sink(message: Any) -> None:
     warning is allowed; if it is a regex, only warnings whose message
     matches are allowed.
     """
+    # str(message) follows the sink's format ("{message}") and additionally
+    # appends an exception traceback whenever logger.exception() was used,
+    # so it can be a multi-line block. record["message"] is the bare message
+    # body (no traceback), which is what allow_warnings() match patterns are
+    # written against. We display the full text in the failure summary but
+    # match against the bare body.
     text = str(message).rstrip("\n")
     if WARNINGS_ALLOWED_STACK:
         pattern = WARNINGS_ALLOWED_STACK[-1]
-        # Loguru wraps the message with level/timestamp prefix in str(message);
-        # use the underlying record["message"] for clean regex matching.
         record_message = message.record["message"] if hasattr(message, "record") else text
         if pattern is None or pattern.search(record_message):
             return
