@@ -482,7 +482,10 @@ def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: s
 
 def generate_command_doc(command_name: str, base_dir: Path) -> None:
     """Generate markdown documentation for a single command."""
-    cmd = cli.commands.get(command_name)
+    # Use cli.get_command so AliasAwareGroup's lazy built-in resolution kicks
+    # in -- built-in commands are not stored in cli.commands until imported.
+    ctx = click.Context(cli)
+    cmd = cli.get_command(ctx, command_name)
     if cmd is None:
         print(f"Warning: Command '{command_name}' not found")
         return
