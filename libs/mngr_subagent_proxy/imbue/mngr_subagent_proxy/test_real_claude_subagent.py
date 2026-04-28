@@ -254,6 +254,17 @@ def _mngr_subprocess_env(
     env["MNGR_ROOT_NAME"] = mngr_test_root_name
     env.pop("TMUX", None)
 
+    # Disable Modal in the per-test mngr profile -- the env-isolated HOME
+    # doesn't have a Modal token, so any `mngr list` call would hit
+    # "Modal is not authorized" and fail with returncode 1, masking
+    # the real test signal. Local-host provider is all we need here.
+    mngr_root = home_dir / ".mngr"
+    profile_name = "test-profile"
+    profile_dir = mngr_root / "profiles" / profile_name
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (mngr_root / "config.toml").write_text(f'profile = "{profile_name}"\n')
+    (profile_dir / "settings.toml").write_text("[providers.modal]\nis_enabled = false\n")
+
     here = Path(__file__).resolve()
     repo_root: Path | None = None
     for parent in here.parents:
