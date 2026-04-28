@@ -55,9 +55,9 @@ def test_builtin_aliases_appear_in_completion_cache(completion_cache_dir: Path) 
     """Every built-in command alias must round-trip through the completion cache.
 
     Built-in aliases (e.g. ``ls`` -> ``list``, ``rm`` -> ``destroy``) live in
-    the lazy-load registry inside ``imbue.mngr.main`` and are not stored in
-    ``cli.commands``. The completion writer must enumerate them explicitly so
-    shell tab completion keeps recognizing the aliases.
+    the lazy-load registry; the completion writer must surface them via
+    ``cli.list_commands`` / ``cli.get_command`` so shell tab completion keeps
+    recognizing the aliases.
     """
     write_cli_completions_cache(cli_group=cli)
     cache = _read_cache(completion_cache_dir)
@@ -130,10 +130,6 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
 
     Returns a dict mapping command key (e.g. "create", "config.set") to the set
     of --long option names on that command.
-
-    Uses ``cli.list_commands`` / ``cli.get_command`` rather than iterating
-    ``cli.commands`` directly so that lazy-loaded built-in commands (which are
-    not stored in ``cli.commands`` until resolved) are included.
     """
     result: dict[str, set[str]] = {}
     assert isinstance(cli, click.Group)

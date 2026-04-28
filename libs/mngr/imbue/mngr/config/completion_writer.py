@@ -17,7 +17,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr.utils.builtin_command_specs import get_builtin_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
 
 # Per-position positional completion spec for top-level commands.
@@ -355,34 +354,15 @@ def write_cli_completions_cache(
     CLI commands. Other exceptions are allowed to propagate.
     """
     try:
-        # Walk the CLI tree via the standard click API so AliasAwareGroup's lazy
-        # built-ins are loaded on demand. Iterating ``cli_group.commands`` alone
-        # would skip the built-ins until something else has imported them.
+        # Walk the CLI tree via the standard click API. AliasAwareGroup.list_commands
+        # returns canonical names, built-in aliases, and plugin aliases all in
+        # one shot; ``get_command`` triggers the lazy import on first access.
         ctx = click.Context(cli_group)
         all_commands: dict[str, click.Command] = {}
         for name in cli_group.list_commands(ctx):
             cmd = cli_group.get_command(ctx, name)
             if cmd is not None:
                 all_commands[name] = cmd
-        # Defensive fallback: surface anything sitting directly in
-        # ``cli_group.commands`` that ``list_commands`` somehow didn't return.
-        # In practice this is currently a no-op -- click's
-        # ``MultiCommand.list_commands`` returns every key from
-        # ``self.commands`` (including plugin aliases registered via
-        # ``add_command(cmd, name=...)``), and ``AliasAwareGroup.list_commands``
-        # forwards to it. The loop guards against future click changes.
-        for name, cmd in cli_group.commands.items():
-            all_commands.setdefault(name, cmd)
-        # Built-in command aliases (e.g. ``ls`` -> ``list``) live only in the
-        # lazy-load registry inside ``imbue.mngr.main`` -- they are never put
-        # into ``cli_group.commands``. Resolve each one and add it under the
-        # alias name so the cache's ``aliases`` mapping ends up populated.
-        for alias_name, canonical_name in get_builtin_alias_to_canonical().items():
-            if alias_name in all_commands:
-                continue
-            cmd = cli_group.get_command(ctx, alias_name)
-            if cmd is not None and cmd.name == canonical_name:
-                all_commands[alias_name] = cmd
         all_command_names = sorted(all_commands.keys())
         alias_to_canonical = {
             name: cmd.name for name, cmd in all_commands.items() if cmd.name is not None and name != cmd.name

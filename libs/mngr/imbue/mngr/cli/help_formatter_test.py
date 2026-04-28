@@ -25,22 +25,28 @@ from imbue.mngr.main import cli
 
 
 def _all_builtin_commands() -> list[click.Command]:
-    """Force-load every built-in command and return the list.
+    """Force-load every built-in command and return its canonical click.Command.
 
     Built-ins are loaded lazily by the AliasAwareGroup; this helper triggers
-    the imports so tests can iterate the full set. Plugin-registered commands
-    (those that live in ``cli.commands``) are excluded so the result reflects
-    only the in-tree commands declared in ``BUILTIN_COMMAND_SPECS``.
+    the imports so tests can iterate the full set. Aliases resolve to the
+    same click.Command as their canonical name, so we dedupe by ``cmd.name``.
+    Plugin-registered commands are excluded so the result reflects only the
+    in-tree commands declared in ``BUILTIN_COMMAND_SPECS``.
     """
     ctx = click.Context(cli)
-    plugin_names = set(cli.commands.keys())
+    plugin_canonical_names = {cmd.name for cmd in cli.commands.values() if cmd.name is not None}
+    seen: set[str] = set()
     commands: list[click.Command] = []
     for name in cli.list_commands(ctx):
-        if name in plugin_names:
-            continue
         cmd = cli.get_command(ctx, name)
-        if cmd is not None:
-            commands.append(cmd)
+        if cmd is None or cmd.name is None:
+            continue
+        if cmd.name in plugin_canonical_names:
+            continue
+        if cmd.name in seen:
+            continue
+        seen.add(cmd.name)
+        commands.append(cmd)
     return commands
 
 

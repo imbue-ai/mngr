@@ -166,15 +166,19 @@ class AliasAwareGroup(DefaultCommandGroup):
             raise
 
     def list_commands(self, ctx: click.Context) -> list[str]:
-        """Return canonical names for built-ins plus all plugin-registered names.
+        """Return every command name visible at the root, canonical and alias.
 
-        Built-in aliases are intentionally omitted -- they live exclusively in
-        the lazy registry, and ``format_commands`` renders them inline next to
-        the canonical name. Plugin-registered aliases (added via
-        ``cli.add_command(cmd, name="alias")``) are still surfaced through
-        ``super().list_commands(ctx)`` because they live in ``self.commands``.
+        Built-ins live in the lazy registry, so the click parent class has no
+        knowledge of them; we have to add their canonical names and their
+        aliases here. Plugin-registered commands and aliases live in
+        ``self.commands`` and reach the result through ``super().list_commands``.
+
+        ``format_commands`` renders aliases inline, and consumers that need to
+        distinguish canonical names from aliases (e.g., the help overview, the
+        completion-cache writer) call ``get_command`` and compare ``cmd.name``
+        to the iteration key.
         """
-        names: set[str] = set(_BUILTIN_ALIASES_BY_CANONICAL.keys())
+        names: set[str] = set(_BUILTINS_BY_NAME.keys())
         for name in super().list_commands(ctx):
             names.add(name)
         return sorted(names)
