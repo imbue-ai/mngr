@@ -2,7 +2,6 @@ import bdb
 import importlib
 import os
 import sys
-from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 
