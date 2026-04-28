@@ -204,13 +204,13 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 
 # Lazy command registry state.
 # `_BUILTINS_BY_NAME` keys are both canonical names and alias names (mapping to the
-# same spec). `_BUILTINS_CANONICAL_ALIASES` maps canonical name -> alias tuple.
+# same spec). `_BUILTIN_ALIASES_BY_CANONICAL` maps canonical name -> tuple of aliases.
 # `_BUILTINS_LOADED` caches resolved click.Command objects keyed by canonical name
 # so repeat lookups are cheap. The cache is intentionally NOT cleared by
 # reset_plugin_manager: the click.Command lives on the (cached) command module,
 # and re-applying plugin options would duplicate them.
 _BUILTINS_BY_NAME: dict[str, _BuiltinSpec] = {}
-_BUILTINS_CANONICAL_ALIASES: dict[str, tuple[str, ...]] = {}
+_BUILTIN_ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {}
 _BUILTINS_LOADED: dict[str, click.Command] = {}
 
 
@@ -218,7 +218,7 @@ def _register_builtin_spec(spec: _BuiltinSpec) -> None:
     _BUILTINS_BY_NAME[spec.name] = spec
     for alias in spec.aliases:
         _BUILTINS_BY_NAME[alias] = spec
-    _BUILTINS_CANONICAL_ALIASES[spec.name] = spec.aliases
+    _BUILTIN_ALIASES_BY_CANONICAL[spec.name] = spec.aliases
 
 
 def get_builtin_alias_to_canonical() -> dict[str, str]:
@@ -228,7 +228,7 @@ def get_builtin_alias_to_canonical() -> dict[str, str]:
     loaded lazily; consumers that need the alias list (tab completion cache,
     documentation generators) read it through this helper.
     """
-    return {alias: canonical for canonical, aliases in _BUILTINS_CANONICAL_ALIASES.items() for alias in aliases}
+    return {alias: canonical for canonical, aliases in _BUILTIN_ALIASES_BY_CANONICAL.items() for alias in aliases}
 
 
 def _resolve_builtin(cmd_name: str) -> click.Command | None:
@@ -295,7 +295,7 @@ class AliasAwareGroup(DefaultCommandGroup):
 
         Aliases are intentionally omitted -- format_commands renders them inline.
         """
-        names: set[str] = set(_BUILTINS_CANONICAL_ALIASES.keys())
+        names: set[str] = set(_BUILTIN_ALIASES_BY_CANONICAL.keys())
         for name in super().list_commands(ctx):
             names.add(name)
         return sorted(names)
@@ -316,7 +316,7 @@ class AliasAwareGroup(DefaultCommandGroup):
         """
         rows: list[tuple[str, str]] = []
 
-        for canonical, aliases in _BUILTINS_CANONICAL_ALIASES.items():
+        for canonical, aliases in _BUILTIN_ALIASES_BY_CANONICAL.items():
             spec = _BUILTINS_BY_NAME[canonical]
             if spec.hidden:
                 continue
