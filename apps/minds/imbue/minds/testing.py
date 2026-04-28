@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
-from imbue.mngr.utils.testing import TEST_ENV_PREFIX
+from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
