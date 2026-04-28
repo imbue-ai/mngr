@@ -364,8 +364,13 @@ def write_cli_completions_cache(
             cmd = cli_group.get_command(ctx, name)
             if cmd is not None:
                 all_commands[name] = cmd
-        # Plugin-registered aliases show up in ``cli_group.commands`` but not in
-        # ``list_commands`` (filtered out as dups), so include them explicitly.
+        # Defensive fallback: surface anything sitting directly in
+        # ``cli_group.commands`` that ``list_commands`` somehow didn't return.
+        # In practice this is currently a no-op -- click's
+        # ``MultiCommand.list_commands`` returns every key from
+        # ``self.commands`` (including plugin aliases registered via
+        # ``add_command(cmd, name=...)``), and ``AliasAwareGroup.list_commands``
+        # forwards to it. The loop guards against future click changes.
         for name, cmd in cli_group.commands.items():
             all_commands.setdefault(name, cmd)
         # Built-in command aliases (e.g. ``ls`` -> ``list``) live only in the
