@@ -70,10 +70,9 @@ def test_agent_id_accepts_valid_format() -> None:
 
 def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
-    assert "selene" in html
+    assert "assistant" in html
     assert "forever-claude-template" in html
     assert "agent_name" in html
-    assert "main" in html
     assert "launch_mode" in html
 
 

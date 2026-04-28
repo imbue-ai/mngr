@@ -482,8 +482,8 @@ def test_build_flat_log_dict_includes_exception_info() -> None:
     try:
         try:
             raise ValueError("test error")
-        except ValueError:
-            logger.exception("Something failed")
+        except ValueError as e:
+            logger.opt(exception=e).error("Something failed")
     finally:
         logger.remove(handler_id)
 

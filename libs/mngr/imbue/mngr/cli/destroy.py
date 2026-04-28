@@ -11,7 +11,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.data_types import GcResourceTypes
@@ -51,6 +50,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class _OfflineHostToDestroy(FrozenModel):
@@ -228,9 +228,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     branches_to_remove: list[tuple[str, Path]] = []
     results_lock = threading.Lock()
 
-    with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group, name="destroy_agents", max_workers=32
-    ) as executor:
+    with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="destroy_agents", max_workers=32) as executor:
         futures: list[Future[None]] = []
         for agent, host in targets.online_agents:
             futures.append(
@@ -332,7 +330,7 @@ def _partition_destroy_targets(
         matched_ids_by_host.setdefault(str(match.host_id), set()).add(match.agent_id)
 
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="partition_destroy_targets", max_workers=32
     ) as executor:
         for host_id_str, matched_ids in matched_ids_by_host.items():

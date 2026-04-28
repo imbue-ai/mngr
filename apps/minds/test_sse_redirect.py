@@ -20,6 +20,7 @@ import uvicorn
 from loguru import logger
 from playwright.sync_api import sync_playwright
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -27,6 +28,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -53,7 +55,13 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
     resolver = MngrCliBackendResolver()
-    creator = AgentCreator(paths=paths)
+    root_cg = ConcurrencyGroup(name="test-root")
+    root_cg.__enter__()
+    creator = AgentCreator(
+        paths=paths,
+        root_concurrency_group=root_cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+    )
 
     # Manually set up a fake agent creation that completes immediately
     agent_id = AgentId()

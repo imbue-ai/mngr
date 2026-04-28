@@ -159,11 +159,9 @@ omit = [
     # Docker provider requires a Docker daemon for testing
     "libs/mngr/imbue/mngr/providers/docker/instance.py",
     "libs/mngr/imbue/mngr/providers/docker/volume.py",
-    "libs/mngr/imbue/mngr/providers/docker/testing.py",
     # Lima provider requires Lima/QEMU for full integration testing
     "libs/mngr_lima/imbue/mngr_lima/instance.py",
     "libs/mngr_lima/imbue/mngr_lima/limactl.py",
-    "libs/mngr_lima/imbue/mngr_lima/testing.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",
@@ -184,7 +182,10 @@ source = [
 ]
 
 [tool.importlinter]
-root_package = "imbue"
+root_packages = [
+    "imbue.mngr",
+    "imbue.minds",
+]
 
 [[tool.importlinter.contracts]]
 name = "mngr layers contract"
