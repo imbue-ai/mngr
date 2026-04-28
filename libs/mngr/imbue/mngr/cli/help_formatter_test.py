@@ -778,7 +778,7 @@ def test_synopsis_lists_all_non_optout_flags(key: str, metadata: CommandHelpMeta
         missing.append(long_forms[0])
 
     assert not missing, (
-        f"Flags on `mngr {metadata.name.removeprefix('mngr ')}` not present in the synopsis: "
+        f"Flags on `{metadata.name}` not present in the synopsis: "
         f"{sorted(missing)}. Either add them to the synopsis, or, if intentionally "
         f"omitted, add them to _SYNOPSIS_OPTOUT_FLAGS[{key!r}] in this file."
     )
