@@ -2143,6 +2143,11 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
 
+            # `git worktree add` only checks out the committed state of the base branch.
+            # Mirror the git-mirror codepath and copy over uncommitted (and optionally
+            # gitignored) files from the source so --include-unclean works in worktree mode.
+            self._transfer_extra_files(host, source_path, work_dir_path, options)
+
             self._apply_work_dir_extra_paths(
                 host, source_path, work_dir_path, self.mngr_ctx.config.work_dir_extra_paths
             )
