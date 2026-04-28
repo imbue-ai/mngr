@@ -501,14 +501,35 @@ def _list_branches(repo: Path) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
+def _list_worktree_paths(repo: Path) -> set[Path]:
+    """List worktree paths (excluding the source repo itself) for the given git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    paths: set[Path] = set()
+    repo_resolved = repo.resolve()
+    for block in result.stdout.strip().split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ")).resolve()
+                if path != repo_resolved:
+                    paths.add(path)
+                break
+    return paths
+
+
 def test_worktree_branch_is_cleaned_up_when_create_fails(
     temp_mngr_ctx: MngrContext,
     temp_git_repo: Path,
 ) -> None:
-    """If create fails after we made a new worktree branch, the branch is removed.
+    """If create fails after we made a new worktree branch, the branch and the worktree are removed.
 
     Reuses the destroy-time safety mechanism: only the branch we created
     (recorded in created_branch_name) is deleted; pre-existing branches are not.
+    The worktree itself is always removed because we always create it ourselves.
     """
     agent_name = AgentName(f"test-cleanup-fail-{int(time.time())}")
     leaked_branch = f"mngr/{agent_name}"
@@ -526,6 +547,7 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
 
     branches_before = _list_branches(temp_git_repo)
     assert leaked_branch not in branches_before
+    worktrees_before = _list_worktree_paths(temp_git_repo)
 
     with pytest.raises(RuntimeError, match="simulated failure after file copy"):
         create(
@@ -540,16 +562,25 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
         f"branch {leaked_branch} should have been cleaned up after create failure, "
         f"but is still present: {branches_after}"
     )
+    worktrees_after = _list_worktree_paths(temp_git_repo)
+    leaked_worktrees = worktrees_after - worktrees_before
+    assert not leaked_worktrees, (
+        f"worktree(s) should have been removed after create failure, but found: {leaked_worktrees}"
+    )
+    for path in leaked_worktrees:
+        assert not path.exists(), f"worktree directory {path} should be removed"
 
 
 def test_preexisting_branch_is_preserved_when_create_fails(
     temp_mngr_ctx: MngrContext,
     temp_git_repo: Path,
 ) -> None:
-    """When create fails on a pre-existing branch (not created by us), keep it.
+    """When create fails on a pre-existing branch (not created by us), keep the branch but remove the worktree.
 
     Mirrors the destroy-time safety: created_branch_name is None when the user
-    reused an existing branch, so the cleanup path is a no-op.
+    reused an existing branch, so branch deletion is skipped. The worktree
+    itself is always removed because we always create it ourselves -- this is
+    the case the most recent commit (8974d5286) was specifically designed to fix.
     """
     existing_branch = "feature/preexisting"
     subprocess.run(
@@ -569,6 +600,8 @@ def test_preexisting_branch_is_preserved_when_create_fails(
         git=AgentGitOptions(base_branch=existing_branch),
     )
 
+    worktrees_before = _list_worktree_paths(temp_git_repo)
+
     with pytest.raises(RuntimeError, match="simulated failure after file copy"):
         create(
             source_location=source_location,
@@ -581,6 +614,14 @@ def test_preexisting_branch_is_preserved_when_create_fails(
     assert existing_branch in branches_after, (
         f"pre-existing branch {existing_branch} must not be deleted by create cleanup"
     )
+    worktrees_after = _list_worktree_paths(temp_git_repo)
+    leaked_worktrees = worktrees_after - worktrees_before
+    assert not leaked_worktrees, (
+        f"worktree(s) should have been removed after create failure even though branch was preserved, "
+        f"but found: {leaked_worktrees}"
+    )
+    for path in leaked_worktrees:
+        assert not path.exists(), f"worktree directory {path} should be removed"
 
 
 # =============================================================================
