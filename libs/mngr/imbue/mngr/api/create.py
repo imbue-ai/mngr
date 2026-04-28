@@ -81,6 +81,11 @@ def _cleanup_failed_worktree_create(
 ) -> None:
     """Best-effort cleanup of a worktree (and any branch we created) after a failed create.
 
+    Caller must only invoke this when `create()` actually created the work_dir
+    (i.e. `create_work_dir=True`); when the work_dir was provided by the
+    caller, this function must not be called -- removing a caller-provided
+    worktree would silently delete data we do not own.
+
     The worktree is always removed when we can locate a source repo for it,
     because in worktree mode `host.create_agent_work_dir` always creates the
     worktree itself. The branch is only deleted when we actually created it
@@ -191,7 +196,9 @@ def create(
         # into the source repo. The branch deletion is gated on created_branch_name
         # so pre-existing branches the user attached to are left alone (mirrors
         # the destroy-path safety check); the worktree removal is unconditional
-        # because in worktree mode we always create the worktree ourselves.
+        # for worktree mode because we always create the worktree ourselves
+        # there. Cleanup is also gated on create_work_dir, since when False the
+        # work_dir was provided by the caller and we must not remove it.
         is_success = False
         try:
             if create_work_dir:
@@ -242,7 +249,7 @@ def create(
             emit_discovery_events_for_host(mngr_ctx.config, host)
             is_success = True
         finally:
-            if not is_success:
+            if not is_success and create_work_dir:
                 _cleanup_failed_worktree_create(work_dir_path, created_branch_name, mngr_ctx)
 
     return result
