@@ -76,7 +76,7 @@ def test_empty_url() -> None:
     assert parse_project_name_from_url(url) is None
 
 
-def test_resolve_project_filter_values_passes_through_non_dot_values(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_resolve_project_filter_values_passes_through_non_dot_values(cg: ConcurrencyGroup) -> None:
     """Non-dot values are returned unchanged."""
     assert resolve_project_filter_values(("foo", "bar"), cg) == ("foo", "bar")
 
