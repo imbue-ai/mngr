@@ -76,9 +76,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Dropped 77 -> 72 after main merged 9 commits (headless flag,
-# test refactors, safe-commands additions) that added code on cli/add.py
-# and cli/run.py faster than tests. Confirmed via test-offload coverage
-# diagnostic that this is a real drop, not missing .coverage downloads
-# (50/50 sandbox delivery match under offload 0.8.1).
-fail_under = 72
+fail_under = 75
