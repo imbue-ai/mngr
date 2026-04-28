@@ -2,7 +2,7 @@
 
 Living scratch notes. Last update: 2026-04-27.
 
-Refresh issue states with `/tmp/check_triage_issues.sh` (issue numbers hardcoded — edit when adding/removing).
+Refresh issue states with `./scripts/check_triage_issues.sh` (parses this file for `#NNNN` refs).
 
 ## In progress (someone working on)
 
