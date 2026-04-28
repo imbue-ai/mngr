@@ -112,7 +112,11 @@ def test_prevent_asyncio_import() -> None:
     # pure asyncio cancellation, not threads/procs.
     # +1 for server_test.py's asyncio.run, which drives _run_ws_broadcast_loop
     # under a fake hanging websocket to verify the timeout path.
-    rc.check_asyncio_import(_DIR, snapshot(3))
+    # +3 for server_test.py's asyncio.run calls that drive
+    # _run_proto_agent_logs_loop under the same fake hanging websocket --
+    # one for the streaming send-hangs case, one for the close-also-hangs
+    # case, and one for the not-found early-return path.
+    rc.check_asyncio_import(_DIR, snapshot(6))
 
 
 def test_prevent_pandas_import() -> None:
@@ -151,7 +155,9 @@ def test_prevent_trailing_comments() -> None:
     # suppression to live on the offending line; cast() is forbidden by the
     # cast ratchet.
     # +1 for the same suppression in the close-hangs variant of that test.
-    rc.check_trailing_comments(_DIR, snapshot(7))
+    # +3 for the same suppression on the three _run_proto_agent_logs_loop
+    # tests that pass the same duck-typed fake websocket.
+    rc.check_trailing_comments(_DIR, snapshot(10))
 
 
 def test_prevent_init_docstrings() -> None:

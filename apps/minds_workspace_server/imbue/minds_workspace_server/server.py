@@ -647,19 +647,37 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     agent_manager: AgentManager = websocket.app.state.agent_manager
     agent_id = websocket.path_params.get("agent_id", "")
-
     log_queue = agent_manager.get_log_queue(agent_id)
+    await _run_proto_agent_logs_loop(
+        websocket=websocket,
+        log_queue=log_queue,
+        send_timeout_seconds=_WS_SEND_TIMEOUT_SECONDS,
+    )
+
+
+async def _run_proto_agent_logs_loop(
+    websocket: WebSocket,
+    log_queue: queue.Queue[str | None] | None,
+    send_timeout_seconds: float,
+) -> None:
+    """Stream ``log_queue`` messages to ``websocket`` until done or a send hangs.
+
+    If ``log_queue`` is ``None`` the proto-agent does not exist; send a
+    structured not-found error and close the socket. All sends and the close
+    itself are bounded by ``send_timeout_seconds`` so a half-dead TCP
+    connection cannot pin this handler.
+    """
     if log_queue is None:
         try:
             await _send_text_with_timeout(
                 websocket,
                 json.dumps({"done": True, "success": False, "error": "Proto-agent not found"}),
-                _WS_SEND_TIMEOUT_SECONDS,
+                send_timeout_seconds,
             )
         except asyncio.TimeoutError:
             pass
         try:
-            await asyncio.wait_for(websocket.close(), timeout=_WS_SEND_TIMEOUT_SECONDS)
+            await asyncio.wait_for(websocket.close(), timeout=send_timeout_seconds)
         except (RuntimeError, asyncio.TimeoutError):
             pass
         return
@@ -674,7 +692,7 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
             if message is None:
                 finished = True
             else:
-                await _send_text_with_timeout(websocket, message, _WS_SEND_TIMEOUT_SECONDS)
+                await _send_text_with_timeout(websocket, message, send_timeout_seconds)
     except WebSocketDisconnect:
         pass
     except asyncio.TimeoutError:
@@ -682,7 +700,7 @@ async def _proto_agent_logs_endpoint(websocket: WebSocket) -> None:
         # could otherwise leave this handler blocked on send_text forever.
         logger.warning("Proto-agent log WebSocket send timed out; closing connection")
         try:
-            await asyncio.wait_for(websocket.close(code=1011), timeout=_WS_SEND_TIMEOUT_SECONDS)
+            await asyncio.wait_for(websocket.close(code=1011), timeout=send_timeout_seconds)
         except (RuntimeError, asyncio.TimeoutError):
             pass
 

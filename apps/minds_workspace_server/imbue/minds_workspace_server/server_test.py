@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import queue
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.server import _run_proto_agent_logs_loop
 from imbue.minds_workspace_server.server import _run_ws_broadcast_loop
 from imbue.minds_workspace_server.server import create_application
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
@@ -424,3 +426,63 @@ def test_run_ws_broadcast_loop_returns_when_close_also_hangs(
     assert received is not None
     assert json.loads(received) == {"type": "after_close_timeout"}
     assert fresh_queue.empty()
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_aborts_when_send_hangs() -> None:
+    """A hung ``send_text`` on the proto-agent log socket triggers the timeout path and closes."""
+    fake_websocket = _HangingWebSocket()
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # type: ignore[arg-type]
+            log_queue=log_queue,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # The first real message was attempted (it hung) and the socket was
+    # explicitly closed with an internal-error code.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+    assert fake_websocket.close_codes == [1011]
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_returns_when_close_also_hangs() -> None:
+    """If both ``send_text`` and ``close`` hang on the log socket, the handler still returns."""
+    fake_websocket = _HangingWebSocket(close_hangs=True)
+    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue.put(json.dumps({"line": "starting"}))
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # type: ignore[arg-type]
+            log_queue=log_queue,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
+
+
+@pytest.mark.timeout(5)
+def test_run_proto_agent_logs_loop_not_found_path_handles_hung_send() -> None:
+    """When the proto-agent is missing and the not-found send hangs, close still happens and the handler returns."""
+    fake_websocket = _HangingWebSocket()
+
+    asyncio.run(
+        _run_proto_agent_logs_loop(
+            websocket=fake_websocket,  # type: ignore[arg-type]
+            log_queue=None,
+            send_timeout_seconds=0.05,
+        )
+    )
+
+    # The not-found error send was attempted (it hung) and the socket was
+    # closed despite the hang.
+    assert fake_websocket.send_attempt_count == 1
+    assert fake_websocket.close_call_count == 1
