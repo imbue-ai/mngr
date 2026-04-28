@@ -59,11 +59,18 @@ class ModalSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("sh", "-c", "test -f ~/.modal.toml")
 
 
+class LimaSignalCheck(SignalCheck):
+    """Detects whether the limactl CLI is installed."""
+
+    command: tuple[str, ...] = ("limactl", "--version")
+
+
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
+_LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
 
 
 class CatalogEntry(FrozenModel):
@@ -114,6 +121,19 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.INDEPENDENT,
         signal=_MODAL_SIGNAL,
         is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="lima",
+        package_name="imbue-mngr-lima",
+        description="Lima VM provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_LIMA_SIGNAL,
+    ),
+    CatalogEntry(
+        entry_point_name="vultr",
+        package_name="imbue-mngr-vultr",
+        description="Vultr provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(
         entry_point_name="tutor",

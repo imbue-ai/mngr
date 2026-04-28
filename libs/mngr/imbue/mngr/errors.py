@@ -370,6 +370,15 @@ class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
 
 
+class UnknownAgentTypeError(ConfigError):
+    """Unknown agent type."""
+
+    def __init__(self, agent_type: str) -> None:
+        self.agent_type = agent_type
+        super().__init__(f"Unknown agent type '{agent_type}' and no default agent class set.")
+        self.user_help_text = get_plugin_install_hint(agent_type)
+
+
 class UnknownBackendError(ConfigError):
     """Unknown provider backend."""
 

@@ -44,12 +44,19 @@ def reset_backend_registry() -> None:
     _registry_state["backends_loaded"] = False
 
 
-def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_docker: bool) -> None:
+# Provider backends that talk to external services (cloud APIs, daemons,
+# VMs). Tests use ``load_local_backend_only`` to skip these, since they
+# require credentials or system binaries.
+_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "lima", "vultr"})
+
+
+def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_remote: bool) -> None:
     """Load provider backends from the specified modules.
 
-    The pm parameter is the pluggy plugin manager. If include_modal is True,
-    the Modal backend is included (requires Modal credentials). If include_docker
-    is True, the Docker backend is included (requires a Docker daemon).
+    The pm parameter is the pluggy plugin manager. If include_docker is True,
+    the Docker backend is included (requires a Docker daemon). If include_remote
+    is True, plugin-provided backends that require external services
+    (Modal, Lima, Vultr, ...) are included.
     """
     if _registry_state["backends_loaded"]:
         return
@@ -58,7 +65,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_doc
     pm.register(ssh_backend_module, name="ssh")
     if include_docker:
         pm.register(docker_backend_module, name="docker")
-    # Note: modal backend is loaded via the mngr_modal plugin entry point
+    # Note: remote backends (modal, lima, vultr, ...) are loaded via plugin entry points
 
     registrations = pm.hook.register_provider_backend()
 
@@ -66,7 +73,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_doc
         if registration is not None:
             backend_class, config_class = registration
             backend_name = backend_class.get_name()
-            if not include_modal and str(backend_name) == "modal":
+            if not include_remote and str(backend_name) in _REMOTE_BACKEND_NAMES:
                 continue
             _backend_registry[backend_name] = backend_class
             register_provider_config(str(backend_name), config_class)
@@ -79,14 +86,14 @@ def load_local_backend_only(pm: pluggy.PluginManager) -> None:
 
     This is used by tests to avoid depending on external services.
     Unlike load_backends_from_plugins, this only registers the local and SSH backends
-    (not Modal or Docker which require external daemons/credentials).
+    (not Docker or any remote backends which require external daemons/credentials).
     """
-    _load_backends(pm, include_modal=False, include_docker=False)
+    _load_backends(pm, include_docker=False, include_remote=False)
 
 
 def load_backends_from_plugins(pm: pluggy.PluginManager) -> None:
     """Load all provider backends from plugins."""
-    _load_backends(pm, include_modal=True, include_docker=True)
+    _load_backends(pm, include_docker=True, include_remote=True)
 
 
 def get_backend(name: str | ProviderBackendName) -> type[ProviderBackendInterface]:
