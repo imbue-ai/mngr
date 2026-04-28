@@ -196,6 +196,32 @@ def render_sidebar_page() -> str:
     return JINJA_ENV.get_template("sidebar.html").render()
 
 
+@pure
+def render_overlay_page() -> str:
+    """Render the stuck-server overlay page for the Electron overlay WebContentsView.
+
+    IPC-driven: main.js sends state updates (stuck / restarting) via the preload
+    bridge; the overlay renders the matching card with a Restart button. Hidden
+    entirely by main.js when the active workspace becomes healthy.
+    """
+    return JINJA_ENV.get_template("overlay.html").render()
+
+
+@pure
+def render_recovery_page(agent_id: str) -> str:
+    """Render the body returned for main-frame HTML navigations that hit a proxy failure.
+
+    Functions as a belt-and-braces fallback behind the in-tab overlay: if the
+    overlay hasn't caught up with the SSE event yet, the page body itself
+    offers the Restart affordance. Polls ``/api/agents/{agent_id}/health``
+    and reloads once the workspace server comes back.
+    """
+    return JINJA_ENV.get_template("recovery.html").render(
+        agent_id=agent_id,
+        accent=workspace_accent(agent_id),
+    )
+
+
 # -- Workspace/settings/sharing/accounts --
 
 
