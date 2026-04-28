@@ -117,12 +117,14 @@ def test_emit_event_json_format(capsys: pytest.CaptureFixture[str]) -> None:
 # =============================================================================
 
 
+@pytest.mark.allow_warnings
 def test_on_error_human_format_continue() -> None:
     """on_error with HUMAN format and CONTINUE should not raise."""
     # Should not raise
     on_error("test error", ErrorBehavior.CONTINUE, OutputFormat.HUMAN)
 
 
+@pytest.mark.allow_warnings
 def test_on_error_human_format_abort() -> None:
     """on_error with HUMAN format and ABORT should raise AbortError."""
     with pytest.raises(AbortError) as exc_info:
@@ -146,6 +148,7 @@ def test_on_error_json_format_continue(capsys: pytest.CaptureFixture[str]) -> No
     assert captured.out == ""
 
 
+@pytest.mark.allow_warnings
 def test_on_error_stores_original_exception() -> None:
     """on_error with ABORT should include original exception in AbortError."""
     original = ValueError("original")

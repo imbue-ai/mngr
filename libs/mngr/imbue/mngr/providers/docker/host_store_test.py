@@ -110,6 +110,7 @@ def test_list_all_host_records_returns_all_records(store: DockerHostStore) -> No
     assert host_ids == {HOST_ID_A, HOST_ID_B}
 
 
+@pytest.mark.allow_warnings
 def test_list_all_host_records_skips_corrupt_files(store: DockerHostStore, tmp_path: Path) -> None:
     record = _make_host_record(host_id=HOST_ID_A, host_name="valid")
     store.write_host_record(record)
@@ -134,6 +135,7 @@ def test_persist_agent_data(store: DockerHostStore) -> None:
     assert results[0]["name"] == "test-agent"
 
 
+@pytest.mark.allow_warnings
 def test_persist_agent_data_without_id_is_noop(store: DockerHostStore) -> None:
     host_id = HostId(HOST_ID_A)
     agent_data: dict[str, object] = {"name": "no-id-agent"}

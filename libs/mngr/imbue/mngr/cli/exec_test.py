@@ -87,6 +87,7 @@ def test_emit_human_output_single_success(capsys: pytest.CaptureFixture[str]) ->
     assert "hello world" in captured.out
 
 
+@pytest.mark.allow_warnings
 def test_emit_human_output_single_failure(capsys: pytest.CaptureFixture[str]) -> None:
     """Test human output handles failed commands."""
     exec_result = ExecResult(agent_name="test-agent", stdout="", stderr="bad command\n", success=False)
@@ -251,6 +252,7 @@ def test_emit_human_output_stdout_without_trailing_newline(capsys: pytest.Captur
     assert "no trailing newline" in captured.out
 
 
+@pytest.mark.allow_warnings
 def test_emit_human_output_stderr_without_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
     """Test human output adds trailing newline if stderr doesn't have one."""
     result = ExecResult(agent_name="test-agent", stdout="", stderr="error output", success=False)

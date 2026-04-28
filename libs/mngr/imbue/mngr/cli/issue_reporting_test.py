@@ -202,6 +202,7 @@ def test_search_for_existing_issue_returns_none_when_no_results(
 # =============================================================================
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_non_interactive_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     """In non-interactive mode, handle_not_implemented_error logs error and exits."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: False)
@@ -212,6 +213,7 @@ def test_handle_not_implemented_error_non_interactive_exits(monkeypatch: pytest.
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_interactive_declined(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode, if user declines to report, just exits."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -223,6 +225,7 @@ def test_handle_not_implemented_error_interactive_declined(monkeypatch: pytest.M
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_empty_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """NotImplementedError with no message uses a default."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: False)
@@ -231,6 +234,7 @@ def test_handle_not_implemented_error_empty_message(monkeypatch: pytest.MonkeyPa
         handle_not_implemented_error(NotImplementedError())
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with existing issue found, opens its URL."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -266,6 +270,7 @@ def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypat
     assert opened_urls[0] == "https://github.com/imbue-ai/mngr/issues/77"
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with no existing issue, opens new issue form."""
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
@@ -296,6 +301,7 @@ def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypat
 # =============================================================================
 
 
+@pytest.mark.allow_warnings
 def test_handle_not_implemented_error_is_interactive_false_exits_without_prompting() -> None:
     """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
 
@@ -309,6 +315,7 @@ def test_handle_not_implemented_error_is_interactive_false_exits_without_prompti
     assert exc_info.value.code == 1
 
 
+@pytest.mark.allow_warnings
 def test_handle_unexpected_error_is_interactive_false_exits_without_prompting() -> None:
     """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
 

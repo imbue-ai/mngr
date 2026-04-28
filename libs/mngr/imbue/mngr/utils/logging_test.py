@@ -711,6 +711,7 @@ def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level
         ),
     ],
 )
+@pytest.mark.allow_warnings
 def test_paramiko_handler_routes_expected_messages(
     message: str,
     input_level: int,
@@ -755,6 +756,7 @@ def test_paramiko_handler_routes_joined_traceback_body_to_debug() -> None:
         logger.remove(handler_id)
 
 
+@pytest.mark.allow_warnings
 def test_paramiko_handler_routes_unknown_error_to_warning() -> None:
     """Unexpected paramiko errors should remain visible at warning level."""
     handler = _ParamikoToLoguruHandler()
@@ -894,6 +896,7 @@ def test_threading_excepthook_routes_expected_paramiko_to_debug() -> None:
         pytest.param(_make_non_paramiko_args, id="non-paramiko"),
     ],
 )
+@pytest.mark.allow_warnings
 def test_threading_excepthook_routes_non_expected_exceptions_to_error(
     make_args: Callable[[], threading.ExceptHookArgs],
 ) -> None:

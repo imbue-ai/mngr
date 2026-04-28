@@ -191,6 +191,7 @@ def test_discover_agents_returns_refs_from_provider(
     assert refs[1].permissions == ()
 
 
+@pytest.mark.allow_warnings
 def test_discover_agents_returns_empty_list_on_error(
     offline_host: OfflineHost, fake_provider: MockProviderInstance
 ) -> None:
@@ -412,6 +413,7 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
     assert ref.permissions == ("read",)
 
 
+@pytest.mark.allow_warnings
 def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> None:
     host_id = HostId.generate()
     agent_data = {"name": "my-agent"}
@@ -419,6 +421,7 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> N
     assert ref is None
 
 
+@pytest.mark.allow_warnings
 def test_validate_and_create_discovered_agent_returns_none_for_invalid_id() -> None:
     host_id = HostId.generate()
     agent_data = {"id": "not-a-valid-id", "name": "my-agent"}
@@ -426,6 +429,7 @@ def test_validate_and_create_discovered_agent_returns_none_for_invalid_id() -> N
     assert ref is None
 
 
+@pytest.mark.allow_warnings
 def test_validate_and_create_discovered_agent_returns_none_for_missing_name() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()

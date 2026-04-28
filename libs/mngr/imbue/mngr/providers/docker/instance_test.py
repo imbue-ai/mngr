@@ -139,6 +139,7 @@ def test_parse_container_labels_handles_missing_tags_label() -> None:
     assert tags == {}
 
 
+@pytest.mark.allow_warnings
 def test_parse_container_labels_handles_invalid_tags_json() -> None:
     labels = {
         LABEL_HOST_ID: HOST_ID_A,

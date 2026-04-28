@@ -256,6 +256,7 @@ def test_handle_error_abort_raises_mngr_error_when_no_exception() -> None:
         _handle_error("some message", ErrorBehavior.ABORT, exc=None)
 
 
+@pytest.mark.allow_warnings
 def test_handle_error_continue_does_not_raise() -> None:
     """CONTINUE behavior logs instead of raising."""
     # Should not raise
@@ -1044,6 +1045,7 @@ class _DiscoveryErrorProvider(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
+@pytest.mark.allow_warnings
 def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """_discover_hosts_for_gc skips a provider entirely when discovery raises MngrError.
 
@@ -1062,6 +1064,7 @@ def test_discover_hosts_for_gc_skips_provider_on_error(temp_host_dir: Path, temp
     assert result == []
 
 
+@pytest.mark.allow_warnings
 def test_discover_hosts_for_gc_continues_after_one_provider_fails(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -1325,6 +1328,7 @@ def test_clean_work_dir_removes_git_worktree(local_host: Host, temp_git_repo: Pa
 # =========================================================================
 
 
+@pytest.mark.allow_warnings
 def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file cannot be parsed."""
     work_dir = tmp_path / "pseudo_worktree"
@@ -1339,6 +1343,7 @@ def test_remove_git_worktree_without_parseable_git_file_falls_back_to_rm(local_h
     assert not work_dir.exists()
 
 
+@pytest.mark.allow_warnings
 def test_remove_git_worktree_falls_back_to_rm_when_git_not_in_main_repo(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when git worktree remove fails."""
     work_dir = tmp_path / "pseudo_worktree2"
@@ -1528,6 +1533,7 @@ class _GetHostErrorProvider(MockProviderInstance):
         raise MngrError("simulated get_host failure from test")
 
 
+@pytest.mark.allow_warnings
 def test_gc_machines_handles_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_machines catches MngrError per-host when ErrorBehavior.CONTINUE is set."""
     host = _make_offline_host(
@@ -1602,6 +1608,7 @@ class _ListSnapshotsErrorProvider(MockProviderInstance):
         raise MngrError("simulated list_snapshots failure from test")
 
 
+@pytest.mark.allow_warnings
 def test_gc_snapshots_handles_inner_mngr_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_snapshots records inner MngrError per-host and continues when CONTINUE behavior."""
     host = _make_offline_host(
@@ -1776,6 +1783,7 @@ class _DeleteVolumeErrorProvider(MockProviderInstance):
         raise MngrError(f"simulated delete_volume failure from test: {volume_id}")
 
 
+@pytest.mark.allow_warnings
 def test_gc_volumes_handles_delete_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """gc_volumes records MngrError from delete_volume and continues."""
     vol = VolumeInfo(
@@ -1867,6 +1875,7 @@ def test_gc_volumes_skips_provider_when_unavailable(temp_host_dir: Path, temp_mn
     assert len(result.errors) == 0
 
 
+@pytest.mark.allow_warnings
 def test_gc_volumes_handles_list_volumes_mngr_error_with_continue(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2057,6 +2066,7 @@ def test_gc_work_dirs_skips_offline_host_not_online_interface(
 # =========================================================================
 
 
+@pytest.mark.allow_warnings
 def test_remove_git_worktree_falls_back_when_git_file_absent(local_host: Host, tmp_path: Path) -> None:
     """_remove_git_worktree falls back to rm -rf when the .git file does not exist."""
     work_dir = tmp_path / "worktree_no_git_file"
@@ -2252,6 +2262,7 @@ def test_gc_machines_destroys_old_online_host_with_no_agents(
     assert provider.destroyed_hosts == [host.id]
 
 
+@pytest.mark.allow_warnings
 def test_gc_machines_skips_host_on_auth_error_during_discover(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2276,6 +2287,7 @@ def test_gc_machines_skips_host_on_auth_error_during_discover(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings
 def test_gc_machines_skips_host_on_connection_error_during_discover(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2314,6 +2326,7 @@ def test_gc_machines_dry_run_identifies_but_does_not_destroy_old_online_host(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings
 def test_gc_machines_skips_host_when_activity_time_unreadable(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
@@ -2400,6 +2413,7 @@ def test_gc_machines_skips_old_running_host_with_no_activity(
     assert provider.destroyed_hosts == []
 
 
+@pytest.mark.allow_warnings
 def test_gc_machines_skips_host_when_get_state_unreadable(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,

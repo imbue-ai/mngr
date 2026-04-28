@@ -123,6 +123,7 @@ def test_editor_session_wait_for_result_returns_content_on_success(
         assert result == "Edited content"
 
 
+@pytest.mark.allow_warnings
 def test_editor_session_wait_for_result_returns_none_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

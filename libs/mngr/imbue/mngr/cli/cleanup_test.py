@@ -650,6 +650,7 @@ def test_emit_result_json_with_errors(capsys: pytest.CaptureFixture[str]) -> Non
     assert data["errors"] == ["error-1"]
 
 
+@pytest.mark.allow_warnings
 def test_emit_result_human_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_result should display errors in HUMAN format."""
     result = CleanupResult()
