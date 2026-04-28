@@ -29,6 +29,7 @@ from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
+from imbue.mngr.cli.create import _project_dot_means_default
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_agent_type_name
 from imbue.mngr.cli.create import _resolve_source_location
@@ -535,29 +536,11 @@ def test_parse_project_name_returns_explicit_project(
     assert result == "explicit-project"
 
 
-def test_parse_project_name_treats_dot_as_default_derivation(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`--project .` is equivalent to omitting --project: derive from the source, not cwd."""
-    cwd_project = tmp_path / "cwd-project"
-    cwd_project.mkdir()
-    monkeypatch.chdir(cwd_project)
-    other_dir = tmp_path / "other-source"
-    other_dir.mkdir()
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedSource(location=HostLocation(host=local_host, path=other_dir))
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().project, "."),
-    )
-
-    result = _parse_project_name(resolved, opts, remote_url=None, cg=cg)
-
-    # Should match what the default derivation produces (source dir name), not cwd.
-    assert result == "other-source"
+def test_project_dot_means_default_callback_normalizes_dot_to_none() -> None:
+    """The --project click callback rewrites '.' to None so the default chain runs in the impl."""
+    assert _project_dot_means_default(None, None, ".") is None  # type: ignore[arg-type]
+    assert _project_dot_means_default(None, None, "explicit") == "explicit"  # type: ignore[arg-type]
+    assert _project_dot_means_default(None, None, None) is None  # type: ignore[arg-type]
 
 
 def test_parse_project_name_inherits_from_source_agent(
