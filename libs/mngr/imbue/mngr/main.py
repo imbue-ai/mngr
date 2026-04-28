@@ -87,6 +87,13 @@ def _resolve_builtin(cmd_name: str) -> click.Command | None:
     return _BUILTINS_LOADED[spec.name]
 
 
+def _format_command_display_name(name: str, aliases: tuple[str, ...] | list[str]) -> str:
+    """Return the "name, alias1, alias2" cell rendered next to a command in --help."""
+    if not aliases:
+        return name
+    return ", ".join([name, *aliases])
+
+
 class AliasAwareGroup(DefaultCommandGroup):
     """Custom click.Group that shows aliases inline with commands in --help.
 
@@ -164,8 +171,7 @@ class AliasAwareGroup(DefaultCommandGroup):
             spec = _BUILTINS_BY_NAME[canonical]
             if spec.hidden:
                 continue
-            display_name = ", ".join([canonical, *aliases]) if aliases else canonical
-            rows.append((display_name, spec.short_help))
+            rows.append((_format_command_display_name(canonical, aliases), spec.short_help))
 
         plugin_alias_to_canonical = detect_alias_to_canonical(self)
         plugin_aliases_by_cmd = detect_aliases_by_command(self)
@@ -181,7 +187,7 @@ class AliasAwareGroup(DefaultCommandGroup):
             if cmd is None or cmd.hidden:
                 continue
             aliases = plugin_aliases_by_cmd.get(subcommand, [])
-            display_name = ", ".join([subcommand, *aliases]) if aliases else subcommand
+            display_name = _format_command_display_name(subcommand, aliases)
             plugin_entries.append((subcommand, display_name, cmd))
 
         if not rows and not plugin_entries:
