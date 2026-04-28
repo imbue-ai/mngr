@@ -103,6 +103,22 @@ def test_resolve_project_filter_values_handles_empty(cg: ConcurrencyGroup) -> No
     assert resolve_project_filter_values((), cg) == ()
 
 
+def test_resolve_project_filter_values_dedupes_preserving_order(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Duplicate values (including duplicate '.' expansions) collapse, in insertion order."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    # Plain duplicates collapse.
+    assert resolve_project_filter_values(("foo", "foo"), cg) == ("foo",)
+    # Duplicate '.' expansions collapse to a single project name.
+    assert resolve_project_filter_values((".", "."), cg) == ("my-project",)
+    # Mixed duplicates collapse and preserve relative insertion order of distinct values.
+    assert resolve_project_filter_values(("foo", ".", "foo", "."), cg) == ("foo", "my-project")
+
+
 def test_resolve_project_filter_values_uses_project_root_over_cwd(
     tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:

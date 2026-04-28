@@ -92,17 +92,18 @@ def resolve_project_filter_values(
     current working directory when not. This is important because running from a
     subdirectory would otherwise miss the git remote and yield the subdirectory's
     name. Other values are returned unchanged. The current project is derived at
-    most once.
+    most once. Duplicate values (after expansion) are collapsed while preserving
+    insertion order so the resulting CEL clause stays minimal.
     """
     current_project: str | None = None
-    resolved: list[str] = []
+    resolved: dict[str, None] = {}
     for value in values:
         if value == ".":
             if current_project is None:
                 current_project = derive_project_name_from_path(project_root or Path.cwd(), cg)
-            resolved.append(current_project)
+            resolved[current_project] = None
         else:
-            resolved.append(value)
+            resolved[value] = None
     return tuple(resolved)
 
 
