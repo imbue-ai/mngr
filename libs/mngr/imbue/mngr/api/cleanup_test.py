@@ -462,7 +462,7 @@ def test_execute_cleanup_destroy_hook_error_with_abort_stops_processing(
         local_host.destroy_agent(second_agent_state)
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Error\ destroying\ offline\ host")
 def test_execute_cleanup_destroy_offline_host_error_with_abort(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -510,7 +510,7 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
         assert result.destroyed_agents == []
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Error\ accessing\ host")
 def test_execute_cleanup_destroy_unknown_provider_with_abort_stops_processing(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -546,7 +546,7 @@ def test_execute_cleanup_destroy_unknown_provider_with_abort_stops_processing(
     assert result.stopped_agents == []
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Error\ stopping\ agents\ on\ host")
 def test_execute_cleanup_stop_error_with_abort_stops_processing(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -594,7 +594,7 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
         assert result.stopped_agents == []
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Error\ accessing\ host")
 def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -629,7 +629,9 @@ def test_execute_cleanup_stop_unknown_provider_with_abort_stops_processing(
     assert result.destroyed_agents == []
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(
+    match=r"^Post\-cleanup\ garbage\ collection\ failed:\ Unknown\ provider\ backend:\ nonexistent\-gc\-backend\.\ Registered\ backends:\ local,\ ssh"
+)
 def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -695,7 +697,7 @@ def test_execute_cleanup_destroy_offline_host_success(
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Skipping\ 1\ agent\(s\)\ on\ offline\ host")
 def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,

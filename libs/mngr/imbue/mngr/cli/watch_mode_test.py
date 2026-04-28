@@ -48,7 +48,7 @@ def test_run_watch_loop_waits_between_iterations() -> None:
     assert gap >= 0.2, f"Expected gap >= 0.2s (interval=0.3), got {gap:.2f}s"
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Error\ in\ iteration\ \(continuing\):\ Test\ error")
 def test_run_watch_loop_continues_on_mngr_error_by_default() -> None:
     """run_watch_loop should continue on MngrError when on_error_continue is True."""
     call_count = [0]

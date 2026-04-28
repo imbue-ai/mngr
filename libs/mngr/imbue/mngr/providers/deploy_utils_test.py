@@ -89,7 +89,7 @@ def test_collect_deploy_files_allows_relative_paths() -> None:
     assert Path(".mngr/settings.local.toml") in result
 
 
-@pytest.mark.allow_warnings
+@pytest.mark.allow_warnings(match=r"^Deploy\ file\ collision:\ \~")
 def test_collect_deploy_files_last_plugin_wins_on_collision() -> None:
     """When multiple plugins return the same path, last one wins."""
     ctx = _ctx(
