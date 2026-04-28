@@ -655,14 +655,9 @@ def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: Error
     """
     from imbue.mngr.api.list import list_agents
 
-    # Streaming mode runs providers independently and catches per-provider
-    # errors at _discover_and_emit_details_for_provider (list.py). Batch mode
-    # re-raises at _run_discovery's future.result() loop and discards partial
-    # results, so a single failing provider (e.g. Modal unauthorized) would
-    # empty the snapshot even when other providers succeeded.
     list_agents(
         mngr_ctx=mngr_ctx,
-        is_streaming=True,
+        is_streaming=False,
         error_behavior=error_behavior,
         reset_caches=True,
     )
