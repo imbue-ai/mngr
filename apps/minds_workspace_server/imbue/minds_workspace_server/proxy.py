@@ -1,5 +1,7 @@
 import re
 from typing import Final
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from imbue.imbue_common.pure import pure
 from imbue.minds_workspace_server.primitives import ServiceName
@@ -151,6 +153,36 @@ def rewrite_cookie_path(
         return set_cookie_header[: match.start(2)] + new_path + set_cookie_header[match.end(2) :]
     else:
         return set_cookie_header + f"; Path={prefix}/"
+
+
+@pure
+def rewrite_location_header(
+    location_header: str,
+    service_name: ServiceName,
+) -> str:
+    """Rewrite a Location header so site-absolute redirects stay within the proxied service prefix.
+
+    Without this, a backend returning ``Location: /foo`` causes the browser to resolve
+    the redirect against the document origin, escaping the service prefix. Relative
+    paths are left untouched because the browser resolves a relative ``Location``
+    against the request URL, which already lives under the service prefix. Absolute
+    URLs (with scheme or protocol-relative ``//``) and already-prefixed paths are
+    also left unchanged.
+    """
+    parts = urlsplit(location_header)
+    # Absolute URL (e.g., https://example.com/...) or protocol-relative (//host/...).
+    # The browser will navigate to the explicit host regardless of our prefix, so leave it.
+    if parts.scheme or parts.netloc:
+        return location_header
+    # Relative path or fragment-only reference -- the browser resolves a relative
+    # Location against the request URL, which already lives under the service prefix.
+    if not parts.path.startswith("/"):
+        return location_header
+    prefix = get_service_prefix(service_name)
+    if parts.path == prefix or parts.path.startswith(prefix + "/"):
+        return location_header
+    new_path = prefix + parts.path
+    return urlunsplit(("", "", new_path, parts.query, parts.fragment))
 
 
 @pure
