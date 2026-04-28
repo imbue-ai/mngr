@@ -585,6 +585,12 @@ kill -TERM 1
         env = dict(os.environ)
         if self.config.host:
             env["DOCKER_HOST"] = self.config.host
+        # BuildKit's default progress mode emits ANSI cursor/color escapes that
+        # show up as garbage in the BUILD log channel. `plain` produces clean
+        # line-oriented output. The env form is preferred over `--progress=plain`
+        # because it is silently ignored by the legacy builder, so mngr does not
+        # require buildx to be installed.
+        env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 
     def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
