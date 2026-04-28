@@ -592,7 +592,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
 
     # Second hook: echoes the base branch for the agent's context
     assert hooks[1]["type"] == "command"
-    assert "GIT_BASE_BRANCH" in hooks[1]["command"]
+    assert "MNGR_GIT_BASE_BRANCH" in hooks[1]["command"]
 
     # Third hook: tracks current session ID for session replacement detection
     session_id_hook = hooks[2]["command"]
