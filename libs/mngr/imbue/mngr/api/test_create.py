@@ -579,8 +579,7 @@ def test_preexisting_branch_is_preserved_when_create_fails(
 
     Mirrors the destroy-time safety: created_branch_name is None when the user
     reused an existing branch, so branch deletion is skipped. The worktree
-    itself is always removed because we always create it ourselves -- this is
-    the case the most recent commit (8974d5286) was specifically designed to fix.
+    itself is always removed because we always create it ourselves.
     """
     existing_branch = "feature/preexisting"
     subprocess.run(
