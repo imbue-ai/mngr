@@ -309,23 +309,29 @@ def test_rewrite_substitutes_output_and_cleans_up(
     assert log_path == state_dir / "subagent_destroy.log"
 
 
-def test_rewrite_missing_result_is_silent(
+def test_rewrite_missing_result_preserves_subagent(
     tmp_path: Path,
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    """When the result file is missing, the hook still cleans up but emits nothing.
+    """When result_file is missing, subagent_wait never observed END_TURN
+    (Haiku gave up early -- timeout, hallucinated permission dialog,
+    retry cap, etc.). The depth-1 child is likely still RUNNING; we
+    must NOT destroy it on the parent's PostToolUse, or we throw away
+    real work the user could have recovered via `mngr connect`.
 
-    The subagent's actual content reaches the parent via Haiku's reply
-    (not via this hook), so a missing side file just means the side
-    file was already consumed -- no error is needed.
+    The hook also retains the map_file and per-tid sidefiles in this
+    case so on_before_agent_destroy / SessionStart-reaper can still
+    pick the child up later.
     """
     state_dir = tmp_path / "state"
-    (state_dir / "subagent_map").mkdir(parents=True)
+    for sub in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
+        (state_dir / sub).mkdir(parents=True)
     clean_env.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
     tid = "toolu_err"
     target_name = "foo-err-target"
-    (state_dir / "subagent_map" / f"{tid}.json").write_text(
+    map_file = state_dir / "subagent_map" / f"{tid}.json"
+    map_file.write_text(
         json.dumps(
             {
                 "target_name": target_name,
@@ -335,12 +341,26 @@ def test_rewrite_missing_result_is_silent(
             }
         )
     )
+    prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
+    prompt_file.write_text("original prompt")
+    # No result_file -- simulating Haiku give-up.
+
+    destroy_calls: list[tuple[str, Path]] = []
+
+    def fake_destroy(target_name: str, log_path: Path) -> None:
+        destroy_calls.append((target_name, log_path))
 
     stdin_buffer = io.StringIO(json.dumps({"tool_use_id": tid, "tool_response": "ignored"}))
     stdout_buffer = io.StringIO()
-    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=lambda _name, _log: None)
+    rewrite_hook.run(stdin_buffer, stdout_buffer, destroy_callable=fake_destroy)
 
     assert stdout_buffer.getvalue() == ""
+    # Critical: child is preserved.
+    assert destroy_calls == []
+    # Critical: state files are preserved so the user / reaper can
+    # find the orphan later.
+    assert map_file.exists()
+    assert prompt_file.exists()
 
 
 def test_rewrite_ignores_unmapped_tool_use_id(

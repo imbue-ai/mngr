@@ -113,7 +113,19 @@ def run(
     # mngr's normal lifecycle handle teardown when it's actually done,
     # and our on_before_agent_destroy cascade catches it on parent
     # destroy.
-    if target_name and not run_in_background:
+    #
+    # Also skip destroy when result_file is absent: that means
+    # subagent_wait never observed an END_TURN for this child (Haiku
+    # gave up early -- timeout, hallucinated permission dialog, retry
+    # cap, etc.). The child is likely still RUNNING and doing real
+    # work; destroying it on the parent's PostToolUse would throw away
+    # that work and leave the user with no path to recover. Keep the
+    # child alive so the user can `mngr connect <name>` to it. The
+    # on_before_agent_destroy cascade still tears it down when the
+    # parent is destroyed.
+    haiku_observed_end_turn = result_file.is_file()
+    should_destroy = target_name and not run_in_background and haiku_observed_end_turn
+    if should_destroy:
         destroy_log = state_dir / "subagent_destroy.log"
         destroy_callable(target_name, destroy_log)
 
@@ -129,15 +141,17 @@ def run(
     # is still running and the on_before_agent_destroy cascade reads
     # subagent_map/ to find children to tear down when the parent is
     # destroyed. Deleting it here would orphan the background child.
+    # The same logic applies when we're keeping the child alive due to
+    # missing result_file: retain the map_file (and all sidefiles) so
+    # SessionStart reaper can pick it up later.
     # watermark_file is a sidefile owned by subagent_wait; the wait-script
     # deletes it on END_TURN, but a SIGKILL'd Python process or parent crash
     # leaves it behind. Cleaning it here matches the other proxy_commands/
     # sidefiles and prevents orphaned watermarks from accumulating.
-    paths_to_remove = [env_file, prompt_file, result_file, watermark_file]
-    if not run_in_background:
-        paths_to_remove.append(map_file)
-    for path in paths_to_remove:
-        _best_effort_unlink(path)
+    if should_destroy:
+        paths_to_remove = [env_file, prompt_file, result_file, watermark_file, map_file]
+        for path in paths_to_remove:
+            _best_effort_unlink(path)
     del script_file, init_flag  # intentionally retained
 
 
