@@ -261,6 +261,7 @@ def test_rewrite_substitutes_output_and_cleans_up(
     map_file = state_dir / "subagent_map" / f"{tid}.json"
     result_file = state_dir / "subagent_results" / f"{tid}.txt"
     prompt_file = state_dir / "subagent_prompts" / f"{tid}.md"
+    watermark_file = state_dir / "proxy_commands" / f"watermark-{tid}"
     map_file.write_text(
         json.dumps(
             {
@@ -274,6 +275,10 @@ def test_rewrite_substitutes_output_and_cleans_up(
     expected_output = "This is the real subagent result.\nWith newlines."
     result_file.write_text(expected_output)
     prompt_file.write_text("original prompt")
+    # Simulate a leaked watermark from a SIGKILL'd / crashed wait-script:
+    # subagent_wait normally deletes it on END_TURN, but PostToolUse must
+    # also clean it up so orphaned watermarks don't accumulate.
+    watermark_file.write_text("4242")
 
     destroy_calls: list[tuple[str, Path]] = []
 
@@ -295,6 +300,7 @@ def test_rewrite_substitutes_output_and_cleans_up(
     assert not map_file.exists()
     assert not result_file.exists()
     assert not prompt_file.exists()
+    assert not watermark_file.exists()
 
     # Destroy was requested exactly once with the target name.
     assert len(destroy_calls) == 1
@@ -435,6 +441,8 @@ def test_reap_background_worker_cleans_up_missing_agent(
     )
     result_file = state_dir / "subagent_results" / f"{tid}.txt"
     result_file.write_text("leftover")
+    watermark_file = state_dir / "proxy_commands" / f"watermark-{tid}"
+    watermark_file.write_text("100")
 
     destroy_calls: list[tuple[str, Path]] = []
 
@@ -451,6 +459,7 @@ def test_reap_background_worker_cleans_up_missing_agent(
 
     assert not map_file.exists()
     assert not result_file.exists()
+    assert not watermark_file.exists()
     # Vanished agent: no destroy call is required.
     assert destroy_calls == []
 

@@ -46,6 +46,7 @@ def _cleanup_tid(state_dir: Path, tid: str) -> None:
         state_dir / "subagent_results" / f"{tid}.txt",
         state_dir / "proxy_commands" / f"wait-{tid}.sh",
         state_dir / "proxy_commands" / f"initialized-{tid}",
+        state_dir / "proxy_commands" / f"watermark-{tid}",
     ]
     for path in paths:
         try:
