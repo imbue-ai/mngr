@@ -133,19 +133,26 @@ class AgentTicketsWatcher:
             self._observer.join(timeout=5.0)
 
     def _setup_watchers(self) -> None:
-        # Watch the parent of .tickets/ so we still get a wake-up if the
-        # directory is created mid-run.
-        watch_dir = self._tickets_dir.parent
-        if not watch_dir.exists():
+        # Watch the parent of .tickets/ (non-recursively) so we get a
+        # wake-up if the .tickets/ directory itself is created mid-run.
+        # If .tickets/ already exists, also watch it (non-recursively)
+        # for sub-second latency on ticket file changes. recursive=True
+        # on a project root would fire on every unrelated file change in
+        # the agent's work tree, which is wasteful and can hit inotify
+        # watch limits on busy checkouts.
+        parent_dir = self._tickets_dir.parent
+        if not parent_dir.exists():
             return
         try:
             observer = Observer()
             handler = _TicketsChangeHandler(self._wake_event)
-            observer.schedule(handler, str(watch_dir), recursive=True)
+            observer.schedule(handler, str(parent_dir), recursive=False)
+            if self._tickets_dir.exists():
+                observer.schedule(handler, str(self._tickets_dir), recursive=False)
             observer.start()
             self._observer = observer
         except OSError:
-            logger.debug("Failed to start watchdog observer for tickets dir: %s", watch_dir)
+            logger.debug("Failed to start watchdog observer for tickets dir: %s", parent_dir)
 
     def _scan(self) -> list[dict[str, Any]]:
         """Scan the tickets directory and emit one event per OBSERVED
