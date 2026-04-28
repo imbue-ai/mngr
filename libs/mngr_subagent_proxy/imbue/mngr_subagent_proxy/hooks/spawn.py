@@ -321,10 +321,20 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
         f"is the real subagent's output and is what the user is waiting for."
     )
 
+    # systemMessage surfaces the spawned subagent's name into the parent
+    # Claude session so the user can `mngr connect <name>` or
+    # `mngr transcript <name>` while it's running.
+    system_message = (
+        f"mngr_subagent_proxy: spawned mngr-managed subagent {target_name!r}. "
+        f"To inspect or interact while it runs: `mngr connect {target_name}`. "
+        f"To see its transcript: `mngr transcript {target_name}`."
+    )
+
     response: dict[str, Any] = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
+            "systemMessage": system_message,
             "updatedInput": {
                 "description": orig_desc,
                 "subagent_type": "mngr-proxy",
