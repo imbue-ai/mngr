@@ -51,6 +51,39 @@ def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
     )
 
 
+def test_builtin_aliases_appear_in_completion_cache(completion_cache_dir: Path) -> None:
+    """Every built-in command alias must round-trip through the completion cache.
+
+    Built-in aliases (e.g. ``ls`` -> ``list``, ``rm`` -> ``destroy``) live in
+    the lazy-load registry inside ``imbue.mngr.main`` and are not stored in
+    ``cli.commands``. The completion writer must enumerate them explicitly so
+    shell tab completion keeps recognizing the aliases.
+    """
+    write_cli_completions_cache(cli_group=cli)
+    cache = _read_cache(completion_cache_dir)
+
+    expected_subset = {
+        "ls": "list",
+        "rm": "destroy",
+        "c": "create",
+        "x": "exec",
+        "msg": "message",
+        "cfg": "config",
+        "conn": "connect",
+        "plug": "plugin",
+        "prov": "provision",
+        "lim": "limit",
+        "mv": "rename",
+        "snap": "snapshot",
+        "clean": "cleanup",
+    }
+    for alias, canonical in expected_subset.items():
+        assert cache.aliases.get(alias) == canonical, (
+            f"alias {alias!r} should map to {canonical!r} in completion cache; got {cache.aliases.get(alias)!r}"
+        )
+        assert alias in cache.commands, f"alias {alias!r} should appear in completion cache commands list"
+
+
 def test_option_choices_reference_real_options(
     completion_cache_dir: Path,
     temp_mngr_ctx: MngrContext,

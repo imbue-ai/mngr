@@ -221,6 +221,16 @@ def _register_builtin_spec(spec: _BuiltinSpec) -> None:
     _BUILTINS_CANONICAL_ALIASES[spec.name] = spec.aliases
 
 
+def get_builtin_alias_to_canonical() -> dict[str, str]:
+    """Return a mapping of built-in alias name -> canonical command name.
+
+    Aliases are not stored in ``cli.commands`` because built-in commands are
+    loaded lazily; consumers that need the alias list (tab completion cache,
+    documentation generators) read it through this helper.
+    """
+    return {alias: canonical for canonical, aliases in _BUILTINS_CANONICAL_ALIASES.items() for alias in aliases}
+
+
 def _resolve_builtin(cmd_name: str) -> click.Command | None:
     """Import the module backing `cmd_name` (or its alias) and return the click.Command."""
     spec = _BUILTINS_BY_NAME.get(cmd_name)

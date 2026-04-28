@@ -15,6 +15,7 @@ from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
+from imbue.mngr.main import get_builtin_alias_to_canonical
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.file_utils import atomic_write
@@ -363,11 +364,20 @@ def write_cli_completions_cache(
             cmd = cli_group.get_command(ctx, name)
             if cmd is not None:
                 all_commands[name] = cmd
-        # Aliases registered with ``cli.add_command(cmd, name=...)`` show up in
-        # ``cli_group.commands`` but not in ``list_commands`` (they're filtered
-        # out as dups), so include them explicitly.
+        # Plugin-registered aliases show up in ``cli_group.commands`` but not in
+        # ``list_commands`` (filtered out as dups), so include them explicitly.
         for name, cmd in cli_group.commands.items():
             all_commands.setdefault(name, cmd)
+        # Built-in command aliases (e.g. ``ls`` -> ``list``) live only in the
+        # lazy-load registry inside ``imbue.mngr.main`` -- they are never put
+        # into ``cli_group.commands``. Resolve each one and add it under the
+        # alias name so the cache's ``aliases`` mapping ends up populated.
+        for alias_name, canonical_name in get_builtin_alias_to_canonical().items():
+            if alias_name in all_commands:
+                continue
+            cmd = cli_group.get_command(ctx, alias_name)
+            if cmd is not None and cmd.name == canonical_name:
+                all_commands[alias_name] = cmd
         all_command_names = sorted(all_commands.keys())
         alias_to_canonical = {
             name: cmd.name for name, cmd in all_commands.items() if cmd.name is not None and name != cmd.name
