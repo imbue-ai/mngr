@@ -2,8 +2,8 @@ import bdb
 import importlib
 import os
 import sys
+from collections.abc import Callable
 from typing import Any
-from typing import Callable
 
 import click
 import pluggy
