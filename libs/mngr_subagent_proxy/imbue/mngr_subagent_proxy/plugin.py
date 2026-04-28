@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from pydantic import Field
 
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -32,32 +34,34 @@ SUBAGENT_PROXY_CHILD_AGENT_TYPE: Final[str] = "mngr-proxy-child"
 class SubagentProxyChildConfig(ClaudeAgentConfig):
     """Claude config for agents spawned by the subagent-proxy hook.
 
-    Differs from ``ClaudeAgentConfig`` in two defaults:
+    Differs from ``ClaudeAgentConfig`` in one default:
+    ``sync_home_settings=False`` -- mngr_claude does not copy the user's
+    ``~/.claude/{plugins,skills,agents,commands}/`` into the child's
+    per-agent config dir.
 
-    1. ``sync_home_settings=False`` -- mngr_claude does not copy the
-       user's ``~/.claude/{plugins,skills,agents,commands}/`` into the
-       child's per-agent config dir.
-    2. ``settings_overrides`` adds ``enabledPlugins: {}`` so Claude
-       Code itself loads no plugins inside the spawned subagent. Without
-       this, Claude Code can still discover plugins via inherited env
-       (CLAUDE_CONFIG_DIR -> parent's per-agent dir -> known_marketplaces)
-       and auto-install them at session start. The setting is
-       documented in the Claude Code plugins reference: a plugin runs
-       only if its name appears in ``enabledPlugins`` in the resolved
-       settings, so an empty map disables all of them.
-
-    Together these stop user-installed Claude Code plugins (e.g.
-    imbue-code-guardian's Stop-hook orchestrator) from re-prompting the
-    spawned subagent into autofix/verify cycles. mngr_claude's own
-    readiness hooks still install (those are baked into provisioning,
-    not sourced from ``~/.claude/``), and our subagent_proxy plugin
-    still loads (Python entry-point, not a Claude Code plugin).
+    Plugin-installed Stop hooks are also auto-guarded by the
+    on_after_provisioning hookimpl below (env-conditional wrap on
+    ``MNGR_SUBAGENT_PROXY_CHILD``), so the user-installed Stop-hook
+    orchestrator does not re-prompt the spawned subagent into
+    autofix/verify cycles.
     """
 
     sync_home_settings: bool = Field(
         default=False,
         description="Override: spawned subagents do not inherit user-installed Claude Code plugins via filesystem sync.",
     )
+
+
+class UnguardedProjectStopHookError(MngrError):
+    """Project-level ``.claude/settings.json`` has un-guarded user Stop hooks.
+
+    Raised at provisioning time when a Claude agent's project settings
+    file contains Stop or SubagentStop commands that would fire inside
+    spawned proxy subagents (which inherit the worktree). Wrapping
+    settings.json automatically would dirty a git-tracked file, so we
+    refuse rather than silently mutate; the user has to either add the
+    env-conditional guard themselves or set the override to bypass.
+    """
 
 
 @hookimpl
@@ -406,6 +410,76 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
             )
 
 
+_OPT_OUT_PROJECT_STOP_CHECK_ENV: Final[str] = "MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS"
+
+
+def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Refuse to provision when ``.claude/settings.json`` has un-guarded Stop hooks.
+
+    settings.json is git-tracked, so the plugin doesn't auto-wrap it
+    (would dirty the worktree). Instead, raise loudly so the user
+    notices and adds the guard manually -- otherwise these hooks fire
+    inside spawned proxy subagents and turn them into runaway autofix
+    loops.
+
+    Bypass with the ``MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS``
+    env var (``=1``) when you know what you're doing. Intended as a
+    temporary escape hatch.
+    """
+    if os.environ.get(_OPT_OUT_PROJECT_STOP_CHECK_ENV, "") == "1":
+        return
+    settings_path = work_dir / ".claude" / "settings.json"
+    try:
+        content = host.read_text_file(settings_path)
+    except FileNotFoundError:
+        return
+    try:
+        settings: dict[str, Any] = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Could not parse {}; skipping project stop-hook check", settings_path)
+        return
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    offenders: list[str] = []
+    for event_name in ("Stop", "SubagentStop"):
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            for cmd_entry in inner:
+                if not isinstance(cmd_entry, dict):
+                    continue
+                command = cmd_entry.get("command")
+                if not isinstance(command, str) or not command:
+                    continue
+                if any(marker in command for marker in _MNGR_MANAGED_HOOK_MARKERS):
+                    continue
+                if _PROXY_CHILD_GUARD_PREFIX in command:
+                    continue
+                offenders.append(f"{event_name}: {command[:80]}")
+    if not offenders:
+        return
+    listing = "\n  - ".join(offenders)
+    raise UnguardedProjectStopHookError(
+        f"{settings_path} has {len(offenders)} un-guarded user Stop / SubagentStop hook(s). "
+        f"These would fire inside spawned mngr-proxy subagents and likely cause runaway loops. "
+        f"Either prepend the env-conditional guard to each command:\n"
+        f"\n"
+        f'  [ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; <original>\n'
+        f"\n"
+        f"...or set {_OPT_OUT_PROJECT_STOP_CHECK_ENV}=1 in the env to bypass this check "
+        f"(temporary escape hatch; see mngr_subagent_proxy README).\n"
+        f"\n"
+        f"Offending commands:\n  - {listing}"
+    )
+
+
 @hookimpl(trylast=True)
 def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """Install subagent-proxy hooks on Claude agents.
@@ -420,6 +494,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     if not isinstance(agent.agent_config, ClaudeAgentConfig):
         return
 
+    _check_project_settings_stop_hooks_guarded(host, agent.work_dir)
     _write_proxy_agent_definition(host, agent.work_dir)
     _merge_subagent_proxy_hooks(host, agent.work_dir)
 

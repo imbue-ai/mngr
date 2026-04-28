@@ -12,6 +12,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_subagent_proxy.plugin import SubagentProxyChildConfig
+from imbue.mngr_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_subagent_proxy.plugin import UnsupportedSubagentHookError
 from imbue.mngr_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_subagent_proxy.plugin import on_after_provisioning
@@ -178,6 +179,86 @@ def test_plugin_preserves_stop_hooks_for_top_level_agent(tmp_path: Path) -> None
     hooks = settings["hooks"]
     assert "Stop" in hooks
     assert "SubagentStop" in hooks
+
+
+def _seed_project_settings_with_unguarded_stop(work_dir: Path) -> Path:
+    """Write .claude/settings.json with one user Stop hook that is not env-guarded."""
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo project-stop"}]}]}},
+            indent=2,
+        )
+        + "\n"
+    )
+    return settings_path
+
+
+def test_plugin_raises_on_unguarded_project_stop_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An un-guarded Stop hook in .claude/settings.json blocks provisioning."""
+    monkeypatch.delenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _seed_project_settings_with_unguarded_stop(work_dir)
+    host = FakeHost(host_dir)
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(UnguardedProjectStopHookError):
+        _provision(agent, host, None)
+
+
+def test_plugin_allows_guarded_project_stop_hook(tmp_path: Path) -> None:
+    """A Stop hook in settings.json that has the env-conditional guard provisions cleanly."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": '[ -n "$MNGR_SUBAGENT_PROXY_CHILD" ] && exit 0; echo project-stop',
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    host = FakeHost(host_dir)
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, host, None)
+
+
+def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting the opt-out env var bypasses the un-guarded check."""
+    monkeypatch.setenv("MNGR_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", "1")
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    _seed_project_settings_with_unguarded_stop(work_dir)
+    host = FakeHost(host_dir)
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    _provision(agent, host, None)
 
 
 def test_plugin_skips_non_claude_agents(tmp_path: Path) -> None:
