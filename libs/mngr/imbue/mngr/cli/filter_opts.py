@@ -143,8 +143,8 @@ def build_agent_filter_cel(
     kanpan, ...) starts work.
 
     ``cg`` and ``project_root`` are used to resolve ``--project .`` to the current
-    project name (derived from the worktree root's git remote, falling back to its
-    folder name).
+    project name (derived from ``project_root``'s git remote, falling back to its
+    folder name; when ``project_root`` is ``None``, falls back to ``Path.cwd()``).
     """
     include: list[str] = list(opts.include)
     exclude: list[str] = list(opts.exclude)
