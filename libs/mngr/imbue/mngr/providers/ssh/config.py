@@ -34,3 +34,7 @@ class SSHProviderConfig(ProviderInstanceConfig):
         default_factory=dict,
         description="Map of host name to SSH configuration",
     )
+    dynamic_hosts_file: Path | None = Field(
+        default=None,
+        description="Path to a TOML file with dynamically registered hosts. Defaults to <profile_dir>/providers/<instance-name>/dynamic_hosts.toml",
+    )

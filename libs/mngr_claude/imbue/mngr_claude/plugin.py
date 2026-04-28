@@ -1469,6 +1469,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         host: OnlineHostInterface,
         agent_args: tuple[str, ...],
         command_override: CommandString | None,
+        initial_message: str | None = None,
     ) -> CommandString:
         """Assemble command with --resume || --session-id format for session resumption.
 
@@ -1480,6 +1481,11 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         An activity updater is started in the background to keep the agent's activity
         timestamp up-to-date while the tmux session is alive.
+
+        ``initial_message`` is accepted for interface compatibility; the
+        interactive ClaudeAgent delivers ``--message`` content through
+        ``send_message`` after the tmux pane is ready, not via the command
+        line, so it is ignored here.
         """
         if command_override is not None:
             base = str(command_override)

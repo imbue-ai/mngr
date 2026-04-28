@@ -29,12 +29,17 @@ from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pydantic import Field
 from websockets import ClientConnection
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
@@ -53,6 +58,8 @@ from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import SharingRequestEvent
@@ -60,6 +67,7 @@ from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.session_store import derive_user_id_prefix
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
 from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
 from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
@@ -74,6 +82,7 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
@@ -200,7 +209,7 @@ async def _managed_lifespan(
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
     inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
-    # Captured here so background callbacks (e.g. the mngr events refresh
+    # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
     inner_app.state.event_loop = asyncio.get_running_loop()
@@ -234,6 +243,19 @@ async def _managed_lifespan(
         tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
         if tunnel_manager is not None:
             tunnel_manager.cleanup()
+        # Exit the root ConcurrencyGroup last, after every other manager has
+        # stopped its strands. ``__exit__`` waits up to
+        # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
+        # a detached tunnel-setup task) to finish.
+        root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
+        if root_concurrency_group is not None:
+            logger.info("Exiting root concurrency group...")
+            try:
+                root_concurrency_group.__exit__(None, None, None)
+            except ConcurrencyExceptionGroup as exc:
+                # Strands reported failures or timed out during shutdown;
+                # log but don't propagate so other cleanup below can run.
+                logger.warning("Root concurrency group exit reported errors: {}", exc)
 
 
 # -- Route handlers (module-level, using Depends for dependency injection) --
@@ -288,6 +310,15 @@ def _handle_authenticate(
     return response
 
 
+def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
+    """Render the welcome/splash page for first-time users."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        html = render_login_page()
+        return HTMLResponse(content=html)
+    html = render_welcome_page()
+    return HTMLResponse(content=html)
+
+
 def _handle_landing_page(
     request: Request,
     auth_store: AuthStoreDep,
@@ -329,7 +360,16 @@ def _handle_landing_page(
 
     git_url = request.query_params.get("git_url", "")
     branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    html = render_create_form(
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )
     return HTMLResponse(content=html)
 
 
@@ -645,7 +685,15 @@ async def _handle_workspace_forward_http(request: Request) -> Response:
     workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
     if workspace_url is None:
         if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content="<p>Workspace server not yet available. Retrying...</p>")
+            return HTMLResponse(
+                content=(
+                    "<!doctype html><html><head>"
+                    '<meta http-equiv="refresh" content="1">'
+                    "</head><body>"
+                    "<p>Workspace server not yet available. Retrying...</p>"
+                    "</body></html>"
+                )
+            )
         return Response(status_code=503, content="Workspace server not yet available")
 
     try:
@@ -736,6 +784,156 @@ async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
 # -- Agent creation route handlers --
 
 
+def _run_tunnel_setup(
+    agent_id: AgentId,
+    enriched_client: CloudflareClient,
+    paths: WorkspacePaths,
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+) -> None:
+    """Create a Cloudflare tunnel and inject its token into the agent.
+
+    Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
+    the desktop client's root ``ConcurrencyGroup``. Failures are logged via
+    loguru and surfaced to the user via ``notification_dispatcher`` -- every
+    failure dispatches one notification, no rate limit.
+
+    ``create_tunnel`` returns ``(None, error_message)`` for every failure mode
+    (HTTP, bad response, etc.) rather than raising, so no defensive wrapper is
+    needed here; we just inspect the return value.
+    """
+    tunnel_token, message = enriched_client.create_tunnel(agent_id)
+    if tunnel_token is None:
+        logger.warning("Failed to create tunnel for {}: {}", agent_id, message)
+        _notify_tunnel_failure(
+            notification_dispatcher=notification_dispatcher,
+            agent_display_name=agent_display_name,
+            error_message=message,
+        )
+        return
+    _save_tunnel_token(paths.data_dir, agent_id, tunnel_token)
+    inject_tunnel_token_into_agent(agent_id, tunnel_token)
+    logger.debug("Injected tunnel token into agent {}", agent_id)
+
+
+def _notify_tunnel_failure(
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+    error_message: str,
+) -> None:
+    """Dispatch an OS notification for a tunnel-setup failure (no rate limit).
+
+    ``NotificationDispatcher.dispatch`` spawns its own background thread or
+    subprocess per channel and swallows channel-specific errors internally,
+    so a top-level ``except`` wrapper here would only mask genuine bugs.
+    """
+    notification_dispatcher.dispatch(
+        NotificationRequest(
+            title="Tunnel setup failed",
+            message=(
+                f"Couldn't set up the Cloudflare tunnel for '{agent_display_name}'. "
+                f"Sharing may be unavailable. Error: {error_message}"
+            ),
+            urgency=NotificationUrgency.NORMAL,
+        ),
+        agent_display_name=agent_display_name,
+    )
+
+
+class _OnCreatedCallbackFactory(MutableModel):
+    """Callable that schedules Cloudflare tunnel setup as a detached background task.
+
+    ``__call__`` returns immediately after spawning a thread on the root
+    ``ConcurrencyGroup``; the actual ``create_tunnel`` + token inject work runs
+    asynchronously. This keeps ``_setup_and_start_leased_agent`` and
+    ``_create_agent_background`` off the critical path for the user redirect.
+    """
+
+    session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
+    cf_client: CloudflareClient = Field(frozen=True, description="Cloudflare client for tunnel creation")
+    paths: WorkspacePaths = Field(frozen=True, description="Workspace paths for tunnel token storage")
+    root_concurrency_group: ConcurrencyGroup = Field(
+        frozen=True,
+        description="Root group on which the detached tunnel task is scheduled.",
+    )
+    notification_dispatcher: NotificationDispatcher = Field(
+        frozen=True,
+        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
+    )
+
+    def __call__(self, agent_id: AgentId) -> None:
+        account = self.session_store.get_account_for_workspace(str(agent_id))
+        if account is None:
+            return
+        token = self.session_store.get_access_token(str(account.user_id))
+        if token is None:
+            return
+        enriched_client = type(self.cf_client)(
+            connector_url=self.cf_client.connector_url,
+            supertokens_token=token,
+            supertokens_user_id_prefix=str(derive_user_id_prefix(str(account.user_id))),
+            supertokens_email=account.email,
+        )
+        # ``_build_on_created_callback`` doesn't have easy access to the
+        # user-chosen name at this point (see ``backend_resolver``), so fall
+        # back to the short form of the agent id for the notification copy.
+        agent_display_name = str(agent_id)[:8]
+        self.root_concurrency_group.start_new_thread(
+            target=_run_tunnel_setup,
+            kwargs={
+                "agent_id": agent_id,
+                "enriched_client": enriched_client,
+                "paths": self.paths,
+                "notification_dispatcher": self.notification_dispatcher,
+                "agent_display_name": agent_display_name,
+            },
+            name=f"tunnel-setup-{agent_id}",
+            # is_checked=False so that a failing tunnel task does not poison
+            # the root CG for unrelated strands; failures are surfaced via
+            # notifications + loguru from within ``_run_tunnel_setup``.
+            is_checked=False,
+        )
+
+
+def _build_on_created_callback(
+    request: Request,
+    account_id: str,
+) -> _OnCreatedCallbackFactory | None:
+    """Build a callback that injects the tunnel token after agent creation.
+
+    Returns None if no account is selected (nothing to inject).
+    """
+    if not account_id:
+        return None
+
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    cf_client: CloudflareClient | None = request.app.state.cloudflare_client
+    try:
+        paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    except AttributeError:
+        paths = None
+
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+
+    if (
+        session_store is None
+        or cf_client is None
+        or paths is None
+        or root_concurrency_group is None
+        or notification_dispatcher is None
+    ):
+        return None
+
+    return _OnCreatedCallbackFactory(
+        session_store=session_store,
+        cf_client=cf_client,
+        paths=paths,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+    )
+
+
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
     """Handle form submission to create a new agent."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -755,9 +953,34 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
         launch_mode = LaunchMode.LOCAL
+    account_id = str(form.get("account_id", "")).strip()
     if not git_url:
-        html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
+        session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+        minds_config_inst: MindsConfig | None = request.app.state.minds_config
+        accounts_list = session_store_inst.list_accounts() if session_store_inst else []
+        default_acct_id = minds_config_inst.get_default_account_id() if minds_config_inst else None
+        html = render_create_form(
+            git_url="",
+            agent_name=agent_name,
+            branch=branch,
+            launch_mode=launch_mode,
+            accounts=accounts_list,
+            default_account_id=default_acct_id or "",
+        )
         return HTMLResponse(content=html, status_code=400)
+
+    # Resolve access token and version for LEASED mode
+    access_token = ""
+    version = ""
+    if launch_mode is LaunchMode.LEASED:
+        session_store_for_token: MultiAccountSessionStore | None = request.app.state.session_store
+        if session_store_for_token and account_id:
+            token = session_store_for_token.get_access_token(account_id)
+            access_token = str(token) if token else ""
+        version = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
+
+    # Build a post-creation callback that injects the tunnel token
+    on_created = _build_on_created_callback(request, account_id)
 
     agent_id = agent_creator.start_creation(
         git_url,
@@ -765,8 +988,21 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         branch=branch,
         launch_mode=launch_mode,
         include_env_file=include_env_file,
+        access_token=access_token,
+        version=version,
+        on_created=on_created,
     )
-    return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
+
+    # Associate the workspace with the selected account before creation completes
+    if account_id:
+        session_store_assoc: MultiAccountSessionStore | None = request.app.state.session_store
+        if session_store_assoc:
+            session_store_assoc.associate_workspace(account_id, str(agent_id))
+
+    creating_url = "/creating/{}".format(agent_id)
+    if launch_mode is LaunchMode.LEASED:
+        creating_url += "?mode=LEASED"
+    return Response(status_code=303, headers={"Location": creating_url})
 
 
 def _handle_create_page(
@@ -779,7 +1015,16 @@ def _handle_create_page(
 
     git_url = request.query_params.get("git_url", "")
     branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    html = render_create_form(
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )
     return HTMLResponse(content=html)
 
 
@@ -886,7 +1131,12 @@ def _handle_creating_page(
     if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
         return Response(status_code=307, headers={"Location": info.redirect_url})
 
-    html = render_creating_page(agent_id=parsed_id, info=info)
+    mode_param = request.query_params.get("mode", "")
+    try:
+        creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LOCAL
+    except ValueError:
+        creating_launch_mode = LaunchMode.LOCAL
+    html = render_creating_page(agent_id=parsed_id, info=info, launch_mode=creating_launch_mode)
     return HTMLResponse(content=html)
 
 
@@ -949,6 +1199,70 @@ async def _handle_creation_logs_sse(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# -- Agent destruction route handlers --
+
+
+async def _handle_destroy_agent_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """API endpoint for destroying an agent (POST /api/destroy-agent/{agent_id})."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(
+            status_code=501, content='{"error": "Agent management not configured"}', media_type="application/json"
+        )
+
+    parsed_id = AgentId(agent_id)
+
+    # Get access token for releasing leased hosts
+    access_token = ""
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if session_store:
+        account = session_store.get_account_for_workspace(agent_id)
+        if account:
+            token = session_store.get_access_token(str(account.user_id))
+            access_token = str(token) if token else ""
+            session_store.disassociate_workspace(str(account.user_id), agent_id)
+
+    agent_creator.start_destruction(parsed_id, access_token=access_token)
+
+    return Response(
+        content=json.dumps({"agent_id": agent_id, "status": "destroying"}),
+        media_type="application/json",
+    )
+
+
+def _handle_destroy_agent_status_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Check destruction status for an agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(
+            status_code=501, content='{"error": "Agent management not configured"}', media_type="application/json"
+        )
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_destruction_info(parsed_id)
+    if info is None:
+        return Response(status_code=404, content='{"error": "Unknown destruction"}', media_type="application/json")
+
+    result: dict[str, object] = {"agent_id": agent_id, "status": str(info.status).lower()}
+    if info.error:
+        result["error"] = info.error
+    return Response(content=json.dumps(result), media_type="application/json")
 
 
 # -- Telegram setup route handlers --
@@ -1102,7 +1416,10 @@ async def _handle_chrome_events(
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+            has_accounts = bool(session_store and session_store.list_accounts())
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
+            )
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
             yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
@@ -1807,6 +2124,7 @@ def create_desktop_client(
     request_inbox: RequestInbox | None = None,
     server_port: int = 0,
     output_format: OutputFormat | None = None,
+    root_concurrency_group: ConcurrencyGroup | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1838,7 +2156,7 @@ def create_desktop_client(
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
 
     @app.middleware("http")
@@ -1869,6 +2187,7 @@ def create_desktop_client(
     app.state.request_inbox = request_inbox
     app.state.auth_server_port = server_port
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    app.state.root_concurrency_group = root_concurrency_group
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
     # events produced between stream_manager.start() and uvicorn.run()) see a
@@ -1916,6 +2235,7 @@ def create_desktop_client(
     app.get("/_chrome/events")(_handle_chrome_events)
 
     # Register routes
+    app.get("/welcome")(_handle_welcome_page)
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
@@ -1954,6 +2274,10 @@ def create_desktop_client(
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
+
+    # Agent destruction routes
+    app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
+    app.get("/api/destroy-agent/{agent_id}/status")(_handle_destroy_agent_status_api)
 
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
