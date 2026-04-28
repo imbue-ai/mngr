@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -543,7 +544,13 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
 
         parts = [base, "--print"]
 
-        all_extra_args = self.agent_config.cli_args + agent_args
+        # cli_args reach here already shell-safe: string-form configs go through split_cli_args_string
+        # (non-POSIX shlex that preserves quote chars in tokens). agent_args, by contrast, are raw
+        # argv strings passed through Click as click.UNPROCESSED -- the OS shell stripped quote chars
+        # when it built argv at invocation time, so we must re-quote each element before splicing it
+        # into a shell command string.
+        quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
+        all_extra_args = self.agent_config.cli_args + quoted_agent_args
         if all_extra_args:
             parts.extend(all_extra_args)
 
@@ -560,11 +567,16 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         # ``_read_data``.
         #
         # The "already referenced" check is an exact-equality membership
-        # test against all_extra_args, not a substring scan of the joined
-        # args: a substring scan would falsely match any arg containing
+        # test against the *unquoted* inputs (``agent_args`` and
+        # ``cli_args``), not a substring scan of the joined args: a
+        # substring scan would falsely match any arg containing
         # `.mngr-prompt` (e.g. an unrelated path) and silently drop the
-        # prompt.
-        if initial_message is not None and _MNGR_PROMPT_CAT_ARG not in all_extra_args:
+        # prompt. We cannot test against ``all_extra_args`` because each
+        # element of ``quoted_agent_args`` has been wrapped by
+        # ``shlex.quote`` and so will not compare equal to the canonical
+        # ``_MNGR_PROMPT_CAT_ARG`` literal.
+        already_referenced = _MNGR_PROMPT_CAT_ARG in agent_args or _MNGR_PROMPT_CAT_ARG in self.agent_config.cli_args
+        if initial_message is not None and not already_referenced:
             parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)

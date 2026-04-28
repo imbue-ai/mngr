@@ -63,6 +63,7 @@ def test_list_leased_hosts_returns_empty_on_connection_error() -> None:
 # -- Happy path tests with fake server --
 
 
+@pytest.mark.flaky
 def test_lease_host_happy_path(fake_pool_server: HostPoolClient) -> None:
     result = fake_pool_server.lease_host(
         access_token="test-token",

@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -437,6 +438,22 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     assert command == CommandString(
         f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
+
+
+def test_claude_agent_assemble_command_quotes_agent_args_with_shell_metacharacters(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Agent args containing shell metacharacters must survive shell parsing as single tokens."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    prompt = "respond with only the word HELLO; echo pwned & rm -rf $HOME"
+
+    command = agent.assemble_command(host=host, agent_args=("--model", "opus", prompt), command_override=None)
+
+    # The command ends with "|| {create_cmd}" where create_cmd is the last shell statement.
+    # Split on "||" and shlex-parse the tail to confirm the prompt arrived intact.
+    create_cmd_segment = str(command).rsplit("||", 1)[1]
+    tokens = shlex.split(create_cmd_segment)
+    assert prompt in tokens, f"prompt should be a single token after shell parsing, got tokens={tokens!r}"
 
 
 # =============================================================================
