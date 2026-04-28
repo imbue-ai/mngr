@@ -25,7 +25,7 @@ from imbue.mngr.main import cli
 
 
 def _all_builtin_commands() -> list[click.Command]:
-    """Force-load every built-in command and return its canonical click.Command.
+    """Force-load every built-in command and return the canonical click.Commands.
 
     Built-ins are loaded lazily by the AliasAwareGroup; this helper triggers
     the imports so tests can iterate the full set. Aliases resolve to the
