@@ -529,8 +529,10 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         parts = [base, "--print"]
 
         # cli_args reach here already shell-safe: string-form configs go through split_cli_args_string
-        # (non-POSIX shlex that preserves quote chars in tokens). agent_args come from Click in POSIX
-        # mode with quotes stripped, so we must re-quote them to survive shell splicing.
+        # (non-POSIX shlex that preserves quote chars in tokens). agent_args, by contrast, are raw
+        # argv strings passed through Click as click.UNPROCESSED -- the OS shell stripped quote chars
+        # when it built argv at invocation time, so we must re-quote each element before splicing it
+        # into a shell command string.
         quoted_agent_args = tuple(shlex.quote(arg) for arg in agent_args)
         all_extra_args = self.agent_config.cli_args + quoted_agent_args
         if all_extra_args:
