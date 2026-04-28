@@ -64,6 +64,16 @@ def _unexpected_warning_sink(message: Any) -> None:
     _unexpected_warnings.append(text)
 
 
+# External-resource markers whose tests legitimately produce a high noise of
+# operational warnings (Docker daemon errors, paramiko reconnects, modal sandbox
+# noise, tmux server lifecycle messages). Auto-opt-out preserves the warning
+# check for the vast majority of unit/integration tests without forcing every
+# integration test to carry an explicit allow_warnings marker.
+_AUTO_ALLOW_WARNINGS_MARKERS: frozenset[str] = frozenset(
+    {"docker", "docker_sdk", "tmux", "modal", "acceptance", "release"}
+)
+
+
 @pytest.fixture(autouse=True)
 def fail_on_unexpected_loguru_warnings(
     request: pytest.FixtureRequest,
@@ -75,6 +85,10 @@ def fail_on_unexpected_loguru_warnings(
       * ``with allow_warnings(): ...`` -- fine-grained opt-out within a test.
       * Use of ``capture_loguru`` -- implicitly opts out for the duration of
         its context (since such tests are inspecting warnings on purpose).
+      * Tests carrying an external-resource marker (docker, docker_sdk, tmux,
+        modal, acceptance, release) are implicitly opted out, since they
+        interact with real external systems and produce a high noise of
+        legitimate operational warnings.
     """
     marker = request.node.get_closest_marker("allow_warnings")
     pushed_frame = False
@@ -82,6 +96,9 @@ def fail_on_unexpected_loguru_warnings(
         match_arg = marker.kwargs.get("match")
         pattern = re.compile(match_arg) if match_arg is not None else None
         _WARNINGS_ALLOWED_STACK.append(pattern)
+        pushed_frame = True
+    elif any(request.node.get_closest_marker(m) is not None for m in _AUTO_ALLOW_WARNINGS_MARKERS):
+        _WARNINGS_ALLOWED_STACK.append(None)
         pushed_frame = True
 
     _unexpected_warnings.clear()
