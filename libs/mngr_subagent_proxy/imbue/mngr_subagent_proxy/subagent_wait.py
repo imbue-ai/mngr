@@ -349,12 +349,25 @@ def _get_result_max_chars() -> int:
 
 
 def _write_heartbeat(location: AgentLocation, now: float) -> None:
+    """Emit a heartbeat to both stderr and the side log.
+
+    The stderr write is what actually keeps Bash's idle-output timeout
+    happy: file writes don't count, but stderr does. The side-log entry
+    is for human diagnostics. Stdout is reserved for the final
+    END_TURN payload that Haiku echoes -- never write heartbeat noise
+    there.
+    """
+    try:
+        sys.stderr.write(f"mngr_subagent_proxy.heartbeat: {now}\n")
+        sys.stderr.flush()
+    except OSError as e:
+        logger.warning("Failed to write stderr heartbeat: {}", e)
     try:
         location.heartbeat_log.parent.mkdir(parents=True, exist_ok=True)
         with location.heartbeat_log.open("a") as handle:
             handle.write(f"heartbeat: {now}\n")
     except OSError as e:
-        logger.warning("Failed to write heartbeat: {}", e)
+        logger.warning("Failed to write heartbeat side log: {}", e)
 
 
 @dataclass
