@@ -643,7 +643,6 @@ def _discovery_stream_tail_events_file(
                     )
                     current_offset = 0
                 if file_size > current_offset:
-                    bytes_new = file_size - current_offset
                     with open(events_path) as f:
                         f.seek(current_offset)
                         new_content = f.read()
@@ -652,7 +651,9 @@ def _discovery_stream_tail_events_file(
                     new_lines, bytes_consumed = split_complete_lines(new_content)
                     current_offset += bytes_consumed
                     logger.debug(
-                        "Discovery tail: read {} new bytes, {} lines from events file", bytes_new, len(new_lines)
+                        "Discovery tail: consumed {} new bytes, {} lines from events file",
+                        bytes_consumed,
+                        len(new_lines),
                     )
                     for file_line in new_lines:
                         if stop_event.is_set():
