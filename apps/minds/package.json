@@ -1,5 +1,6 @@
 {
   "name": "minds",
+  "productName": "Minds",
   "version": "0.1.0",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
