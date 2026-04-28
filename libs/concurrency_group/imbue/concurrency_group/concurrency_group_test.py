@@ -459,10 +459,12 @@ def _create_nested_concurrency_group_and_run_process(
     closure: dict,
     tmp_path: Path,
     process_started_event: Event,
+    process_holder: list[RunningProcess],
 ) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
             process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
+            process_holder.append(process)
             process_started_event.set()
             process.wait()
             closure["i"] += 1
@@ -470,23 +472,24 @@ def _create_nested_concurrency_group_and_run_process(
     closure["i"] += 10
 
 
-# Same offload-CI-only race as `test_all_failure_modes_get_combined`: when
-# shutdown propagates, the inner CG's timeout path uses
-# `process.terminate(force_kill_seconds=0.0)`, so the LONG_RUNNING_COMMAND
-# (`sleep 30`) is not guaranteed to be reaped before pytest's session-cleanup
-# leak detector runs. Assertion content is deterministic; only teardown races.
-@pytest.mark.flaky
 def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> None:
     closure = {"i": 0}
     process_started_event = Event()
+    process_holder: list[RunningProcess] = []
     with ConcurrencyGroup(name="outer") as cg:
         cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process,
-            args=(cg, closure, tmp_path, process_started_event),
+            args=(cg, closure, tmp_path, process_started_event, process_holder),
         )
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
     assert closure["i"] == 10
+    # CG's timeout path is fire-and-forget (`terminate(force_kill_seconds=0.0)`
+    # signals the supervisor thread but does not wait for it to reap the
+    # subprocess). Wait explicitly so pytest's session-level leak detector
+    # cannot scan before SIGTERM+reap completes.
+    assert len(process_holder) == 1
+    assert poll_until(process_holder[0].is_finished, timeout=10.0)
 
 
 def _create_nested_concurrency_group_and_run_process_while_shutting_down(
@@ -494,6 +497,7 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
     tmp_path: Path,
     closure: dict,
     process_started_event: Event,
+    process_holder: list[RunningProcess],
 ) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
@@ -501,24 +505,28 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
             assert poll_until(lambda: concurrency_group.is_shutting_down(), timeout=5.0)
             closure["i"] += 1
             process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
+            process_holder.append(process)
             process.wait()
             closure["i"] += 1
         assert exception_info.value.only_exception_is_instance_of(ConcurrentShutdownError)
 
 
-# Same offload-CI-only teardown race as the sibling shutdown test above.
-@pytest.mark.flaky
 def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> None:
     closure = {"i": 0}
     process_started_event = Event()
+    process_holder: list[RunningProcess] = []
     with ConcurrencyGroup(name="outer") as cg:
         cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process_while_shutting_down,
-            args=(cg, tmp_path, closure, process_started_event),
+            args=(cg, tmp_path, closure, process_started_event, process_holder),
         )
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
     assert closure["i"] == 1
+    # Same fire-and-forget teardown race as `test_shutdown_propagates_*`: wait
+    # for the supervisor thread to reap the subprocess before returning.
+    if process_holder:
+        assert poll_until(process_holder[0].is_finished, timeout=10.0)
 
 
 def test_threads_get_cleaned_up() -> None:
