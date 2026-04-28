@@ -3,6 +3,7 @@ import importlib
 import os
 import sys
 from typing import Any
+from typing import Callable
 
 import click
 import pluggy
@@ -62,6 +63,9 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 _BUILTINS_BY_NAME: dict[str, BuiltinCommandSpec] = {}
 _BUILTIN_ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {}
 _BUILTINS_LOADED: dict[str, click.Command] = {}
+# Hooks invoked after a built-in command is imported, keyed by canonical name.
+# Populated at module bottom once the hook callables are defined.
+_BUILTIN_POST_LOAD_HOOKS: dict[str, Callable[[], None]] = {}
 
 
 def _register_builtin_spec(spec: BuiltinCommandSpec) -> None:
@@ -81,8 +85,9 @@ def _resolve_builtin(cmd_name: str) -> click.Command | None:
         real_cmd = getattr(module, spec.attr_name)
         if spec.apply_plugin_options:
             apply_plugin_cli_options(real_cmd, command_name=spec.name)
-        if spec.name == "create":
-            _update_create_help_with_provider_args()
+        post_load_hook = _BUILTIN_POST_LOAD_HOOKS.get(spec.name)
+        if post_load_hook is not None:
+            post_load_hook()
         _BUILTINS_LOADED[spec.name] = real_cmd
     return _BUILTINS_LOADED[spec.name]
 
@@ -424,3 +429,9 @@ def _update_create_help_with_provider_args() -> None:
         ),
     )
     updated_metadata.register()
+
+
+# Register post-load hooks once the callables are defined. The mapping is
+# consulted by `_resolve_builtin`, which only runs at first command lookup, so
+# populating it at module bottom is fine.
+_BUILTIN_POST_LOAD_HOOKS["create"] = _update_create_help_with_provider_args
