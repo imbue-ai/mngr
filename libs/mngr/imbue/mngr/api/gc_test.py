@@ -259,7 +259,7 @@ def test_handle_error_abort_raises_mngr_error_when_no_exception() -> None:
         _handle_error("some message", ErrorBehavior.ABORT, exc=None)
 
 
-@pytest.mark.allow_warnings(match=r"^(test|some message)$")
+@pytest.mark.allow_warnings(match=r"^some message$")
 def test_handle_error_continue_does_not_raise() -> None:
     """CONTINUE behavior logs instead of raising."""
     # Should not raise
