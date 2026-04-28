@@ -146,10 +146,14 @@ class AliasAwareGroup(DefaultCommandGroup):
         aliases here. Plugin-registered commands and aliases live in
         ``self.commands`` and reach the result through ``super().list_commands``.
 
-        ``format_commands`` renders aliases inline, and consumers that need to
-        distinguish canonical names from aliases (e.g., the help overview, the
-        completion-cache writer) call ``get_command`` and compare ``cmd.name``
-        to the iteration key.
+        ``format_commands`` does NOT walk this list -- it renders built-in
+        rows directly from ``_BUILTIN_ALIASES_BY_CANONICAL`` (so aliases show
+        up inline next to the canonical name) and plugin rows from
+        ``super().list_commands(ctx)``. The consumers of this method are
+        tools that walk the full CLI tree (e.g., the completion-cache writer
+        in ``completion_writer.py`` and the doc generator in
+        ``scripts/make_cli_docs.py``); those callers dedupe by calling
+        ``get_command`` and comparing ``cmd.name`` to the iteration key.
         """
         names: set[str] = set(_BUILTINS_BY_NAME.keys())
         for name in super().list_commands(ctx):
