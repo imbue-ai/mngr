@@ -17,6 +17,12 @@ class AgentListItem(FrozenModel):
     state: str = Field(description="The agent's lifecycle state")
 
 
+class InterruptAgentResponse(FrozenModel):
+    """Response from the /api/agents/{id}/interrupt endpoint."""
+
+    status: str = Field(description="Status of the interrupt operation")
+
+
 class AgentListResponse(FrozenModel):
     """Response from the /api/agents endpoint."""
 

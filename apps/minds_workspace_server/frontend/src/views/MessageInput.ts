@@ -1,5 +1,5 @@
 import m from "mithril";
-import { sendMessage } from "../models/Response";
+import { interruptAgent, sendMessage } from "../models/Response";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
 
@@ -61,6 +61,19 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         });
       }
 
+      async function handleInterrupt(): Promise<void> {
+        if (!agentId) {
+          return;
+        }
+        try {
+          await interruptAgent(agentId);
+        } catch (err) {
+          const reqErr = err as { response?: { detail?: string }; message?: string };
+          const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
+          console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
+        }
+      }
+
       function handleKeydown(event: KeyboardEvent): void {
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
@@ -98,7 +111,21 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             onkeydown: handleKeydown,
           }),
           m("div", { class: "message-input-toolbar" }, [
-            m("div", { class: "message-input-toolbar-left" }),
+            m(
+              "div",
+              { class: "message-input-toolbar-left" },
+              m(
+                "button",
+                {
+                  class: "message-input-stop-button",
+                  title: "Interrupt current turn",
+                  onclick: handleInterrupt,
+                },
+                m.trust(
+                  '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+                ),
+              ),
+            ),
             hasMessageText
               ? m(
                   "button",
