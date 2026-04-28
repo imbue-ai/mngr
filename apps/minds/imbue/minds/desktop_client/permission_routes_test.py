@@ -1,8 +1,8 @@
 """Integration tests for the permission routes wired into ``app.py``.
 
 Drives the FastAPI app via ``TestClient`` against a real catalog and a
-fake ``PermissionGrantHandler`` so the routes are exercised end-to-end
-without spawning any subprocesses.
+fake ``LatchkeyPermissionGrantHandler`` so the routes are exercised
+end-to-end without spawning any subprocesses.
 """
 
 from collections.abc import Sequence
@@ -19,20 +19,24 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
 from imbue.minds.desktop_client.latchkey.store import PermissionsConfig
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.latchkey.store import save_permissions
-from imbue.minds.desktop_client.permissions import MngrMessageSender
-from imbue.minds.desktop_client.permissions import PermissionGrantHandler
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestResponseEvent
+from imbue.minds.desktop_client.request_events import RequestStatus
+from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.mngr.primitives import AgentId
 
 
-class _RecordingHandler(PermissionGrantHandler):
-    """Subclass of ``PermissionGrantHandler`` that records calls instead of running them.
+class _RecordingHandler(LatchkeyPermissionGrantHandler):
+    """Subclass of ``LatchkeyPermissionGrantHandler`` that records calls instead of running them.
 
     Inheriting from the real handler keeps the ``app.state`` typing happy
     without polluting production code with a Protocol.
@@ -50,7 +54,7 @@ class _RecordingHandler(PermissionGrantHandler):
         agent_id: AgentId,
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, RequestResponseEvent]:
         self.grant_calls.append(
             {
                 "request_event_id": request_event_id,
@@ -59,14 +63,22 @@ class _RecordingHandler(PermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
-        return self.was_granted_outcome, self.grant_message
+        status = RequestStatus.GRANTED if self.was_granted_outcome else RequestStatus.DENIED
+        response_event = create_request_response_event(
+            request_event_id=request_event_id,
+            status=status,
+            agent_id=str(agent_id),
+            request_type=str(RequestType.LATCHKEY_PERMISSION),
+            service_name=service_info.name,
+        )
+        return self.was_granted_outcome, self.grant_message, response_event
 
     def deny(
         self,
         request_event_id: str,
         agent_id: AgentId,
         service_info: ServicePermissionInfo,
-    ) -> str:
+    ) -> tuple[str, RequestResponseEvent]:
         self.deny_calls.append(
             {
                 "request_event_id": request_event_id,
@@ -74,7 +86,14 @@ class _RecordingHandler(PermissionGrantHandler):
                 "service_name": service_info.name,
             }
         )
-        return self.deny_message
+        response_event = create_request_response_event(
+            request_event_id=request_event_id,
+            status=RequestStatus.DENIED,
+            agent_id=str(agent_id),
+            request_type=str(RequestType.LATCHKEY_PERMISSION),
+            service_name=service_info.name,
+        )
+        return self.deny_message, response_event
 
 
 def _get_app_request_inbox(client: TestClient) -> RequestInbox:
@@ -95,6 +114,7 @@ def _make_recording_handler(
     return _RecordingHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_binary="/nonexistent"),
+        services_catalog=load_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
         was_granted_outcome=was_granted_outcome,
         grant_message=grant_message,
@@ -110,7 +130,6 @@ def _build_authenticated_client(
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     paths = WorkspacePaths(data_dir=tmp_path)
-    catalog = load_services_catalog()
 
     app = create_desktop_client(
         auth_store=auth_store,
@@ -118,7 +137,6 @@ def _build_authenticated_client(
         http_client=None,
         paths=paths,
         request_inbox=inbox,
-        latchkey_services_catalog=catalog,
         permission_handler=handler,
     )
     client = TestClient(app, base_url="http://localhost")

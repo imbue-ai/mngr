@@ -4,12 +4,12 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.latchkey.core import Latchkey
+from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFlowError
+from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.store import load_permissions
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
-from imbue.minds.desktop_client.permissions import MngrMessageSender
-from imbue.minds.desktop_client.permissions import PermissionFlowError
-from imbue.minds.desktop_client.permissions import PermissionGrantHandler
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
@@ -107,7 +107,7 @@ def _build_handler(
     credential_status: str,
     auth_browser_exit: int = 0,
     auth_browser_stderr: str = "",
-) -> PermissionGrantHandler:
+) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
         credential_status=credential_status,
@@ -115,9 +115,10 @@ def _build_handler(
         auth_browser_stderr=auth_browser_stderr,
     )
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
-    return PermissionGrantHandler(
+    return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
     )
 
@@ -144,14 +145,14 @@ def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
     sender.send(AgentId(), "hello")
 
 
-# -- PermissionGrantHandler.grant --
+# -- LatchkeyPermissionGrantHandler.grant --
 
 
 def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
     agent_id = AgentId()
 
-    was_granted, message = handler.grant(
+    was_granted, message, _ = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
         service_info=_SLACK_SERVICE_INFO,
@@ -180,7 +181,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
     handler = _build_handler(tmp_path, credential_status="missing", auth_browser_exit=0)
     agent_id = AgentId()
 
-    was_granted, _ = handler.grant(
+    was_granted, _, _ = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
         service_info=_SLACK_SERVICE_INFO,
@@ -196,7 +197,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
 def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="invalid", auth_browser_exit=0)
 
-    was_granted, _ = handler.grant(
+    was_granted, _, _ = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
         service_info=_SLACK_SERVICE_INFO,
@@ -226,13 +227,14 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     )
     binary.chmod(0o755)
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
-    handler = PermissionGrantHandler(
+    handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_binary=str(binary)),
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
     )
 
-    was_granted, _ = handler.grant(
+    was_granted, _, _ = handler.grant(
         request_event_id="evt-abc",
         agent_id=AgentId(),
         service_info=_SLACK_SERVICE_INFO,
@@ -252,7 +254,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
     )
     agent_id = AgentId()
 
-    was_granted, message = handler.grant(
+    was_granted, message, _ = handler.grant(
         request_event_id="evt-abc",
         agent_id=agent_id,
         service_info=_SLACK_SERVICE_INFO,
@@ -276,7 +278,7 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
 
-    with pytest.raises(PermissionFlowError):
+    with pytest.raises(LatchkeyPermissionFlowError):
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
@@ -291,7 +293,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
 def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
 
-    with pytest.raises(PermissionFlowError):
+    with pytest.raises(LatchkeyPermissionFlowError):
         handler.grant(
             request_event_id="evt-abc",
             agent_id=AgentId(),
@@ -323,7 +325,7 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
     assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
 
 
-# -- PermissionGrantHandler.deny --
+# -- LatchkeyPermissionGrantHandler.deny --
 
 
 def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: Path) -> None:
