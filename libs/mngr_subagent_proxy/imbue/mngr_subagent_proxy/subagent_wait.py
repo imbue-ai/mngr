@@ -25,6 +25,13 @@ _END_TURN_SETTLE_SECONDS: Final[float] = 5.0
 _TARGET_DISAPPEAR_GRACE_SECONDS: Final[float] = 10.0
 _INITIAL_TARGET_WAIT_SECONDS: Final[float] = 60.0
 _MNGR_LIST_TIMEOUT_SECONDS: Final[float] = 30.0
+# `mngr list` is expensive (multi-second on hosts with 30+ agents), so we
+# do not invoke it on every poll. Each call from the main wait loop is
+# rate-limited to this interval. Without this, the loop fires 5x/s and
+# can saturate the host -- observed live: nested verify-and-fix subagent
+# wedged when mngr list timed out repeatedly because the wait loop kept
+# re-issuing it before previous calls finished.
+_TARGET_PRESENCE_RECHECK_SECONDS: Final[float] = 5.0
 # ~100KB roughly matches Claude Code's native Task tool_result truncation
 # threshold (~25k tokens, observed empirically). Override via
 # MNGR_SUBAGENT_RESULT_MAX_CHARS if your subagents legitimately produce more.
@@ -382,6 +389,7 @@ class _WaitRuntime:
     pending_end_turn_deadline: float | None = None
     last_heartbeat_at: float = 0.0
     last_session_id_check_at: float = 0.0
+    last_presence_check_at: float = 0.0
     target_missing_since: float | None = None
 
 
@@ -496,10 +504,12 @@ def wait_for_subagent(target_name: str) -> str:
             truncated = truncate_result_text(runtime.pending_end_turn_text, max_chars)
             return f"END_TURN:{truncated}"
 
-        if _has_target_disappeared_past_grace(runtime, now):
-            destroyed_text = resolve_destroyed_result(target_name, location)
-            truncated = truncate_result_text(destroyed_text, max_chars)
-            return f"END_TURN:{truncated}"
+        if now - runtime.last_presence_check_at >= _TARGET_PRESENCE_RECHECK_SECONDS:
+            runtime.last_presence_check_at = now
+            if _has_target_disappeared_past_grace(runtime, now):
+                destroyed_text = resolve_destroyed_result(target_name, location)
+                truncated = truncate_result_text(destroyed_text, max_chars)
+                return f"END_TURN:{truncated}"
 
         time.sleep(_POLL_INTERVAL_SECONDS)
 

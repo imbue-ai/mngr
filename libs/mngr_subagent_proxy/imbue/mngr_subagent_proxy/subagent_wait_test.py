@@ -9,6 +9,7 @@ from typing import Iterator
 from loguru import logger
 
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_subagent_proxy import subagent_wait
 from imbue.mngr_subagent_proxy.subagent_wait import AgentLocation
 from imbue.mngr_subagent_proxy.subagent_wait import TailState
 from imbue.mngr_subagent_proxy.subagent_wait import extract_assistant_text
@@ -241,3 +242,22 @@ def test_destroyed_fallback_from_preserved_sessions(tmp_path: Path) -> None:
         resolve_destroyed_result(target_name, missing_location)
         == "[ERROR] mngr subagent destroyed before completion: "
     )
+
+
+def test_target_presence_recheck_is_rate_limited() -> None:
+    """The wait loop's `mngr list` calls for target-presence checks must be
+    rate-limited via _TARGET_PRESENCE_RECHECK_SECONDS so the 5x/s polling
+    cadence does not flood the host with concurrent `mngr list` runs.
+
+    Found live: a nested verify-and-fix subagent stalled when many parent
+    agents made `mngr list` slow. The wait loop fired its disappearance
+    check on every poll iteration (every 200ms), each call timing out
+    after 30s, queueing up faster than they finished and starving the
+    rest of the loop.
+    """
+    # The rate-limit interval must be substantially larger than the poll
+    # interval; otherwise the rate-limiting is effectively a no-op.
+    assert subagent_wait._TARGET_PRESENCE_RECHECK_SECONDS > subagent_wait._POLL_INTERVAL_SECONDS * 5
+    # The interval must also be at least a few seconds in absolute terms,
+    # since a single mngr-list call commonly takes >1s on busy hosts.
+    assert subagent_wait._TARGET_PRESENCE_RECHECK_SECONDS >= 2.0
