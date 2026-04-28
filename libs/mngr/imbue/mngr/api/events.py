@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -327,8 +328,13 @@ def filter_sources_by_name(
 
 
 @pure
-def _record_from_event_data(data: dict[str, Any], stripped_line: str, source_hint: str) -> EventRecord | None:
-    """Build an EventRecord from already-parsed JSON data, applying source-hint correction."""
+def _record_from_event_data(data: Mapping[str, Any], stripped_line: str, source_hint: str) -> EventRecord | None:
+    """Build an EventRecord from already-parsed JSON data, applying source-hint correction.
+
+    The input is a Mapping rather than a dict so the type system enforces that
+    this function never mutates caller-owned state: the returned EventRecord's
+    `data` field is always a fresh dict.
+    """
     timestamp = data.get("timestamp", "")
     if not timestamp:
         return None
@@ -353,14 +359,7 @@ def _record_from_event_data(data: dict[str, Any], stripped_line: str, source_hin
         )
 
     source = source_hint
-    # Build a corrected dict only if the source field needs correcting or
-    # backfilling; never mutate the caller-owned input dict (this function is
-    # marked @pure).
-    needs_data_correction = data.get("source") != source
-    if needs_data_correction:
-        corrected_data = {**data, "source": source}
-    else:
-        corrected_data = data
+    corrected_data = {**data, "source": source}
     # Re-serialize raw_line only when the JSON had a wrong source field;
     # backfilling a missing source doesn't require re-serializing because the
     # original line is still a faithful representation of the event.
