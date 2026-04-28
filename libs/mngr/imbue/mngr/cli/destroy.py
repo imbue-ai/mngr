@@ -50,7 +50,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
-from imbue.mngr.utils.git_utils import remove_worktree
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -168,7 +167,7 @@ class DestroyCliOptions(CommonCliOptions):
 @optgroup.option(
     "--allow-worktree-removal/--no-allow-worktree-removal",
     default=True,
-    help="Allow removal of the git worktree directory (default: enabled)",
+    help="Allow GC to remove the git worktree directory (default: enabled)",
 )
 @add_common_options
 @click.pass_context
@@ -226,7 +225,6 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     # Destroy all targets (online agents + offline hosts) in parallel
     destroyed_agents: list[AgentName] = []
-    worktrees_to_remove: list[tuple[Path, Path]] = []
     branches_to_remove: list[tuple[str, Path]] = []
     results_lock = threading.Lock()
 
@@ -243,7 +241,6 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     mngr_ctx,
                     results_lock,
                     destroyed_agents,
-                    worktrees_to_remove,
                     branches_to_remove,
                 )
             )
@@ -263,21 +260,22 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     for future in futures:
         future.result()
 
-    # Remove worktrees (must happen before branch deletion)
-    for work_dir, source_repo_path in worktrees_to_remove:
-        try:
-            remove_worktree(work_dir, source_repo_path, mngr_ctx.concurrency_group)
-            _output(f"Removed worktree: {work_dir}", output_opts)
-        except ProcessError as e:
-            logger.warning("Failed to remove worktree {}: {}", work_dir, e)
+    # Run garbage collection if enabled.  Worktree cleanup is GC's job:
+    # `gc._get_orphaned_work_dirs` already enforces the only-mngr-generated /
+    # not-still-referenced safety predicate, so the destroy command does not
+    # touch worktrees inline.  Branch deletion runs after GC so that any
+    # worktree GC removes is no longer holding the branch checked out.
+    if opts.gc and destroyed_agents:
+        _run_post_destroy_gc(
+            mngr_ctx=mngr_ctx,
+            output_opts=output_opts,
+            include_work_dirs=opts.allow_worktree_removal,
+        )
 
-    # Delete created branches (after worktree removal)
+    # Delete created branches (after GC, so the worktree that was holding
+    # the branch checked out is gone and `git branch -D` can succeed).
     for created_branch, source_repo_path in branches_to_remove:
         _remove_created_branch(created_branch, source_repo_path, mngr_ctx.concurrency_group, output_opts)
-
-    # Run garbage collection if enabled
-    if opts.gc and destroyed_agents:
-        _run_post_destroy_gc(mngr_ctx=mngr_ctx, output_opts=output_opts)
 
     # Output final result
     _output_result(destroyed_agents, output_opts)
@@ -407,7 +405,6 @@ def _destroy_single_online_agent(
     mngr_ctx: MngrContext,
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
-    worktrees_to_remove: list[tuple[Path, Path]],
     branches_to_remove: list[tuple[str, Path]],
 ) -> None:
     """Destroy a single agent on an online host. Thread-safe."""
@@ -420,13 +417,9 @@ def _destroy_single_online_agent(
             )
             return
 
-        # Read worktree info before destroy removes the work_dir
-        source_repo_path = find_source_repo_of_worktree(agent.work_dir)
-        if source_repo_path is not None:
-            if opts.allow_worktree_removal:
-                with results_lock:
-                    worktrees_to_remove.append((agent.work_dir, source_repo_path))
-            if opts.remove_created_branch:
+        if opts.remove_created_branch:
+            source_repo_path = find_source_repo_of_worktree(agent.work_dir)
+            if source_repo_path is not None:
                 created_branch = agent.get_created_branch_name()
                 if created_branch is not None:
                     with results_lock:
@@ -555,8 +548,12 @@ def _remove_created_branch(
 ) -> None:
     """Delete a git branch from the source repository.
 
-    Called after worktree removal, so git should allow the branch deletion.
-    Failures are logged as warnings but do not fail the destroy operation.
+    Called after the post-destroy GC pass, which is what removes the agent's
+    worktree (when GC and work-dir cleanup are both enabled). If the worktree
+    still has the branch checked out -- for example when --no-gc or
+    --no-allow-worktree-removal was passed -- ``git branch -D`` will fail;
+    such failures are logged as warnings and do not fail the destroy
+    operation.
     """
     try:
         result = cg.run_process_to_completion(
@@ -571,11 +568,19 @@ def _remove_created_branch(
         logger.warning("Failed to delete branch {}: {}", branch_name, e)
 
 
-def _run_post_destroy_gc(mngr_ctx: MngrContext, output_opts: OutputOptions) -> None:
+def _run_post_destroy_gc(
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+    include_work_dirs: bool,
+) -> None:
     """Run garbage collection after destroying agents.
 
     This cleans up orphaned host-level resources (machines, work dirs, snapshots, volumes).
     Errors are logged but don't prevent destroy from reporting success.
+
+    ``include_work_dirs`` follows the destroy command's --allow-worktree-removal
+    flag.  When False, GC skips work-dir cleanup so the user's worktree stays
+    on disk (other resources are still GC'd).
     """
     try:
         _output("Garbage collecting...", output_opts)
@@ -584,7 +589,7 @@ def _run_post_destroy_gc(mngr_ctx: MngrContext, output_opts: OutputOptions) -> N
 
         resource_types = GcResourceTypes(
             is_machines=True,
-            is_work_dirs=True,
+            is_work_dirs=include_work_dirs,
             is_snapshots=True,
             is_volumes=True,
             is_logs=False,
