@@ -7,7 +7,6 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -27,6 +26,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 _NOT_INTERRUPTIBLE_REASON = "Agent type does not support interrupt"
 
@@ -78,7 +78,7 @@ def interrupt_agents(
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
     futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
+    with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="interrupt_agents", max_workers=32
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
@@ -180,7 +180,7 @@ def _process_host_for_interrupt(
             agents_to_interrupt.append(agent)
 
         interrupt_futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=parent_cg, name=f"interrupt_{host_ref.host_id}", max_workers=32
         ) as interrupt_executor:
             for agent in agents_to_interrupt:
